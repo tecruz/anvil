@@ -1,0 +1,17 @@
+# Normalize line endings in the repository.
+#
+# The golden tests parse fixture files by line, so CRLF vs LF can change an extracted
+# command or an evidence line number depending on who checked out the repo. Normalizing
+# in the index means every platform sees the same bytes.
+* text=auto eol=lf
+
+# Keep these exactly as committed.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# Generated or machine-written, keep LF and do not attempt CRLF translation.
+package-lock.json text eol=lf
+*.lock text eol=lf
