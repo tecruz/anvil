@@ -1,0 +1,10 @@
+{
+  "name": "@anvil/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Core types, config resolution, output contract and process helpers.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

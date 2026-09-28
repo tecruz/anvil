@@ -1,0 +1,19 @@
+# build output
+packages/*/dist/
+*.tsbuildinfo
+
+# dependencies
+node_modules/
+
+# anvil's own per-repo state (staging, ticket context bundles).
+# Never commit: staging is regenerated and ticket context is company-internal.
+.anvil/
+
+# local scratch
+*.log
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/

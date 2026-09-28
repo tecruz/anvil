@@ -1,0 +1,16 @@
+{
+  "name": "@anvil/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "anvil command-line interface.",
+  "bin": {
+    "anvil": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./src/main.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*"
+  }
+}

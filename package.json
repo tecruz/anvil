@@ -1,0 +1,25 @@
+{
+  "name": "anvil-workspace",
+  "private": true,
+  "type": "module",
+  "description": "AI-ready dev harness: audit repos, derive agent context, work tickets in parallel worktrees.",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-reporter=spec \"packages/*/test/*.test.ts\"",
+    "test:watch": "node --test --watch \"packages/*/test/*.test.ts\"",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "clean": "node scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  }
+}
