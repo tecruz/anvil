@@ -9,7 +9,7 @@
  * is discoverable without pretending unimplemented commands exist.
  */
 
-import type { FlagSpecs, Style } from '@anvil/core'
+import type { FlagSpecs, GitRepoInfo, Style } from '@anvil/core'
 
 /** Commands that exist today. */
 export interface Command {
@@ -23,24 +23,34 @@ export interface Command {
    * Commands receive raw argv (minus the command token and global flags) and parse it
    * themselves, so the flag table above is the single source of truth for both the
    * parser and the generated help.
+   *
+   * Return an exit code to signal a non-zero result while still having emitted a
+   * complete payload. `anvil doctor --fail-on` needs exactly that: the report is the
+   * answer, the exit code is the verdict.
    */
-  run(ctx: CommandContext, argv: string[]): Promise<void>
+  run(ctx: CommandContext, argv: string[]): Promise<number | void>
 }
 
 export interface CommandContext {
   cwd: string
+  /** Repo root when inside a git repo, else null. */
   repoRoot: string | null
+  /** Full repo discovery result, when available. */
+  repo: GitRepoInfo | null
   style: Style
   json: boolean
   /** Print a human-readable line. No-op in --json mode. */
   say(message: string): void
+  /** Emit the payload: an envelope in --json mode, rendered text otherwise. */
   out(data: unknown, render: () => void): void
+  /** Write a rendered block to stdout even in --json mode (for report + error combos). */
+  writeRaw(text: string): void
+  /** Write a rendered error block to stderr. */
+  writeError(text: string): void
 }
 
 /** Planned commands, surfaced in help with their milestone. Shown, not runnable. */
 export const PLANNED_COMMANDS: Array<{ usage: string; summary: string; milestone: string }> = [
-  { usage: 'anvil profile', summary: 'Detect the stack and emit a ProjectProfile', milestone: 'M1' },
-  { usage: 'anvil doctor', summary: 'Audit AI-readiness and score the repo', milestone: 'M1' },
   { usage: 'anvil plan', summary: 'Rank fixes as derived / official / community', milestone: 'M2a' },
   { usage: 'anvil brief --for <t>', summary: 'Emit verified facts for the LLM step', milestone: 'M2b' },
   { usage: 'anvil init [--apply]', summary: 'Derive AGENTS.md, agents, commands, skills', milestone: 'M2b' },

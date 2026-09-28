@@ -1,0 +1,188 @@
+/**
+ * Repo file walking.
+ *
+ * Detection is signature-based: we read filenames and a small number of config files,
+ * never execute the build. That is what makes `anvil profile` safe to run against a repo
+ * you have never seen and cannot modify.
+ *
+ * The walk skips vendored, generated and VCS directories. This is not only a speed
+ * concern -- `node_modules` and `target` contain millions of files whose *extensions*
+ * would otherwise dominate a naive language count and make the primary-language
+ * determination confidently wrong.
+ */
+
+import { readdirSync, readFileSync, statSync, existsSync, type Dirent } from 'node:fs'
+import { join } from 'node:path'
+import { normalizeRelPath, toPosix } from './types.ts'
+
+/** Directories never descended into. */
+export const SKIP_DIRS: ReadonlySet<string> = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.anvil',
+  'node_modules',
+  'bower_components',
+  'vendor',
+  'target',
+  'build',
+  'out',
+  'dist',
+  '.next',
+  '.nuxt',
+  '.svelte-kit',
+  '.turbo',
+  '.parcel-cache',
+  '.gradle',
+  '.venv',
+  'venv',
+  'env',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.tox',
+  '.idea',
+  '.vscode',
+  '.cache',
+  '.terraform',
+  'coverage',
+  'Pods',
+  'DerivedData',
+  'bin',
+  'obj',
+])
+
+export interface WalkOptions {
+  /** Hard cap on files returned, to keep a pathological repo bounded. */
+  maxFiles?: number
+  /** Maximum directory depth. */
+  maxDepth?: number
+  /** File extensions to collect. Empty means every file. */
+  extensions?: ReadonlySet<string>
+  /** Extra directory names to skip, on top of SKIP_DIRS. */
+  extraSkipDirs?: ReadonlySet<string>
+  /**
+   * Names that are not build output but share a build-output name. `dist` is output in
+   * JS projects and source in some others; a project can legitimately commit it.
+   */
+  followDirs?: ReadonlySet<string>
+}
+
+export interface WalkResult {
+  /** Repo-relative POSIX paths, sorted. */
+  files: string[]
+  /** True when the walk stopped early at maxFiles. */
+  truncated: boolean
+}
+
+const DEFAULT_MAX_FILES = 20_000
+const DEFAULT_MAX_DEPTH = 12
+
+/**
+ * Hidden directories are almost always tooling rather than source, so they are skipped
+ * by default. These are the ones a detector may legitimately need to read.
+ */
+export const HIDDEN_DIR_ALLOW: ReadonlySet<string> = new Set([
+  '.github',
+  '.config',
+  '.devcontainer',
+  '.claude',
+  '.cursor',
+  '.agents',
+])
+
+export function walkFiles(root: string, options: WalkOptions = {}): WalkResult {
+  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
+  const extensions = options.extensions
+  const extraSkip = options.extraSkipDirs
+  const follow = options.followDirs
+  const files: string[] = []
+  let truncated = false
+
+  const skipDir = (name: string): boolean => {
+    if (follow?.has(name)) return false
+    if (SKIP_DIRS.has(name)) return true
+    if (extraSkip?.has(name)) return true
+    if (name.startsWith('.') && !HIDDEN_DIR_ALLOW.has(name)) return true
+    return false
+  }
+
+  const walk = (dir: string, rel: string, depth: number): void => {
+    if (truncated || depth > maxDepth) return
+
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      // Unreadable directory (permissions, or a race with a running build): skip it
+      // rather than fail the whole profile. A partial profile is still useful.
+      return
+    }
+
+    for (const entry of entries) {
+      if (truncated) return
+      const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`
+
+      if (entry.isDirectory()) {
+        if (skipDir(entry.name)) continue
+        walk(join(dir, entry.name), childRel, depth + 1)
+        continue
+      }
+
+      if (!entry.isFile()) continue
+
+      if (extensions && extensions.size > 0) {
+        const ext = extensionOf(entry.name)
+        if (ext !== null && !extensions.has(ext)) continue
+      }
+
+      files.push(childRel)
+      if (files.length >= maxFiles) {
+        truncated = true
+        return
+      }
+    }
+  }
+
+  walk(root, '', 0)
+  files.sort()
+  return { files, truncated }
+}
+
+/** Lowercased extension including the dot, or null for dotfiles with no extension. */
+export function extensionOf(name: string): string | null {
+  const idx = name.lastIndexOf('.')
+  if (idx <= 0) return null
+  return name.slice(idx).toLowerCase()
+}
+
+export interface ReadTextResult {
+  text: string | null
+  bytes: number
+}
+
+/** Read a text file, tolerating absence, permission errors and binary content. */
+export function readText(path: string): ReadTextResult {
+  try {
+    const stat = statSync(path)
+    if (!stat.isFile()) return { text: null, bytes: 0 }
+    const text = readFileSync(path, 'utf8')
+    // A NUL in the first block means binary; a manifest that is binary is not a manifest.
+    if (text.includes('\0')) return { text: null, bytes: 0 }
+    return { text, bytes: Buffer.byteLength(text) }
+  } catch {
+    return { text: null, bytes: 0 }
+  }
+}
+
+/** Find the first existing path from a list, as a repo-relative POSIX path. */
+export function firstExisting(root: string, candidates: readonly string[]): string | null {
+  for (const candidate of candidates) {
+    if (existsSync(join(root, candidate))) return normalizeRelPath(candidate)
+  }
+  return null
+}
+
+export { toPosix }

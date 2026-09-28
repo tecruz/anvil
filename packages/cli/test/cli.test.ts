@@ -75,8 +75,10 @@ describe('anvil (no args)', () => {
   test('lists the planned surface, tagged with its milestone', () => {
     const res = runAnvil([])
     assert.match(res.stdout, /PLANNED/)
-    assert.match(res.stdout, /anvil doctor/)
-    assert.match(res.stdout, /M1/)
+    assert.match(res.stdout, /anvil doctor\s+Audit AI-readiness/)  // implemented, not planned
+    assert.doesNotMatch(res.stdout, /anvil doctor.*M1/)               // M1 is done
+    assert.match(res.stdout, /anvil plan/)                            // still planned
+    assert.match(res.stdout, /M2a/)                                   // with its milestone
   })
 
   test('--json with no command emits an envelope, not a help page', () => {
@@ -230,6 +232,38 @@ describe('anvil config init inside a repo', () => {
       rmSync(dir, { recursive: true, force: true })
       rmSync(home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('anvil profile / doctor with --profile', () => {
+  // Regression: `--profile <dir>` used to hoist to the enclosing git repo root, so
+  // pointing it at a nested fixture silently audited the parent project instead.
+  test('analyses the given directory, not the enclosing repo', () => {
+    const fixtures = join(import.meta.dirname, '..', '..', '..', 'fixtures', 'node-workspace')
+    const res = runAnvil(['profile', '--profile', fixtures, '--json', '--no-files'])
+    assert.equal(res.code, 0)
+    const data = jsonOf(res).data as {
+      root: string
+      modules: Array<{ id: string }>
+      stacks: Array<{ id: string }>
+    }
+    assert.ok(
+      data.root.toLowerCase().includes('node-workspace'),
+      `expected the fixture root, got ${data.root}`,
+    )
+    assert.equal(data.modules.length, 3, 'the workspace fixture has three members')
+    assert.ok(!data.stacks.some((s) => s.id === 'dotnet'), 'must not pick up sibling fixtures')
+  })
+
+  test('doctor --profile reports the fixture, not the parent', () => {
+    const fixtures = join(import.meta.dirname, '..', '..', '..', 'fixtures', 'node-workspace')
+    const fixtureScore = jsonOf(runAnvil(['doctor', '--profile', fixtures, '--json'])).data as { score: number }
+    const repoScore = jsonOf(runAnvil(['doctor', '--json'])).data as { score: number }
+    assert.notEqual(
+      fixtureScore.score,
+      repoScore.score,
+      'scoring the fixture must differ from scoring the enclosing repository',
+    )
   })
 })
 

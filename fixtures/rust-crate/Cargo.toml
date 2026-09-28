@@ -1,0 +1,10 @@
+[package]
+name = "acme-cli"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+clap = "4.5"
+
+[dev-dependencies]
+nextest = "0.9"

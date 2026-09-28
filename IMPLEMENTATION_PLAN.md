@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0 complete**. Next milestone: **M1** (`profile` + `doctor`).
+> Status: **M0 and M1 complete**. Next milestone: **M2a** (playbook registry + `anvil plan`).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -584,10 +584,51 @@ mode but not in JSON.
 
 Deviation from plan recorded in [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
+### M1 — complete (2026-09-28)
+
+Delivered: `packages/profile` (signature-based, non-executing detection) and
+`packages/audit` (rules engine). Six detectors — Node, Python, Go, Rust, JVM, .NET —
+plus a language-agnostic pass for docs, instruction files, CI and the blast-radius map.
+29 rules across the four layers. `anvil profile` and `anvil doctor` are live, with
+`--fail-on <severity>` exiting 6 while still emitting the full report.
+
+130 tests: 10 fixture repos (node-npm, node-workspace, python-django, go-module,
+rust-crate, jvm-gradle, dotnet-sln, cold-empty, documented-commands, multi-lockfile)
+asserting detection behaviour per ecosystem, plus report-shape and scoring invariants.
+
+Bugs the tests caught:
+
+1. **`--profile <dir>` hoisted to the enclosing git repo root.** Pointing it at a nested
+   fixture silently audited the parent project — reporting the wrong repository with total
+   confidence, which is the exact failure mode this tool exists to eliminate. An explicit
+   `--profile` is now analysed as given; the enclosing repo is consulted only for
+   provenance.
+2. **`addCommand` appended a higher-priority command last.** A `documented` command
+   discovered after a `detected` one ended up *second* in the list, so
+   `commands.test[0]` was the less trustworthy entry. Commands are now sorted
+   highest-priority-first; lower-priority candidates are kept so a source disagreement
+   stays visible to a rule.
+3. **The `testFast` prose pattern was unreachable.** `\btest\b` consumed the `test` token
+   in `npm run test:changed`, leaving nothing for the marker to match, so a documented fast
+   subset was classified as a full suite.
+4. **`test:watch` was classified as `testFast`.** A watch process never exits, so it cannot
+   be what `crew verify` runs. Excluded from the fast-subset patterns.
+5. **A JSDoc comment containing `**/` terminated the block comment early**, twice,
+   producing syntax errors. Reworded.
+
+Two rules were initially shipped as dishonest placeholders and now do real work:
+
+- **`CI_PARITY` compared nothing** while reporting `pass` and admitting in its own detail
+  text that comparison was unimplemented. It now reads the workflow bodies and checks each
+  documented command against the runner tokens that would satisfy it. It found a genuine
+  gap in two of the fixtures.
+- **`TEST_FAST` conflates "capable" with "documented"**. Per the detection spec, a
+  toolchain with a changed-files capability but no documented subset reports `warn`, not
+  `fail` — which is what keeps the "no false blockers" criterion testable.
+
 ## First move
 
-**M1.** `profile` + `doctor` need zero auth and zero network, and give immediate signal on
-whether this idea holds up against real repositories — before any of the git or provider
-complexity lands. Six detectors, module graph, command extraction (with
-`documented`/`detected`/`inferred` labels), blast-radius, and 10 fixtures with golden
-snapshots.
+**M2a.** The playbook registry and `anvil plan`. Pure data and ranking, no LLM step: match
+the detected stack to per-technology guidance (official docs, skills, community resources)
+and rank the resulting fixes by origin and confidence. This is the last milestone before
+the derive step, and the one that turns a score into a to-do list.

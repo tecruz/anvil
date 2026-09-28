@@ -1,0 +1,13 @@
+{
+  "name": "@anvil/audit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI-readiness rules engine and report.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/profile": "*"
+  }
+}

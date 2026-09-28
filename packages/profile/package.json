@@ -1,0 +1,13 @@
+{
+  "name": "@anvil/profile",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Stack detection producing a ProjectProfile.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*"
+  }
+}

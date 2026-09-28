@@ -28,10 +28,11 @@ import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { renderCommandHelp, renderRootHelp } from './help.ts'
 import { configCommand } from './commands/config.ts'
+import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { versionCommand } from './commands/version.ts'
 import type { Command, CommandContext } from './commands/types.ts'
 
-const COMMANDS: Command[] = [configCommand, versionCommand]
+const COMMANDS: Command[] = [configCommand, doctorCommand, profileCommand, versionCommand]
 
 const GLOBAL_FLAGS = new Set(['--json', '-j', '--no-color', '--help', '-h'])
 
@@ -96,16 +97,15 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   // Best-effort repo discovery. A missing repo is not an error until a command needs it.
-  let repoRoot: string | null = null
   const repo = await discoverRepo(process.cwd())
-  if (repo !== null) repoRoot = repo.root
 
   const colorEnabled = shouldUseColor({ noColor, stream: process.stdout, env: process.env })
   const style = makeStyle(colorEnabled)
 
   const ctx: CommandContext = {
     cwd: process.cwd(),
-    repoRoot,
+    repoRoot: repo === null ? null : repo.root,
+    repo,
     style,
     json,
     say(message) {
@@ -118,11 +118,17 @@ export async function run(argv: string[]): Promise<number> {
         process.stdout.write(render() + '\n')
       }
     },
+    writeRaw(text) {
+      process.stdout.write(text)
+    },
+    writeError(text) {
+      process.stderr.write(text)
+    },
   }
 
   try {
-    await command.run(ctx, rest)
-    return ExitCode.Ok
+    const code = await command.run(ctx, rest)
+    return code ?? ExitCode.Ok
   } catch (thrown) {
     const err = toAnvilError(thrown)
     if (json) {

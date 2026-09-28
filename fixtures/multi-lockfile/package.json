@@ -1,0 +1,12 @@
+{
+  "name": "acme-locked-twice",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.4.0",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

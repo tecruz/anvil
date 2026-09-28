@@ -1,0 +1,12 @@
+{
+  "name": "@acme/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@acme/core": "workspace:*",
+    "@acme/ui": "workspace:*",
+    "next": "^14.2.0"
+  }
+}
