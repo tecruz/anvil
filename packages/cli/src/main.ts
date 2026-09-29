@@ -28,12 +28,13 @@ import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { renderCommandHelp, renderRootHelp } from './help.ts'
 import { configCommand } from './commands/config.ts'
+import { briefCommand, initCommand } from './commands/init.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { planCommand } from './commands/plan.ts'
 import { versionCommand } from './commands/version.ts'
 import type { Command, CommandContext } from './commands/types.ts'
 
-const COMMANDS: Command[] = [configCommand, doctorCommand, planCommand, profileCommand, versionCommand]
+const COMMANDS: Command[] = [briefCommand, configCommand, doctorCommand, initCommand, planCommand, profileCommand, versionCommand]
 
 const GLOBAL_FLAGS = new Set(['--json', '-j', '--no-color', '--help', '-h'])
 

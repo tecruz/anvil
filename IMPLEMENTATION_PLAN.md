@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0, M1 and M2a complete**. Next milestone: **M2b** (`brief` + `init` + validator).
+> Status: **M0, M1, M2a and M2b complete**. Next milestone: **M3** (git wrapper, `claim`/`release`/`status`, `local` provider, compaction-context injection).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -672,15 +672,78 @@ Bugs the tests caught:
    commands" is an action derived from this repo's own gap; the GitHub docs link is
    supporting material. Calling it official put a repo-specific task in the
    external-guidance tier and inflated counts on repos with no matched playbook.
+**Known refinement for M2b:** official guidance is currently unbounded, so a
+well-matched repo shows more external suggestions than derived ones (anvil itself: 38
+official vs 13 derived). Reading order is correct — derived first — but the plan should
+stop offering guidance the repo already satisfies, so the list stays actionable rather
+than browsable.
 
-**Known refinement for M2b:** official guidance is currently unbounded, so a well-matched
-repo shows more external suggestions than derived ones (anvil itself: 38 official vs 13
-derived). Reading order is correct — derived first — but the plan should stop offering
-guidance the repo already satisfies, so the list stays actionable rather than browsable.
+### M2b — complete (2026-09-28)
+
+Delivered: `packages/derive` and `anvil brief` / `anvil init`. Detector count 6 → **12**.
+
+The end-to-end loop, verified on every fixture:
+
+| fixture | stacks detected | before | after init |
+|---|---|---|---|
+| node-npm | node, typescript, eslint, prettier, vitest | 67 | 92 |
+| python-django | python, pep621, django | 55 | 81 |
+| terraform-infra | terraform, terraform-aws, terraform-github | 45 | 69 |
+| ruby-rails | ruby, rails, rspec, rubocop | 45 | 67 |
+| php-laravel | php, laravel | 42 | 53 |
+| elixir-phoenix | elixir, phoenix, ecto | 38 | 49 |
+| swift-package | swift | 38 | 47 |
+| frontend-vue | vue, vite, node | 38 | 63 |
+
+**The self-referential test now asserts more than a rising score.** A rising score is not
+sufficient evidence: the audit can improve by clearing a cosmetic rule while the blocker
+that matters most stays failing. So the test additionally requires that `AGENTS_COMMANDS`
+— the reason AGENTS.md exists — actually goes to `pass`. That immediately caught two bugs
+the weaker assertion had let through, both of which meant anvil failed to recognize its
+own output.
+
+**Design decision worth recording.** `anvil init` generates a *working baseline* from
+verified facts alone, with no model in the loop. The agent then improves the staged files
+before `--apply`. This is better than "emit a brief and hope the model writes something
+valid": `init` is useful standalone, the validator always has a real artifact to gate, and
+the agent's edits are what land (their version wins, the baseline survives underneath).
+Editing a staged file is reported as `tampered` but is *not* an error — that is the
+intended workflow, not a violation.
+
+The staleness contract was verified live: with a bundle staged, hand-editing `AGENTS.md`
+and running `--apply` exits **8** and leaves the human's file untouched; the same happens
+with no bundle at all. Both with a hint naming the next command.
+
+Six more detectors: Ruby, PHP/Laravel, Elixir/Phoenix, frontend (Vue/Svelte/Vite/Next),
+Swift, Terraform. Terraform is given priority **85** above the others, because an IaC repo
+is a Terraform repo first and its playbook must win over a provider-specific one.
+
+Bugs the tests caught in the new detectors:
+
+1. **The audit could not see its own generated `AGENTS.md`.** `mentionsCommand` required a
+   command to be preceded by whitespace, but in markdown it is wrapped in backticks, so
+   `AGENTS_COMMANDS` stayed `fail` after an `init` that fixed it. The blocker cleared only
+   once the leading-character class included markdown delimiters.
+2. **`AGENTS_COMMANDS` over-fired on code-less repositories.** A repo with no source files
+   has no verify commands to document, so failing it was a false positive — and a false
+   positive teaches the reader to ignore the report. Now `na`, consistent with
+   `BUILD`/`TEST`/`LINT`.
+3. **The Terraform provider regex stopped at the first closing brace**, so only the first
+   provider in a `required_providers` block was ever seen. Now reads provider identity
+   from the `source = "org/type"` string, which is Terraform's own convention.
+4. **Gemfile patterns anchored at column 0**, missing every `gem` line indented inside a
+   `group` block — which is exactly where development tooling like rubocop is declared.
+5. **The Rakefile idiom `RuboCop::RakeTask.new` takes no argument**, so it does not
+   appear as a named task and was missed by task-name matching.
+
+257 tests. Bundle 193.1 kB, still zero runtime dependencies.
+
+**Remaining M2b refinement, deferred:** the unbounded-official-guidance issue noted above
+is not fixed. `anvil plan` should stop offering guidance a repo already satisfies.
 
 ## First move
 
-**M2b.** `anvil brief` (verified facts for the LLM step), the staging/apply lifecycle
-described under *Staging & apply lifecycle*, the artifact validator against the real
-opencode frontmatter schemas, and `anvil init --apply`. This is where anvil stops
-describing the problem and starts producing the thing that fixes it.
+**M3.** The git wrapper, `claim` / `release` / `status`, worktree preflight, the `local`
+provider, and compaction-context injection. This is where the tool stops describing the
+problem and starts running work in parallel — and it is the first milestone whose risk is
+platform behaviour (Windows paths, shared refs) rather than detection correctness.

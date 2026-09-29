@@ -1,0 +1,516 @@
+import { test, describe, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, copyFileSync, readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { audit, type ReadinessReport } from '@anvil/audit'
+import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
+import {
+  buildBrief,
+  generateAgentsFile,
+  generateReviewCommand,
+  generateVerifySkill,
+  validateArtifact,
+  validateAll,
+  checkApplyPreconditions,
+  hashInputs,
+  readRepoFile,
+  writeStaging,
+  applyStaging,
+  inspectStaging,
+  sha256,
+  type GeneratedArtifact,
+} from '@anvil/derive'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = resolve(here, '..', '..', '..')
+const FIXTURES = join(REPO_ROOT, 'fixtures')
+
+const temps: string[] = []
+after(() => {
+  for (const t of temps) rmSync(t, { recursive: true, force: true })
+})
+
+function copyTree(src: string, dest: string): void {
+  mkdirSync(dest, { recursive: true })
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name)
+    const to = join(dest, entry.name)
+    if (entry.isDirectory()) copyTree(from, to)
+    else copyFileSync(from, to)
+  }
+}
+
+function materialize(fixture: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `anvil-m2b-${fixture}-`))
+  temps.push(dir)
+  copyTree(join(FIXTURES, fixture), dir)
+  return dir
+}
+
+function profileIn(root: string): ProjectProfile {
+  return buildProfile(root, { root, host: null, remote: null, defaultBranch: null }).profile
+}
+
+function matchesFor(profile: ProjectProfile) {
+  return matchPlaybooks(profile, loadBuiltins().playbooks)
+}
+
+// ===========================================================================
+// The test that matters: anvil must improve what it measures.
+// ===========================================================================
+
+describe('self-referential: init must improve the readiness score', () => {
+  // The one test that proves the tool does anything. If `init` did not raise `doctor`'s
+  // score, the audit would be measuring something generation cannot affect, and the whole
+  // premise would be wrong.
+  for (const fixture of ['node-npm', 'python-django', 'go-module', 'node-workspace', 'cold-empty']) {
+    test(`${fixture}: doctor -> init --apply -> doctor scores strictly higher`, () => {
+      const dir = materialize(fixture)
+
+      const before = audit(profileIn(dir)).score
+
+      // Build and apply, exactly as `anvil init` / `anvil init --apply` do.
+      const profile = profileIn(dir)
+      const report = audit(profile)
+      const matches = matchesFor(profile)
+      const { playbooks } = loadBuiltins()
+
+      const artifacts: GeneratedArtifact[] = [generateAgentsFile({ profile, matches })]
+      const skill = generateVerifySkill({ profile, matches })
+      if (skill !== null) artifacts.push(skill)
+      const command = generateReviewCommand({ profile, matches })
+      if (command !== null) artifacts.push(command)
+
+      const validation = validateAll(artifacts)
+      assert.ok(validation.ok, `generated artifacts must validate: ${JSON.stringify(validation.errors)}`)
+
+      const inputHash = hashInputs({
+        profile: { ...profile, files: undefined, root: undefined },
+        report: { score: report.score, findings: report.findings },
+        playbookIds: playbooks.map((p) => p.id),
+      })
+      writeStaging(dir, { inputHash, generator: 'test' }, new Map(artifacts.map((a) => [a.path, a.content])))
+
+      const manifest = inspectStaging(dir).manifest
+      assert.ok(manifest !== null)
+      const check = checkApplyPreconditions(dir, manifest, inputHash)
+      assert.ok(check.ok, `preconditions failed: ${check.reason}`)
+
+      for (const a of artifacts) {
+        const target = join(dir, a.path)
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, a.content, 'utf8')
+      }
+
+      const after = audit(profileIn(dir)).score
+      assert.ok(after > before, `expected ${after} > ${before} for ${fixture}`)
+
+      // A rising score is not enough on its own: the audit can improve by clearing a
+      // cosmetic rule while the blocker that matters most stays failing. `AGENTS_COMMANDS`
+      // is the reason AGENTS.md exists, so generating it must clear that blocker.
+      //
+      // Only asserted for repos that have code: with no source files the rule is `na`
+      // (there are no commands to document), so a generated AGENTS.md has nothing to fix.
+      const finalReport = audit(profileIn(dir))
+      const hasCode = finalReport.findings.some((f) => f.id === 'AGENTS_COMMANDS' && f.status !== 'na')
+      if (hasCode) {
+        const blocker = finalReport.findings.find((f) => f.id === 'AGENTS_COMMANDS')
+        assert.equal(
+          blocker?.status,
+          'pass',
+          `AGENTS_COMMANDS must pass after init for ${fixture}; the audit failed to recognize its own generated output`,
+        )
+      }
+    })
+  }
+
+  test('cold-empty is the strongest case: an empty repo gains the most', () => {
+    const dir = materialize('cold-empty')
+    const before = audit(profileIn(dir)).score
+    const profile = profileIn(dir)
+    const matches = matchesFor(profile)
+    const artifact = generateAgentsFile({ profile, matches })
+    writeFileSync(join(dir, artifact.path), artifact.content, 'utf8')
+    const after = audit(profileIn(dir)).score
+    assert.ok(after > before, `expected ${after} > ${before}`)
+  })
+})
+
+describe('idempotence', () => {
+  test('generating twice from the same inputs produces identical bytes', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const matches = matchesFor(profile)
+    const a = generateAgentsFile({ profile, matches })
+    const b = generateAgentsFile({ profile: profileIn(dir), matches: matchesFor(profileIn(dir)) })
+    assert.equal(sha256(a.content), sha256(b.content))
+  })
+
+  test('the input hash is stable across runs', () => {
+    const dir = materialize('node-workspace')
+    const h1 = hashInputsFrom(dir)
+    const h2 = hashInputsFrom(dir)
+    assert.equal(h1, h2)
+  })
+
+  test('a second apply is a no-op because the content already matches', () => {
+    const dir = materialize('node-npm')
+    const { inputHash, artifact } = stageOnce(dir)
+    writeFileSync(join(dir, artifact.path), artifact.content, 'utf8')
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    const check = checkApplyPreconditions(dir, manifest, inputHash)
+    assert.ok(check.ok, check.reason)
+  })
+})
+
+function hashInputsFrom(dir: string): string {
+  const profile = profileIn(dir)
+  const report = audit(profile)
+  const { playbooks } = loadBuiltins()
+  return hashInputs({
+    profile: { ...profile, files: undefined, root: undefined },
+    report: { score: report.score, findings: report.findings },
+    playbookIds: playbooks.map((p) => p.id),
+  })
+}
+
+function stageOnce(dir: string): { inputHash: string; artifact: GeneratedArtifact } {
+  const profile = profileIn(dir)
+  const matches = matchesFor(profile)
+  const artifact = generateAgentsFile({ profile, matches })
+  const report = audit(profile)
+  const { playbooks } = loadBuiltins()
+  const inputHash = hashInputs({
+    profile: { ...profile, files: undefined, root: undefined },
+    report: { score: report.score, findings: report.findings },
+    playbookIds: playbooks.map((p) => p.id),
+  })
+  writeStaging(dir, { inputHash, generator: 'test' }, new Map([[artifact.path, artifact.content]]))
+  return { inputHash, artifact }
+}
+
+// ===========================================================================
+// Staging lifecycle
+// ===========================================================================
+
+describe('staging lifecycle', () => {
+  test('init writes nothing into the repository', () => {
+    const dir = materialize('node-npm')
+    const { artifact } = stageOnce(dir)
+    assert.equal(existsSync(join(dir, artifact.path)), false, 'staging must not touch the repo')
+    assert.ok(existsSync(join(dir, '.anvil', 'staging', 'manifest.json')))
+  })
+
+  test('a stale bundle is refused rather than applied', () => {
+    const dir = materialize('node-npm')
+    const { inputHash } = stageOnce(dir)
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    const check = checkApplyPreconditions(dir, manifest, 'a-different-hash')
+    assert.equal(check.ok, false)
+    assert.match(check.reason ?? '', /stale/)
+    assert.match(check.hint ?? '', /Re-run/)
+    assert.notEqual(inputHash, 'a-different-hash')
+  })
+
+  test('applying is refused when a target file changed in the repository', () => {
+    const dir = materialize('node-npm')
+    const { inputHash } = stageOnce(dir)
+    // Someone edits AGENTS.md after staging.
+    writeFileSync(join(dir, 'AGENTS.md'), 'hand written by a human\n', 'utf8')
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    const check = checkApplyPreconditions(dir, manifest, inputHash)
+    assert.equal(check.ok, false)
+    assert.match(check.reason ?? '', /AGENTS\.md has changed/)
+  })
+
+  test('applying is allowed when the target file does not exist yet', () => {
+    const dir = materialize('node-npm')
+    const { inputHash } = stageOnce(dir)
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    assert.equal(checkApplyPreconditions(dir, manifest, inputHash).ok, true)
+  })
+
+  test('a missing bundle is a clear error, not a crash', () => {
+    const dir = materialize('node-npm')
+    const check = checkApplyPreconditions(dir, null, 'whatever')
+    assert.equal(check.ok, false)
+    assert.match(check.reason ?? '', /No staging bundle/)
+  })
+
+  test('editing a staged file is reported as tampered but is not an error', () => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const staged = join(dir, '.anvil', 'staging', 'files', 'AGENTS.md')
+    writeFileSync(staged, 'edited by the agent\n', 'utf8')
+    const state = inspectStaging(dir)
+    assert.deepEqual(state.tampered, ['AGENTS.md'])
+  })
+
+  test('an edited staged file is what gets applied', () => {
+    // The intended workflow: anvil provides a baseline, the agent improves it, and the
+    // agent's version is what lands. Editing staged files is not tampering; it is the
+    // design.
+    const dir = materialize('node-npm')
+    const { inputHash } = stageOnce(dir)
+    const staged = join(dir, '.anvil', 'staging', 'files', 'AGENTS.md')
+    const improved = `${readFileSync(staged, 'utf8')}\n## Improved by the agent\n\n- extra guidance\n`
+    writeFileSync(staged, improved, 'utf8')
+
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    const check = checkApplyPreconditions(dir, manifest, inputHash)
+    assert.ok(check.ok, `an agent's edits must not block apply: ${check.reason}`)
+
+    const written = applyStaging(dir, manifest)
+    assert.deepEqual(written, ['AGENTS.md'])
+    const onDisk = readRepoFile(dir, 'AGENTS.md')
+    assert.ok(onDisk !== null)
+    assert.match(onDisk, /Improved by the agent/, "the agent's version must be what lands")
+    assert.match(onDisk, /## Commands/, 'and the verified baseline must survive')
+  })
+})
+
+// ===========================================================================
+// The validator: the actual product feature
+// ===========================================================================
+
+describe('artifact validation', () => {
+  test('accepts a well-formed agent', () => {
+    const v = validateArtifact(
+      '.opencode/agents/reviewer.md',
+      '---\ndescription: Reviews code\nmode: subagent\n---\n\nYou review code carefully.\n',
+    )
+    assert.ok(v.ok, v.errors.join('; '))
+  })
+
+  test('rejects an agent with no description, which opencode requires', () => {
+    const v = validateArtifact('.opencode/agents/x.md', '---\nmode: subagent\n---\n\nbody\n')
+    assert.equal(v.ok, false)
+    assert.ok(v.errors.some((e) => e.includes('description')))
+  })
+
+  test('rejects an invalid agent mode', () => {
+    const v = validateArtifact('.opencode/agents/x.md', '---\ndescription: d\nmode: bogus\n---\n\nbody\n')
+    assert.ok(v.errors.some((e) => e.includes('mode')))
+  })
+
+  test('rejects an unterminated frontmatter block', () => {
+    const v = validateArtifact('.opencode/agents/x.md', '---\ndescription: d\nbody without closing\n')
+    assert.ok(v.errors.some((e) => e.includes('not closed')))
+  })
+
+  test('rejects a command with no body', () => {
+    const v = validateArtifact('.opencode/commands/x.md', '---\ndescription: d\n---\n')
+    assert.ok(v.errors.some((e) => e.includes('no template body')))
+  })
+
+  test('accepts a valid skill', () => {
+    const v = validateArtifact(
+      '.agents/skills/verify-change/SKILL.md',
+      '---\nname: verify-change\ndescription: Run the test suite before claiming done.\n---\n\n# Verify\n\nSteps.\n',
+    )
+    assert.ok(v.ok, v.errors.join('; '))
+  })
+
+  test('rejects a skill name that does not match the required pattern', () => {
+    const v = validateArtifact(
+      '.agents/skills/Verify_Change/SKILL.md',
+      '---\nname: Verify_Change\ndescription: d\n---\n\nbody\n',
+    )
+    assert.ok(v.errors.some((e) => e.includes('must match')))
+  })
+
+  test('rejects a skill whose name does not match its directory', () => {
+    // This is the failure opencode hides: the skill simply never appears.
+    const v = validateArtifact(
+      '.agents/skills/verify-change/SKILL.md',
+      '---\nname: verify-something-else\ndescription: d\n---\n\nbody\n',
+    )
+    assert.ok(v.errors.some((e) => e.includes('must equal the containing directory')))
+  })
+
+  test('rejects a skill with no description', () => {
+    const v = validateArtifact('.agents/skills/thing/SKILL.md', '---\nname: thing\n---\n\nbody\n')
+    assert.ok(v.errors.some((e) => e.includes('description')))
+  })
+
+  test('rejects an over-long skill description', () => {
+    const v = validateArtifact(
+      '.agents/skills/thing/SKILL.md',
+      `---\nname: thing\ndescription: ${'x'.repeat(1100)}\n---\n\nbody\n`,
+    )
+    assert.ok(v.errors.some((e) => e.includes('1024')))
+  })
+
+  test('warns that an empty AGENTS.md is worse than none', () => {
+    const v = validateArtifact('AGENTS.md', '')
+    assert.equal(v.ok, false)
+  })
+
+  test('warns when AGENTS.md uses @file references without saying to read them', () => {
+    const v = validateArtifact('AGENTS.md', 'See @docs/style.md for conventions.\n')
+    assert.ok(v.warnings.some((w) => w.includes('@file')))
+  })
+
+  test('does not warn when AGENTS.md instructs reading the references', () => {
+    const v = validateArtifact('AGENTS.md', 'Use your Read tool to load @docs/style.md when relevant.\n')
+    assert.equal(v.warnings.length, 0)
+  })
+
+  test('classifies each artifact kind by path', () => {
+    for (const [path, kind] of [
+      ['.opencode/agents/a.md', 'agent'],
+      ['.opencode/commands/c.md', 'command'],
+      ['.agents/skills/s/SKILL.md', 'skill'],
+      ['AGENTS.md', 'agents-file'],
+    ] as const) {
+      const v = validateArtifact(path, '---\nname: s\ndescription: d\n---\n\nbody\n')
+      assert.equal(v.kind, kind, path)
+    }
+  })
+
+  test('an unrecognized path is an error, not a silent pass', () => {
+    const v = validateArtifact('random/file.txt', 'hello')
+    assert.equal(v.ok, false)
+  })
+})
+
+describe('generated artifacts are valid', () => {
+  for (const fixture of ['node-npm', 'python-django', 'go-module', 'jvm-gradle', 'node-workspace', 'dotnet-sln']) {
+    test(`${fixture}: every generated artifact validates`, () => {
+      const dir = materialize(fixture)
+      const profile = profileIn(dir)
+      const matches = matchesFor(profile)
+      const artifacts: GeneratedArtifact[] = [generateAgentsFile({ profile, matches })]
+      const skill = generateVerifySkill({ profile, matches })
+      if (skill !== null) artifacts.push(skill)
+      const command = generateReviewCommand({ profile, matches })
+      if (command !== null) artifacts.push(command)
+
+      const summary = validateAll(artifacts)
+      assert.ok(summary.ok, `${fixture}: ${summary.errors.map((e) => `${e.path} ${e.message}`).join('; ')}`)
+    })
+  }
+})
+
+describe('generated AGENTS.md contains only verifiable claims', () => {
+  test('never states a command the profile did not detect', () => {
+    const dir = materialize('go-module')
+    const profile = profileIn(dir)
+    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const backticked = [...artifact.content.matchAll(/`([^`]+)`/g)].map((m) => m[1] as string)
+    const known = new Set(Object.values(profile.commands).flat().map((c) => c.cmd))
+    const knownGlobish = /^[a-z][\w./-]*$/ // not a command: a path, glob, or identifier
+    for (const token of backticked) {
+      if (knownGlobish.test(token)) continue
+      if (known.has(token)) continue
+      // Anything command-shaped must have come from the profile.
+      if (/^(go|cargo|npm|pnpm|yarn|bun|make|pytest|dotnet|gradlew?|mvnw?|ruff|mypy|tsc|eslint)\b/.test(token)) {
+        assert.ok(known.has(token), `AGENTS.md mentions "${token}" which the profile did not detect`)
+      }
+    }
+  })
+
+  test('labels inferred commands as inferred', () => {
+    const dir = materialize('rust-crate')
+    const profile = profileIn(dir)
+    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    assert.match(artifact.content, /\(inferred\)/)
+    assert.match(artifact.content, /inferred from ecosystem convention/)
+  })
+
+  test('includes the module map for a monorepo', () => {
+    const dir = materialize('node-workspace')
+    const profile = profileIn(dir)
+    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    assert.match(artifact.content, /## Layout/)
+    assert.match(artifact.content, /@acme\/core/)
+  })
+
+  test('lists high-risk paths when they exist', () => {
+    const dir = materialize('python-django')
+    const profile = profileIn(dir)
+    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    assert.match(artifact.content, /## High-risk paths/)
+    assert.match(artifact.content, /migrations/)
+  })
+
+  test('omits sections it has no evidence for', () => {
+    const dir = materialize('cold-empty')
+    const profile = profileIn(dir)
+    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    assert.doesNotMatch(artifact.content, /## Commands/)
+    assert.doesNotMatch(artifact.content, /## Layout/)
+  })
+})
+
+describe('brief', () => {
+  test('carries the verified commands with evidence', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: (p) => readRepoFile(dir, p),
+    })
+    const test0 = brief.commands.find((c) => c.kind === 'test')
+    assert.ok(test0)
+    assert.ok(test0.evidence !== null)
+    assert.match(test0.evidence, /package\.json:\d+/)
+  })
+
+  test('lists the gaps so a model cannot contradict the repository', () => {
+    const dir = materialize('cold-empty')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: () => null,
+    })
+    assert.ok(brief.gaps.length > 0)
+    assert.ok(brief.gaps.some((g) => g.includes('AGENTS')))
+  })
+
+  test('never includes a secret-shaped file in the excerpts', () => {
+    const dir = materialize('node-npm')
+    writeFileSync(join(dir, '.env'), 'SECRET_TOKEN=abc123\n', 'utf8')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: (p) => readRepoFile(dir, p),
+    })
+    assert.ok(!brief.excerpts.some((e) => e.path.includes('.env')))
+    const serialized = JSON.stringify(brief)
+    assert.ok(!serialized.includes('abc123'), 'a secret value must never reach the brief')
+  })
+
+  test('includes the matched playbook guidance', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+    })
+    assert.ok(brief.playbooks.some((p) => p.id === 'node'))
+    assert.ok(brief.playbooks[0]!.guidance.length > 0)
+  })
+})
+

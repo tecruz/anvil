@@ -51,8 +51,6 @@ export interface CommandContext {
 
 /** Planned commands, surfaced in help with their milestone. Shown, not runnable. */
 export const PLANNED_COMMANDS: Array<{ usage: string; summary: string; milestone: string }> = [
-  { usage: 'anvil brief --for <t>', summary: 'Emit verified facts for the LLM step', milestone: 'M2b' },
-  { usage: 'anvil init [--apply]', summary: 'Derive AGENTS.md, agents, commands, skills', milestone: 'M2b' },
   { usage: 'anvil playbook <sub>', summary: 'List/match/show/add/check tech playbooks', milestone: 'M2a' },
   { usage: 'anvil issue <sub>', summary: 'Pull, show, comment, set-state, sync tickets', milestone: 'M3-M4' },
   { usage: 'anvil claim <ref>', summary: 'Create branch + worktree + ticket context', milestone: 'M3' },

@@ -1,0 +1,223 @@
+/**
+ * The brief: verified facts handed to the LLM step.
+ *
+ * This is the seam between the deterministic half of anvil and the agent. Everything in
+ * here is *verified* -- a command that exists in a manifest with a `file:line`, a module
+ * from the workspace graph -- and nothing is a guess. The agent's job is to turn these
+ * facts into prose and structure; it is never asked to rediscover them.
+ *
+ * Two things deliberately absent:
+ *
+ *  - **No instructions to guess.** The brief says what the repo *is*, not what a good
+ *    AGENTS.md should say. Templates provide the shape; the model fills it.
+ *  - **No secrets.** The file list is filtered, and file *contents* are only included
+ *    for a small allowlist of manifest-shaped paths. An agent working in a corporate repo
+ *    should not have secrets pushed into its context by a convenience feature.
+ */
+
+import type { ProjectProfile, RiskPath, CommandEntry } from '@anvil/profile'
+import type { ReadinessReport, Finding } from '@anvil/audit'
+import type { MatchResult } from '@anvil/playbooks'
+
+export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
+
+export interface BriefCommand {
+  kind: string
+  cmd: string
+  source: CommandEntry['source']
+  evidence: string | null
+}
+
+export interface BriefModule {
+  id: string
+  path: string
+  dependsOn: string[]
+}
+
+export interface BriefFileExcerpt {
+  path: string
+  /** File contents, truncated. Only for the allowlisted manifest shapes. */
+  content: string
+  truncated: boolean
+}
+
+export interface Brief {
+  schemaVersion: 1
+  target: BriefTarget
+  repo: {
+    root: string
+    vcs: string | null
+    defaultBranch: string | null
+    languages: Array<{ id: string; files: number; primary: boolean }>
+    stacks: Array<{ id: string; version: string | null; evidence: string[] }>
+    monorepo: { tool: string; members: string[] } | null
+  }
+  commands: BriefCommand[]
+  tooling: {
+    lint: string[]
+    formatter: string[]
+    typecheck: string[]
+    test: string[]
+    ci: string[]
+    hooks: string[]
+    container: boolean
+  }
+  modules: BriefModule[]
+  docs: Record<string, string | null>
+  instructions: Array<{ path: string; category: string }>
+  risk: RiskPath[]
+  playbooks: Array<{
+    id: string
+    title: string
+    matchedBy: string[]
+    conventions: {
+      moduleLayout: string | null
+      testNaming: string | null
+      reviewFocus: string[]
+    }
+    verify: Record<string, string[]>
+    guidance: Array<{ kind: string; label: string; url: string; why: string }>
+  }>
+  findings: Array<{ id: string; layer: string; status: string; severity: string; detail: string }>
+  /** Excerpts from a small allowlist of manifest files. Never secrets. */
+  excerpts: BriefFileExcerpt[]
+  /** What the repo lacks, so the model does not write guidance for things already present. */
+  gaps: string[]
+}
+
+/**
+ * Files whose contents are safe and useful to include. Manifests and agent instructions
+ * only -- never `.env`, keys, or source files.
+ */
+const EXCERPT_ALLOW: Array<{ path: string; maxBytes: number }> = [
+  { path: 'AGENTS.md', maxBytes: 20_000 },
+  { path: 'CLAUDE.md', maxBytes: 20_000 },
+  { path: 'README.md', maxBytes: 20_000 },
+  { path: 'CONTRIBUTING.md', maxBytes: 20_000 },
+  { path: 'package.json', maxBytes: 40_000 },
+  { path: 'pyproject.toml', maxBytes: 40_000 },
+  { path: 'Cargo.toml', maxBytes: 40_000 },
+  { path: 'go.mod', maxBytes: 4_000 },
+  { path: 'Makefile', maxBytes: 20_000 },
+  { path: 'settings.gradle.kts', maxBytes: 20_000 },
+  { path: 'build.gradle.kts', maxBytes: 40_000 },
+  { path: '.editorconfig', maxBytes: 8_000 },
+]
+
+export interface BuildBriefOptions {
+  profile: ProjectProfile
+  report: ReadinessReport
+  matches: readonly MatchResult[]
+  target: BriefTarget
+  /** Reads a repo-relative file. Injected so tests do not need a real repo. */
+  read: (relPath: string) => string | null
+  /** Findings to omit, so a `brief --for agents` is not swamped by unrelated rules. */
+  relevantLayers?: readonly string[]
+}
+
+export function buildBrief(options: BuildBriefOptions): Brief {
+  const { profile, report, matches, target, read } = options
+
+  const commands: BriefCommand[] = []
+  for (const kind of Object.keys(profile.commands).sort()) {
+    for (const entry of profile.commands[kind as keyof typeof profile.commands] ?? []) {
+      commands.push({ kind, cmd: entry.cmd, source: entry.source, evidence: entry.evidence ?? null })
+    }
+  }
+
+  const layers = options.relevantLayers
+  const findings: Brief['findings'] = report.findings
+    .filter((f) => f.status !== 'na')
+    .filter((f) => layers === undefined || layers.includes(f.layer))
+    .map((f) => ({ id: f.id, layer: f.layer, status: f.status, severity: f.severity, detail: f.detail }))
+
+  const playbooks: Brief['playbooks'] = matches.map((m) => ({
+    id: m.playbook.id,
+    title: m.playbook.title,
+    matchedBy: m.reasons.map((r) => `${r.kind}:${r.pattern} -> ${r.matched}`),
+    conventions: {
+      moduleLayout: m.playbook.conventions.moduleLayout,
+      testNaming: m.playbook.conventions.testNaming,
+      reviewFocus: m.playbook.conventions.reviewFocus,
+    },
+    verify: m.playbook.verify as unknown as Record<string, string[]>,
+    guidance: flattenGuidance(m.playbook),
+  }))
+
+  const excerpts: BriefFileExcerpt[] = []
+  for (const { path, maxBytes } of EXCERPT_ALLOW) {
+    if (!profile.files.includes(path)) continue
+    const content = read(path)
+    if (content === null) continue
+    const truncated = content.length > maxBytes
+    excerpts.push({ path, content: truncated ? content.slice(0, maxBytes) : content, truncated })
+  }
+
+  return {
+    schemaVersion: 1,
+    target,
+    repo: {
+      root: profile.root,
+      vcs: profile.vcs.host,
+      defaultBranch: profile.vcs.defaultBranch,
+      languages: profile.languages.map((l) => ({ id: l.id, files: l.files, primary: l.primary })),
+      stacks: profile.stacks.map((s) => ({ id: s.id, version: s.version, evidence: s.evidence })),
+      monorepo:
+        profile.monorepo === null
+          ? null
+          : { tool: profile.monorepo.tool, members: profile.monorepo.members },
+    },
+    commands,
+    tooling: {
+      lint: profile.tooling.lint,
+      formatter: profile.tooling.formatter,
+      typecheck: profile.tooling.typecheck,
+      test: profile.tooling.test,
+      ci: profile.tooling.ci,
+      hooks: profile.tooling.hooks,
+      container: profile.tooling.container,
+    },
+    modules: profile.modules.map((m) => ({ id: m.id, path: m.path, dependsOn: m.deps })),
+    docs: { ...profile.docs },
+    instructions: profile.instructions.map((i) => ({ path: i.path, category: i.category })),
+    risk: profile.risk,
+    playbooks,
+    findings,
+    excerpts,
+    gaps: computeGaps(report, profile),
+  }
+}
+
+function flattenGuidance(playbook: {
+  official: { docs: unknown[]; skills: unknown[]; agents: unknown[]; mcp: unknown[]; styleGuides: unknown[]; migrationGuides: unknown[] }
+}): Array<{ kind: string; label: string; url: string; why: string }> {
+  const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
+    ['doc', playbook.official.docs as Array<{ label: string; url: string; why: string }>],
+    ['skill', playbook.official.skills as Array<{ label: string; url: string; why: string }>],
+    ['agent', playbook.official.agents as Array<{ label: string; url: string; why: string }>],
+    ['mcp', playbook.official.mcp as Array<{ label: string; url: string; why: string }>],
+    ['style', playbook.official.styleGuides as Array<{ label: string; url: string; why: string }>],
+    ['migration', playbook.official.migrationGuides as Array<{ label: string; url: string; why: string }>],
+  ]
+  return groups.flatMap(([kind, resources]) => resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why })))
+}
+
+/**
+ * What the repo lacks.
+ *
+ * This is the part that keeps generated guidance honest. Without it a model writes
+ * instructions for things the repo already does -- a "we use pnpm" note in an npm repo --
+ * and the result is worse than writing nothing.
+ */
+export function computeGaps(report: ReadinessReport, profile: ProjectProfile): string[] {
+  const gaps: string[] = []
+  for (const f of report.findings) {
+    if (f.status === 'pass' || f.status === 'na') continue
+    gaps.push(`${f.id} (${f.severity}): ${f.detail}`)
+  }
+  if (profile.instructions.length === 0) gaps.push('no agent instructions file exists at all')
+  if (profile.modules.length > 1) gaps.push('multi-module repo: guidance must include a module map')
+  return gaps
+}
+
+export type { Finding }

@@ -1,0 +1,15 @@
+{
+  "name": "@anvil/derive",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Brief building, artifact generation, validation and the staging/apply lifecycle.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/audit": "*",
+    "@anvil/playbooks": "*",
+    "@anvil/profile": "*"
+  }
+}

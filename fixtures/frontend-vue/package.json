@@ -1,0 +1,1 @@
+{"name":"acme-web","devDependencies":{"vite":"^5.0.0","@vitejs/plugin-vue":"^5.0.0"},"scripts":{"build":"vite build","test":"vitest run"}}

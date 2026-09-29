@@ -10,6 +10,7 @@
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
 import { addLanguage, type Detector, type DetectorContext, type ProfileDraft } from './detector.ts'
 import { ecosystemDetectors } from './detectors/ecosystems.ts'
+import { additionalDetectors } from './detectors/more.ts'
 import {
   addRiskHeuristics,
   detectDocs,
@@ -98,7 +99,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     files: fileSet,
   }
 
-  const detectors = [...ecosystemDetectors, ...(options.extraDetectors ?? [])]
+  const detectors = [...ecosystemDetectors, ...additionalDetectors, ...(options.extraDetectors ?? [])]
     .slice()
     .sort((a, b) => a.priority - b.priority)
 

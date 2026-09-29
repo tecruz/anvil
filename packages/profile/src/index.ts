@@ -55,6 +55,15 @@ export {
 } from './detector.ts'
 
 export { ecosystemDetectors } from './detectors/ecosystems.ts'
+export {
+  additionalDetectors,
+  elixirDetector,
+  frontendDetector,
+  phpDetector,
+  rubyDetector,
+  swiftDetector,
+  terraformDetector,
+} from './detectors/more.ts'
 export { nodeDetector } from './detectors/node.ts'
 export { pythonDetector } from './detectors/python.ts'
 

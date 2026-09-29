@@ -85,9 +85,15 @@ function commands(ctx: RuleContext, kind: keyof ProjectProfile['commands']): str
 // Orientability
 // ---------------------------------------------------------------------------
 
-/** Does the instruction text mention a runnable command? */
+/**
+ * Does the instruction text name a runnable command?
+ *
+ * The leading-character class includes markdown delimiters, because in a rendered
+ * instructions file a command is almost always wrapped in backticks -- and a rule that
+ * cannot see its own generated output is a rule that will never be satisfied.
+ */
 function mentionsCommand(text: string): boolean {
-  return /(^|\s)(npm |pnpm |yarn |bun |cargo |go |gradlew|mvnw|pytest|make |dotnet |tsc |ruff |mypy |eslint)/m.test(text)
+  return /(^|[\s`"'(])(npm |pnpm |yarn |bun |cargo |go |gradlew|mvnw|pytest|make |dotnet |tsc |ruff |mypy |eslint)/m.test(text)
 }
 
 const AGENTS_FILE: Rule = {
@@ -131,6 +137,12 @@ const AGENTS_COMMANDS: Rule = {
   title: 'Instructions contain runnable commands',
   order: 11,
   evaluate(ctx) {
+    // A repository with no source files has no verify commands to document, so failing
+    // it would be a false positive -- and a false positive is worse than a missing
+    // finding, because it teaches the reader to ignore the report. Consistent with
+    // BUILD/TEST/LINT, which are all `na` for a code-less repo.
+    if (!ctx.hasCode) return na('No source files, so there are no runnable commands to document')
+
     if (ctx.instructionsText.trim() === '') {
       return fail('No instructions to inspect, and no commands documented', [], derived(
         'AGENTS.md',

@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, ecosystemDetectors, additionalDetectors, type ProjectProfile } from '@anvil/profile'
 import { audit, type ReadinessReport } from '@anvil/audit'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -270,10 +270,17 @@ describe('cold-empty', () => {
     assert.ok(r.score < 50, `expected a low score, got ${r.score}`)
   })
 
-  test('AGENTS_COMMANDS is the blocker', () => {
-    const f = findFinding(r, 'AGENTS_COMMANDS')
+  test('AGENTS_COMMANDS is a blocker and fails on a code repo with no instructions', () => {
+    // cold-empty has no source files, so the rule is `na` there (nothing to document).
+    // A code-bearing repo with no instructions is the case that must be a blocker.
+    const f = findFinding(reportOf('node-npm'), 'AGENTS_COMMANDS')
     assert.equal(f.status, 'fail')
     assert.equal(f.severity, 'blocker')
+  })
+
+  test('AGENTS_COMMANDS is na on a repo with no source files', () => {
+    // A false positive here would train the reader to ignore the report.
+    assert.equal(findFinding(reportOf('cold-empty'), 'AGENTS_COMMANDS').status, 'na')
   })
 
   test('code-shaped rules report na rather than fail on an empty repo', () => {
@@ -340,6 +347,86 @@ describe('SECRET_SCAN', () => {
   test('passes on a repo with no secret-shaped files', () => {
     const r = reportOf('cold-empty')
     assert.equal(findFinding(r, 'SECRET_SCAN').status, 'pass')
+  })
+})
+
+describe('the six additional detectors', () => {
+  test('a Rails repo detects ruby, rails, rspec and rubocop', () => {
+    const p = profileOf('ruby-rails')
+    const ids = p.stacks.map((s) => s.id)
+    for (const expected of ['ruby', 'rails', 'rspec', 'rubocop']) {
+      assert.ok(ids.includes(expected), `expected ${expected} in ${ids.join(', ')}`)
+    }
+  })
+
+  test('a Rakefile task definition is detected, not assumed', () => {
+    const p = profileOf('ruby-rails')
+    // `rake spec` is defined in the Rakefile, so the rspec command is `detected`.
+    assert.equal(p.commands.test?.[0]?.source, 'detected')
+    assert.equal(p.commands.lint?.[0]?.cmd, 'bundle exec rubocop')
+  })
+
+  test('a Terraform repo detects terraform and its providers', () => {
+    const p = profileOf('terraform-infra')
+    const ids = p.stacks.map((s) => s.id)
+    assert.ok(ids.includes('terraform'))
+    assert.ok(ids.includes('terraform-aws'))
+    assert.ok(ids.includes('terraform-github'))
+  })
+
+  test('Terraform is high risk and recorded as IaC', () => {
+    const p = profileOf('terraform-infra')
+    assert.ok(p.risk.some((r) => r.glob === '**/*.tf' && r.level === 'high'))
+    assert.ok(p.tooling.iac.length > 0)
+  })
+
+  test('terraform has a higher detector priority than a provider-specific stack', () => {
+    // An IaC repo is a Terraform repo first; its playbook must win.
+    const p = profileOf('terraform-infra')
+    assert.ok(p.stacks.length > 0)
+    const terraform = p.stacks.find((s) => s.id === 'terraform')
+    assert.ok(terraform)
+  })
+
+  test('a php repo detects php and, with artisan, laravel', () => {
+    const p = profileOf('php-laravel')
+    const ids = p.stacks.map((s) => s.id)
+    assert.ok(ids.includes('php'))
+    assert.ok(ids.includes('laravel'))
+    assert.equal(p.commands.test?.[0]?.cmd, 'php artisan test')
+  })
+
+  test('a php repo treats migrations as high risk', () => {
+    const p = profileOf('php-laravel')
+    assert.ok(p.risk.some((r) => r.glob.includes('migrations') && r.level === 'high'))
+  })
+
+  test('an elixir repo detects elixir and phoenix', () => {
+    const p = profileOf('elixir-phoenix')
+    const ids = p.stacks.map((s) => s.id)
+    assert.ok(ids.includes('elixir'))
+    assert.ok(ids.includes('phoenix'))
+  })
+
+  test('a swift package build and test are detected from the manifest', () => {
+    const p = profileOf('swift-package')
+    assert.equal(p.commands.build?.[0]?.cmd, 'swift build')
+    assert.equal(p.commands.build?.[0]?.source, 'detected')
+  })
+
+  test('a vite + vue repo detects both without inventing a build command', () => {
+    const p = profileOf('frontend-vue')
+    const ids = p.stacks.map((s) => s.id)
+    assert.ok(ids.includes('vue'))
+    assert.ok(ids.includes('vite'))
+    // The bundler is invoked through a package script; the node detector reads that.
+    // Claiming a build command here would duplicate or contradict it.
+    assert.equal(p.commands.build?.[0]?.source, 'detected')
+  })
+
+  test('detector count reaches twelve', () => {
+    const ids = new Set([...ecosystemDetectors, ...additionalDetectors].map((d) => d.id))
+    assert.equal(ids.size, 12)
   })
 })
 
