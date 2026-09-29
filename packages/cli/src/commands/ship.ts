@@ -7,7 +7,7 @@
  */
 
 import { join, resolve } from 'node:path'
-import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess } from '@anvil/core'
 import { buildProfile } from '@anvil/profile'
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
 import { parseRef, type Ticket } from '@anvil/tickets'
@@ -19,28 +19,23 @@ import { readFileSync } from 'node:fs'
 import { promisify } from 'node:util'
 import type { Command, CommandContext } from './types.ts'
 
-const execFileAsync = promisify(execFile)
 
 const GLOBAL_ONLY = { json: { type: 'boolean', short: 'j' }, noColor: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } as const
 
-/** Run a verify command in the worktree. Never through a shell. */
+/**
+ * Run a verify command in the worktree.
+ *
+ * Delegates to `runProcess`, the only place that knows about Windows shims.
+ */
 async function runCommand(command: string, cwd: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
-  // Split on whitespace: the commands anvil emits are simple argv sequences produced by
-  // the detectors, never user prose. Anything with quoting or a pipe is not run.
   const parts = command.split(/\s+/).filter((p) => p !== '')
-  if (parts.length === 0) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
   const [bin, ...args] = parts as [string, ...string[]]
+  if (bin === undefined) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
   try {
-    const { stdout, stderr } = await execFileAsync(bin, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: 10 * 60_000 })
-    return { ok: true, code: 0, stdout, stderr }
+    const result = await runProcess(bin, args, { cwd, timeoutMs: 10 * 60_000 })
+    return { ok: result.exitCode === 0, code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
   } catch (err) {
-    const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string }
-    return {
-      ok: false,
-      code: typeof e?.code === 'number' ? e.code : 1,
-      stdout: e?.stdout ?? '',
-      stderr: e?.stderr ?? e?.message ?? `${bin} failed`,
-    }
+    return { ok: false, code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }
   }
 }
 

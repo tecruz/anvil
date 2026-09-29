@@ -65,3 +65,15 @@ export {
   type FlagSpecs,
   type ParsedArgs,
 } from './args.ts'
+
+export {
+  WINDOWS_EXECUTABLE_EXTENSIONS,
+  isExecutableFile,
+  isUnsafeArgument,
+  quoteForCmd,
+  resolveCommand,
+  runProcess,
+  type ProcessResult,
+  type ResolvedCommand,
+  type RunProcessOptions,
+} from './exec.ts'

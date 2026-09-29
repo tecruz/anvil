@@ -15,9 +15,7 @@
  * makes people give up on a tool.
  */
 
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { AnvilError, ErrorCode } from '@anvil/core'
+import { AnvilError, ErrorCode, runProcess } from '@anvil/core'
 import type {
   AuthStatus,
   NormalizedState,
@@ -32,8 +30,6 @@ import type {
 } from '@anvil/tickets'
 import type { ForgeTransport } from '@anvil/worktrees/ship'
 
-const execFileAsync = promisify(execFile)
-
 export interface RunResult {
   stdout: string
   stderr: string
@@ -47,21 +43,14 @@ export interface GhOptions {
   run?: (args: string[], cwd: string) => Promise<RunResult>
 }
 
-/** Run a gh subcommand. Never invokes a shell. */
+/**
+ * Run a gh subcommand.
+ *
+ * Through `runProcess`, because on Windows `gh` is a real `.exe` (so nothing is re-parsed
+ * and the argv array is safe) but the same ENOENT trap applies to any shim on PATH.
+ */
 export async function gh(args: string[], cwd: string): Promise<RunResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync('gh', args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 8 * 1024 * 1024 })
-    return { stdout, stderr, exitCode: 0 }
-  } catch (err) {
-    const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string }
-    if (e !== null && typeof e === 'object' && typeof e.code === 'number') {
-      return { stdout: e.stdout ?? '', stderr: e.stderr ?? e.message ?? '', exitCode: e.code }
-    }
-    throw new AnvilError(ErrorCode.ToolMissing, `Cannot run gh: ${e?.message ?? String(err)}`, {
-      hint: 'Install the GitHub CLI (https://cli.github.com) and run `gh auth login`. anvil needs gh for the GitHub provider.',
-      cause: err,
-    })
-  }
+  return runProcess('gh', args, { cwd })
 }
 
 function runner(options: GhOptions | undefined): (args: string[], cwd: string) => Promise<RunResult> {
@@ -344,20 +333,15 @@ export class GhForgeTransport implements ForgeTransport {
    *
    * `-u` matters: without it the branch exists on the remote but has no upstream, and
    * `gh pr create` cannot see it. This is git, not gh, so it runs git directly -- through
-   * execFile with an argument array, never a shell.
+   * the shared runner, with an argument array and never a shell.
    */
   async pushBranch({ cwd, branch }: { cwd: string; branch: string }): Promise<{ ok: boolean; detail: string }> {
-    try {
-      const { stderr } = await execFileAsync('git', ['push', '-u', 'origin', branch], { cwd, encoding: 'utf8', windowsHide: true })
-      return { ok: true, detail: `pushed ${branch}${stderr.trim() === '' ? '' : ` (${stderr.trim()})`}` }
-    } catch (err) {
-      const e = err as { code?: number | string; stderr?: string; stdout?: string; message?: string }
-      const detail = (e?.stderr ?? e?.stdout ?? e?.message ?? 'git push failed').trim()
-      return {
-        ok: false,
-        detail,
-      }
+    const res = await runProcess('git', ['push', '-u', 'origin', branch], { cwd })
+    if (res.exitCode === 0) {
+      return { ok: true, detail: `pushed ${branch}${res.stderr.trim() === '' ? '' : ` (${res.stderr.trim()})`}` }
     }
+    const detail = (res.stderr || res.stdout || `exit ${res.exitCode}`).trim()
+    return { ok: false, detail }
   }
 
   async upsertPullRequest(options: {

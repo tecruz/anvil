@@ -53,7 +53,6 @@ export interface CommandContext {
 /** Planned commands, surfaced in help with their milestone. Shown, not runnable. */
 export const PLANNED_COMMANDS: Array<{ usage: string; summary: string; milestone: string }> = [
   { usage: 'anvil playbook <sub>', summary: 'List/match/show/add/check tech playbooks', milestone: 'M2a' },
-  { usage: 'anvil crew <sub>', summary: 'Run N tickets in parallel worktrees', milestone: 'M5' },
 ]
 
 /** Subcommands of `anvil config`. */

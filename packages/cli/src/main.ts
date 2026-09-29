@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url'
 import { renderCommandHelp, renderRootHelp } from './help.ts'
 import { configCommand } from './commands/config.ts'
 import { briefCommand, initCommand } from './commands/init.ts'
+import { crewCommand } from './commands/crew.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { planCommand } from './commands/plan.ts'
 import { shipCommand } from './commands/ship.ts'
@@ -41,6 +42,7 @@ const COMMANDS: Command[] = [
   briefCommand,
   claimCommand,
   configCommand,
+  crewCommand,
   doctorCommand,
   initCommand,
   issueCommand,

@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0, M1, M2a, M2b, M3 and M4 complete**. Next milestone: **M5** (`crew up`, parallel agent launch, `crew verify`).
+> Status: **M0–M5 complete**. Next milestone: **M6** (playbooks to 15, npm publish, plugin packaging).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -466,7 +466,7 @@ context work?) come first, before any git or provider complexity.
 | **M2b** | `brief`, `init` staging + validator + diff renderer, templates for AGENTS.md / agents / commands / skills. Detector count 6 → 12 | `init` on a real repo produces artifacts that opencode actually loads, and `doctor` scores higher after `--apply` |
 | **M3** | `git` wrapper, `claim` / `release` / `status`, worktree preflight, **`local` provider**, and **compaction-context injection** (see note) | crew of 3 real worktrees with no git-ref **or** build-cache cross-contamination; `crew verify` aggregates per-worktree pass/fail and exits non-zero on any failure |
 | **M4** | `gh` provider, `ship` (verify → push → PR → ticket), `issue sync`, PR body templates | ticket → branch → PR → ticket round-trip on a real repo |
-| **M5** | `crew up` + parallel agent launch, `crew verify`, ref locking, `--jobs` | 3 tickets shipped in parallel by 3 agents |
+| **M5** ✅ | `crew up` + parallel agent launch, `crew verify`, ref locking, `--jobs` | 3 tickets shipped in parallel by 3 agents |
 | **M6** | `opencode-anvil` plugin (tools, toasts, `shell.env`), 15 playbooks, npm publish | plugin installs from npm; full documented flow works end to end |
 
 ### M2 is deliberately split
@@ -854,9 +854,62 @@ Verified: exit codes are correct on the shipped bundle (`ship` with no claim →
 auth provider → 2, `version` → 0), and `anvil auth github` reports the real authenticated
 identity when a GitHub remote is present.
 
+### M5 — complete (2026-09-29)
+
+Delivered: `packages/worktrees/src/crew.ts` and `anvil crew up|status|verify`.
+
+**Claims are serialized, agents are not.** `git worktree add` mutates the repository's
+shared administrative area, so claims run one at a time. Agents only touch their own
+worktree, so they start concurrently. A refused claim does not stop the others: a crew of
+three where one ticket is already claimed should still get two worktrees, not zero.
+
+**Build caches are the real cross-contamination risk**, and it is invisible until a build
+corrupts something. Gradle keeps mutable state in `~/.gradle`, Maven in `~/.m2`, npm and
+pnpm and Yarn in their home caches, Bazel in a shared output base. So verification runs
+under an explicit concurrency policy derived from the detected stacks, and **the decision is
+always printed** — a tool that quietly serializes your builds and never says why is worse
+than one that runs them all at once. Go and Cargo run concurrently (content-addressed cache,
+or the tool takes its own file locks). `--force-parallel` overrides.
+
+`crew verify` exits non-zero if **any** worktree fails, stops at the first failing command
+within a worktree, and skips a vanished worktree rather than counting it as a failure.
+
+Agents launch detached via `opencode run --dir <worktree>`, so they survive anvil exiting.
+The agent prompt points at the context bundle rather than restating the ticket, and
+**forbids pushing** — shipping is a human decision, and an agent that pushes is an agent
+nobody reviewed.
+
+### The Windows process bug
+
+This milestone surfaced a defect that had been present since M3 and would have made the
+tool **completely non-functional on Windows**: `execFile('npm', ...)` fails with ENOENT,
+because `npm`, `npx`, `pnpm`, `yarn`, `bun` and `gradlew.bat` are `.cmd` shims and Node's
+`uv_spawn` does not resolve PATHEXT. Every verify command, every `gh` call and every agent
+launch would have failed. Found by running `crew verify` for real and reading the error,
+which is exactly what a crew is supposed to do.
+
+`packages/core/src/exec.ts` now resolves the binary on PATH itself, executes `.exe`
+directly with an argument array, and only falls back to `cmd.exe` for actual shims — where
+**arguments containing a character cmd would interpret are refused rather than escaped**.
+The tool would rather decline to run a command than run the wrong one. Three Windows
+quirks had to be satisfied together, each found by probing rather than reasoning:
+
+1. `/s` must **not** be passed: it strips the first and last quote of the command line,
+   which removes the inner quotes around a spaced path instead of the outer pair.
+2. The binary path must be quoted. A default install is `C:\Program Files\nodejs\npm.CMD`,
+   and unquoted, cmd treats `C:\Program` as the program.
+3. `windowsVerbatimArguments: true` is required, because Node otherwise escapes embedded
+   quotes to `\"` and cmd reports the quote characters as part of the filename.
+
+A probe confirmed the refusal policy is not theoretical: `npm run test;whoami` **would**
+execute through cmd if unquoted, which is why the argument check exists.
+
+409 tests (up from 363). Bundle 315.0 kB, still zero runtime dependencies.
+
+Verified end to end: four tickets claimed into four worktrees, `crew status` clean, real
+commits in each, `crew verify` running real commands — 2 pass / 1 fail against a worktree
+whose test script was deliberately broken, reporting the serialization reason and exiting 6.
+
 ## First move
 
-**M5.** `crew up` (claim N tickets in one command), parallel agent launch, `crew verify`,
-and fetch-ref locking under concurrency. The remaining risk is resource contention: N
-parallel Gradle or cargo builds against shared caches, which is a different problem from
-the git-ref contention M3 already solved.
+**M6.** Grow the registry to 15 playbooks, publish to npm, and package the plugin.
