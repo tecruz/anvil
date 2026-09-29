@@ -3,11 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Claims: branch + worktree + ticket context, and the registry that tracks them.",
-  "exports": { ".": "./src/index.ts" },
+  "description": "Claims: branch + worktree + ticket context, the registry that tracks them, and the ship pipeline.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ship": "./src/ship.ts"
+  },
   "dependencies": {
     "@anvil/core": "*",
     "@anvil/git": "*",
+    "@anvil/pr": "*",
     "@anvil/profile": "*",
     "@anvil/tickets": "*"
   }

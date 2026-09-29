@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0, M1, M2a, M2b and M3 complete**. Next milestone: **M4** (`gh` provider, `ship`, `issue sync`).
+> Status: **M0, M1, M2a, M2b, M3 and M4 complete**. Next milestone: **M5** (`crew up`, parallel agent launch, `crew verify`).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -801,3 +801,62 @@ Two product bugs caught by running the real flow rather than the tests:
 risk the plan flagged for this milestone is real: `ship` is the seam where git, provider,
 PR templates, CODEOWNERS and verify all meet for the first time. Budget 1.5–2x, and build
 it early enough to fail.
+
+### M4 — complete (2026-09-29)
+
+Delivered: `packages/pr`, the `github` provider, the ship pipeline, and
+`anvil ship` / `anvil issue sync` / `anvil auth github`.
+
+**The transport is injected, not imported.** That single decision is what kept the seam
+tractable: the entire ship sequence — refuse, verify, push, PR, ticket — is tested with no
+network, no `gh`, and no real repository. 49 tests in `packages/pr`.
+
+**Order is the design.** Refuse → verify → push → PR → ticket. The stages that can lose
+work or leave debris on the remote run last, so **a failed verification means nothing
+reached the remote at all**. `ship` refuses before pushing when the worktree has
+uncommitted changes (ship ships commits, not a working tree) or when the branch has no
+commits beyond its base. Verification is off by default — builds are slow and expensive, so
+`--probe` opts in and `--skip-verify` acknowledges.
+
+Risk is computed **from the diff, not from the ticket**. A PR touching a migration or a CI
+workflow gets a checklist naming the files that triggered it, in the PR body *and* in the
+ticket comment. A checklist that always says the same thing gets ignored, so it is
+narrowed to what actually changed.
+
+Reviewers come from CODEOWNERS. A ticket-update failure is reported but does **not**
+discard the PR: the PR exists, and silently diverging the two systems is worse than a
+partial result. The stage is marked failed and `anvil issue sync` closes the gap.
+
+`gh` rather than the REST API, because it already handles auth refresh, Enterprise hosts
+and enterprise proxying — none of which is where anvil's value is. The auth contract
+probes the **detected host** and returns the login command naming it, so joining a company
+with a GHE instance does not mean authenticating to the wrong one. Every call is
+`execFile` with an argument array; there is a test asserting a ticket body containing
+`; rm -rf / #$(whoami)` arrives as a single argv element, because ticket text is user input.
+
+363 tests (up from 314). Bundle 291.2 kB, still zero runtime dependencies.
+
+Three real bugs:
+
+1. **`resolveReviewers` stopped at the first matching CODEOWNERS rule.** Git's rule is
+   **last match wins**, so every review was going to the `*` catch-all — the exact opposite
+   of what CODEOWNERS is for. Now every rule is checked and each match replaces the
+   previous one, with a test for the override direction.
+2. **`authStatus` called `gh` directly instead of through the injected runner**, making it
+   the one untestable method in the transport. A test written to check it then read the
+   *developer's real* `gh` identity and asserted against it. Now routed through the runner,
+   so no test can touch real credentials.
+3. **`GhForgeTransport.pushBranch` was wrong** — a stray `gh api` call, discarded results,
+   and it reported success unconditionally. It now runs `git push -u` and returns the real
+   outcome, which is what makes "a push failure stops the ship" true.
+
+Verified: exit codes are correct on the shipped bundle (`ship` with no claim → 2, unknown
+auth provider → 2, `version` → 0), and `anvil auth github` reports the real authenticated
+identity when a GitHub remote is present.
+
+## First move
+
+**M5.** `crew up` (claim N tickets in one command), parallel agent launch, `crew verify`,
+and fetch-ref locking under concurrency. The remaining risk is resource contention: N
+parallel Gradle or cargo builds against shared caches, which is a different problem from
+the git-ref contention M3 already solved.

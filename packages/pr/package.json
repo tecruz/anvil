@@ -1,0 +1,14 @@
+{
+  "name": "@anvil/pr",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pull request construction: body template, risk analysis, CODEOWNERS reviewers.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/profile": "*",
+    "@anvil/tickets": "*"
+  }
+}

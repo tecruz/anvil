@@ -31,6 +31,7 @@ import { configCommand } from './commands/config.ts'
 import { briefCommand, initCommand } from './commands/init.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { planCommand } from './commands/plan.ts'
+import { shipCommand } from './commands/ship.ts'
 import { authCommand, claimCommand, issueCommand, releaseCommand, statusCommand } from './commands/work.ts'
 import { versionCommand } from './commands/version.ts'
 import type { Command, CommandContext } from './commands/types.ts'
@@ -46,6 +47,7 @@ const COMMANDS: Command[] = [
   planCommand,
   profileCommand,
   releaseCommand,
+  shipCommand,
   statusCommand,
   versionCommand,
 ]

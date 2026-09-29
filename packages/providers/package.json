@@ -3,12 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Ticket providers. `local` ships in M3 as the zero-auth escape hatch.",
+  "description": "Ticket providers: `local` (zero-auth escape hatch) and `github` (gh CLI transport).",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
     "@anvil/core": "*",
-    "@anvil/tickets": "*"
+    "@anvil/tickets": "*",
+    "@anvil/worktrees": "*"
   }
 }

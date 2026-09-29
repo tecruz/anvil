@@ -326,7 +326,7 @@ export const statusCommand: Command = {
 // anvil issue
 // ---------------------------------------------------------------------------
 
-const ISSUE_SUBCOMMANDS = ['show', 'list', 'create', 'comment', 'set-state', 'pull', 'refresh'] as const
+const ISSUE_SUBCOMMANDS = ['show', 'list', 'create', 'comment', 'set-state', 'pull', 'refresh', 'sync'] as const
 
 export const issueCommand: Command = {
   name: 'issue',
@@ -338,6 +338,7 @@ export const issueCommand: Command = {
     '',
     'pull       write the context bundle into the current directory (or a worktree)',
     'refresh    re-read the ticket and rewrite the bundle, picking up new comments',
+    'sync       push state from the linked pull request back to the ticket',
   ].join('\n'),
   flags: {
     ...GLOBAL_ONLY,
@@ -427,6 +428,49 @@ export const issueCommand: Command = {
       return undefined
     }
 
+    if (sub === 'sync') {
+      // PR -> ticket. The other direction is `ship`, which updates the ticket as it opens
+      // the PR; `sync` is for when that update was skipped, or when the PR moved on.
+      const { GitHubProvider, hostFromRemote } = await import('@anvil/providers')
+      const { git, mainWorktreeRoot: mainOf } = await import('@anvil/git')
+      const { readClaims: readClaimsOf } = await import('@anvil/worktrees')
+      const claim = readClaimsOf(mainRoot).claims.find((c) => c.key === ref.key)
+      if (claim === undefined) {
+        throw new AnvilError(ErrorCode.Usage, `No claim for "${ref.key}"`, {
+          hint: 'Run `anvil status` to see claims, or `anvil ship <key>` to open the pull request first.',
+        })
+      }
+
+      const remote = await git(['remote', 'get-url', 'origin'], { cwd: mainRoot })
+      const host = hostFromRemote(remote.exitCode === 0 ? remote.stdout.trim() : null)
+      const ghProvider = new GitHubProvider({ ...(host === null ? {} : { host }) })
+
+      const branch = await currentBranch(claim.worktreePath)
+      if (branch === null) {
+        throw new AnvilError(ErrorCode.Usage, `The worktree for ${ref.key} has no branch`, { hint: 'Inspect the worktree, or release and re-claim.' })
+      }
+      const pr = await ghProvider.transport().findPullRequest({ cwd: claim.worktreePath, branch })
+      if (pr === null) {
+        throw new AnvilError(ErrorCode.Usage, `No open pull request for ${branch}`, {
+          hint: `Run \`anvil ship ${ref.key}\` to open one.`,
+        })
+      }
+
+      const state = pr.state.toUpperCase() === 'MERGED' ? 'done' : 'in_review'
+      const note = `Pull request #${pr.number} is ${pr.state.toLowerCase()}: ${pr.url}`
+      await ghProvider.comment(claim.ticket, note)
+      await ghProvider.transition(claim.ticket, state)
+
+      ctx.out({ schemaVersion: 1, ref, pr, state }, () =>
+        [
+          `${ctx.style.green('synced')} ${ref.key}`,
+          `  pull request  #${pr.number} ${pr.state}`,
+          `  ticket state  ${state}`,
+        ].join('\n'),
+      )
+      return undefined
+    }
+
     // pull / refresh: write the context bundle for the current directory.
     const target = requireRepo(ctx)
     const ticket = await provider.fetch(ref)
@@ -496,10 +540,14 @@ function renderTicket(ctx: CommandContext, ticket: Ticket): string {
 export const authCommand: Command = {
   name: 'auth',
   summary: 'Check ticket-provider access and print the exact command to fix it.',
-  usage: 'anvil auth [local] [--check]',
+  usage: 'anvil auth [local|github] [--check]',
   details: [
-    'Checks the local markdown provider offline, with no network call. The `gh` transport',
-    'arrives in M4 with `anvil auth github --check`.',
+    'Checks the provider offline where possible, and never emits a bare "auth failed".',
+    '',
+    'For GitHub Enterprise -- the common case when you join a new company -- the check',
+    'probes the *detected host* and returns the login command naming that host, so you do',
+    'not authenticate to the wrong one. A failure here stops `ship` before anything is',
+    'pushed.',
   ].join('\n'),
   flags: {
     ...GLOBAL_ONLY,
@@ -509,11 +557,39 @@ export const authCommand: Command = {
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, authCommand.flags)
     const which = args.positionals[0] ?? 'local'
+
+    if (which === 'github') {
+      const { GitHubProvider, hostFromRemote } = await import('@anvil/providers')
+      const { git } = await import('@anvil/git')
+      const cwd = requireRepo(ctx)
+      const remote = await git(['remote', 'get-url', 'origin'], { cwd })
+      const remoteUrl = remote.exitCode === 0 ? remote.stdout.trim() : null
+      const host = hostFromRemote(remoteUrl)
+      const provider = new GitHubProvider({ ...(host === null ? {} : { host }) })
+      const status = await provider.authStatus()
+
+      if (!status.ok) {
+        const err = new AnvilError(ErrorCode.AuthFailed, `github provider: ${status.detail ?? 'unavailable'}`, {
+          ...(status.remediation === undefined ? {} : { hint: status.remediation }),
+        })
+        if (args.values.json === true) ctx.out({ schemaVersion: 1, provider: 'github', ok: false, host }, () => '')
+        ctx.writeError(`\nerror ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`)
+        return err.exitCode
+      }
+      ctx.out(
+        { schemaVersion: 1, provider: 'github', ok: true, host, identity: status.identity },
+        () =>
+          `${ctx.style.green('ok')} github${host === null ? '' : ` (${host})`}: ${status.identity ?? 'authenticated'}`,
+      )
+      return undefined
+    }
+
     if (which !== 'local') {
       throw new AnvilError(ErrorCode.Usage, `Unknown provider: ${which}`, {
-        hint: 'Only `local` ships in M3. The `gh` transport arrives in M4.',
+        hint: 'Expected one of: local, github',
       })
     }
+
     const mainRoot = await mainRootFor(ctx)
     const dir = ticketsDirFor(ctx, mainRoot)
     const provider = new LocalTicketProvider({ dir })

@@ -1,10 +1,3 @@
-/**
- * @anvil/providers -- ticket provider implementations.
- *
- * `local` is the zero-auth escape hatch and works everywhere. The `gh` transport arrives
- * in M4.
- */
-
 export {
   DEFAULT_TICKETS_DIR,
   LocalTicketProvider,
@@ -14,3 +7,13 @@ export {
   type LocalTicket,
   type TicketFileInput,
 } from './local.ts'
+
+export {
+  GhForgeTransport,
+  GitHubProvider,
+  gh,
+  hostFromRemote,
+  parseGhIssue,
+  type GhOptions,
+  type RunResult,
+} from './github.ts'
