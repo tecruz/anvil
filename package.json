@@ -10,7 +10,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "npm run gen:playbooks && node scripts/build.mjs",
+    "gen:playbooks": "node scripts/gen-playbooks.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test --test-reporter=spec \"packages/*/test/*.test.ts\"",
     "test:watch": "node --test --watch \"packages/*/test/*.test.ts\"",

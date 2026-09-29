@@ -1,0 +1,11 @@
+{
+  "name": "@anvil/playbooks",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Technology AI-standards playbooks: registry, matcher and plan builder.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./generated": "./src/generated.ts"
+  }
+}

@@ -1,0 +1,78 @@
+# JVM (Gradle / Maven) playbook.
+
+id: jvm
+title: JVM (Gradle / Maven)
+priority: 80
+
+match:
+  files: ['build.gradle', 'build.gradle.kts', 'pom.xml', 'settings.gradle', 'settings.gradle.kts']
+  deps: ['gradle', 'maven', 'java', 'kotlin']
+  importPrefixes: ['org.gradle', 'javax.', 'java.']
+
+official:
+  docs:
+    - label: Gradle build tool documentation
+      url: 'https://docs.gradle.org/current/userguide/'
+      why: >-
+        The user guide covers task configuration and the build cache. Read it before
+        changing anything in the build, because Gradle misconfiguration fails in ways that
+        look like code bugs.
+    - label: Java Platform, Enterprise Edition (JEE) specifications
+      url: 'https://docs.oracle.com/javase/specs/'
+      why: >-
+        The normative behaviour of the JDK. When a runtime behaves unexpectedly, the spec
+        settles it.
+  skills:
+    - label: Android Jetpack Compose guidance
+      url: 'https://developer.android.com/develop/ui/compose'
+      why: >-
+        Only relevant to Android modules. Compose recomposition and state handling have
+        rules that are not inferable from the code alone.
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: Google Java Style Guide
+      url: 'https://google.github.io/styleguide/javaguide.html'
+      why: >-
+        The most widely adopted Java convention. Use it as the default when a repo has no
+        stated style.
+  migrationGuides:
+    - label: Gradle upgrade guide
+      url: 'https://docs.gradle.org/current/userguide/upgrading_version.html'
+      why: >-
+        Required reading before a Gradle version bump. Deprecated APIs are removed, and the
+        build breaks in ways unrelated to the change you were making.
+
+community:
+  - repo: 'gradle/gradle'
+    label: Gradle itself
+    why: >-
+      The source is the final answer when documentation and behaviour disagree. Search
+      the issue tracker for the symptom before concluding a plugin is at fault.
+  - repo: 'square/okio'
+    label: Square open-source conventions
+    why: >-
+      A well-regarded example of Kotlin/Java project structure and test layout at scale.
+
+verify:
+  build: ['./gradlew build', './mvnw -q package -DskipTests']
+  test: ['./gradlew test', './mvnw -q test']
+  testFast: ['./gradlew test --tests "*Changed*"', './mvnw test -Dit.test=*Changed*']
+  lint: ['./gradlew checkstyleMain', './mvnw checkstyle:check']
+  format: ['./gradlew spotlessApply']
+  typecheck: []
+
+conventions:
+  moduleLayout: 'root + :module subprojects, each with its own build.gradle'
+  testNaming: '*Test.java, *Test.kt'
+  reviewFocus:
+    - 'Gradle dependency resolution and version catalogs'
+    - 'changes to the build script itself'
+    - 'anything touching a serialized type or a database schema'
+
+riskGlobs:
+  - '**/build.gradle'
+  - '**/build.gradle.kts'
+  - '**/gradle/libs.versions.toml'
+  - '**/AndroidManifest.xml'
+  - '**/migrations/**'

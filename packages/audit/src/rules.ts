@@ -370,8 +370,11 @@ const CI: Rule = {
   evaluate(ctx) {
     if (ctx.profile.tooling.ci.length === 0) {
       return fail('No CI workflow found. Nothing catches a change that only breaks the build.', [], {
+        // `derived`, not `official`: the *action* comes from this repo's own gap. The docs
+        // link is supporting material, and calling the whole fix "official" would put a
+        // repo-specific task in the external-guidance tier.
         kind: 'link-doc',
-        origin: 'official',
+        origin: 'derived',
         summary: 'Add a CI workflow that runs the documented verify commands',
         source: { label: 'GitHub Actions docs', url: 'https://docs.github.com/actions' },
         confidence: 0.85,

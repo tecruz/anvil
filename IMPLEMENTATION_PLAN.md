@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0 and M1 complete**. Next milestone: **M2a** (playbook registry + `anvil plan`).
+> Status: **M0, M1 and M2a complete**. Next milestone: **M2b** (`brief` + `init` + validator).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -626,9 +626,61 @@ Two rules were initially shipped as dishonest placeholders and now do real work:
   toolchain with a changed-files capability but no documented subset reports `warn`, not
   `fail` — which is what keeps the "no false blockers" criterion testable.
 
+### M2a — complete (2026-09-28)
+
+Delivered: `packages/playbooks` and `anvil plan`. Three seed playbooks (node, jvm,
+python), a strict YAML-subset parser, a generated registry, matching, and tiered ranking.
+`anvil plan` is read-only and involves no LLM.
+
+Hand-check across the fixture repos plus anvil itself:
+
+| repo | score | grade | playbook | derived/official/community |
+|---|---|---|---|---|
+| node-npm | 67 | C | node | 7/8/4 |
+| node-workspace | 42 | D | node | 10/10/3 |
+| python-django | 55 | C | python | 11/12/4 |
+| go-module | 54 | D | — | 9/0/2 |
+| jvm-gradle | 46 | D | jvm | 13/12/4 |
+| dotnet-sln | 39 | D | — | 14/0/2 |
+| cold-empty | 30 | F | — | 7/0/1 |
+| anvil itself | 53 | D | node | 13/38/8 |
+
+Playbook matching is exact where expected, and `go` and `dotnet` correctly yield **zero**
+official suggestions because those playbooks do not exist yet — an honest gap rather than
+a generic fallback. Scores track fixture warmth in the right order.
+
+**Authoring format decision.** `registry/playbooks/*.yaml` stays the authoring format, but
+loading is a strict, bounded YAML-subset parser that **throws** on anything outside the
+subset (anchors, aliases, tags, tab indentation, unterminated quotes). A misparse would
+point an agent at the wrong technology guidance with full confidence, which is the one
+outcome this tool exists to prevent. 28 tests cover the accepted subset and assert that
+everything else is rejected. The YAML is compiled into `generated.ts` at build time
+(`npm run gen:playbooks`) so the single-file bundle carries its playbooks; a test asserts
+the generated file still matches the YAML, so a playbook edited without regenerating fails
+CI instead of silently not existing.
+
+Bugs the tests caught:
+
+1. **Optional sections were treated as required.** A playbook omitting `official:`,
+   `verify:` or `conventions:` was rejected outright, which invalidated every minimal
+   playbook — including user-supplied overrides, so the whole merge path was dead.
+2. **`deps: [java, kotlin]` could never match.** Playbook authors name ecosystems and
+   languages, but those are emitted as *languages* by the detectors, not stacks. Matching
+   now considers both, and the reason records which kind of evidence matched so confidence
+   can weight a file match above a stack id above an inferred language.
+3. **The CI fix was tiered `official`.** "Add a CI workflow that runs the documented verify
+   commands" is an action derived from this repo's own gap; the GitHub docs link is
+   supporting material. Calling it official put a repo-specific task in the
+   external-guidance tier and inflated counts on repos with no matched playbook.
+
+**Known refinement for M2b:** official guidance is currently unbounded, so a well-matched
+repo shows more external suggestions than derived ones (anvil itself: 38 official vs 13
+derived). Reading order is correct — derived first — but the plan should stop offering
+guidance the repo already satisfies, so the list stays actionable rather than browsable.
+
 ## First move
 
-**M2a.** The playbook registry and `anvil plan`. Pure data and ranking, no LLM step: match
-the detected stack to per-technology guidance (official docs, skills, community resources)
-and rank the resulting fixes by origin and confidence. This is the last milestone before
-the derive step, and the one that turns a score into a to-do list.
+**M2b.** `anvil brief` (verified facts for the LLM step), the staging/apply lifecycle
+described under *Staging & apply lifecycle*, the artifact validator against the real
+opencode frontmatter schemas, and `anvil init --apply`. This is where anvil stops
+describing the problem and starts producing the thing that fixes it.

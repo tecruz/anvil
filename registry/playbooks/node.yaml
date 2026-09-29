@@ -1,0 +1,72 @@
+# Node / TypeScript playbook.
+#
+# `match.deps` entries are matched against stack ids the detectors emit, and
+# `match.files` against repo-relative POSIX paths.
+
+id: node
+title: Node / TypeScript
+priority: 60
+
+match:
+  files: ['package.json', '**/package.json']
+  deps: ['node', 'typescript', 'javascript']
+  importPrefixes: ['node:']
+
+official:
+  docs:
+    - label: Node.js documentation
+      url: 'https://nodejs.org/docs/latest/api/'
+      why: >-
+        The authoritative API reference. Consult it before using a builtin whose behaviour
+        is version-sensitive, and check the version your engines field actually pins.
+    - label: TypeScript handbook
+      url: 'https://www.typescriptlang.org/docs/handbook/intro.html'
+      why: >-
+        Official language reference. The narrowing and generics sections explain most
+        typecheck failures you will otherwise guess at.
+  skills:
+    - label: typescript-eslint rules reference
+      url: 'https://typescript-eslint.io/rules/'
+      why: >-
+        The rule catalogue behind `npm run lint` in most TypeScript repos. Use it to tell
+        whether a lint error is a real defect or a style preference.
+  agents: []
+  mcp:
+    - label: Context7 (library docs on demand)
+      url: 'https://github.com/upstash/context7'
+      why: >-
+        Serves version-matched docs for a library at the version in package.json, which
+        beats guessing from a model's training data.
+  styleGuides: []
+  migrationGuides: []
+
+community:
+  - repo: 'github/awesome-copilot'
+    stars: 20000
+    label: GitHub awesome-copilot
+    why: >-
+      Community-accepted prompts, instructions and chat modes, reviewed by GitHub. Useful
+      starting material, but verify anything you adopt against this repo's own conventions.
+  - repo: 'vercel-labs/agent-skills'
+    label: Vercel agent skills
+    why: >-
+      Well-regarded skills for modern JS/TS work (React patterns, testing, performance).
+      A reasonable source when a playbook recommends community guidance over official docs.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: ['npm run test:changed', 'npx vitest related --run']
+  lint: ['npm run lint']
+  format: ['npm run format']
+  typecheck: ['npm run typecheck', 'npx tsc --noEmit']
+
+conventions:
+  moduleLayout: null
+  testNaming: '*.test.ts, *.spec.ts'
+  reviewFocus:
+    - 'lockfile changes move the supply chain'
+    - 'any edit to a dependency version'
+    - 'unhandled promise rejections'
+
+riskGlobs: ['**/package.json', '**/package-lock.json', '**/pnpm-lock.yaml', '**/Dockerfile*']

@@ -1,0 +1,84 @@
+# Python playbook.
+#
+# Python's tooling is fragmented, so this playbook leans on the pyproject.toml-driven
+# tools (pytest, ruff, mypy) rather than the older setup.cfg equivalents.
+
+id: python
+title: Python
+priority: 60
+
+match:
+  files: ['pyproject.toml', 'requirements.txt', 'setup.py', 'setup.cfg', 'Pipfile']
+  deps: ['python', 'django', 'flask', 'fastapi', 'pytest', 'ruff', 'mypy', 'poetry', 'uv']
+  importPrefixes: ['django.', 'flask.', 'fastapi.']
+
+official:
+  docs:
+    - label: Python documentation
+      url: 'https://docs.python.org/3/'
+      why: >-
+        The language reference and standard library docs. Check the version your project
+        declares in `requires-python` before relying on newer syntax.
+    - label: Django documentation
+      url: 'https://docs.djangoproject.com/en/stable/'
+      why: >-
+        Query semantics, migration machinery and settings precedence are all documented
+        precisely here, and getting them subtly wrong is the usual cause of "it works in
+        tests" bugs.
+  skills:
+    - label: Django deployment checklist
+      url: 'https://docs.djangoproject.com/en/stable/howto/deployment/checklist/'
+      why: >-
+        The canonical list of production settings. Useful when an agent edits settings.py
+        or adds middleware.
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: PEP 8
+      url: 'https://peps.python.org/pep-0008/'
+      why: >-
+        The default Python style. Prefer a repo's own documented style when one exists;
+        this is the fallback.
+  migrationGuides:
+    - label: Django deployment and upgrade notes
+      url: 'https://docs.djangoproject.com/en/stable/releases/'
+      why: >-
+        Read the release notes for the target version before upgrading: removed APIs and
+        changed defaults are the usual source of silent breakage.
+
+community:
+  - repo: 'astral-sh/ruff'
+    stars: 40000
+    label: Ruff
+    why: >-
+      The fast linter and formatter most modern Python repos standardise on. Its rule
+      documentation explains what each check actually catches.
+  - repo: 'pytest-dev/pytest'
+    label: pytest
+    why: >-
+      The documentation for markers, fixtures and `-k` selection is the reference for the
+      fast-test subset the audit looks for.
+
+verify:
+  build: ['python -m build', 'poetry build']
+  test: ['pytest', 'python -m pytest']
+  testFast: ['pytest -k changed', 'pytest -m "not slow"']
+  lint: ['ruff check .', 'flake8 .']
+  format: ['ruff format .', 'black .']
+  typecheck: ['mypy .', 'pyright']
+
+conventions:
+  moduleLayout: 'src/ layout with a tests/ directory alongside'
+  testNaming: 'test_*.py, *_test.py'
+  reviewFocus:
+    - 'database migrations, which are hard to reverse'
+    - 'dependency pins and lockfile changes'
+    - 'anything that changes import side effects'
+
+riskGlobs:
+  - '**/migrations/**'
+  - '**/alembic/**'
+  - '**/settings.py'
+  - '**/requirements*.txt'
+  - '**/poetry.lock'
+  - '**/uv.lock'
