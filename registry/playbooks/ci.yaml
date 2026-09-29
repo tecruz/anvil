@@ -1,0 +1,73 @@
+# CI playbook.
+#
+# Matches on workflow files rather than on a provider, so GitHub Actions, GitLab CI and
+# CircleCI all match. The advice is mostly about the one thing CI gets wrong: a pipeline
+# that cannot tell you whether the change broke anything.
+
+id: ci
+title: CI / pipelines
+priority: 45
+
+match:
+  files: ['.github/workflows/*.y*ml', '.gitlab-ci.yml', 'Jenkinsfile', '.circleci/config.yml', 'azure-pipelines.yml']
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: GitHub Actions documentation
+      url: 'https://docs.github.com/en/actions'
+      why: >-
+        The workflow syntax, contexts and reusable-workflow reference. Action behaviour
+        changes between major versions, so pin and read the changelog.
+    - label: GitLab CI reference
+      url: 'https://docs.gitlab.com/ee/ci/'
+      why: >-
+        The complete `.gitlab-ci.yml` reference, including the `rules` and `needs`
+        keywords that control when and in what order a job runs.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+  # A workflow file is high-risk in a way ordinary code is not: a change can silently
+  # remove a check, and nothing fails until the day the check was the only thing standing
+  # between a regression and production.
+
+community:
+  - repo: 'actions/checkout'
+    label: actions/checkout
+    why: >-
+        The most-used action on GitHub, and its README documents the credential and
+        fetch-depth behaviour that causes confusing "cannot find branch" failures.
+  - repo: 'github/actions'
+    label: GitHub\'s own actions
+    why: >-
+        Cache, setup and artifact actions maintained alongside the platform. The setup
+        actions are versioned per runtime, so a stale pin quietly tests an old Node.
+
+verify:
+  build: []
+  test: []
+  testFast: []
+  lint: ['actionlint', 'yamllint .github/workflows']
+  format: ['prettier --check .github/workflows']
+  typecheck: []
+
+conventions:
+  moduleLayout: null
+  testNaming: 'one workflow per concern, reusable workflows for shared jobs'
+  reviewFocus:
+    - 'any change that removes or makes a job non-blocking'
+    - 'action pins, and whether a version tag can move under you'
+    - 'permissions blocks, which are usually broader than intended'
+    - 'secrets exposure, including anything echoed into a log'
+    - 'cache keys, because a wrong key serves a stale build indefinitely'
+
+riskGlobs:
+  - '**/.github/workflows/**'
+  - '**/.gitlab-ci.yml'
+  - '**/Jenkinsfile'
+  - '**/.circleci/**'
+  - '**/azure-pipelines.yml'
+  - '**/codecov.yml'

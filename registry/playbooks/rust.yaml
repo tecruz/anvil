@@ -1,0 +1,78 @@
+# Rust playbook.
+
+id: rust
+title: Rust
+priority: 60
+
+match:
+  files: ['Cargo.toml', '**/Cargo.toml']
+  deps: ['rust', 'rust-toolchain']
+  importPrefixes: ['std::', 'tokio::']
+
+official:
+  docs:
+    - label: The Rust Programming Language
+      url: 'https://doc.rust-lang.org/book/'
+      why: >-
+        The book every Rust project assumes you have read. The ownership chapter explains
+        most borrow-checker errors you will otherwise fight.
+    - label: Standard library documentation
+      url: 'https://doc.rust-lang.org/std/'
+      why: >-
+        Authoritative API reference. Trait implementations and auto-trait behaviour are
+        easy to get wrong from memory and decisive when they are wrong.
+  skills:
+    - label: Rust API Guidelines
+      url: 'https://rust-lang.github.io/api-guidelines/'
+      why: >-
+        How to design a Rust API that is hard to misuse. Worth reading before adding a
+        public function, because signatures are effectively frozen once published.
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: rustfmt
+      url: 'https://rust-lang.github.io/rustfmt/'
+      why: >-
+        The formatter is non-negotiable in Rust. Generated code and macro bodies are the
+        known exceptions, and both need an explicit allow.
+  migrationGuides:
+    - label: Rust editions
+      url: 'https://doc.rust-lang.org/edition-guide/'
+      why: >-
+        Read before an edition bump. Editions are designed to be low-risk, but they do
+        change some semantics, and a `Cargo.toml` has to opt in explicitly.
+
+community:
+  - repo: 'rust-lang/rust'
+    label: The Rust source tree
+    why: >-
+      `std` is the reference for both behaviour and style, and the compiler error messages
+      are unusually good, so they are worth reading in full when one appears.
+  - repo: 'rust-lang/rust-clippy'
+    label: Clippy
+    why: >-
+      The linter most Rust projects run in CI. Its lint list documents the community's
+      preferred idioms and explains why each one exists.
+
+verify:
+  build: ['cargo build']
+  test: ['cargo test']
+  testFast: ['cargo test --lib', 'cargo nextest run']
+  lint: ['cargo clippy --all-targets -- -D warnings']
+  format: ['cargo fmt --all']
+  typecheck: ['cargo check --all-targets']
+
+conventions:
+  moduleLayout: 'one crate per package, lib.rs plus a bin/ for the entrypoint'
+  testNaming: '#[cfg(test)] mod tests, or tests/ for integration tests'
+  reviewFocus:
+    - 'unsafe blocks, and the safety invariant stated in the comment above them'
+    - 'anything that changes a public type signature'
+    - 'blocking calls inside an async context, which is a latent deadlock'
+    - 'dependency additions, and features enabled on them'
+
+riskGlobs:
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - '**/build.rs'
+  - '**/rust-toolchain*'

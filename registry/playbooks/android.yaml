@@ -1,0 +1,82 @@
+# Android playbook (Jetpack Compose).
+#
+# Higher priority than `jvm` because an Android repo matches both, and the Android advice
+# is the more specific. Compose recomposition and manifest permissions are not inferable
+# from the code, which is why they lead.
+
+id: android
+title: Android (Jetpack Compose)
+priority: 90
+
+match:
+  files: ['**/AndroidManifest.xml', 'gradle/libs.versions.toml', '**/build.gradle.kts']
+  deps: ['android', 'gradle']
+  importPrefixes: ['androidx.compose', 'androidx.', 'com.android.']
+
+official:
+  docs:
+    - label: Jetpack Compose documentation
+      url: 'https://developer.android.com/develop/ui/compose'
+      why: >-
+        The official guide to the UI toolkit. Recomposition scope and state hoisting have
+        rules that cannot be read off the code, and getting them wrong is a performance
+        bug rather than a crash.
+    - label: Android developer documentation
+      url: 'https://developer.android.com/develop'
+      why: >-
+        Covers the platform APIs, the build system and the lifecycle. Behaviour varies by
+        API level, so check the min/target SDK in the module\'s build file.
+  skills:
+    - label: Compose performance guidance
+      url: 'https://developer.android.com/develop/ui/compose/performance'
+      why: >-
+        The official list of what triggers recomposition. Read it before optimising a slow
+        screen, because the usual cause is passing a new object rather than a primitive.
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Android Jetpack release notes
+      url: 'https://developer.android.com/jetpack/androidx/jetpack-release-notes'
+      why: >-
+        Required before an AndroidX bump. Behaviour changes ship inside minor versions and
+        are not always mentioned in release notes, so a diff of the release notes matters.
+
+community:
+  - repo: 'android/nowinandroid'
+    label: Now in Android
+    why: >-
+        A production app by the Android team, kept current. The clearest reference for how
+        the official recommendations fit together in an actual project.
+  - repo: 'android/architecture-samples'
+    label: Android architecture samples
+    why: >-
+        Official samples for MVVM, MVI and layered architectures. Useful for deciding a
+        structure rather than for copying one.
+
+verify:
+  build: ['./gradlew assembleDebug']
+  test: ['./gradlew test']
+  testFast: ['./gradlew testDebugUnitTest --tests "*Changed*"']
+  lint: ['./gradlew lint']
+  format: ['./gradlew spotlessApply']
+  typecheck: ['./gradlew compileDebugKotlin']
+
+conventions:
+  moduleLayout: 'app/ plus feature/ modules, core/ for shared code'
+  testNaming: '*Test.kt for unit tests, *ScreenTest for Compose UI tests'
+  reviewFocus:
+    - 'the manifest, particularly permissions and exported components'
+    - 'database and Room migrations, which cannot run on an already-installed app'
+    - 'anything in a coroutine scope tied to a composable'
+    - 'changes to the version catalog, which move every dependency in the build'
+
+riskGlobs:
+  - '**/AndroidManifest.xml'
+  - '**/build.gradle'
+  - '**/build.gradle.kts'
+  - '**/gradle/libs.versions.toml'
+  - '**/gradle.properties'
+  - '**/proguard-rules.pro'
+  - '**/migrations/**'
+  - '**/schemas/**'

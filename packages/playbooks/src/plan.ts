@@ -17,7 +17,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
-import type { ProjectProfile } from '@anvil/profile'
+import { matchesAny, matchesGlob, type ProjectProfile } from '@anvil/profile'
 import type { CommunityResource, Playbook, Resource } from './schema.ts'
 import type { MatchResult } from './match.ts'
 
@@ -85,8 +85,14 @@ export function buildPlan(
   }
 
   // Tiers 2 and 3: guidance from the matched playbooks.
+  //
+  // `matches` arrives sorted by priority, so the first playbook to claim a risk glob keeps
+  // it. An Android repo matches both `jvm` and `android` and both declare
+  // `**/build.gradle.kts`; without this the same advice appears twice, which reads as two
+  // separate concerns rather than one.
+  const claimedRiskGlobs = new Set<string>()
   for (const match of matches) {
-    for (const suggestion of playbookSuggestions(match.playbook, profile)) {
+    for (const suggestion of playbookSuggestions(match.playbook, profile, claimedRiskGlobs)) {
       suggestions.push(suggestion)
     }
   }
@@ -114,7 +120,7 @@ export function buildPlan(
 }
 
 /** Guidance a playbook contributes for a specific repo, not a generic resource dump. */
-function playbookSuggestions(playbook: Playbook, profile: ProjectProfile): Suggestion[] {
+function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claimedRiskGlobs: Set<string>): Suggestion[] {
   const out: Suggestion[] = []
   const base = { playbook: playbook.id }
 
@@ -139,18 +145,31 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile): Sugge
     })
   }
 
-  // A risk glob the playbook declares but the profile does not yet cover.
+  // A risk glob is only worth mentioning when the repo actually has something matching it.
+  //
+  // This is the single biggest source of noise in the plan. A Node playbook declares five
+  // risk globs; on a repo with no `pnpm-lock.yaml` and no Dockerfile, all five are advice
+  // about files that do not exist. Offering them made a well-matched repo show more
+  // external guidance than derived work, and a list that is mostly irrelevant stops being
+  // read.
+  //
+  // The conditional also means the suggestion is *derived* in the useful sense: it is
+  // about this repository's files, not about the ecosystem in general.
   for (const glob of playbook.riskGlobs) {
+    if (claimedRiskGlobs.has(glob)) continue
+    if (!matchesAny(profile.files, glob)) continue
+    claimedRiskGlobs.add(glob)
+    const hit = profile.files.find((f) => matchesGlob(f, glob))
     out.push({
       ...base,
       id: `risk:${playbook.id}:${glob}`,
       tier: 'official',
       title: `Treat ${glob} as high-risk`,
-      detail: `The ${playbook.title} playbook marks this path as risky: ${
-        playbook.conventions.reviewFocus[0] ?? 'changes here reach past code review'
-      }`,
-      evidence: [playbook.source ?? playbook.id],
-      confidence: 0.6,
+      detail: `The ${playbook.title} playbook marks this path as risky, and this repo has ${
+        hit ?? 'files matching it'
+      }: ${playbook.conventions.reviewFocus[0] ?? 'changes here reach past code review'}`,
+      evidence: [playbook.source ?? playbook.id, ...(hit === undefined ? [] : [hit])],
+      confidence: 0.7,
     })
   }
 

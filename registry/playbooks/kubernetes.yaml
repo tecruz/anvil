@@ -1,0 +1,77 @@
+# Kubernetes playbook.
+#
+# Matched on manifests rather than on a language, because the failure modes here are
+# operational rather than syntactic: a manifest that is valid and wrong deploys happily
+# and takes the service down.
+
+id: kubernetes
+title: Kubernetes
+priority: 70
+
+match:
+  files: ['k8s.yaml', 'kustomization.yaml', '**/kustomization.yaml', 'Chart.yaml', '**/Chart.yaml', '**/*-deployment.yml', '**/*-deployment.yaml']
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Kubernetes documentation
+      url: 'https://kubernetes.io/docs/home/'
+      why: >-
+        The canonical reference, including the API reference for every resource. Field
+        names and defaults differ between API versions, so check the version the cluster
+        actually serves.
+    - label: kubectl cheat sheet
+      url: 'https://kubernetes.io/docs/reference/kubectl/quick-reference/'
+      why: >-
+        The command reference. Most incident time is spent in kubectl, and the
+        `--dry-run=server` and `--diff` flags validate a manifest before it ships.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Kubernetes deprecation guide
+      url: 'https://kubernetes.io/docs/reference/using-api/deprecation-guide/'
+      why: >-
+        APIs are removed on a published schedule. A manifest that works today can fail
+        after a cluster upgrade with an error that does not mention the manifest at all.
+
+community:
+  - repo: 'kubernetes/kubernetes'
+    label: The Kubernetes source
+    why: >-
+        The API machinery, admission controllers and defaults live here. The defaulting
+        behaviour is why a manifest "works" in ways the YAML does not suggest.
+  - repo: 'helm/helm'
+    label: Helm
+    why: >-
+        The package manager most manifests are templated with. Its chart testing
+        documentation is the reference for validating a rendered chart.
+
+verify:
+  build: ['helm template .', 'kustomize build .']
+  test: ['kubectl apply --dry-run=server -f .']
+  testFast: ['helm lint .', 'kubeconform -strict -summary .']
+  lint: ['kubeconform -strict -summary .', 'kubectl-neat']
+  format: ['prettier --write "**/*.yaml"']
+  typecheck: ['kubeconform -strict -summary .']
+
+conventions:
+  moduleLayout: 'base/ with kustomize overlays per environment, or one Helm chart'
+  testNaming: 'policy tests in *.yaml, applied by kyverno or conftest'
+  reviewFocus:
+    - 'anything touching a Service, Ingress, storage class or network policy'
+    - 'resource requests and limits, because a missing limit is a cluster-wide outage'
+    - 'image tags, and whether they are mutable'
+    - 'secrets, which should be references and never inline values'
+    - 'RBAC rules, particularly a wildcard verb or resource'
+
+riskGlobs:
+  - '**/kustomization.yaml'
+  - '**/Chart.yaml'
+  - '**/values*.yaml'
+  - '**/*-deployment.y*ml'
+  - '**/*-service.y*ml'
+  - '**/*ingress*.y*ml'
+  - '**/Chart.lock'

@@ -1,0 +1,82 @@
+# Ruby on Rails playbook.
+#
+# Rails has strong conventions and a large amount of implicit behaviour, so the official
+# guides matter more here than in most ecosystems: "Rails way" is a specific thing.
+
+id: ruby
+title: Ruby / Rails
+priority: 60
+
+match:
+  files: ['Gemfile', '*.gemspec', 'config/application.rb', 'Rakefile']
+  # `rails`, not `laravel`. The two names are close enough that a typo here silently
+  # matched every PHP project, and the resulting plan confidently recommended Rails
+  # security guides to a Laravel codebase.
+  deps: ['ruby', 'rails']
+  importPrefixes: ['active_record', 'action_controller', 'action_view']
+
+official:
+  docs:
+    - label: Rails Guides
+      url: 'https://guides.rubyonrails.org/'
+      why: >-
+        The task-oriented guides are the most useful part of the Rails documentation.
+        Start with the guide for whatever subsystem you are changing, not the API list.
+    - label: Ruby core documentation
+      url: 'https://ruby-doc.org/core/'
+      why: >-
+        The language reference. Ruby has more surprising corners than most languages, and
+        the docs are the fastest way to settle whether something is intended.
+  skills:
+    - label: Rails security guidelines
+      url: 'https://guides.rubyonrails.org/security.html'
+      why: >-
+        SQL injection, XSS, CSRF and mass-assignment guidance. Rails' defaults handle
+        most of this, and the guide says exactly which cases escape them.
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Ruby on Rails release notes
+      url: 'https://guides.rubyonrails.org/8_0_release_notes.html'
+      why: >-
+        Read the notes for the target version before upgrading. Rails deprecations often
+        span two releases, and the removal is silent until it raises.
+
+community:
+  - repo: 'rails/rails'
+    label: Rails
+    why: >-
+      The framework source and guides in one place, and the canonical answer for how a
+      piece of magic actually behaves.
+  - repo: 'rubocop/rubocop'
+    label: RuboCop
+    why: >-
+      The default Ruby linter and formatter. Its documentation explains which conventions
+      are enforced and why, which is more useful than a bare lint error.
+
+verify:
+  build: ['bundle exec rake assets:precompile']
+  test: ['bundle exec rspec', 'bundle exec rails test']
+  testFast: ['bundle exec rspec --only-failures', 'bundle exec rails test:prepare']
+  lint: ['bundle exec rubocop']
+  format: ['bundle exec rubocop -a']
+  typecheck: []
+
+conventions:
+  moduleLayout: 'app/models, app/controllers, app/services; lib/ for non-autoloaded code'
+  testNaming: '*_spec.rb (RSpec) or *_test.rb (Minitest)'
+  reviewFocus:
+    - 'database migrations, and whether they are reversible on older app versions'
+    - 'N+1 queries, which pass review and then fall over in production'
+    - 'anything using raw SQL or `update_all`'
+    - 'changes to Gemfile.lock'
+
+riskGlobs:
+  - '**/Gemfile'
+  - '**/Gemfile.lock'
+  - '**/*.gemspec'
+  - '**/db/migrate/**'
+  - '**/db/schema.rb'
+  - '**/config/routes.rb'
+  - '**/Dockerfile*'

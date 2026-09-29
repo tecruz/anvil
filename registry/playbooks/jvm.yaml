@@ -22,12 +22,10 @@ official:
       why: >-
         The normative behaviour of the JDK. When a runtime behaves unexpectedly, the spec
         settles it.
-  skills:
-    - label: Android Jetpack Compose guidance
-      url: 'https://developer.android.com/develop/ui/compose'
-      why: >-
-        Only relevant to Android modules. Compose recomposition and state handling have
-        rules that are not inferable from the code alone.
+  # No Android resource here. An Android repo matches both `jvm` and `android`, so keeping
+  # Compose guidance in both printed the same URL twice in one plan. The dedicated playbook
+  # is the right home for it, and it ranks higher.
+  skills: []
   agents: []
   mcp: []
   styleGuides:

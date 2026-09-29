@@ -1,0 +1,71 @@
+# Swift / Apple-platform playbook.
+
+id: swift
+title: Swift / Apple platforms
+priority: 55
+
+match:
+  files: ['Package.swift', '**/Package.swift', '**/*.xcodeproj/project.pbxproj', 'Podfile']
+  deps: ['swift']
+  importPrefixes: ['import SwiftUI', 'import UIKit', 'import Foundation']
+
+official:
+  docs:
+    - label: Swift documentation
+      url: 'https://www.swift.org/documentation/'
+      why: >-
+        The language reference and standard library. Concurrency and the ownership model
+        differ from every mainstream language, so this is worth reading properly.
+    - label: Swift Package Manager documentation
+      url: 'https://www.swift.org/documentation/package-manager/'
+      why: >-
+        The manifest reference. A `Package.swift` is executable code, and its API changes
+        between toolchain versions.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Swift evolution proposals
+      url: 'https://github.com/apple/swift-evolution'
+      why: >-
+        The accepted, rejected and deferred language changes. Reading the accepted SEs for
+        a source-compatibility break is the only reliable way to know what a toolchain
+        upgrade will do.
+
+community:
+  - repo: 'apple/swift'
+    label: The Swift compiler
+    why: >-
+      The compiler source and its diagnostics. Swift error messages often name the exact
+      rule being violated, so the message is usually the fastest route to the cause.
+  - repo: 'pointfreeco/swift-composable-architecture'
+    label: Point-Free
+    why: >-
+      A well-regarded source of Swift architecture guidance. Worth reading before adopting
+      a pattern, because the trade-offs are real and specific to Swift\'s type system.
+
+verify:
+  build: ['swift build']
+  test: ['swift test']
+  testFast: ['swift test --filter Changed']
+  lint: ['swiftlint']
+  format: ['swift-format --in-place --recursive .']
+  typecheck: ['swift build']
+
+conventions:
+  moduleLayout: 'a SwiftPM package per module, Sources/ and Tests/ inside it'
+  testNaming: '*Tests.swift, with XCTest or swift-testing'
+  reviewFocus:
+    - 'anything crossing a concurrency domain, and the Sendable annotations'
+    - 'retain cycles from closures capturing self'
+    - 'force unwraps and force casts, which are crash sites rather than error handling'
+    - 'changes to Package.swift dependencies'
+
+riskGlobs:
+  - '**/Package.swift'
+  - '**/Package.resolved'
+  - '**/Podfile'
+  - '**/Podfile.lock'
+  - '**/*.entitlements'
+  - '**/Info.plist'

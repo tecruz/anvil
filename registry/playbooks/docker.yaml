@@ -1,0 +1,73 @@
+# Container / Docker playbook.
+#
+# Matches on Dockerfiles rather than on a language, so a containerised Go service and a
+# containerised Node service both get the build-context and layer-caching advice, which is
+# where the actual mistakes live.
+
+id: docker
+title: Containers (Docker)
+priority: 50
+
+match:
+  files: ['Dockerfile*', '**/Dockerfile*', 'docker-compose*.y*ml', 'compose*.y*ml', '.dockerignore']
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Dockerfile reference
+      url: 'https://docs.docker.com/reference/dockerfile/'
+      why: >-
+        The instruction reference, including the build cache rules. Most "the build is
+        slow" problems are a missing cache mount or a copy in the wrong order.
+    - label: Compose file reference
+      url: 'https://docs.docker.com/reference/compose-file/'
+      why: >-
+        The authoritative key list for compose. Compose has grown well beyond its original
+        scope, so much of what people expect is not in a v2 file.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Docker build best practices
+      url: 'https://docs.docker.com/build/building/best-practices/'
+      why: >-
+        The official guidance on layer ordering, multi-stage builds and cache mounts.
+        Worth reading before a large Dockerfile rewrite.
+
+community:
+  - repo: 'docker/build-push-action'
+    label: Docker build actions
+    why: >-
+        The maintained buildx action. Its documentation explains the cache and platform
+        options that the CLI flags do not make obvious.
+  - repo: 'hadolint/hadolint'
+    label: Hadolint
+    why: >-
+        A Dockerfile linter whose rules each cite the reason. Useful as a CI gate, and a
+        decent way to discover the conventions a project has not written down.
+
+verify:
+  build: ['docker build -t anvil-check .']
+  test: ['docker compose config -q']
+  testFast: ['docker build --target lint -t anvil-check .']
+  lint: ['hadolint Dockerfile']
+  format: ['docker buildx bake --print']
+  typecheck: []
+
+conventions:
+  moduleLayout: 'Dockerfile at the service root, one per deployable'
+  testNaming: 'docker-compose.test.yml for container-level assertions'
+  reviewFocus:
+    - 'anything that copies secrets into an image layer, which persists in the history'
+    - 'base image tags, and whether they are pinned to a digest'
+    - 'runs as root, because most defaults do'
+    - 'the order of COPY and dependency install, which decides whether builds are cacheable'
+
+riskGlobs:
+  - '**/Dockerfile*'
+  - '**/docker-compose*.y*ml'
+  - '**/compose*.y*ml'
+  - '**/.dockerignore'
+  - '**/.env*'

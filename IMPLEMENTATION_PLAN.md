@@ -1,7 +1,8 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M5 complete**. Next milestone: **M6** (playbooks to 15, npm publish, plugin packaging).
+> Status: **M0–M5 complete. M6 in progress**: playbooks at 15 and the unbounded-guidance
+> fix are done; npm publish and plugin packaging remain.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -940,6 +941,63 @@ is exactly the failure that would have been invisible with the old logger.
 
 416 tests (up from 409). Bundle 316.6 kB.
 
+### M6 — in progress
+
+Two pieces done, two remaining. Done first because the deferred M2a/M2b defect was a known
+wrong output in a shipped command, and it made the expanded registry unusable.
+
+**The unbounded-official-guidance defect is fixed.** It was noted twice in this plan and
+left alone, and running `plan` on anvil itself put a number on it: **14 derived, 38
+official**. Reading the list showed why. Fifteen of the official entries were risk globs,
+and a risk glob was suggested whether or not the repo had such a file — a Node repo with no
+`pnpm-lock.yaml` and no Dockerfile was being told to treat both as high-risk. Advice about
+files that do not exist is not advice.
+
+Risk globs are now conditional on the repo having a matching file, and each one cites that
+file as evidence, so the suggestion is checkable rather than asserted. The count went
+**38 → 25 official** against the same 14 derived, and every remaining risk entry names a
+file in the repository.
+
+A second kind of duplication showed up once the registry grew: an Android repo matches both
+`jvm` and `android`, and both declared `**/build.gradle.kts`, so the same advice appeared
+twice. A contested risk glob is now claimed once, by the higher-priority playbook, which is
+the one carrying the specific Android rules.
+
+**The registry is at 15.** Added `android`, `go`, `rust`, `dotnet`, `ruby`, `php`, `elixir`,
+`swift`, `terraform`, `kubernetes`, `docker` and `ci`. The last three match on files rather
+than on a language, so a containerised Go service and a GitHub Actions workflow get
+guidance the language playbooks cannot give. `android` outranks `jvm` for the same reason.
+
+Two real bugs the expansion exposed, both from writing playbooks rather than from a test:
+
+1. **The Ruby playbook listed `laravel` in `match.deps`.** A typo, and it made every PHP
+   project match it, so `anvil plan` confidently recommended the Rails security guide to a
+   Laravel codebase. Confident-and-wrong is worse than no match, because the reader has no
+   reason to check. Fixed, and there is now a test asserting no playbook claims another
+   ecosystem's framework.
+2. **Three tests asserted the registry had exactly 3 playbooks.** They broke the moment a
+   4th was added, and the tempting fix — editing `3` to `15` — would have re-broken them on
+   the next addition. They now read the built-in count. A test that hardcodes a number the
+   project intends to grow is a test that eventually gets deleted or weakened instead of
+   fixed.
+
+The `jvm` playbook also loses its Android resource: with a dedicated `android` playbook,
+keeping Compose guidance in both printed the same URL twice.
+
+Checked across all 16 fixtures: every one produces a plan, `cold-empty` correctly gets zero
+playbook guidance, and the official tier now sits at or below the derived tier on 13 of 16
+(the exceptions being `jvm-gradle` and `php-laravel`, which match two playbooks each and
+therefore draw on two ecosystems' worth of documentation).
+
+425 tests (up from 416). Bundle 316.9 kB.
+
+### Still to do in M6
+
+npm publish, plugin packaging, and the ADR backlog — ADR-0001 through ADR-0005 are all
+still unwritten, which makes this the milestone where they have to land, because by now
+every one of those decisions has code exercising it.
+
 ## First move
 
-**M6.** Grow the registry to 15 playbooks, publish to npm, and package the plugin.
+**M6, remaining.** Publish to npm and package the plugin, then write ADR-0001 through
+ADR-0005.

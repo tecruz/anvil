@@ -1,0 +1,81 @@
+# Go playbook.
+#
+# Go's tooling is unusually well-factored: the standard library is the reference, and
+# `go vet` plus the race detector catch most of what a linter would elsewhere.
+
+id: go
+title: Go
+priority: 60
+
+match:
+  files: ['go.mod', '**/go.mod']
+  deps: ['go']
+  importPrefixes: ['golang.org/x/', 'net/http', 'context.']
+
+official:
+  docs:
+    - label: Go documentation
+      url: 'https://go.dev/doc/'
+      why: >-
+        Includes the effective Go specification, the standard library index and the
+        memory model. The memory model is the document to read before adding a goroutine.
+    - label: Effective Go
+      url: 'https://go.dev/doc/effective_go'
+      why: >-
+        The conventions the Go project actually follows. Read it once before writing
+        idiomatic Go, because the idioms are not obvious from other languages.
+  skills:
+    - label: Go Code Review Comments
+      url: 'https://go.dev/wiki/CodeReviewComments'
+      why: >-
+        The community's review checklist. It names the specific mistakes a reviewer will
+        flag, which is more useful than a general style guide.
+  agents: []
+  mcp:
+    - label: gopls
+      url: 'https://pkg.go.dev/golang.org/x/tools/gopls'
+      why: >-
+        The official language server. Wiring it into an editor is what makes Go
+        navigation and refactoring reliable at scale.
+  styleGuides: []
+  migrationGuides:
+    - label: Go release notes and API changes
+      url: 'https://go.dev/doc/devel/release'
+      why: >-
+        Required reading before a Go version bump. The team commits to not breaking
+        compatibility within a major version, but stdlib behaviour and vet checks do
+        change between releases.
+
+community:
+  - repo: 'golang/go'
+    label: The Go source tree
+    why: >-
+      The implementation settles any question about intended behaviour, and the standard
+      library is the best-written Go in existence. Read it as a style reference.
+  - repo: 'uber-go/guide'
+    label: Uber Go style guide
+    why: >-
+      A stricter, more opinionated guide than Effective Go, useful for large codebases
+      where the looser conventions cause inconsistency.
+
+verify:
+  build: ['go build ./...']
+  test: ['go test ./...']
+  testFast: ['go test -run Changed ./...', 'go test -short ./...']
+  lint: ['go vet ./...', 'golangci-lint run']
+  format: ['gofmt -l -w .']
+  typecheck: ['go vet ./...']
+
+conventions:
+  moduleLayout: 'one module per repo, packages by domain rather than by layer'
+  testNaming: '*_test.go, in the same package as the code'
+  reviewFocus:
+    - 'anything starting a goroutine, and the context it is given'
+    - 'error wrapping, because whether a caller can match on an error is an API decision'
+    - 'changes to a struct field that is serialized or compared'
+
+riskGlobs:
+  - '**/go.mod'
+  - '**/go.sum'
+  - '**/Dockerfile*'
+  - '**/*.go'

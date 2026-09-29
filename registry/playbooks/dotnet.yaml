@@ -1,0 +1,78 @@
+# .NET / C# playbook.
+
+id: dotnet
+title: .NET / C#
+priority: 60
+
+match:
+  files: ['*.sln', '*.csproj', '*.fsproj', 'global.json', 'Directory.Build.props']
+  deps: ['dotnet', 'csharp']
+  importPrefixes: ['using System', 'using Microsoft.']
+
+official:
+  docs:
+    - label: .NET documentation
+      url: 'https://learn.microsoft.com/en-us/dotnet/'
+      why: >-
+        API reference and guides, versioned per target framework. The target framework
+        decides which APIs exist, so read the reference for the version in the csproj
+        rather than the newest one.
+    - label: C# language guide
+      url: 'https://learn.microsoft.com/en-us/dotnet/csharp/'
+      why: >-
+        The language reference, including nullability semantics. Nullable reference types
+        change what the compiler accepts, which is why they generate large diffs on an
+        otherwise untouched codebase.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: .NET code style rules
+      url: 'https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules'
+      why: >-
+        The analyzer rules the SDK ships with. These are the errors a reviewer will expect
+        to be clean, so treat new ones as defects.
+  migrationGuides:
+    - label: .NET upgrade guide
+      url: 'https://learn.microsoft.com/en-us/dotnet/core/compatibility/'
+      why: >-
+        The breaking-change list per version. Read the entries for the target framework
+        before upgrading, since removals compile fine and fail at runtime.
+
+community:
+  - repo: 'dotnet/runtime'
+    label: .NET runtime
+    why: >-
+      The runtime source, useful for settling a framework behaviour question, and the
+      place compatibility decisions are actually recorded.
+  - repo: 'communitytoolkit/dotnet'
+    label: .NET Community Toolkit
+    why: >-
+      Maintained replacements for patterns the BCL left as an implementation detail, and
+      a good signal for what the ecosystem has standardised on.
+
+verify:
+  build: ['dotnet build']
+  test: ['dotnet test']
+  testFast: ['dotnet test --filter Changed']
+  lint: ['dotnet format --verify-no-changes', 'dotnet build -warnaserror']
+  format: ['dotnet format']
+  typecheck: ['dotnet build']
+
+conventions:
+  moduleLayout: 'one csproj per project, src/ and tests/ at the root'
+  testNaming: '*Tests.cs, with a class per tested type'
+  reviewFocus:
+    - 'async methods without an await, which compile to a silent no-op'
+    - 'nullable reference annotations, because enabling them changes compilation'
+    - 'anything touching entity framework migrations'
+    - 'changes to Directory.Build.props or global.json, which affect every project'
+
+riskGlobs:
+  - '**/*.csproj'
+  - '**/*.sln'
+  - '**/global.json'
+  - '**/Directory.Build.props'
+  - '**/appsettings*.json'
+  - '**/Migrations/**'
+  - '**/Dockerfile*'

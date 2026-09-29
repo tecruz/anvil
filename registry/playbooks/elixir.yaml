@@ -1,0 +1,77 @@
+# Elixir / Phoenix playbook.
+#
+# The supervisor tree and the "let it crash" model are the parts a newcomer gets wrong
+# most often, so the official guides lead with them rather than with syntax.
+
+id: elixir
+title: Elixir / Phoenix
+priority: 60
+
+match:
+  files: ['mix.exs', 'mix.lock']
+  deps: ['elixir', 'phoenix', 'ecto']
+  importPrefixes: ['Ecto.', 'Phoenix.', 'GenServer']
+
+official:
+  docs:
+    - label: Elixir documentation
+      url: 'https://hexdocs.pm/elixir'
+      why: >-
+        HexDocs for the language, including the Mix task reference. OTP behaviours are
+        documented here, not in the language guide, so check the specific module.
+    - label: Phoenix documentation
+      url: 'https://hexdocs.pm/phoenix'
+      why: >-
+        Covers the web layer, channels and LiveView. Phoenix generates a surprising amount
+        of structure, so this is the reference for what a generated file is doing.
+  skills:
+    - label: Elixir design patterns
+      url: 'https://hexdocs.pm/elixir/design_patterns.html'
+      why: >-
+        The official guide to GenServer, Supervisor and Agent. Read it before adding a
+        process, because the process is the unit of concurrency and failure here.
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Elixir release notes
+      url: 'https://github.com/elixir-lang/elixir/blob/main/CHANGELOG.md'
+      why: >-
+        Elixir is pre-1.0-forever and its deprecations span releases. Check the changelog
+        for the target version before a dependency bump.
+
+community:
+  - repo: 'elixir-lang/elixir'
+    label: Elixir
+    why: >-
+      The source of both the language and the standard library, and the best available
+      answer for what a macro is expanding to.
+  - repo: 'phoenixframework/phoenix'
+    label: Phoenix
+    why: >-
+      The framework source, including the generators. The generated code is a deliberate
+      design artefact, so the generator is the documentation for it.
+
+verify:
+  build: ['mix compile --warnings-as-errors']
+  test: ['mix test']
+  testFast: ['mix test --stale', 'mix test --only test']
+  lint: ['mix credo --strict']
+  format: ['mix format']
+  typecheck: ['mix dialyzer']
+
+conventions:
+  moduleLayout: 'lib/<app>/ with contexts grouping by domain, not by layer'
+  testNaming: '*_test.exs, with describe blocks per behaviour'
+  reviewFocus:
+    - 'anything touching a Supervisor or a process lifecycle'
+    - 'database migrations in priv/repo, which Ecto makes hard to reverse'
+    - 'GenServer state, since a crash loses it'
+    - 'changes to mix.exs dependencies'
+
+riskGlobs:
+  - '**/mix.exs'
+  - '**/mix.lock'
+  - '**/priv/repo/migrations/**'
+  - '**/config/*.exs'
+  - '**/Dockerfile*'

@@ -1,0 +1,85 @@
+# PHP / Laravel playbook.
+#
+# Split from Ruby deliberately: a Laravel repo is not a Rails repo, and the tools, the
+# ORM and the deployment model are all different. The `laravel` dep id is what matches a
+# framework-specific project, while a bare `composer.json` still gets the generic half.
+
+id: php
+title: PHP / Laravel
+priority: 60
+
+match:
+  files: ['composer.json', 'artisan', 'phpunit.xml', 'phpstan.neon']
+  deps: ['php', 'laravel']
+  importPrefixes: ['Illuminate\\', 'Laravel\\']
+
+official:
+  docs:
+    - label: PHP manual
+      url: 'https://www.php.net/manual/en/'
+      why: >-
+        The language reference, and the only reliable answer for version-dependent
+        behaviour. PHP 8 changed error handling substantially from PHP 7.
+    - label: Laravel documentation
+      url: 'https://laravel.com/docs'
+      why: >-
+        Covers routing, the container, Eloquent and queues. The framework does a great deal
+        implicitly, so this is where to find out what a call actually does.
+  skills:
+    - label: Laravel deployment checklist
+      url: 'https://laravel.com/docs/deployment'
+      why: >-
+        The production settings people most often miss, and the checks to run before
+        shipping a Laravel app.
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: PSR-12 coding style
+      url: 'https://www.php-fig.org/psr/psr-12/'
+      why: >-
+        The PHP-FIG standard. Use the project\'s own tooling when it has one; this is the
+        fallback for an unconfigured repo.
+  migrationGuides:
+    - label: PHP migration guide
+      url: 'https://www.php.net/manual/en/migration84.php'
+      why: >-
+        Read the deprecations and removals for the target version. PHP removes features on
+        a schedule, so an unsupported version fails in ways that look like code bugs.
+
+community:
+  - repo: 'laravel/laravel'
+    label: Laravel skeleton application
+    why: >-
+      The reference structure. Useful for deciding where new code belongs, which is a
+      question more often answered by convention than by the docs.
+  - repo: 'sebastianbergmann/phpstan'
+    label: PHPStan
+    why: >-
+      The static analyser most PHP projects standardise on, and the level system documents
+      which correctness guarantees you have actually bought.
+
+verify:
+  build: ['composer install --no-dev --optimize-autoloader']
+  test: ['php artisan test', './vendor/bin/phpunit']
+  testFast: ['php artisan test --filter=Changed', './vendor/bin/phpunit --filter Changed']
+  lint: ['./vendor/bin/phpstan analyse', './vendor/bin/php-cs-fixer fix --dry-run']
+  format: ['./vendor/bin/pint', './vendor/bin/php-cs-fixer fix']
+  typecheck: ['./vendor/bin/phpstan analyse']
+
+conventions:
+  moduleLayout: 'app/Http (controllers), app/Models, app/Jobs, database/migrations'
+  testNaming: '*Test.php under tests/Unit and tests/Feature'
+  reviewFocus:
+    - 'database migrations, which must be reversible while older code is still deployed'
+    - 'raw SQL and `whereRaw` / `selectRaw`, the usual N+1 source'
+    - 'mass assignment and `$fillable`'
+    - 'changes to composer.lock'
+
+riskGlobs:
+  - '**/composer.json'
+  - '**/composer.lock'
+  - '**/database/migrations/**'
+  - '**/config/**'
+  - '**/routes/**'
+  - '**/.env*'
+  - '**/Dockerfile*'

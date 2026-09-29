@@ -1,0 +1,73 @@
+# Terraform / infrastructure-as-code playbook.
+#
+# Matches on `.tf` files rather than a specific cloud, so a repo targeting AWS, Azure or
+# anything else still gets the parts that matter: state is remote, and `plan` is the only
+# safe way to see a change.
+
+id: terraform
+title: Terraform / IaC
+priority: 70
+
+match:
+  files: ['**/*.tf', '**/*.tfvars', '.terraform.lock.hcl']
+  deps: ['terraform', 'terraform-*']
+  importPrefixes: ['terraform.']
+
+official:
+  docs:
+    - label: Terraform language documentation
+      url: 'https://developer.hashicorp.com/terraform/language'
+      why: >-
+        The reference for the language itself. Read the lifecycle and state sections
+        before anything involving a resource that must not be recreated.
+    - label: Terraform registry
+      url: 'https://registry.terraform.io/'
+      why: >-
+        Canonical provider documentation, including the argument reference. Provider
+        behaviour differs between versions, so check the version in the lock file.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Terraform version upgrade guide
+      url: 'https://developer.hashicorp.com/terraform/language/upgrade-guides'
+      why: >-
+        Required before a major version bump. State format changes and provider
+        incompatibilities surface during `plan`, often as a diff you did not expect.
+
+community:
+  - repo: 'hashicorp/terraform'
+    label: Terraform
+    why: >-
+      The source and issue tracker settle provider and core behaviour questions that the
+      documentation leaves ambiguous.
+  - repo: 'gruntwork-io/terraform-aws-project-layout'
+    label: Gruntwork reference layout
+    why: >-
+      A widely used convention for separating environments, which keeps a state file per
+      environment and makes partial applies less dangerous.
+
+verify:
+  build: ['terraform init -backend=false', 'terraform validate']
+  test: ['terraform plan -detailed-exitcode -lock=false -refresh=false -input=false']
+  testFast: ['terraform validate', 'terraform fmt -check -recursive']
+  lint: ['tflint', 'terraform fmt -check -recursive']
+  format: ['terraform fmt -recursive']
+  typecheck: ['terraform validate']
+
+conventions:
+  moduleLayout: 'root module for shared config, modules/ for reusable pieces, per-env roots'
+  testNaming: '*.tftest.hcl, or a tests/ directory of plan assertions'
+  reviewFocus:
+    - 'any change with a destroy, replace or force-new plan'
+    - 'state handling and backend configuration'
+    - 'security group, IAM policy and public-bucket changes'
+    - 'anything touching a variable default, which silently changes every environment'
+
+riskGlobs:
+  - '**/*.tf'
+  - '**/*.tfvars'
+  - '**/.terraform.lock.hcl'
+  - '**/terraform.tfstate'
+  - '**/terraform.tfstate.backup'

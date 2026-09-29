@@ -20,7 +20,7 @@ import {
   type Playbook,
   type Suggestion,
 } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, matchesAny, type ProjectProfile } from '@anvil/profile'
 import { audit } from '@anvil/audit'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -125,9 +125,37 @@ describe('built-in registry', () => {
     assert.ok(playbooks.length >= 3)
   })
 
-  test('has the three seed playbooks', () => {
+  test('covers every ecosystem the detectors emit, plus the file-only ones', () => {
+    // The registry grew from 3 to 15, so this is now a coverage claim rather than a
+    // snapshot. A new ecosystem with no playbook shows up in `plan` as a matched stack
+    // with no guidance at all, which is worse than not detecting it.
     const ids = playbooks.map((p) => p.id).sort()
-    assert.deepEqual(ids, ['jvm', 'node', 'python'])
+    assert.deepEqual(ids, [
+      'android',
+      'ci',
+      'docker',
+      'dotnet',
+      'elixir',
+      'go',
+      'jvm',
+      'kubernetes',
+      'node',
+      'php',
+      'python',
+      'ruby',
+      'rust',
+      'swift',
+      'terraform',
+    ])
+  })
+
+  test('the three original seed playbooks survived the expansion', () => {
+    // They are the ones with the most battle-testing behind them, so an accidental
+    // rename during the expansion would silently change every existing plan.
+    const ids = playbooks.map((p) => p.id)
+    for (const seed of ['jvm', 'node', 'python']) {
+      assert.ok(ids.includes(seed), `${seed} should still be in the registry`)
+    }
   })
 
   test('every playbook has at least one usable resource', () => {
@@ -202,6 +230,16 @@ describe('generated file is in sync with the YAML sources', () => {
 })
 
 describe('user playbook directory', () => {
+  /**
+   * The built-in count, read rather than hardcoded.
+   *
+   * These tests were written when the registry had exactly three playbooks and asserted
+   * `length === 3`. Growing the registry broke them, and the tempting fix -- editing 3 to 15
+   * -- would have re-broken them on the next addition. A test that encodes a count the
+   * project intends to grow is a test that will be deleted or weakened instead of fixed.
+   */
+  const builtinCount = (): number => loadBuiltins().playbooks.length
+
   test('merges over the built-ins by id', () => {
     const dir = tempDir()
     try {
@@ -212,7 +250,7 @@ describe('user playbook directory', () => {
       const { playbooks } = loadPlaybooksFromDirectory(dir)
       const node = playbooks.find((p) => p.id === 'node')
       assert.equal(node?.title, 'Company node rules')
-      assert.equal(playbooks.length, 3, 'overrides rather than appends')
+      assert.equal(playbooks.length, builtinCount(), 'overrides rather than appends')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -223,11 +261,48 @@ describe('user playbook directory', () => {
     try {
       writeFileSync(join(dir, 'acme.yaml'), 'id: acme\ntitle: Acme\nmatch:\n  files: ["acme.toml"]\n')
       const { playbooks } = loadPlaybooksFromDirectory(dir)
-      assert.equal(playbooks.length, 4)
+      assert.equal(playbooks.length, builtinCount() + 1)
       assert.ok(playbooks.some((p) => p.id === 'acme'))
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+
+  test('no playbook claims another ecosystem\'s framework', () => {
+    // A `laravel` dep entry in the Ruby playbook made every PHP project match it, so
+    // `plan` confidently recommended the Rails security guide to a Laravel codebase. A
+    // cross-ecosystem match is worse than no match: it is confident and wrong, and the
+    // reader has no reason to check.
+    const { playbooks } = loadBuiltins()
+    const owner: Record<string, string> = {
+      laravel: 'php',
+      rails: 'ruby',
+      phoenix: 'elixir',
+      django: 'python',
+      fastapi: 'python',
+      flask: 'python',
+      'android-jetpack': 'android',
+    }
+    for (const pb of playbooks) {
+      for (const dep of pb.match.deps) {
+        const claimed = owner[dep]
+        if (claimed === undefined) continue
+        assert.equal(
+          pb.id,
+          claimed,
+          `${pb.id} claims \`${dep}\`, which belongs to the ${claimed} playbook`,
+        )
+      }
+    }
+  })
+
+  test('a framework is matched by its own playbook, not by a same-named neighbour', () => {
+    // The same defect, seen from the repo side: a Laravel fixture must not pick up Ruby.
+    const profile = profileFor('php-laravel')
+    const { playbooks } = loadBuiltins()
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(ids.includes('php'), 'a Laravel project is a PHP project')
+    assert.ok(!ids.includes('ruby'), `a Laravel project matched ruby; got ${ids.join(', ')}`)
   })
 
   test('a broken user playbook warns without taking down the built-ins', () => {
@@ -235,7 +310,7 @@ describe('user playbook directory', () => {
     try {
       writeFileSync(join(dir, 'broken.yaml'), 'id: BROKEN\n')
       const { playbooks, warnings } = loadPlaybooksFromDirectory(dir)
-      assert.equal(playbooks.length, 3, 'built-ins still load')
+      assert.equal(playbooks.length, builtinCount(), 'built-ins still load')
       assert.equal(warnings.length, 1)
       assert.match(warnings[0] ?? '', /broken\.yaml/)
     } finally {
@@ -245,7 +320,7 @@ describe('user playbook directory', () => {
 
   test('a missing directory warns rather than throwing', () => {
     const { playbooks, warnings } = loadPlaybooksFromDirectory(join(tempDir(), 'nope'))
-    assert.equal(playbooks.length, 3)
+    assert.equal(playbooks.length, builtinCount())
     assert.ok(warnings.some((w) => w.includes('not found')))
   })
 
@@ -393,6 +468,92 @@ describe('plan', () => {
     assert.equal(cold.playbooks.length, 0)
     assert.ok(cold.counts.derived > 0, 'derived fixes do not need external guidance')
     assert.equal(cold.counts.official, 0)
+  })
+
+  // ------------------------------------------------------------------------
+  // Risk globs are conditional on the repo having such a file
+  // ------------------------------------------------------------------------
+
+  test('a risk glob is only suggested when the repo has a file matching it', () => {
+    // The unbounded-guidance defect: a Node repo with no pnpm lockfile and no Dockerfile
+    // was being told to treat `**/pnpm-lock.yaml` and `**/Dockerfile*` as high-risk. Advice
+    // about files that do not exist is not advice, it is noise.
+    const { playbooks } = loadBuiltins()
+    const profile = profileFor('node-npm')
+    const matches = matchPlaybooks(profile, playbooks)
+    const plan = buildPlan(audit(profile), profile, matches)
+    const risks = plan.suggestions.filter((s) => s.id.startsWith('risk:'))
+
+    for (const r of risks) {
+      const glob = r.id.split(':').slice(2).join(':')
+      assert.ok(
+        matchesAny(profile.files, glob),
+        `${r.id} is suggested but no file in node-npm matches ${glob}`,
+      )
+    }
+  })
+
+  test('a risk glob that the repo does have cites the file as evidence', () => {
+    // Otherwise the suggestion is a generic assertion; the reader cannot check it.
+    const { playbooks } = loadBuiltins()
+    const profile = profileFor('node-npm')
+    const matches = matchPlaybooks(profile, playbooks)
+    const plan = buildPlan(audit(profile), profile, matches)
+    const pkg = plan.suggestions.find((s) => s.id === 'risk:node:**/package.json')
+    assert.ok(pkg !== undefined, 'node-npm has a package.json, so this glob should apply')
+    assert.ok(
+      pkg.evidence.some((e) => e === 'package.json'),
+      `evidence should name the file, got ${JSON.stringify(pkg.evidence)}`,
+    )
+  })
+
+  test('conditional risk globs cut the official tier down, not the derived tier', () => {
+    // The point of the fix: an actionable list, derived work first. If gating risk globs
+    // also removed derived fixes the plan would be losing real work, not noise.
+    const p = planFor('node-npm')
+    const riskCount = p.suggestions.filter((s) => s.id.startsWith('risk:')).length
+    assert.ok(riskCount > 0, 'the node fixture does have a package.json, so some apply')
+    assert.ok(
+      p.counts.official < p.counts.derived + p.counts.official,
+      'sanity: counts are still computed',
+    )
+    const allRiskGlobs = loadBuiltins().playbooks
+      .filter((pb) => pb.id === 'node')
+      .flatMap((pb) => pb.riskGlobs)
+    assert.ok(
+      riskCount < allRiskGlobs.length,
+      `expected only the globs that apply (${riskCount} of ${allRiskGlobs.length})`,
+    )
+  })
+
+  test('a risk glob declared by two playbooks is suggested once', () => {
+    // An Android repo matches both `jvm` and `android`, and both declare
+    // `**/build.gradle.kts`. Printed twice, the same advice reads as two concerns; the
+    // higher-priority playbook keeps it, which is the one with the specific Android rules.
+    const { playbooks } = loadBuiltins()
+    const profile = profileFor('jvm-gradle')
+    const matches = matchPlaybooks(profile, playbooks)
+    assert.ok(matches.length > 1, 'this fixture should match more than one playbook')
+    const plan = buildPlan(audit(profile), profile, matches)
+    const globs = plan.suggestions.filter((s) => s.id.startsWith('risk:')).map((s) => s.id.split(':').slice(2).join(':'))
+    assert.equal(new Set(globs).size, globs.length, `duplicate risk globs: ${globs.join(', ')}`)
+  })
+
+  test('the higher-priority playbook wins a contested risk glob', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = profileFor('jvm-gradle')
+    const matches = matchPlaybooks(profile, playbooks)
+    const winner = matches[0]?.playbook.id
+    const plan = buildPlan(audit(profile), profile, matches)
+    const contested = plan.suggestions.find((s) => s.id === `risk:${winner}:**/build.gradle.kts`)
+    assert.ok(contested !== undefined, `expected ${winner} to own **/build.gradle.kts`)
+  })
+
+  test('a cold repo gets no risk suggestions even from a matched playbook', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = profileFor('cold-empty')
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, playbooks), [])
+    assert.equal(plan.suggestions.filter((s) => s.id.startsWith('risk:')).length, 0)
   })
 
   test('rankSuggestions is stable for equal inputs', () => {
