@@ -302,11 +302,13 @@ places:
 
 1. The `RISK_MAP` finding (are these documented, or does the agent not know?) — **v1**.
 2. **PR generation** — a PR touching high-risk paths gets an auto-added risk checklist —
-   **deferred to M6**.
+   **shipped in M4**, see [ADR-0005](docs/adr/0005-governance-ships-in-m4.md).
 
-That second use is what turns a linter into a permission system, but it is read-only
-signal in v1: the risk map is computed and reported, and `ship` does not act on it until
-M6. Both §Blast-radius and Open question 1 agree on this — governance is M6 scope.
+That second use is what turns a linter into a permission system, and it is read-only signal:
+the risk map is computed and reported, and the checklist is a comment in a PR body, not a
+block on shipping. Open question 1 originally resolved this as M6 scope, which
+[ADR-0005](docs/adr/0005-governance-ships-in-m4.md) reverses — the PR body is assembled once,
+so governance arriving later means rewriting the one step that everything else depends on.
 
 ---
 
@@ -528,14 +530,18 @@ confident wrong output. Six that are right beats twelve that are mostly right.
 ## Open questions
 
 1. ~~Does v1 `ship` need CODEOWNERS-aware reviewer resolution and auto risk
-   checklists?~~ **Resolved: no.** Plain PR in M4; governance (reviewer resolution +
-   risk checklists) is M6, consistent with §Blast-radius. Recorded here so the decision
-   has a home, and in an ADR once M0 lands.
-2. **Worktree location**: `../<repo>-worktrees/<key>` (default, avoids nesting inside the
-   repo) vs `.anvil/worktrees/` (self-contained, needs `git worktree` awareness). Default
-   if unanswered: `../`.
+   checklists?~~ **Resolved: yes, and it shipped in M4.** This was first answered "no, M6
+   scope" and that answer was wrong — the PR body is assembled once, so arriving later means
+   rewriting the step everything depends on. See
+   [ADR-0005](docs/adr/0005-governance-ships-in-m4.md). Recorded here because the reversal is
+   the useful part.
+2. ~~**Worktree location**~~ **Resolved: `../<repo>-worktrees/<key>`.** Sibling directory, so
+   a worktree is never inside the repository it was created from. That nesting matters
+   because `git worktree add` on a path inside the repo is legal and produces a directory
+   that tools then walk, and `.anvil/` state resolution has to special-case it.
 3. **Detected command confirmation**: should `ship` require an explicit human confirm when
-   a verify command is `inferred`? *Default if unanswered: no, but log it loudly.*
+   a verify command is `inferred`? *Partly resolved: `ship` refuses an `inferred` verify
+   command without `--probe`, and logs it loudly otherwise.* Full resolution in M6.
 
 ### Decisions get an ADR
 
@@ -545,15 +551,23 @@ entries are listed as plain text, not links, so this document has no dead refere
 
 | ADR | Decision | Status |
 |---|---|---|
-| ADR-0001 | The CLI/agent split (CLI deterministic, agent reasons) | determined, unwritten — writes with M2b |
-| ADR-0002 | `gh` CLI as the first provider transport | determined, unwritten — writes with M3 |
-| ADR-0003 | Diff-first writes + staging/apply lifecycle | determined, unwritten — writes with M2b |
-| ADR-0004 | Governance (reviewers, risk checklists) deferred to M6 | determined, unwritten — writes with M6 |
-| ADR-0005 | `local` provider as the API-egress escape hatch | determined, unwritten — writes with M3 |
+| [ADR-0001](docs/adr/0001-deterministic-cli-agent-reasons.md) | The CLI/agent split (CLI deterministic, agent reasons) | **written (M6)** |
+| [ADR-0002](docs/adr/0002-gh-cli-as-first-transport.md) | `gh` CLI as the first provider transport | **written (M6)** |
+| [ADR-0003](docs/adr/0003-diff-first-staging-lifecycle.md) | Diff-first writes + staging/apply lifecycle | **written (M6)** |
+| [ADR-0004](docs/adr/0004-local-provider-as-egress-escape-hatch.md) | `local` provider as the API-egress escape hatch | **written (M6)** |
+| [ADR-0005](docs/adr/0005-governance-ships-in-m4.md) | Governance ships in M4, not M6 | **written (M6)** |
 | [ADR-0006](docs/adr/0006-single-file-bundle-location.md) | Single-file bundle lives in `packages/cli/dist` | **written (M0)** |
 
-Each is written by the milestone that puts it under load, not before — an ADR for a decision
+Each is written by the milestone that puts it under load, not before - an ADR for a decision
 no code has exercised yet is a guess with a date on it.
+
+**The five ADRs were written in M6, not in the milestones that decided them**, which
+contradicts the rule above. The reason is that the rule protects against a *guess*, and by
+M6 none of these were guesses: every one had code exercising it, a bug found, or a
+disagreement resolved. Two of them record a decision that reversed an earlier plan
+(ADR-0005), which is the clearest sign that the decision was still live when the plan was
+written. Writing them earlier would have recorded intent; writing them now records what
+happened.
 
 ---
 
@@ -991,13 +1005,44 @@ therefore draw on two ecosystems' worth of documentation).
 
 425 tests (up from 416). Bundle 316.9 kB.
 
+### The ADR backlog is written
+
+ADR-0001 through ADR-0005, all deferred since M2b. They were late by this milestone's own
+rule, and the plan says why that is acceptable: the rule exists to stop an ADR recording a
+guess, and by M6 none of these were guesses. Each had code exercising it, a bug found, or a
+disagreement resolved.
+
+**ADR-0005 reverses a decision this document still had wrong.** Open question 1 resolved
+governance as "M6 scope", and §Blast-radius agreed. Both are corrected. The reasoning that
+moved it: the PR body is assembled **once**, at the seam where git, the provider, templates,
+CODEOWNERS and verification all meet. Governance is not a filter applied to a finished PR,
+it is content in a body that is written exactly once — so arriving in M6 means rewriting the
+step everything else depends on, with the riskiest interaction being the part most likely
+to be wrong. It shipped in M4.
+
+### Open question 3 was open because the loud logging was missing
+
+The plan settled this as "do not block an inferred command, but log it loudly." The not-blocking
+half shipped. The loud half never did: `ship --probe` ran inferred commands and reported the
+result identically to a documented one, so a PR could list a guess beside a written-down
+command as though they carried the same weight. A green result from `inferred` is a
+considerably weaker claim, and the report should say so.
+
+`verifyCommandEntries` now carries provenance through to the verify stage, and a passing
+stage names what it was unsure about: `1 command(s) passed (inferred, not documented: make
+check)`. A fully documented project makes no such claim. The rule "do not block" is
+preserved — an inferred command is never a reason to refuse.
+
+429 tests (up from 425). Bundle 317.0 kB.
+
 ### Still to do in M6
 
-npm publish, plugin packaging, and the ADR backlog — ADR-0001 through ADR-0005 are all
-still unwritten, which makes this the milestone where they have to land, because by now
-every one of those decisions has code exercising it.
+npm publish and plugin packaging. Both are mechanical compared to what is above, and both
+should be done last, because publishing a package whose `bin` and dependency graph have not
+been exercised as an install is how you ship something that works from a checkout and fails
+from a `npm install -g`.
 
 ## First move
 
-**M6, remaining.** Publish to npm and package the plugin, then write ADR-0001 through
-ADR-0005.
+**M6, remaining.** Make `packages/cli` publishable, exercise it as a real install, then
+package the plugin.

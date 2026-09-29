@@ -15,7 +15,14 @@ import {
 } from '@anvil/pr'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
-import { ship, verifyCommands, type ForgeTransport, type ShipOptions } from '@anvil/worktrees/ship'
+import {
+  ship,
+  inferredVerifyCommands,
+  verifyCommandEntries,
+  verifyCommands,
+  type ForgeTransport,
+  type ShipOptions,
+} from '@anvil/worktrees/ship'
 import { GitHubProvider, hostFromRemote, parseGhIssue } from '@anvil/providers'
 
 // ===========================================================================
@@ -357,6 +364,28 @@ describe('verify command selection', () => {
     const dup = { commands: { test: [{ cmd: 'make check', source: 'detected' as const }], lint: [{ cmd: 'make check', source: 'detected' as const }] } } as unknown as ProjectProfile
     assert.deepEqual(verifyCommands(dup), ['make check'])
   })
+
+  test('a command inferred rather than documented is reported as such', () => {
+    // Open question 3 in the plan: do not block an inferred command, but say so. A green
+    // result from a guess is much weaker evidence than one from a written-down command, and
+    // a PR that lists them identically misrepresents what was actually checked.
+    const mixed = {
+      commands: {
+        test: [{ cmd: 'npm test', source: 'documented' as const }],
+        lint: [{ cmd: 'npm run lint', source: 'inferred' as const }],
+      },
+    } as unknown as ProjectProfile
+    assert.deepEqual(inferredVerifyCommands(mixed), ['npm run lint'])
+    assert.deepEqual(verifyCommandEntries(mixed), [
+      { cmd: 'npm test', source: 'documented' },
+      { cmd: 'npm run lint', source: 'inferred' },
+    ])
+  })
+
+  test('a fully documented project has nothing to caveat', () => {
+    assert.deepEqual(inferredVerifyCommands(profile), [])
+  })
+
 })
 
 describe('ship pipeline', () => {
@@ -435,6 +464,35 @@ describe('ship pipeline', () => {
     assert.equal(result.ok, true)
     assert.equal(ran, 0, 'builds are slow and expensive; opt in with --probe')
     assert.match(result.stages.find((s) => s.name === 'verify')?.detail ?? '', /--probe/)
+  })
+
+  test('a passing verify stage names the inferred commands it is unsure about', async () => {
+    // Open question 3 in the plan settled on "do not block, but log it loudly". A green
+    // result from an inferred command is much weaker evidence than from a documented one,
+    // and a PR that lists them identically misrepresents what was checked.
+    const dir = repo()
+    workOnBranch(dir, 'a.txt', 'work')
+    const inferred = {
+      ...shipOptions(dir).profile,
+      commands: { test: [{ cmd: 'make check', source: 'inferred' as const }] },
+    } as unknown as ProjectProfile
+    const result = await ship(shipOptions(dir, { profile: inferred, probe: true }))
+    assert.equal(result.ok, true, 'an inferred command is not a reason to refuse')
+    const verify = result.stages.find((s) => s.name === 'verify')
+    assert.match(verify?.detail ?? '', /inferred, not documented: make check/)
+  })
+
+  test('a documented-only verify stage makes no caveat claim', async () => {
+    const dir = repo()
+    workOnBranch(dir, 'a.txt', 'work')
+    const documented = {
+      ...shipOptions(dir).profile,
+      commands: { test: [{ cmd: 'make check', source: 'documented' as const }] },
+    } as unknown as ProjectProfile
+    const result = await ship(shipOptions(dir, { profile: documented, probe: true }))
+    const verify = result.stages.find((s) => s.name === 'verify')
+    assert.doesNotMatch(verify?.detail ?? '', /inferred/)
+    assert.match(verify?.detail ?? '', /1 command\(s\) passed/)
   })
 
   test('a push failure stops the ship and reports why', async () => {

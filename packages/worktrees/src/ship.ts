@@ -15,7 +15,7 @@
  */
 
 import { git, worktreeStatus, type WorktreeStatus } from '@anvil/git'
-import type { ProjectProfile } from '@anvil/profile'
+import type { CommandSource, ProjectProfile } from '@anvil/profile'
 import type { NormalizedState, Ticket, TicketRef } from '@anvil/tickets'
 import {
   analyzeRisk,
@@ -110,20 +110,29 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   if (options.skipVerify) {
     stages.push({ name: 'verify', ok: true, detail: 'skipped (--skip-verify)' })
   } else if (options.probe) {
-    for (const command of verifyCommands(options.profile)) {
-      commandsRun.push(command)
-      const result = await options.run(command, options.worktreePath)
+    const entries = verifyCommandEntries(options.profile)
+    for (const entry of entries) {
+      commandsRun.push(entry.cmd)
+      const result = await options.run(entry.cmd, options.worktreePath)
       verification.push({
-        command,
+        command: entry.cmd,
         ok: result.ok,
         ...(result.ok ? {} : { detail: (result.stderr || result.stdout).slice(0, 400) }),
       })
     }
     const failed = verification.filter((v) => !v.ok)
+    const inferred = entries.filter((e) => e.source === 'inferred').map((e) => e.cmd)
+    const passed = failed.length === 0
+    // An inferred command is a guess from ecosystem convention, and a green result from
+    // one is much weaker evidence than a green result from a documented command. Saying so
+    // is the difference between a check that ran and a check that means something.
+    const caveat = passed && inferred.length > 0 ? ` (inferred, not documented: ${inferred.join(', ')})` : ''
     stages.push({
       name: 'verify',
-      ok: failed.length === 0,
-      detail: failed.length === 0 ? `${verification.length} command(s) passed` : `${failed.length} command(s) failed: ${failed.map((f) => f.command).join(', ')}`,
+      ok: passed,
+      detail: passed
+        ? `${verification.length} command(s) passed${caveat}`
+        : `${failed.length} command(s) failed: ${failed.map((f) => f.command).join(', ')}`,
     })
     // A failed verify stops the ship *before* the push, so nothing broken reaches the
     // remote.
@@ -214,15 +223,37 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
 
 /** The verify commands anvil will run, highest-confidence first. */
 export function verifyCommands(profile: ProjectProfile): string[] {
+  return verifyCommandEntries(profile).map((e) => e.cmd)
+}
+
+/**
+ * The verify commands, with the provenance of each.
+ *
+ * `inferred` means anvil guessed the command from ecosystem convention and nobody has run
+ * it. It is a reasonable guess and a poor guarantee, so a ship that runs one says so
+ * rather than presenting it beside a `documented` command as though they were equal. Open
+ * question 3 in the plan settled on "do not block, but log it loudly"; this is the loud
+ * part, which was previously missing.
+ */
+export function verifyCommandEntries(profile: ProjectProfile): Array<{ cmd: string; source: CommandSource }> {
   const order: Array<keyof ProjectProfile['commands']> = ['testFast', 'test', 'typecheck', 'lint', 'build']
-  const out: string[] = []
+  const out: Array<{ cmd: string; source: CommandSource }> = []
+  const seen = new Set<string>()
   for (const kind of order) {
     const entry = profile.commands[kind]?.[0]
     if (entry === undefined) continue
-    if (out.includes(entry.cmd)) continue
-    out.push(entry.cmd)
+    if (seen.has(entry.cmd)) continue
+    seen.add(entry.cmd)
+    out.push({ cmd: entry.cmd, source: entry.source })
   }
   return out
+}
+
+/** The verify commands anvil inferred rather than found written down. */
+export function inferredVerifyCommands(profile: ProjectProfile): string[] {
+  return verifyCommandEntries(profile)
+    .filter((e) => e.source === 'inferred')
+    .map((e) => e.cmd)
 }
 
 interface Refusal {
