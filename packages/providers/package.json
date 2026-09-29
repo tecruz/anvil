@@ -1,0 +1,14 @@
+{
+  "name": "@anvil/providers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ticket providers. `local` ships in M3 as the zero-auth escape hatch.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*",
+    "@anvil/tickets": "*"
+  }
+}

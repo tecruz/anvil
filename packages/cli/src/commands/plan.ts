@@ -6,7 +6,8 @@
  */
 
 import { resolve } from 'node:path'
-import { AnvilError, ErrorCode, discoverRepo, parseCliArgs, renderTable } from '@anvil/core'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
+import { discoverRepo } from '@anvil/git'
 import { audit, type ReadinessReport } from '@anvil/audit'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'

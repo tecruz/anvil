@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
-import { discoverRepo, git, gitOrThrow } from '@anvil/core'
+import { discoverRepo, git, gitOrThrow } from '@anvil/git'
 
 const roots: string[] = []
 

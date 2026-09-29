@@ -14,11 +14,11 @@ import {
   AnvilError,
   ErrorCode,
   ExitCode,
-  discoverRepo,
   parseCliArgs,
   renderTable,
   type Style,
 } from '@anvil/core'
+import { discoverRepo } from '@anvil/git'
 import { audit, LAYERS, LAYER_QUESTIONS, LAYER_TITLES, type Layer, type ReadinessReport, type Severity } from '@anvil/audit'
 import { buildProfile, type ProjectProfile, type VcsHost } from '@anvil/profile'
 import type { Command, CommandContext } from './types.ts'

@@ -9,7 +9,8 @@
  * is discoverable without pretending unimplemented commands exist.
  */
 
-import type { FlagSpecs, GitRepoInfo, Style } from '@anvil/core'
+import type { FlagSpecs, Style } from '@anvil/core'
+import type { GitRepoInfo } from '@anvil/git'
 
 /** Commands that exist today. */
 export interface Command {
@@ -52,9 +53,6 @@ export interface CommandContext {
 /** Planned commands, surfaced in help with their milestone. Shown, not runnable. */
 export const PLANNED_COMMANDS: Array<{ usage: string; summary: string; milestone: string }> = [
   { usage: 'anvil playbook <sub>', summary: 'List/match/show/add/check tech playbooks', milestone: 'M2a' },
-  { usage: 'anvil issue <sub>', summary: 'Pull, show, comment, set-state, sync tickets', milestone: 'M3-M4' },
-  { usage: 'anvil claim <ref>', summary: 'Create branch + worktree + ticket context', milestone: 'M3' },
-  { usage: 'anvil release <key>', summary: 'Tear down a claim', milestone: 'M3' },
   { usage: 'anvil crew <sub>', summary: 'Run N tickets in parallel worktrees', milestone: 'M5' },
   { usage: 'anvil ship <key>', summary: 'Verify, push, open PR, update ticket', milestone: 'M4' },
 ]

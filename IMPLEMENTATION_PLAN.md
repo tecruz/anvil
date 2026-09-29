@@ -1,7 +1,7 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0, M1, M2a and M2b complete**. Next milestone: **M3** (git wrapper, `claim`/`release`/`status`, `local` provider, compaction-context injection).
+> Status: **M0, M1, M2a, M2b and M3 complete**. Next milestone: **M4** (`gh` provider, `ship`, `issue sync`).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -741,9 +741,63 @@ Bugs the tests caught in the new detectors:
 **Remaining M2b refinement, deferred:** the unbounded-official-guidance issue noted above
 is not fixed. `anvil plan` should stop offering guidance a repo already satisfies.
 
+### M3 — complete (2026-09-29)
+
+Delivered: `packages/git`, `packages/tickets`, `packages/providers`, `packages/worktrees`,
+the `claim` / `release` / `status` / `issue` / `auth` commands, and the opencode plugin
+with compaction-context injection.
+
+**`packages/git` was extracted out of `core`.** Core had grown a `git.ts` in M0 for repo
+discovery; worktree management does not belong there, and a dependency from core onto git
+would have been circular. Core no longer knows about git at all.
+
+**Shared state always resolves against the main worktree.** This was a real bug found by
+running the flow for real, not by reading the code. `anvil issue refresh` run *inside* a
+worktree looked for tickets in that worktree's own `.anvil/tickets/` — which does not
+exist — so the mid-task refresh workflow the plan describes simply did not work. The
+claims registry had the same flaw: a disposable worktree must not own the file that tracks
+the other worktrees. `mainWorktreeRoot()` derives the main repo from the common git dir
+and both now resolve through it.
+
+**`.anvil/` is excluded through `info/exclude`, not `.gitignore`.** Writing a `.gitignore`
+entry from `claim` dirtied every new worktree, and since `release` reports uncommitted
+changes, **the clean release path was unreachable** — every claim had to be forced. The
+exclusion is local-only, which is also exactly right for regenerated, company-internal
+state. A test asserts a fresh claim leaves `git status --porcelain` empty.
+
+Windows-first, as planned. The worktree root is a short **sibling** directory rather than
+anything inside the repo, and preflight checks the path budget (180 chars, leaving room for
+git's `.git/worktrees/<name>` companion path) — the failure that budget prevents surfaces on
+*removal*, long after a successful create. Preflight also reports submodules, Git LFS and
+sparse checkout, because each changes what a new worktree needs and none of them fail
+loudly. A dirty base worktree **warns but does not block**: `claim` never switches your main
+worktree's branch, so a dirty tree is not a reason to refuse.
+
+Refusal, not guesswork, is the theme. A colliding branch is refused rather than suffixed —
+a collision is nearly always a duplicate or stale claim, and appending a counter hides
+exactly that. A blocked claim registers nothing and creates no branch, so there is no debris
+to clean up. `release` refuses to discard uncommitted changes or unpushed commits unless
+forced, and reports which of the two it found.
+
+Verified end to end on a real repo: two tickets created, two claims, distinct worktrees and
+branches, a comment added to ticket 1 mid-task, and `anvil issue refresh 1` run **from
+inside the worktree** correctly delivering that comment to the agent's context. Status from
+inside a worktree still sees every claim.
+
+314 tests (up from 257), against real git repositories in temp directories rather than
+mocks. Bundle 253.0 kB, still zero runtime dependencies — the plugin's
+`@opencode-ai/plugin` is a dev-time type dependency, not a runtime one.
+
+Two product bugs caught by running the real flow rather than the tests:
+
+1. **`isValidBranchName` accepted spaces.** Git rejects them, and a space in a branch name
+   becomes a space in a worktree path, which then breaks on Windows. Now rejected, along
+   with control characters.
+2. **A fresh claim always looked dirty**, for the `info/exclude` reason above.
+
 ## First move
 
-**M3.** The git wrapper, `claim` / `release` / `status`, worktree preflight, the `local`
-provider, and compaction-context injection. This is where the tool stops describing the
-problem and starts running work in parallel — and it is the first milestone whose risk is
-platform behaviour (Windows paths, shared refs) rather than detection correctness.
+**M4.** The `gh` transport, `ship` (verify → push → PR → ticket) and `issue sync`. The
+risk the plan flagged for this milestone is real: `ship` is the seam where git, provider,
+PR templates, CODEOWNERS and verify all meet for the first time. Budget 1.5–2x, and build
+it early enough to fail.

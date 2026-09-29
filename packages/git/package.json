@@ -1,0 +1,13 @@
+{
+  "name": "@anvil/git",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Git and worktree operations. Never invokes a shell.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*"
+  }
+}

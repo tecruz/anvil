@@ -13,7 +13,8 @@
 
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { AnvilError, ErrorCode, discoverRepo, parseCliArgs, renderTable } from '@anvil/core'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
+import { discoverRepo } from '@anvil/git'
 import { audit, type ReadinessReport } from '@anvil/audit'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import { loadPlaybooks, matchPlaybooks, type MatchResult, type Playbook } from '@anvil/playbooks'

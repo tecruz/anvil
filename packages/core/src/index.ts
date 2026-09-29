@@ -65,13 +65,3 @@ export {
   type FlagSpecs,
   type ParsedArgs,
 } from './args.ts'
-
-export {
-  discoverRepo,
-  discoverRepoOrThrow,
-  git,
-  gitOrThrow,
-  type GitRepoInfo,
-  type RunOptions,
-  type RunResult,
-} from './git.ts'

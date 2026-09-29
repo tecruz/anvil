@@ -16,7 +16,6 @@ import {
   ErrorCode,
   ExitCode,
   VERSION,
-  discoverRepo,
   emitJson,
   makeStyle,
   shouldUseColor,
@@ -24,6 +23,7 @@ import {
   toAnvilError,
   type Envelope,
 } from '@anvil/core'
+import { discoverRepo } from '@anvil/git'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { renderCommandHelp, renderRootHelp } from './help.ts'
@@ -31,10 +31,24 @@ import { configCommand } from './commands/config.ts'
 import { briefCommand, initCommand } from './commands/init.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { planCommand } from './commands/plan.ts'
+import { authCommand, claimCommand, issueCommand, releaseCommand, statusCommand } from './commands/work.ts'
 import { versionCommand } from './commands/version.ts'
 import type { Command, CommandContext } from './commands/types.ts'
 
-const COMMANDS: Command[] = [briefCommand, configCommand, doctorCommand, initCommand, planCommand, profileCommand, versionCommand]
+const COMMANDS: Command[] = [
+  authCommand,
+  briefCommand,
+  claimCommand,
+  configCommand,
+  doctorCommand,
+  initCommand,
+  issueCommand,
+  planCommand,
+  profileCommand,
+  releaseCommand,
+  statusCommand,
+  versionCommand,
+]
 
 const GLOBAL_FLAGS = new Set(['--json', '-j', '--no-color', '--help', '-h'])
 

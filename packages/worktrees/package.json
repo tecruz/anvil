@@ -1,0 +1,14 @@
+{
+  "name": "@anvil/worktrees",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Claims: branch + worktree + ticket context, and the registry that tracks them.",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@anvil/core": "*",
+    "@anvil/git": "*",
+    "@anvil/profile": "*",
+    "@anvil/tickets": "*"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@anvil/tickets",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Canonical ticket model, provider interface, and the per-worktree context bundle.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./context": "./src/context.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*",
+    "@anvil/profile": "*"
+  }
+}

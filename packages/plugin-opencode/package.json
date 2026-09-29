@@ -1,0 +1,13 @@
+{
+  "name": "opencode-anvil",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "opencode plugin exposing anvil's audit, plan, ticket and status tools.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.33"
+  }
+}
