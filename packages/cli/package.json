@@ -1,16 +1,40 @@
 {
-  "name": "@anvil/cli",
-  "version": "0.0.0",
-  "private": true,
+  "name": "anvil",
+  "version": "0.1.0",
   "type": "module",
-  "description": "anvil command-line interface.",
+  "description": "AI-ready dev harness: audit repos, derive agent context, work tickets in parallel worktrees.",
+  "keywords": [
+    "ai",
+    "agent",
+    "agents",
+    "cli",
+    "code-review",
+    "developer-tools",
+    "git",
+    "opencode",
+    "worktree"
+  ],
+  "license": "MIT",
   "bin": {
     "anvil": "./dist/cli.js"
   },
-  "exports": {
-    ".": "./src/main.ts"
+  "engines": {
+    "node": ">=22.6.0"
   },
-  "dependencies": {
-    "@anvil/core": "*"
+  "files": [
+    "dist/cli.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anomalyco/anvil.git"
+  },
+  "homepage": "https://github.com/anomalyco/anvil#readme",
+  "bugs": {
+    "url": "https://github.com/anomalyco/anvil/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

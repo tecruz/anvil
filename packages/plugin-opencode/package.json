@@ -1,13 +1,43 @@
 {
   "name": "opencode-anvil",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "description": "opencode plugin exposing anvil's audit, plan, ticket and status tools.",
+  "keywords": [
+    "agent",
+    "agents",
+    "ai",
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "worktree"
+  ],
+  "license": "MIT",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
   },
-  "dependencies": {
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anomalyco/anvil.git"
+  },
+  "homepage": "https://github.com/anomalyco/anvil#readme",
+  "bugs": {
+    "url": "https://github.com/anomalyco/anvil/issues"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.18.0"
+  },
+  "devDependencies": {
     "@opencode-ai/plugin": "^1.18.33"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

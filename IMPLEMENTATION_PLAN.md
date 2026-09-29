@@ -1,8 +1,8 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M5 complete. M6 in progress**: playbooks at 15 and the unbounded-guidance
-> fix are done; npm publish and plugin packaging remain.
+> Status: **M0–M6 complete.** The tool is built; what it has not done yet is run against ten
+> real repositories, which is the exit criterion M1 wrote.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -470,7 +470,7 @@ context work?) come first, before any git or provider complexity.
 | **M3** | `git` wrapper, `claim` / `release` / `status`, worktree preflight, **`local` provider**, and **compaction-context injection** (see note) | crew of 3 real worktrees with no git-ref **or** build-cache cross-contamination; `crew verify` aggregates per-worktree pass/fail and exits non-zero on any failure |
 | **M4** | `gh` provider, `ship` (verify → push → PR → ticket), `issue sync`, PR body templates | ticket → branch → PR → ticket round-trip on a real repo |
 | **M5** ✅ | `crew up` + parallel agent launch, `crew verify`, ref locking, `--jobs` | 3 tickets shipped in parallel by 3 agents |
-| **M6** | `opencode-anvil` plugin (tools, toasts, `shell.env`), 15 playbooks, npm publish | plugin installs from npm; full documented flow works end to end |
+| **M6** ✅ | `opencode-anvil` plugin (tools, toasts, `shell.env`), 15 playbooks, npm publish | plugin installs from npm; full documented flow works end to end |
 
 ### M2 is deliberately split
 
@@ -1033,16 +1033,53 @@ stage names what it was unsure about: `1 command(s) passed (inferred, not docume
 check)`. A fully documented project makes no such claim. The rule "do not block" is
 preserved — an inferred command is never a reason to refuse.
 
-429 tests (up from 425). Bundle 317.0 kB.
+### Both packages are publishable, and the install is tested
 
-### Still to do in M6
+The last mocked boundary in the project, closed by testing it rather than assuming it.
 
-npm publish and plugin packaging. Both are mechanical compared to what is above, and both
-should be done last, because publishing a package whose `bin` and dependency graph have not
-been exercised as an install is how you ship something that works from a checkout and fails
-from a `npm install -g`.
+**The published binary reported the wrong version.** `scripts/build.mjs` injected
+`npm_package_version`, which npm only sets for the package it is running a script *in* — and
+the build runs from the workspace root, which is private and versionless. So every published
+binary would have said `0.1.0-dev` forever. The kind of thing nobody notices until a bug
+report arrives naming the wrong release. The version is now read from
+`packages/cli/package.json`, which is the package the bundle ships as, and a test asserts
+the two agree.
+
+**`packages/cli` is published as `anvil`.** Unscoped, so the package name matches the binary
+a user types; a scoped `@anvil/cli` would install as `anvil` but appear in `npm ls` as a
+scope nobody chose. `files` is an allowlist containing only `dist/cli.js` — source and tests
+are not shipped, and the bundle is the whole product. Zero runtime dependencies, which is the
+entire reason for bundling: a dependency reintroduces the `npm install` that the single file
+exists to avoid.
+
+**`opencode-anvil` now ships compiled JS.** It exported `src/index.ts`, which opencode's
+resolver has no transpiler for. That works from a checkout and fails the moment it is
+installed — and only for users, never for us, which is the worst place for a bug to live. The
+build emits `dist/index.js` plus a `.d.ts`, so the plugin's tools are typed in the host
+editor rather than being `any` until they fail at runtime. The SDK is a **peer** dependency
+and stays external: a second inlined copy would give the plugin a different `Plugin` type
+than the host and the tools would not register.
+
+**A packaging test that actually installs the tarball.** `npm pack` → `npm install` into a
+throwaway consumer repo → run the installed `anvil.cmd` through `version --json`, `doctor
+--json`, `issue create`, `claim` and `crew verify`. That last step matters: it is the only
+check that exercises a real `npm run` through a shim from an installed bundle, which is
+exactly the Windows defect that made the tool non-functional and that the unit suite could
+not see, because the unit suite runs from the repo. A test also greps the bundle for
+unresolvable bare imports, which is the strongest available proof it is self-contained.
+
+One self-inflicted bug worth recording: a `"":` typo made the plugin's `package.json` invalid
+JSON, and TypeScript's response was a baffling `TS1295 ... cannot be written in a CommonJS
+file` on the plugin source. The message was about module syntax; the cause was an unparseable
+manifest. A confusing error far from its cause is worth remembering, because the instinct is
+to start changing tsconfig flags.
+
+442 tests (up from 429). Bundle 351.9 kB — up from 317.0 kB, because 12 new playbooks
+embedded ~35 kB of YAML-derived strings. The previous commit's figure was simply wrong.
 
 ## First move
 
-**M6, remaining.** Make `packages/cli` publishable, exercise it as a real install, then
-package the plugin.
+**M6 is complete.** M7 does not exist yet, and the honest next step is to use the tool: run
+`anvil doctor` on ten real repositories, which is the exit criterion M1 wrote and the only
+thing that can tell us whether the detectors are right. Publishing to the npm registry needs
+credentials and a decision about the package name, so it is prepared but not performed.
