@@ -161,6 +161,64 @@ export function resolveCommand(bin: string, opts: { env?: NodeJS.ProcessEnv; pla
 }
 
 /**
+ * Refuse an argument that cmd would interpret, rather than trying to escape it.
+ *
+ * Escaping is the wrong tool here: the arguments include ticket titles, PR bodies and file
+ * paths, all of which are user input, and a tool that runs the wrong command is worse than
+ * one that declines. The refusal names the argument so it is obvious which value to fix.
+ */
+function assertSafeArgument(arg: string, bin: string, platform: NodeJS.Platform): void {
+  if (!isUnsafeArgument(arg)) return
+  const detail =
+    platform === 'win32'
+      ? 'an argument contains a character Windows cmd would interpret'
+      : 'an argument contains a character that would need shell escaping'
+  throw new AnvilError(
+    ErrorCode.Usage,
+    `Refusing to run \`${bin}\`: ${detail}: ${JSON.stringify(arg)}`,
+    {
+      hint: 'This is a shell-metacharacter safety check, not a bug. anvil only runs commands whose arguments it can verify are inert.',
+    },
+  )
+}
+
+/**
+ * The argv for launching a binary in a way that does not wait for it.
+ *
+ * Same shim handling as {@link runProcess}, and for the same reason: `spawn('opencode')`
+ * fails with ENOENT on Windows because the npm-installed `opencode` is a `.CMD` shim.
+ * An agent launcher that silently fails to start is worse than one that refuses, because
+ * the crew reports success and nothing is working.
+ */
+export function spawnArgv(
+  bin: string,
+  args: readonly string[] = [],
+  opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
+): { file: string; args: string[]; resolved: ResolvedCommand } {
+  const platform = opts.platform ?? process.platform
+  const resolved = resolveCommand(bin, { ...(opts.env === undefined ? {} : { env: opts.env }), platform })
+  if (resolved === null) {
+    throw new AnvilError(ErrorCode.ToolMissing, `Command not found: ${bin}`, {
+      hint: hintFor(bin, platform),
+    })
+  }
+  if (resolved.isShim) {
+    for (const arg of args) assertSafeArgument(arg, bin, platform)
+  }
+  const env = opts.env ?? process.env
+  const file = resolved.isShim ? (env.ComSpec ?? 'cmd.exe') : resolved.path
+  const spawnArgs = resolved.isShim ? cmdShimArgs(resolved.path, args) : [...args]
+  return { file, args: spawnArgs, resolved }
+}
+
+/** True when a launch needs `windowsVerbatimArguments` to keep its quoting intact. */
+export function needsVerbatimArguments(bin: string, opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): boolean {
+  const platform = opts.platform ?? process.platform
+  const resolved = resolveCommand(bin, { ...(opts.env === undefined ? {} : { env: opts.env }), platform })
+  return resolved !== null && resolved.isShim
+}
+
+/**
  * Run a program with an argument array, safely, on any platform.
  *
  * Returns the exit code rather than throwing on a non-zero exit, because almost every
@@ -182,20 +240,11 @@ export async function runProcess(
 
   // On Windows a shim must go through cmd.exe. Refuse anything we cannot prove inert.
   if (resolved.isShim) {
-    for (const arg of args) {
-      if (isUnsafeArgument(arg)) {
-        throw new AnvilError(
-          ErrorCode.Usage,
-          `Refusing to run \`${bin}\`: an argument contains a character Windows cmd would interpret: ${JSON.stringify(arg)}`,
-          {
-            hint: 'This is a shell-metacharacter safety check, not a bug. anvil only runs commands whose arguments it can verify are inert.',
-          },
-        )
-      }
-    }
+    for (const arg of args) assertSafeArgument(arg, bin, platform)
   }
 
-  const execPath = resolved.isShim ? (process.env.ComSpec ?? 'cmd.exe') : resolved.path
+  const env = options.env ?? process.env
+  const execPath = resolved.isShim ? (env.ComSpec ?? 'cmd.exe') : resolved.path
   const execArgs = resolved.isShim ? cmdShimArgs(resolved.path, args) : [...args]
 
   try {

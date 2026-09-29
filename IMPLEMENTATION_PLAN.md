@@ -910,6 +910,36 @@ Verified end to end: four tickets claimed into four worktrees, `crew status` cle
 commits in each, `crew verify` running real commands — 2 pass / 1 fail against a worktree
 whose test script was deliberately broken, reporting the serialization reason and exiting 6.
 
+### The agent launcher had never actually launched an agent
+
+M5's closing note flagged that the launcher was only ever exercised through an injected
+fake. Checking that gap on the real machine found a second instance of the same Windows
+shim defect, in the one place it mattered most: `spawn('opencode', ...)` fails with ENOENT
+because the npm-installed `opencode` is a `.CMD` shim. The crew would have reported
+`started opencode (pid ...)` for every agent while nothing at all was running — the
+worst kind of failure, because the output says everything worked.
+
+`spawnArgv` in `core` now gives the detached launch the same shim handling as
+`runProcess`, and three smaller things the fake had hidden:
+
+1. **A spawn error is caught.** ENOENT arrives as an asynchronous `error` event, so
+   unhandled it takes the whole process down — which would kill the agents already running
+   in the other worktrees. It is now reported as a failed launch.
+2. **The log file is actually written to.** `stdio: 'ignore'` meant the CLI's "logs at
+   `<path>`" pointed at a file containing only anvil's own header. A detached agent has no
+   terminal to report to, and when the run fails on a quota or an auth error, that log is
+   the only evidence. stdout and stderr now go to the file, opened append-only so our
+   header and the agent's writes do not race for the offset.
+3. **The resolved path is recorded, not the bare name**, because a `.CMD` in
+   `AppData\Roaming\npm` is the thing worth seeing in a log.
+
+Verified by launching a real `opencode` against a real worktree: the shim is resolved,
+the process starts, and the log fills with the agent's own output. The run itself failed
+on a Gemini free-tier quota, which is an account fact rather than an anvil bug — but it
+is exactly the failure that would have been invisible with the old logger.
+
+416 tests (up from 409). Bundle 316.6 kB.
+
 ## First move
 
 **M6.** Grow the registry to 15 playbooks, publish to npm, and package the plugin.

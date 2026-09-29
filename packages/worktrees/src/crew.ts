@@ -19,9 +19,10 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, openSync, writeSync, closeSync } from 'node:fs'
 import { join } from 'node:path'
 import { availableParallelism, cpus } from 'node:os'
+import { spawnArgv } from '@anvil/core'
 import { mainWorktreeRoot } from '@anvil/git'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
@@ -307,24 +308,64 @@ export async function launchOpencodeAgent(options: {
   prompt: string
   logPath: string
   runner: string
+  /** Injected so tests never start a process. */
+  spawnFn?: typeof spawn
+  /** Injected so tests never read the real PATH. */
+  env?: NodeJS.ProcessEnv
+  platform?: NodeJS.Platform
 }): Promise<{ pid: number | null; detail: string }> {
   const binary = options.runner === 'opencode' ? 'opencode' : options.runner
-  const child = spawn(binary, ['run', '--dir', options.worktree, '--print-logs', options.prompt], {
+  const platform = options.platform ?? process.platform
+  const env = options.env ?? process.env
+  const args = ['run', '--dir', options.worktree, '--print-logs', options.prompt]
+
+  // `spawnArgv` rather than `spawn(binary, ...)`: the npm-installed `opencode` is a `.CMD`
+  // shim on Windows, and Node's spawn does not resolve PATHEXT, so the bare form fails
+  // with ENOENT and the crew reports agents started when nothing is running.
+  const { file, args: argv, resolved } = spawnArgv(binary, args, { env, platform })
+  const spawnFn = options.spawnFn ?? spawn
+
+  // The agent's output goes to the log file, not to `ignore`. The CLI tells the user
+  // "logs at <path>", and a detached agent that outlives the terminal has nowhere else to
+  // report a quota error, an auth failure, or a tool call it could not complete.
+  //
+  // Opened append-only, so our header and the agent's own writes cannot overwrite each
+  // other: the child inherits this handle, and two writers on one offset would interleave.
+  const log = openSync(options.logPath, 'a')
+  writeSync(log, `launched ${resolved.path} in ${options.worktree}\n`)
+
+  const child = spawnFn(file, argv, {
     cwd: options.worktree,
-    detached: process.platform !== 'win32',
-    stdio: 'ignore',
+    detached: platform !== 'win32',
+    stdio: ['ignore', log, log],
     windowsHide: true,
+    ...(resolved.isShim ? { windowsVerbatimArguments: true } : {}),
+    env,
+  })
+
+  // A spawn error arrives asynchronously; without this it becomes an unhandled 'error'
+  // event and takes the process down, rather than being reported as a failed launch.
+  let spawnError: Error | null = null
+  child.on('error', (err: Error) => {
+    spawnError = err
   })
   child.unref()
+  // One turn of the event loop is enough for a synchronous ENOENT to surface.
+  await new Promise((resolve) => setImmediate(resolve))
 
-  writeFileSync(
-    options.logPath,
-    `launched ${binary} in ${options.worktree}\npid ${String(child.pid ?? 'unknown')}\n\n`,
-    'utf8',
-  )
+  writeSync(log, `pid ${String(child.pid ?? 'unknown')}\n\n`)
+  closeSync(log)
+
+  if (spawnError !== null) {
+    const message = `failed to start ${binary}: ${(spawnError as Error).message}`
+    writeFileSync(options.logPath, `${message}\n`, 'utf8')
+    return { pid: null, detail: message }
+  }
+
+  const pid = child.pid ?? null
   return {
-    pid: child.pid ?? null,
-    detail: `started ${binary} (pid ${String(child.pid ?? 'unknown')}), logs at ${options.logPath}`,
+    pid,
+    detail: `started ${binary} (pid ${String(pid ?? 'unknown')}), logs at ${options.logPath}`,
   }
 }
 

