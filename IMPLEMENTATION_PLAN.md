@@ -1130,8 +1130,8 @@ contributing guide repeats that `playbook check` runs in CI.
 
 ## First move
 
-**M6, the review pass, the ten-repository audit, and the last two items are all done.** What
-is left, in the order it should be done:
+**M6, the review pass, the repository audits, `playbook add`, the governance files and the
+pre-commit hook are all done.** What is left, in the order it should be done:
 
 1. **Replace the placeholders**: real handles in `CODEOWNERS`, a monitored address in
    `SECURITY.md`. Until then `anvil doctor` will keep reporting both, which is correct.
@@ -1139,8 +1139,12 @@ is left, in the order it should be done:
    single-ecosystem projects, plus five deliberately awkward shapes. One shape is still
    unresolved by design: a repository with *two* projects in two subdirectories is reported
    as unknown rather than guessed at.
-3. **A pre-commit hook** (`PRECOMMIT` still warns -- deliberately, since a hook that runs
-   formatting on every commit for every contributor is a choice, not a default).
+3. **A generated `AGENTS.md` cannot cite itself accurately.** Regenerating the file shifted
+   the line numbers in its own evidence: `npm run build` is documented at `AGENTS.md:7`,
+   which after applying is the install line. The cause is structural -- a document that
+   rewrites itself cannot also keep stable line references into itself -- and it is recorded
+   here rather than hand-corrected, because hand-correcting would make the committed file
+   disagree with the generator, and the next regeneration would put it back.
 4. **Publishing** to the npm registry needs credentials and a decision about the package
    name, so it is prepared but not performed.
 
@@ -1602,6 +1606,47 @@ and the same script had been printing empty command lines for the ten real repos
 the whole session, hidden behind an output filter. The lesson is the one this project keeps
 teaching: a measurement that says "everything is broken" is more often a broken measurement
 than ten broken repositories.
+
+### The pre-commit hook, and the one thing it took to see it
+
+`PRECOMMIT` warned here for as long as the rule existed, and the warning was correct the
+whole time: the project had no hook. It has one now -- `.githooks/pre-commit`, enabled with
+`npm run setup:hooks`, which is a separate step because `core.hooksPath` is *local* git
+configuration and cannot be committed. No clone can inherit it, and a hook that only some
+clones have is a hook nobody can rely on, so the contributing guide says so where a new
+contributor will read it.
+
+The scope is formatting and lint on the staged files, and nothing else. That is the scope of
+the finding the rule raises -- "formatting and lint fixes land as review noise" -- and it is
+deliberately not more: `npm run test` takes seconds, and a hook that takes seconds is a hook
+people reach for `--no-verify`, which is strictly worse than no hook. Tests and typechecking
+stay with CI. The hook also refuses to run when `node_modules` is missing, and says
+`npm ci`, rather than failing obscurely or -- far worse -- passing without checking anything.
+
+It is tested through git rather than asserted on as a file: a real repository, the real hook,
+a `node_modules/.bin/biome` shim pointing at the real biome, and a real `git commit`. The
+assertion that matters is that a badly formatted staged file *blocks* the commit and leaves
+the history untouched. Only the location of the binary is stubbed, because that is the part
+that legitimately differs per machine.
+
+**And then the tool could not see its own hook.** The walk skips hidden directories, and
+`.githooks` was not on the allow-list, so `PRECOMMIT` still warned about a repository that
+had one. The rule was right about the walk and wrong about the repository. `.githooks` is now
+allowed, for the same reason `.github` always was. The first test run also failed for a
+reason worth keeping: the temp repositories had no `biome.json`, so biome's *defaults* applied
+-- which want semicolons -- and a file that is perfectly formatted in this repository was
+reported as unformatted. A test that measures the tool's defaults instead of the hook is
+worse than no test, so the fixtures carry the real config now.
+
+One more fix came out of it: the list of files meaning "this repository runs a commit hook"
+was four copies of the same three paths in four detectors, which is how a convention added to
+one of them ends up invisible to the other three. It is one list now, and it names the
+*framework* -- `githooks`, `husky`, `pre-commit` -- instead of calling all three
+"pre-commit", which told a reader nothing they did not already know from the finding's title.
+
+`OPERABILITY` is 100/100. `AGENTS.md` was regenerated to match, which incidentally fixed a
+real error in it: the typecheck command was documented as `npm run check`, which runs lint,
+the whole suite and the build, and is not a typecheck.
 
 ### What is still open
 

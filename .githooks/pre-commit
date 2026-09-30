@@ -1,0 +1,40 @@
+#!/bin/sh
+# Pre-commit: formatting and lint, on the staged files only.
+#
+# Enabled with `npm run setup:hooks`, once per clone. `core.hooksPath` is local git config
+# and cannot be committed, so a fresh clone has no hooks until someone runs that; the
+# contributing guide says so at the point where it matters.
+#
+# The scope is deliberately narrow, and it is the scope of the finding this answers:
+# "formatting and lint fixes land as review noise". Tests and typechecking belong to CI.
+# `npm run test` takes seconds, and a hook that takes seconds is a hook people reach for
+# --no-verify, which is worse than having no hook at all.
+#
+# Nothing here rewrites files. A hook that formats mid-commit leaves the working tree
+# dirty *after* the commit was formed, and the resulting confusion is why people disable
+# hooks rather than trust them.
+
+set -e
+
+# The repository root comes from this script's own location rather than from the working
+# directory. Git sets a hook's working directory to the top of the working tree, so `$PWD`
+# would also be right today; resolving from `$0` means this keeps checking the tree that
+# *contains the hook* if it is ever run from elsewhere -- a wrapper, a manual invocation, or
+# a `core.hooksPath` pointing at a shared directory outside the repository.
+hooks_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(dirname -- "$hooks_dir")
+cd -- "$repo_root"
+
+biome='node_modules/.bin/biome'
+if [ ! -f "$biome" ]; then
+  echo "pre-commit: $biome is missing -- run 'npm ci' before committing." >&2
+  exit 1
+fi
+
+if ! "$biome" check --staged --no-errors-on-unmatched; then
+  echo '' >&2
+  echo "pre-commit: the staged files did not pass. Run 'npm run lint:fix', then re-stage." >&2
+  exit 1
+fi
+
+exit 0

@@ -74,6 +74,35 @@ export function hasFile(ctx: DetectorContext, relPath: string): boolean {
   return ctx.files.has(ctx.resolve(relPath))
 }
 
+/**
+ * Files that mean "this repository runs a hook on commit", with the framework's name.
+ *
+ * One list, because this was four copies of the same three paths in four detectors, and a
+ * convention added to one of them would be invisible to the other three -- which is how a
+ * tool ends up reporting "no pre-commit hooks" about a repository that has one.
+ *
+ * The name is the framework rather than the event, so a repository is reported as using
+ * `husky` or `githooks` and not as using "pre-commit", which tells a reader nothing they did
+ * not already know from the finding's own title.
+ *
+ * `.githooks/` is a plain git `core.hooksPath` directory: no dependency, no `prepare` script.
+ * `.pre-commit-config.yaml` is the Python framework, whose name is the framework.
+ */
+export const COMMIT_HOOK_FILES: ReadonlyArray<readonly [relPath: string, framework: string]> = [
+  ['.pre-commit-config.yaml', 'pre-commit'],
+  ['.husky/pre-commit', 'husky'],
+  ['.husky/commit-msg', 'husky'],
+  ['.githooks/pre-commit', 'githooks'],
+]
+
+/** The hook framework configured in this repository, or null when there is none. */
+export function hookFramework(ctx: DetectorContext): string | null {
+  for (const [relPath, framework] of COMMIT_HOOK_FILES) {
+    if (ctx.files.has(ctx.resolve(relPath))) return framework
+  }
+  return null
+}
+
 export function hasAnyFile(ctx: DetectorContext, relPaths: readonly string[]): boolean {
   return relPaths.some((p) => ctx.files.has(ctx.resolve(p)))
 }

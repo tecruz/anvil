@@ -16,6 +16,7 @@ import {
   type DetectorContext,
   hasFile,
   hasFileUnder,
+  hookFramework,
   type ProfileDraft,
   setMonorepo,
 } from '../detector.ts'
@@ -166,7 +167,8 @@ export const pythonDetector: Detector = {
     }
 
     if (hasFile(ctx, 'Dockerfile')) addTool(draft, 'container', 'docker')
-    if (hasFile(ctx, '.pre-commit-config.yaml')) addTool(draft, 'hooks', 'pre-commit')
+    const hook = hookFramework(ctx)
+    if (hook !== null) addTool(draft, 'hooks', hook)
     for (const f of ctx.files) {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
     }

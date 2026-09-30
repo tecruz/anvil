@@ -9,7 +9,7 @@
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { addCommand, addRisk, addTool, type ProfileDraft } from './detector.ts'
+import { addCommand, addRisk, addTool, COMMIT_HOOK_FILES, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
 import type { Docs, InstructionFile } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
@@ -215,9 +215,8 @@ export function detectGenericTooling(
     else if (/^(azure-pipelines\.ya?ml|Jenkinsfile)$/.test(f)) addTool(draft, 'ci', f)
     else if (f.startsWith('.circleci/')) addTool(draft, 'ci', f)
   }
-  if (hasAny(files, ['.pre-commit-config.yaml', '.husky/pre-commit', '.husky/commit-msg'])) {
-    addTool(draft, 'hooks', 'pre-commit')
-  }
+  const hook = COMMIT_HOOK_FILES.find(([f]) => files.has(resolve(f)))
+  if (hook !== undefined) addTool(draft, 'hooks', hook[1])
   if (existsSync(join(root, 'Dockerfile')) || hasAny(files, ['docker-compose.yml', 'compose.yaml', 'compose.yml'])) {
     addTool(draft, 'container', 'docker')
   }

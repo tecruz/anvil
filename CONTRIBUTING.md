@@ -17,6 +17,24 @@ leaves the reader guessing which one is real.
 While iterating, `npm run test:changed` runs the tests of the packages whose source changed,
 widened to everything that depends on them -- usually a fraction of the full suite.
 
+## Once per clone: turn the hook on
+
+```bash
+npm ci && npm run setup:hooks
+```
+
+`setup:hooks` sets `core.hooksPath` to `.githooks`, and it is a separate step because
+`core.hooksPath` is *local* git configuration -- it cannot be committed, so no clone can
+inherit it. Without it there are no hooks, silently.
+
+The hook checks formatting and lint on the staged files only, which takes about a second.
+It does not run the test suite, deliberately: `npm run test` takes seconds, and a hook that
+takes seconds is a hook people bypass with `--no-verify`, which is worse than no hook at
+all. Tests and typechecking are CI's job, and `npm run check` before you push.
+
+It also refuses to run when `node_modules` is missing, and says so, rather than failing with
+"command not found" or -- worse -- passing without checking anything.
+
 ## Things that will be asked
 
 - **An unverified change is not a proposal.** State the command you ran and what it printed.

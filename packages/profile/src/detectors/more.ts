@@ -22,6 +22,7 @@ import {
   type DetectorContext,
   filesUnder,
   hasFile,
+  hookFramework,
 } from '../detector.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
@@ -388,7 +389,8 @@ export const terraformDetector: Detector = {
       })
     }
 
-    if (hasFile(ctx, '.pre-commit-config.yaml')) addTool(draft, 'hooks', 'pre-commit')
+    const hook = hookFramework(ctx)
+    if (hook !== null) addTool(draft, 'hooks', hook)
     // A plan/apply typo is the classic expensive IaC mistake.
     addRisk(draft, {
       glob: '**/*.tf',

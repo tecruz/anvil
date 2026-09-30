@@ -15,6 +15,7 @@ import {
   addModule,
   addStack,
   addTool,
+  COMMIT_HOOK_FILES,
   type Detector,
   type DetectorContext,
   filesUnder,
@@ -239,13 +240,11 @@ export const nodeDetector: Detector = {
     if (hasFile(ctx, 'Dockerfile') || hasFile(ctx, 'docker-compose.yml') || hasFile(ctx, 'compose.yaml')) {
       addTool(draft, 'container', 'docker')
     }
-    if (
-      hasFile(ctx, '.husky/pre-commit') ||
-      hasFile(ctx, '.husky/commit-msg') ||
-      hasFile(ctx, '.pre-commit-config.yaml')
-    ) {
-      addTool(draft, 'hooks', 'pre-commit')
-    }
+    // Named for the framework rather than the event, so a repository is reported as using
+    // `githooks` or `husky` and not as using "pre-commit". `addTool` deduplicates, so the
+    // cross-ecosystem pass in `general.ts` reaching the same conclusion is harmless.
+    const hook = COMMIT_HOOK_FILES.find(([f]) => ctx.files.has(ctx.resolve(f)))
+    if (hook !== undefined) addTool(draft, 'hooks', hook[1])
     for (const f of ctx.files) {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
       if (f.endsWith('.tf')) addTool(draft, 'iac', f.split('/').slice(0, -1).join('/') || '.')

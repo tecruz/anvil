@@ -223,6 +223,30 @@ describe('a bzlmod Bazel tree is understood', () => {
   })
 })
 
+describe('a commit hook is detected wherever it lives', () => {
+  // This repository shipped a pre-commit hook and anvil reported "no pre-commit hooks" about
+  // itself: the walk skips hidden directories, and `.githooks` was not on the allow-list. A
+  // detector that cannot see the file cannot report it, and the rule was right about the
+  // walk and wrong about the repository.
+  const hooksOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile.tooling.hooks
+  }
+
+  test('a .githooks directory is found, and named for what it is', () => {
+    assert.deepEqual(hooksOf({ '.githooks/pre-commit': '#!/bin/sh\n' }), ['githooks'])
+  })
+
+  test('husky and the Python framework are found too', () => {
+    assert.deepEqual(hooksOf({ '.husky/pre-commit': 'npx lint-staged\n' }), ['husky'])
+    assert.deepEqual(hooksOf({ '.pre-commit-config.yaml': 'repos: []\n' }), ['pre-commit'])
+  })
+
+  test('a repository with no hook reports none', () => {
+    assert.deepEqual(hooksOf({ 'package.json': '{}' }), [])
+  })
+})
+
 describe('a project that does not live at the repository root is found', () => {
   // A Rust crate under `engine/` -- manifest, sources and tests all in the subdirectory --
   // produced no stack, no commands, and a TEST blocker claiming the tests could not be run.

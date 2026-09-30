@@ -108,9 +108,15 @@ const DEFAULT_MAX_DEPTH = 12
 /**
  * Hidden directories are almost always tooling rather than source, so they are skipped
  * by default. These are the ones a detector may legitimately need to read.
+ *
+ * `.githooks` is here for the same reason `.github` is: it is where a repository's own git
+ * hooks live, and "does this repository run a hook on commit" is unanswerable while the
+ * directory containing the answer is skipped. Skipping it meant this repository reported
+ * "no pre-commit hooks" about itself, while shipping one.
  */
 export const HIDDEN_DIR_ALLOW: ReadonlySet<string> = new Set([
   '.github',
+  '.githooks',
   '.config',
   '.devcontainer',
   '.claude',

@@ -4,12 +4,13 @@ Typescript project, with javascript.
 
 ## Commands
 
-- **Build:** `npm run build` `AGENTS.md:17`
-- **Test:** `npm run test` `AGENTS.md:13`
-- **Test (changed files only):** `npm run test:changed` `AGENTS.md:10`
-- **Lint:** `npm run lint` `AGENTS.md:14`
+- **Install:** `npm ci` _(detected)_ `package-lock.json`
+- **Build:** `npm run build` `AGENTS.md:7`
+- **Test:** `npm run test` `AGENTS.md:8`
+- **Test (changed files only):** `npm run test:changed` `CONTRIBUTING.md:17`
+- **Lint:** `npm run lint` `AGENTS.md:10`
 - **Format:** `npm run format` _(detected)_ `package.json:18`
-- **Typecheck:** `npm run check` `AGENTS.md:8`
+- **Typecheck:** `npm run typecheck` _(detected)_ `package.json:15`
 
 ## Layout
 
@@ -49,6 +50,7 @@ Changes here reach past code review. Say so in the PR description and get a seco
 
 - Linting is enforced by biome; run it before proposing a change.
 - Formatting is handled by biome.
+- Pre-commit hooks (githooks) run on every commit.
 - CI runs on 1 workflow file(s).
 
 ## For agents
