@@ -67,6 +67,21 @@ function profileOf(fixture: string): ProjectProfile {
   return withProfile(fixture, (profile) => profile)
 }
 
+/**
+ * Audit a directory the caller has already populated.
+ *
+ * Separate from `reportOf` because several rules read file *content* while evaluating --
+ * SECRET_SCAN decides whether a committed `.npmrc` holds a token -- so the tree has to
+ * still exist during the audit, not just while the profile is built.
+ */
+function auditDir(dir: string): ReadinessReport {
+  try {
+    return audit(buildProfile(dir, { ...VCS, root: dir }).profile)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 function reportOf(fixture: string): ReadinessReport {
   return withProfile(fixture, (profile) => audit(profile))
 }
@@ -394,6 +409,86 @@ describe('SECRET_SCAN', () => {
   test('passes on a repo with no secret-shaped files', () => {
     const r = reportOf('cold-empty')
     assert.equal(findFinding(r, 'SECRET_SCAN').status, 'pass')
+  })
+
+  test('a committed secret outside a test path still fails', () => {
+    // The rule must keep its teeth. Everything below is about the *false* positives, and a
+    // fix that quieted the rule entirely would be worse than the bug.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'config'), { recursive: true })
+    writeFileSync(join(dir, 'config', 'production.pem'), '-----BEGIN CERTIFICATE-----\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'fail')
+    assert.match(f.detail, /production\.pem/)
+  })
+
+  test('a real credential under a test path is still reported in the detail', () => {
+    // Fixtures are not failures, but they are also not invisible: the names are listed so a
+    // human can confirm they really are fixtures. The path deliberately has no
+    // `fixtures` segment, because the walker skips those directories outright -- so this
+    // covers the case that actually reaches the rule, like `tests/certs/expired/server.key`
+    // in requests.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'tests', 'certs'), { recursive: true })
+    writeFileSync(join(dir, 'tests', 'certs', 'expired.key'), '-----BEGIN PRIVATE KEY-----\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /test fixtures/)
+    assert.match(f.detail, /expired\.key/)
+  })
+
+  test('a .npmrc is a leak only when it holds a token', () => {
+    // Auditing ten real repositories failed this rule on four of them for a committed
+    // `.npmrc` containing a registry URL and a scope. A filename is not evidence.
+    const clean = materialize('cold-empty')
+    writeFileSync(
+      join(clean, '.npmrc'),
+      'registry=https://registry.npmjs.org/\n@acme:registry=https://npm.acme.example\n',
+    )
+    assert.equal(findFinding(auditDir(clean), 'SECRET_SCAN').status, 'pass')
+
+    const leaky = materialize('cold-empty')
+    writeFileSync(join(leaky, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_abc123\n')
+    const f = findFinding(auditDir(leaky), 'SECRET_SCAN')
+    assert.equal(f.status, 'fail')
+    assert.match(f.detail, /\.npmrc/)
+  })
+
+  test('an .env under tests/ or playground/ is a fixture, not a leak', () => {
+    // The real repositories that triggered this: `tests/test_apps/.env` in a Python web
+    // framework, and one `.env` per playground in a bundler's fixture tree.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'tests', 'test_apps'), { recursive: true })
+    writeFileSync(join(dir, 'tests', 'test_apps', '.env'), 'SECRET_KEY=not-a-real-secret\n')
+    mkdirSync(join(dir, 'playground', 'env-nested'), { recursive: true })
+    writeFileSync(join(dir, 'playground', 'env-nested', '.env.production'), 'TOKEN=x\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+})
+
+describe('TEST_FAST', () => {
+  test('a documented test command proves a runner exists, so the rule warns rather than fails', () => {
+    // The bug: "is there a test runner" was answered from the tooling list alone, which is
+    // silent about plenty of runners. A Rust project documenting `cargo test` was reported
+    // as having no test runner and failed a high-severity rule -- the exact false failure
+    // the plan's "no false blockers" criterion forbids.
+    const dir = materialize('rust-crate')
+    const f = findFinding(auditDir(dir), 'TEST_FAST')
+    assert.notEqual(f.status, 'fail', f.detail)
+  })
+
+  test('a capable toolchain with no documented subset is never a failure', () => {
+    // Per the plan's detection spec, verbatim: "a repo with pytest but no documented subset
+    // must not fail TEST_FAST".
+    for (const fixture of ['python-django', 'go-module', 'rust-crate', 'node-npm']) {
+      const f = findFinding(reportOf(fixture), 'TEST_FAST')
+      assert.notEqual(f.status, 'fail', `${fixture}: ${f.detail}`)
+    }
+  })
+
+  test('a documented fast subset still passes', () => {
+    assert.equal(findFinding(reportOf('go-module'), 'TEST_FAST').status, 'pass')
   })
 })
 

@@ -1,9 +1,9 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M6 complete**, plus a review pass (see
-> [Review pass](#review-pass--m6-hardening-2026-09-30)). The tool is built; what it has not
-> done yet is run against ten real repositories, which is the exit criterion M1 wrote.
+> Status: **M0–M6 complete**, plus a review pass, the ten-repository audit and the last
+> two items (see [Review pass](#review-pass--m6-hardening-2026-09-30)). M1's exit
+> criterion -- ten real repositories, no false blockers -- is met.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -1101,17 +1101,46 @@ embedded ~35 kB of YAML-derived strings. The previous commit's figure was simply
 (The review pass below found and fixed seven defects this milestone did not catch; the
 442 were green while all seven were live.)
 
+### The last two items: `playbook add`, and the governance files
+
+**`anvil playbook add <path|url>`** completes the extensibility claim -- a company playbook
+without a fork. The order is the design: obtain, **validate, then write**. A playbook is
+executable configuration (its globs decide which files count as high risk, its verify
+commands are what a crew runs), so installing an unvalidated one is installing untested
+behaviour, and a failure names the path in the file. It refuses to replace an existing id
+without `--force`, refuses `http` for a fetch, caps the download at 256 kB in a 15s timeout,
+and writes to `~/.anvil/playbooks` -- never into the repository you are standing in.
+
+Which exposed a prerequisite: `loadPlaybooks` only read `ANVIL_PLAYBOOKS`, so a playbook
+installed the obvious way was invisible. It now layers built-ins, then `~/.anvil/playbooks`,
+then `ANVIL_PLAYBOOKS` -- and the first version of that change dropped the built-ins
+entirely, taking a fifteen-playbook registry down to one. A test now pins "a user playbook
+adds to the built-ins rather than replacing them", because a user would have discovered it
+as *anvil suddenly has no Terraform guidance*.
+
+**Governance.** `LICENSE` is MIT. `PULL_REQUEST_TEMPLATE.md`, `CONTRIBUTING.md`,
+`CODEOWNERS` and `SECURITY.md` all exist. The last two are **templates with marked
+placeholders**, because both need values I do not have: real team handles and a monitored
+security address. A CODEOWNERS rule naming a team that does not exist does not fail loudly
+-- GitHub silently falls back to whoever can review -- and a security address nobody watches
+is worse than none, because a researcher who reports a real vulnerability and gets silence
+concludes the project is not worth reporting to. Both say so at the top, and the
+contributing guide repeats that `playbook check` runs in CI.
+
 ## First move
 
-**M6 and the review pass are complete.** The remaining work, in the order it should be done:
+**M6, the review pass, the ten-repository audit, and the last two items are all done.** What
+is left, in the order it should be done:
 
-1. **`anvil playbook add <path|url>`**, so a company playbook can be added without a fork.
-   The rest of the `playbook` family now exists; this is the last piece of the
-   extensibility claim.
-2. **Run `anvil doctor` on ten real repositories** -- M1's exit criterion, still unmet.
-   Pointing it at this one found nine defects, so the other nine are likely to as well.
-3. **Governance decisions that need a human, not a tool**: CODEOWNERS, a PR template, a
-   LICENSE. `anvil doctor` will keep reporting them until someone decides.
+1. **Replace the placeholders**: real handles in `CODEOWNERS`, a monitored address in
+   `SECURITY.md`. Until then `anvil doctor` will keep reporting both, which is correct.
+2. **More real repositories**, and the awkward shapes this set did not cover: a monorepo
+   whose tooling lives in a subdirectory, a Bazel tree without `WORKSPACE`, a polyglot
+   repository, and a repository whose lockfile lives somewhere unusual.
+3. **A pre-commit hook** (`PRECOMMIT` still warns -- deliberately, since a hook that runs
+   formatting on every commit for every contributor is a choice, not a default).
+4. **Publishing** needs credentials and a decision about the package name, so it is prepared
+   but not performed.
 4. Publishing to the npm registry needs credentials and a decision about the package name,
    so it is prepared but not performed.
 
@@ -1387,6 +1416,86 @@ does not exist. Now the section of this document that actually specifies the for
 version range". There is no version-range field anywhere in the schema, so there was nothing
 to validate; a fake version check would have been theatre. The structural half that the data
 *can* support is what shipped.
+
+### M1's exit criterion, met: ten real repositories
+
+M1 wrote the criterion and it went unmet through six milestones: *"on 10 real repos: no
+false blockers, verify commands correctly found"*. Ten repositories were cloned and audited
+-- express, zod, vite, axios (Node); requests, flask (Python); gin (Go); ripgrep (Rust);
+sinatra (Ruby); laravel (PHP) -- and **the criterion failed on the first run, three times
+over.** All three were found by running the tool on code nobody here wrote, which is
+precisely the argument for the criterion.
+
+**1. `SECRET_SCAN` failed on six of ten.** Every single hit was a test fixture:
+`tests/certs/expired/server.key` in requests, `tests/test_apps/.env` in flask, one `.env`
+per playground in vite's fixture tree, `tests/unit/adapters/key.pem` in axios -- and a
+committed `.npmrc` in four of them containing a registry URL and a scope. A rule that fires
+on six of ten mature repositories is a rule whose reader learns to ignore it, which costs
+more than the one real leak it might catch. Two changes, both narrowing the *false* side
+only: a secret-shaped file under a test/fixture path is a fixture, and is reported in the
+detail but not failed; and `.npmrc` is decided by *content* (does it hold an auth token?)
+rather than by filename. `docs` is deliberately not treated as a fixture path, so a
+credential committed there still fails.
+
+**2. `TEST_FAST` failed on ripgrep.** A Rust project documenting `cargo test` was reported
+as having *no test runner*, because "is there a runner" was answered from the tooling list
+alone, which is silent about plenty of runners -- and the rule then failed a high-severity
+check on a repository whose tests run perfectly well. The plan's own spec forbids exactly
+this: *"a repo with pytest but no documented subset must not fail TEST_FAST"*. A documented
+or detected test command is now itself proof a runner exists, and the residual case (only
+an inferred command, no recognised runner) is a warning that says plainly that nothing is
+proven missing.
+
+The plan specifies `info` for that case, but `Finding.status` is a published contract of
+`pass | warn | fail | na` that the JSON schema and the opencode plugin both depend on.
+Adding a fifth status to say "soft warning" would ripple through scoring, the report shape
+and the plugin, so the distinction is carried in the detail text and the requirement that
+actually matters -- never failing -- is met.
+
+**3. sinatra reported no commands at all**, failing `TEST` as a **blocker** on a repository
+whose tests run fine with `rake test`. Two bugs in one place: `Minitest::TestTask.create`
+(minitest 6's API) was not a recognised Rake task idiom, and the command was hardcoded to
+`bundle exec rspec` regardless -- so a minitest project would have been handed an rspec
+command with file:line evidence that fails when an agent runs it. Confident and wrong, the
+output this tool exists to prevent. The detector now knows the four task idioms that occur
+in practice and offers `bundle exec rake test` -- which is what the Rakefile provides, and
+is correct whichever framework sits underneath.
+
+**4. `INSTALL_DOC` warned on ten of ten.** Nothing ever emitted an `install` command: the
+kind was in the type, the generated `AGENTS.md` had a row for it, and no detector filled it
+in. It is now derived from the lockfile, which is evidence rather than a guess --
+`package-lock.json` means `npm ci`, `pnpm-lock.yaml` means `pnpm install --frozen-lockfile`.
+The detail that matters: `npm ci` *requires* a lockfile, so a Node project that has
+committed none gets `npm install`, labelled `inferred`, because recommending the
+reproducible form to a repository that cannot run it would make the first command a new
+contributor types a failure. Go is given no install command, because there is no install
+step.
+
+**The result, after the fixes:**
+
+| repository | before | after | remaining findings |
+|---|---|---|---|
+| axios | 85 (A) | **93 (A)** | none failing |
+| express | 53 (D) | **62 (C)** | `AGENTS_COMMANDS` (no AGENTS.md) |
+| flask | 54 (D) | **62 (C)** | `AGENTS_COMMANDS` (no AGENTS.md) |
+| gin | 67 (C) | 67 (C) | `AGENTS_COMMANDS` (no AGENTS.md) |
+| laravel | 57 (C) | **65 (C)** | `AGENTS_COMMANDS` (instructions name no command) |
+| requests | 58 (C) | **67 (C)** | `AGENTS_COMMANDS` (no AGENTS.md) |
+| ripgrep | 57 (C) | **61 (C)** | `AGENTS_COMMANDS` (no AGENTS.md) |
+| sinatra | 41 (D) | **61 (C)** | `AGENTS_COMMANDS` (no AGENTS.md) |
+| vite | 77 (B) | **85 (A)** | none failing |
+| zod | 80 (B) | **87 (A)** | none failing |
+
+**Every remaining blocker and high finding is a true positive**: eight of these repositories
+genuinely have no agent instructions, and laravel's instructions name no runnable command.
+That is the finding the tool exists to report, not a defect in it. Detection held up well
+where it was not broken -- `go test -short ./...` found unprompted for gin, `php artisan
+test` for laravel, `ruff check` and `mypy` for flask, `pnpm test` for vite.
+
+The criterion is met. It is also met narrowly: ten repositories is ten, they are all
+mid-to-large projects in five ecosystems, and none of them is the awkward case (a monorepo
+whose tooling lives in a subdirectory, a Bazel-without-WORKSPACE tree, a polyglot repo).
+The honest next step is more of the same, not a different kind of test.
 
 ### What is still open
 

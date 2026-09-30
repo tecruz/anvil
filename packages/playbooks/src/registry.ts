@@ -13,8 +13,9 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { AnvilError, ErrorCode } from '@anvil/core'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { AnvilError, CONFIG_DIR_NAME, ErrorCode } from '@anvil/core'
 import { BUILTIN_PLAYBOOK_SOURCE, generatedPlaybookFiles } from './generated.ts'
 import { type Playbook, parsePlaybook } from './schema.ts'
 
@@ -51,46 +52,82 @@ export function loadBuiltins(): LoadResult {
   return parsePlaybookFiles(generatedPlaybookFiles)
 }
 
-/** Load playbooks from a directory of YAML files, merged over the built-ins. */
-export function loadPlaybooksFromDirectory(dir: string): LoadResult {
-  const builtins = loadBuiltins()
-  if (!existsSync(dir)) {
-    return {
-      playbooks: builtins.playbooks,
-      warnings: [...builtins.warnings, `playbook directory not found: ${dir}`],
-    }
-  }
-
-  const files = new Map<string, string>()
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue
-    files.set(join(dir, entry.name), readFileSync(join(dir, entry.name), 'utf8'))
-  }
-  if (files.size === 0) {
-    return {
-      playbooks: builtins.playbooks,
-      warnings: [...builtins.warnings, `no .yaml playbooks in ${dir}`],
-    }
-  }
-
-  const loaded = parsePlaybookFiles(files)
-  const byId = new Map(builtins.playbooks.map((p) => [p.id, p]))
-  for (const playbook of loaded.playbooks) byId.set(playbook.id, playbook)
-
-  return {
-    playbooks: [...byId.values()],
-    warnings: [...builtins.warnings, ...loaded.warnings],
-  }
+/**
+ * Built-ins, then each directory in order, later winning by id.
+ *
+ * `warnAbout` names the directories whose absence or emptiness is worth reporting, which
+ * is every explicitly configured one and not the default home directory.
+ */
+export function userPlaybookDir(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.ANVIL_CONFIG_HOME
+  const home = override !== undefined && override !== '' ? resolve(override) : homedir()
+  return join(home, CONFIG_DIR_NAME, 'playbooks')
 }
 
 /**
- * Load the effective registry: built-ins, overridden or extended by
- * `$ANVIL_PLAYBOOKS` (a user or company directory).
+ * Load the effective registry: built-ins, then the user's default directory, then
+ * `$ANVIL_PLAYBOOKS` (a user or company directory) merged over them.
+ *
+ * Three layers rather than one, because "where do my playbooks live" has two reasonable
+ * answers and a user should not have to pick: the home directory is the default, and the
+ * environment variable is for a company checkout several people share. Later layers win by
+ * id, so a company playbook can correct a built-in without forking the registry.
+ *
+ * The built-ins are always the base. A user directory replaces nothing -- it adds to, and
+ * overrides by id. Dropping the built-ins when a user has one playbook would be a silent,
+ * catastrophic narrowing of what the tool knows, discovered only by a user wondering why
+ * their Terraform guidance vanished.
  */
 export function loadPlaybooks(env: NodeJS.ProcessEnv = process.env): LoadResult {
-  const dir = env.ANVIL_PLAYBOOKS
-  if (dir === undefined || dir === '') return loadBuiltins()
-  return loadPlaybooksFromDirectory(dir)
+  const override = env.ANVIL_PLAYBOOKS
+  const userDir = userPlaybookDir(env)
+  const hasOverride = override !== undefined && override !== ''
+
+  // The default directory not existing is the normal case, not a problem: nobody has added
+  // a playbook yet. Only an explicitly configured directory that is missing is worth saying.
+  if (!hasOverride && !existsSync(userDir)) return loadBuiltins()
+
+  const dirs = hasOverride ? [userDir, override as string] : [userDir]
+  return mergeWithBuiltins(dirs, new Set(dirs.filter((d) => d !== userDir)))
+}
+
+/** Load playbooks from a directory of YAML files, merged over the built-ins. */
+export function loadPlaybooksFromDirectory(dir: string): LoadResult {
+  return mergeWithBuiltins([dir], new Set([dir]))
+}
+
+/**
+ * Built-ins, then each directory in order, later winning by id.
+ *
+ * `warnAbout` names the directories whose absence or emptiness is worth reporting, which
+ * is every explicitly configured one and not the default home directory.
+ */
+function mergeWithBuiltins(dirs: readonly string[], warnAbout: ReadonlySet<string>): LoadResult {
+  const builtins = loadBuiltins()
+  const byId = new Map<string, Playbook>(builtins.playbooks.map((p) => [p.id, p]))
+  const warnings = [...builtins.warnings]
+
+  for (const dir of dirs) {
+    if (!existsSync(dir)) {
+      if (warnAbout.has(dir)) warnings.push(`playbook directory not found: ${dir}`)
+      continue
+    }
+    const files = new Map<string, string>()
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !/\.ya?ml$/.test(entry.name)) continue
+      const path = join(dir, entry.name)
+      files.set(path, readFileSync(path, 'utf8'))
+    }
+    if (files.size === 0) {
+      if (warnAbout.has(dir)) warnings.push(`no .yaml playbooks in ${dir}`)
+      continue
+    }
+    const loaded = parsePlaybookFiles(files)
+    for (const playbook of loaded.playbooks) byId.set(playbook.id, playbook)
+    warnings.push(...loaded.warnings)
+  }
+
+  return { playbooks: [...byId.values()], warnings }
 }
 
 export { playbookId }

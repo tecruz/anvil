@@ -40,6 +40,7 @@ export {
   loadPlaybooksFromDirectory,
   parsePlaybookFiles,
   requireDirectory,
+  userPlaybookDir,
 } from './registry.ts'
 export {
   type CommunityResource,

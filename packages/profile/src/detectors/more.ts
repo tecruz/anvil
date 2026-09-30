@@ -33,15 +33,32 @@ function read(ctx: DetectorContext, rel: string): string | null {
 /**
  * Find a Rake task definition.
  *
- * Handles both idioms: `task :spec => ...` and `RSpec::Core::RakeTask.new(:spec)`. The
- * second is how most Rails projects declare their test task, so matching only the first
- * would miss it.
+ * Handles the four idioms that actually appear:
+ *
+ *   - `task :test => ...`                     the plain declaration
+ *   - `Rake::TestTask.new(:test)`             rake's own test task
+ *   - `Minitest::TestTask.create`             minitest 6+; with no argument it creates
+ *     the default `test` task, which is why a bare `.create` has to count
+ *   - `RSpec::Core::RakeTask.new(:spec)`      how most Rails projects declare `spec`
+ *
+ * Only the first and last were handled before, which meant a minitest project with a
+ * Rakefile reported no test command at all -- and the audit's `TEST` rule then failed as a
+ * blocker on a repository whose tests run perfectly well with `rake test`.
  */
 function rakeTask(text: string, task: string): number | null {
-  return (
-    findLine(text, new RegExp(`^\\s*task\\s+:${task}\\b`, 'm')) ??
-    findLine(text, new RegExp(`RakeTask\\.new\\(:${task}\\b`))
-  )
+  const forms: RegExp[] = [
+    new RegExp(`^\\s*task\\s+:${task}\\b`, 'm'),
+    new RegExp(`RakeTask\\.new\\(:['"]?${task}\\b`),
+    new RegExp(`Minitest::TestTask\\.create\\(\\s*:['"]${task}\\b`),
+  ]
+  // A bare `Minitest::TestTask.create` defines the default `test` task, so it counts for
+  // `test` and for nothing else.
+  if (task === 'test') forms.push(/Minitest::TestTask\.create\b/)
+  for (const re of forms) {
+    const line = findLine(text, re)
+    if (line !== null) return line
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +83,21 @@ export const rubyDetector: Detector = {
     const rake = hasFile(ctx, 'Rakefile') ? read(ctx, 'Rakefile') : null
     if (rake !== null) {
       // A Rake task definition is real evidence; anything else is a guess.
-      if (rakeTask(rake, 'spec') !== null || rakeTask(rake, 'test') !== null) {
+      //
+      // Which command to offer depends on which task exists. Offering `rspec` for a project
+      // that declares a `test` task and uses minitest is the confident-and-wrong output
+      // this tool exists to avoid: the command is real-looking, carries file:line evidence,
+      // and fails when an agent runs it. `rake test` is what the Rakefile actually provides,
+      // and it is correct whichever framework is underneath.
+      const hasSpec = rakeTask(rake, 'spec') !== null
+      const hasTest = rakeTask(rake, 'test') !== null
+      if (hasTest && !hasSpec) {
+        addCommand(draft, 'test', {
+          cmd: 'bundle exec rake test',
+          source: 'detected',
+          evidence: 'Rakefile',
+        })
+      } else if (hasSpec || hasTest) {
         addCommand(draft, 'test', {
           cmd: 'bundle exec rspec',
           source: 'detected',

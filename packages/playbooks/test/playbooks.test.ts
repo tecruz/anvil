@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -9,6 +9,7 @@ import { audit } from '@anvil/audit'
 import {
   buildPlan,
   loadBuiltins,
+  loadPlaybooks,
   loadPlaybooksFromDirectory,
   matchPlaybooks,
   type Plan,
@@ -232,6 +233,79 @@ describe('user playbook directory', () => {
    * project intends to grow is a test that will be deleted or weakened instead of fixed.
    */
   const builtinCount = (): number => loadBuiltins().playbooks.length
+
+  test('the default user directory is loaded without any environment variable', () => {
+    // `anvil playbook add` writes to the home directory, so a playbook installed the
+    // obvious way has to be picked up the obvious way. Before this, only ANVIL_PLAYBOOKS
+    // was read and an installed playbook was invisible.
+    const home = tempDir()
+    const dir = join(home, '.anvil', 'playbooks')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'acme.yaml'),
+      'id: acme\ntitle: ACME\npriority: 65\nmatch:\n  files: ["acme.config.yaml"]\n',
+    )
+    const { playbooks } = loadPlaybooks({ ANVIL_CONFIG_HOME: home } as NodeJS.ProcessEnv)
+    assert.ok(
+      playbooks.some((p) => p.id === 'acme'),
+      'the installed playbook should be active',
+    )
+  })
+
+  test('a user playbook adds to the built-ins rather than replacing them', () => {
+    // The bug this pins: the multi-directory loader started from an empty map, so adding
+    // one company playbook silently reduced the registry from fifteen to one. A user would
+    // have discovered it as "anvil suddenly has no Terraform guidance".
+    const home = tempDir()
+    const dir = join(home, '.anvil', 'playbooks')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'acme.yaml'),
+      'id: acme\ntitle: ACME\npriority: 65\nmatch:\n  files: ["acme.config.yaml"]\n',
+    )
+    const { playbooks } = loadPlaybooks({ ANVIL_CONFIG_HOME: home } as NodeJS.ProcessEnv)
+    assert.equal(playbooks.length, builtinCount() + 1)
+    for (const id of ['node', 'terraform', 'python']) {
+      assert.ok(
+        playbooks.some((p) => p.id === id),
+        `${id} should still be registered`,
+      )
+    }
+  })
+
+  test('a user playbook can override a built-in by id', () => {
+    const home = tempDir()
+    const dir = join(home, '.anvil', 'playbooks')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'node.yaml'),
+      'id: node\ntitle: Company node rules\npriority: 99\nmatch:\n  files: ["package.json"]\n',
+    )
+    const { playbooks } = loadPlaybooks({ ANVIL_CONFIG_HOME: home } as NodeJS.ProcessEnv)
+    assert.equal(playbooks.filter((p) => p.id === 'node').length, 1)
+    assert.equal(playbooks.find((p) => p.id === 'node')?.title, 'Company node rules')
+  })
+
+  test('an absent default directory is not a warning', () => {
+    // Everybody hits this before they have added anything; warning about it would mean the
+    // first thing every user sees is a complaint about a directory they never made.
+    const { playbooks, warnings } = loadPlaybooks({
+      ANVIL_CONFIG_HOME: tempDir(),
+    } as NodeJS.ProcessEnv)
+    assert.equal(warnings.length, 0)
+    assert.equal(playbooks.length, builtinCount())
+  })
+
+  test('an explicitly configured directory that is missing does warn', () => {
+    const { warnings } = loadPlaybooks({
+      ANVIL_CONFIG_HOME: tempDir(),
+      ANVIL_PLAYBOOKS: join(tempDir(), 'does-not-exist'),
+    } as NodeJS.ProcessEnv)
+    assert.ok(
+      warnings.some((w) => w.includes('playbook directory not found')),
+      warnings.join('; '),
+    )
+  })
 
   test('merges over the built-ins by id', () => {
     const dir = tempDir()

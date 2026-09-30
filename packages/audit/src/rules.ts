@@ -12,6 +12,8 @@
  *     the reader to ignore the report.
  */
 
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ProjectProfile } from '@anvil/profile'
 import type { Fix, Layer, Severity, Status } from './types.ts'
 
@@ -342,17 +344,40 @@ const TEST_FAST: Rule = {
       return pass('A changed-files test subset is described in the instructions', ['AGENTS.md'])
     }
 
-    const hasRunner = ctx.profile.tooling.test.length > 0
-    if (hasRunner) {
+    // "Is there a test runner?" cannot be answered from the tooling list alone. That list
+    // names the runners the detectors recognise, and it is silent about plenty of them --
+    // a Rust project whose documented command is `cargo test` was reported as having *no
+    // test runner*, and the rule then failed a repository whose tests run fine. A documented
+    // or detected test command is itself proof that a runner exists.
+    const named = ctx.profile.tooling.test
+    const testEntries = ctx.profile.commands.test ?? []
+    const fromCommands = testEntries
+      .filter((e) => e.source !== 'inferred')
+      .map((e) => e.cmd.split(/\s+/)[0] ?? e.cmd)
+      .filter((n) => n !== '')
+    const runners = [...new Set([...named, ...fromCommands])]
+
+    if (runners.length > 0) {
       return warn(
-        `A test runner is configured (${ctx.profile.tooling.test.join(', ')}) but no changed-files subset is documented. Full-suite feedback on every iteration makes agents unusable.`,
-        ctx.profile.tooling.test,
+        `A test runner is configured (${runners.join(', ')}) but no changed-files subset is documented. Full-suite feedback on every iteration makes agents unusable.`,
+        [...named, ...testEntries.map((e) => e.evidence ?? '')],
         derived('AGENTS.md', 'Document a changed-files test command', 0.8),
       )
     }
-    return fail(
-      'No changed-files test subset documented and no test runner detected.',
-      [],
+    // Only an inferred command with no recognised runner reaches here, and the plan is
+    // explicit about this case: "a toolchain with a changed-files capability but no
+    // documented subset is a prompt for the agent to *add* a fast path, not evidence that
+    // one exists" -- so it must not fail. It is reported as a warning whose detail says
+    // plainly that nothing is proven missing.
+    //
+    // The plan's wording for this case is `info`, but `Finding.status` is a published
+    // contract of `pass | warn | fail | na` and the JSON schema the opencode plugin reads.
+    // Adding a fifth status to express "soft warning" would ripple through scoring, the
+    // report shape and the plugin, so the distinction is carried in the detail text
+    // instead -- and the requirement that actually matters, never failing, is met.
+    return warn(
+      'No changed-files test subset is documented. Adding one is the single highest-leverage change for agent usability; nothing here is proven missing.',
+      testEntries.map((e) => e.evidence ?? ''),
       derived('AGENTS.md', 'Document a changed-files test command', 0.8),
     )
   },
@@ -862,6 +887,63 @@ const ENV_EXAMPLE: Rule = {
 }
 
 /** Secret scanning is filename-and-pattern based in M1; entropy scanning lands later. */
+/**
+ * Path segments that mean "sample data, not the product".
+ *
+ * A `.env`, a `.pem` or a private key under one of these is a *fixture* -- a test that
+ * proves the code handles a credential, or a playground that exercises env parsing. This
+ * list exists because the first audit of ten real repositories failed SECRET_SCAN on six of
+ * them, every time on exactly this: expired test certificates under `tests/certs`, a
+ * `.env` under `tests/test_apps`, a `.env` per playground in a bundler's fixture tree. A
+ * rule that fires on every mature repository teaches its reader to ignore it, which costs
+ * more than the one real leak it might catch.
+ *
+ * `docs` is deliberately **not** here: sample files in documentation are common, but a
+ * credential committed under `docs/` is still a leak worth failing on.
+ */
+const TEST_DATA_SEGMENTS: ReadonlySet<string> = new Set([
+  'test',
+  'tests',
+  '__tests__',
+  'spec',
+  'specs',
+  'testing',
+  'testdata',
+  'test-data',
+  'fixture',
+  'fixtures',
+  '__fixtures__',
+  'playground',
+  'playgrounds',
+  'example',
+  'examples',
+  'sample',
+  'samples',
+])
+
+function isTestDataPath(path: string): boolean {
+  return path.split('/').some((segment) => TEST_DATA_SEGMENTS.has(segment.toLowerCase()))
+}
+
+/**
+ * Credential files that are only suspicious by *content*.
+ *
+ * A committed `.npmrc` is not a leak: it usually holds a registry URL and a scope. It
+ * becomes one the moment it contains an auth token, so this reads the file and decides
+ * rather than guessing from the name. (`.netrc` and `.pypirc` are *meant* to hold
+ * credentials, so those stay filename-based.)
+ */
+function npmrcHasToken(root: string, path: string): boolean {
+  try {
+    const text = readFileSync(join(root, ...path.split('/')), 'utf8')
+    return /(_authToken|_auth\s*=|_password\s*=|always-auth\s*=\s*true)/i.test(text)
+  } catch {
+    // Unreadable is not evidence of a token, and guessing "secret" on an unreadable file
+    // is the same false positive by another route.
+    return false
+  }
+}
+
 const SECRET_SCAN: Rule = {
   id: 'SECRET_SCAN',
   layer: 'governance',
@@ -869,15 +951,39 @@ const SECRET_SCAN: Rule = {
   title: 'No obvious committed secrets',
   order: 58,
   evaluate(ctx) {
-    const suspicious = ctx.profile.files.filter((f) =>
+    const shaped = ctx.profile.files.filter((f) =>
       /(^|\/)\.env(\.(local|production|prod|secret))?$|\.(pem|p12|pfx|key|keystore)$|(^|\/)id_(rsa|dsa|ecdsa|ed25519)$|(^|\/)\.npmrc$|(^|\/)\.pypirc$|(^|\/)\.netrc$/.test(
         f,
       ),
     )
-    if (suspicious.length === 0) return pass('No secret-shaped files tracked', ['.gitignore'])
+
+    // Split what a credential file *looks like* from what it *is*: a fixture under a test
+    // path, or a config file with no token in it, is not a committed secret.
+    const fixtures: string[] = []
+    const real: string[] = []
+    for (const file of shaped) {
+      if (isTestDataPath(file)) {
+        fixtures.push(file)
+        continue
+      }
+      if (/(^|\/)\.npmrc$/.test(file) && !npmrcHasToken(ctx.profile.root, file)) {
+        fixtures.push(file)
+        continue
+      }
+      real.push(file)
+    }
+
+    if (real.length === 0) {
+      return pass(
+        fixtures.length === 0
+          ? 'No secret-shaped files tracked'
+          : `No committed secrets. ${fixtures.length} secret-shaped file(s) are test fixtures or token-free config: ${fixtures.slice(0, 3).join(', ')}${fixtures.length > 3 ? ', ...' : ''}`,
+        fixtures.slice(0, 4),
+      )
+    }
     return fail(
-      `${suspicious.length} secret-shaped file(s) tracked in git: ${suspicious.slice(0, 4).join(', ')}`,
-      suspicious.slice(0, 6),
+      `${real.length} secret-shaped file(s) tracked in git: ${real.slice(0, 4).join(', ')}`,
+      real.slice(0, 6),
       {
         kind: 'manual',
         origin: 'derived',

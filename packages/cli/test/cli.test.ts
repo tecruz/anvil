@@ -192,10 +192,72 @@ describe('anvil playbook', () => {
     assert.equal(data.counts.error, 0)
   })
 
+  test('add installs a playbook into the home directory and it is active immediately', () => {
+    const home = mkdtempSync(join(tmpdir(), 'anvil-pb-home-'))
+    const source = join(home, 'acme.yaml')
+    writeFileSync(
+      source,
+      [
+        'id: acme',
+        'title: ACME internal platform',
+        'priority: 65',
+        'match:',
+        "  files: ['**/acme.config.yaml']",
+        'verify:',
+        "  test: ['make verify']",
+        '',
+      ].join('\n'),
+    )
+    const installed = runAnvil(['playbook', 'add', source], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.equal(installed.code, 0, installed.stderr)
+    assert.match(installed.stdout, /installed acme/)
+    assert.ok(existsSync(join(home, '.anvil', 'playbooks', 'acme.yaml')), 'the file should exist')
+
+    // And it is loaded with no environment variable pointing at it -- the whole point of
+    // putting it in the home directory rather than the current repository.
+    const listed = runAnvil(['playbook', 'list'], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.match(listed.stdout, /\bacme\b/)
+    // ...without dropping the built-ins on the floor.
+    assert.match(listed.stdout, /\bterraform\b/)
+  })
+
+  test('add refuses to replace an existing playbook unless forced', () => {
+    const home = mkdtempSync(join(tmpdir(), 'anvil-pb-home-'))
+    const source = join(home, 'acme.yaml')
+    writeFileSync(source, 'id: acme\ntitle: ACME\nmatch:\n  files: ["a.yaml"]\n')
+    assert.equal(runAnvil(['playbook', 'add', source], { env: { ANVIL_CONFIG_HOME: home } }).code, 0)
+
+    writeFileSync(source, 'id: acme\ntitle: ACME v2\nmatch:\n  files: ["a.yaml"]\n')
+    const clash = runAnvil(['playbook', 'add', source], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.equal(clash.code, 2)
+    assert.match(clash.stderr, /already installed/)
+
+    const forced = runAnvil(['playbook', 'add', source, '--force'], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.equal(forced.code, 0)
+    assert.match(forced.stdout, /replaced acme/)
+  })
+
+  test('add validates before it writes, so a broken playbook installs nothing', () => {
+    // A playbook is executable configuration: its globs decide which files count as high
+    // risk. Writing an unvalidated one is installing untested behaviour.
+    const home = mkdtempSync(join(tmpdir(), 'anvil-pb-home-'))
+    const source = join(home, 'broken.yaml')
+    writeFileSync(source, 'id: Broken\ntitle: no\nmatch:\n  files: []\n') // uppercase id, no match
+    const res = runAnvil(['playbook', 'add', source], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.notEqual(res.code, 0)
+    assert.ok(!existsSync(join(home, '.anvil', 'playbooks', 'broken.yaml')), 'nothing should be written')
+  })
+
+  test('add refuses an http url', () => {
+    const res = runAnvil(['playbook', 'add', 'http://example.com/acme.yaml'])
+    assert.equal(res.code, 2)
+    assert.match(res.stderr, /Refusing to fetch a playbook over http/)
+  })
+
   test('an unknown subcommand is a usage error naming the real ones', () => {
     const res = runAnvil(['playbook', 'frobnicate'])
     assert.equal(res.code, 2)
-    assert.match(res.stderr, /list, show, check/)
+    assert.match(res.stderr, /list, show, check, add/)
   })
 })
 

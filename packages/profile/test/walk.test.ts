@@ -129,6 +129,46 @@ describe('buildProfile does not detect stacks that only exist in fixtures', () =
   })
 })
 
+describe('the install command is derived from the lockfile', () => {
+  // Ten real repositories, every one of which reported "no documented dependency-install
+  // command": nothing ever emitted an `install` command, even though the kind existed in
+  // the type and the generated AGENTS.md had a row for it.
+  const installOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile.commands.install?.[0]
+  }
+
+  test('a lockfile names the manager and is labelled detected', () => {
+    const npm = installOf({ 'package.json': '{}', 'package-lock.json': '{}' })
+    assert.equal(npm?.cmd, 'npm ci')
+    assert.equal(npm?.source, 'detected')
+    assert.equal(npm?.evidence, 'package-lock.json')
+
+    assert.equal(installOf({ 'pnpm-lock.yaml': '', 'package.json': '{}' })?.cmd, 'pnpm install --frozen-lockfile')
+    assert.equal(installOf({ 'uv.lock': '', 'pyproject.toml': '' })?.cmd, 'uv sync --frozen')
+    assert.equal(installOf({ 'Cargo.lock': '', 'Cargo.toml': '' })?.cmd, 'cargo fetch --locked')
+  })
+
+  test('a lockfile wins over the manifest it belongs to', () => {
+    const entry = installOf({ 'package.json': '{}', 'package-lock.json': '{}', 'composer.json': '{}' })
+    assert.equal(entry?.cmd, 'npm ci')
+  })
+
+  test('without a lockfile the install is the non-reproducible form, and inferred', () => {
+    // `npm ci` requires a lockfile and fails without one. Recommending it anyway would be
+    // the first command a new contributor types, and it would fail.
+    const npm = installOf({ 'package.json': '{}' })
+    assert.equal(npm?.cmd, 'npm install')
+    assert.equal(npm?.source, 'inferred')
+  })
+
+  test('a Go project has no install step, and is not given one', () => {
+    // `go.sum` proves the module graph, not a command a newcomer should type.
+    const go = installOf({ 'go.mod': 'module x', 'go.sum': '' })
+    assert.equal(go, undefined)
+  })
+})
+
 describe('the skip lists do not overlap', () => {
   test('a name is either build output or test data, not both', () => {
     for (const name of SKIP_TEST_DATA_DIRS) {

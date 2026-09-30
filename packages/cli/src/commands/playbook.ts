@@ -17,6 +17,8 @@
  * always exits 0 is a report, not a check.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode, ExitCode, type FlagSpecs, parseCliArgs, renderTable } from '@anvil/core'
 import {
   type CheckReport,
@@ -25,11 +27,22 @@ import {
   type Playbook,
   type Problem,
   type ProblemLevel,
+  parsePlaybook,
+  userPlaybookDir,
 } from '@anvil/playbooks'
 import type { Command, CommandContext } from './types.ts'
 
-const SUBCOMMANDS = ['list', 'show', 'check'] as const
+const SUBCOMMANDS = ['list', 'show', 'check', 'add'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
+
+/**
+ * The most a fetched playbook may be, in bytes.
+ *
+ * A playbook is a few kilobytes of hand-written YAML. A cap is not about politeness to the
+ * server: without one, `anvil playbook add <url>` is an unbounded download that a mistyped
+ * link can turn into a multi-gigabyte fetch into memory.
+ */
+const MAX_PLAYBOOK_BYTES = 256 * 1024
 
 function load(env: NodeJS.ProcessEnv = process.env): { playbooks: Playbook[]; warnings: string[] } {
   return loadPlaybooks(env)
@@ -73,6 +86,7 @@ const FLAGS: FlagSpecs = {
   concurrency: { type: 'string' },
   timeout: { type: 'string' },
   warnings: { type: 'boolean' },
+  force: { type: 'boolean' },
 }
 
 export const playbookCommand: Command = {
@@ -83,14 +97,21 @@ export const playbookCommand: Command = {
     'list     every playbook, where it came from, and what it matches',
     'show     one playbook in full, with every resource and its url',
     'check    validate the registry; with --probe, whether every url still resolves',
+    'add      install a playbook from a file or an https url, into your own directory',
     '',
     'check is the mitigation for playbook rot. It exits 6 when something is wrong, so it',
     'is usable as a CI gate rather than a report nobody reads.',
+    '',
+    'add validates the playbook before writing it, and refuses to replace an existing id',
+    'without --force. Your playbooks live in your home directory, never in the repository',
+    'you are standing in: a company playbook is shared by being installed, not by being',
+    "committed to someone else's project.",
     '',
     '--offline            skip the network; run only the structural checks',
     '--concurrency <n>    parallel url probes (default 6)',
     '--timeout <ms>       per-request timeout (default 15000)',
     '--warnings           exit non-zero on warnings as well as errors',
+    '--force              overwrite an existing playbook with the same id',
   ].join('\n'),
   flags: FLAGS,
 
@@ -112,8 +133,140 @@ export const playbookCommand: Command = {
       const flag = typeof args.values.id === 'string' ? args.values.id : undefined
       return runShow(ctx, playbooks, flag ?? positional)
     }
+    if (sub === 'add') {
+      const source = args.positionals[1]
+      if (source === undefined) {
+        throw new AnvilError(ErrorCode.Usage, 'playbook add needs a path or url', {
+          hint: 'e.g. `anvil playbook add ./acme.yaml` or `anvil playbook add https://example.com/acme.yaml`',
+        })
+      }
+      return runAdd(ctx, playbooks, source, args.values.force === true)
+    }
     return runCheck(ctx, playbooks, warnings, args.values)
   },
+}
+
+interface AddResult {
+  id: string
+  path: string
+  replaced: boolean
+  resources: number
+}
+
+/**
+ * Install a playbook from a file or an https URL into the user's own directory.
+ *
+ * The order is the whole design: obtain, **validate, then write**. A playbook is executable
+ * configuration -- its globs decide which files the tool calls high risk, and its verify
+ * commands are what a crew runs -- so installing an unvalidated one is installing untested
+ * behaviour. Validation happens before anything touches the filesystem, and a failure names
+ * the path in the file so the error is actionable.
+ */
+async function runAdd(
+  ctx: CommandContext,
+  existing: readonly Playbook[],
+  source: string,
+  force: boolean,
+): Promise<undefined> {
+  const isUrl = /^https?:\/\//i.test(source)
+  let text: string
+  let origin: string
+
+  if (isUrl) {
+    if (!/^https:\/\//i.test(source)) {
+      throw new AnvilError(ErrorCode.Usage, `Refusing to fetch a playbook over http: ${source}`, {
+        hint: 'Use https. The playbook becomes trusted configuration, and it is fetched over a network anvil does not control.',
+      })
+    }
+    ;({ text, origin } = await fetchPlaybook(source))
+  } else {
+    const path = isAbsolute(source) ? source : resolve(process.cwd(), source)
+    if (!existsSync(path)) {
+      throw new AnvilError(ErrorCode.Usage, `No such file: ${path}`, {
+        hint: 'Pass a path to a .yaml playbook, or an https URL.',
+      })
+    }
+    text = readFileSync(path, 'utf8')
+    if (Buffer.byteLength(text) > MAX_PLAYBOOK_BYTES) {
+      throw new AnvilError(ErrorCode.Usage, `Playbook is larger than ${MAX_PLAYBOOK_BYTES} bytes: ${path}`)
+    }
+    origin = path
+  }
+
+  // `parsePlaybook` throws with every issue, and throws on anything outside the supported
+  // YAML subset, so this is the gate: nothing is written until the document is a playbook.
+  const playbook = parsePlaybook(text, origin)
+
+  const clash = existing.find((p) => p.id === playbook.id)
+  if (clash !== undefined && !force) {
+    throw new AnvilError(ErrorCode.Usage, `A playbook with id "${playbook.id}" is already installed`, {
+      hint: `It came from ${clash.source ?? 'the built-in registry'}. Re-run with --force to replace it, or edit that file.`,
+      details: { id: playbook.id, existingSource: clash.source ?? 'built-in' },
+    })
+  }
+
+  const dir = userPlaybookDir()
+  mkdirSync(dir, { recursive: true })
+  // The filename is the id, which the schema already constrains to lowercase
+  // alphanumerics and hyphens -- so it cannot escape the directory or collide on a
+  // case-insensitive filesystem in a way the id check would miss.
+  const target = join(dir, `${playbook.id}.yaml`)
+  writeFileSync(target, text, 'utf8')
+
+  const result: AddResult = {
+    id: playbook.id,
+    path: target,
+    replaced: clash !== undefined,
+    resources: resourceRows(playbook).length,
+  }
+  const data = { schemaVersion: 1, added: result }
+  ctx.out(data, () => {
+    const s = ctx.style
+    return [
+      `${s.green(result.replaced ? 'replaced' : 'installed')} ${result.id}`,
+      `  ${result.path}`,
+      `  ${result.resources} resource(s), priority ${playbook.priority}`,
+      '',
+      s.dim(`It is active immediately. \`anvil playbook show ${result.id}\` to read it back.`),
+    ].join('\n')
+  })
+  return undefined
+}
+
+/** Fetch a playbook over https, with a timeout and a size cap. */
+async function fetchPlaybook(url: string): Promise<{ text: string; origin: string }> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(15_000),
+      headers: { 'user-agent': 'anvil-playbook-add', accept: 'text/yaml, text/plain, */*' },
+    })
+  } catch (err) {
+    throw new AnvilError(
+      ErrorCode.Usage,
+      `Could not fetch ${url}: ${err instanceof Error ? err.message : String(err)}`,
+      {
+        hint: 'Check the URL and your network. Anvil has a 15s timeout on this request.',
+      },
+    )
+  }
+  if (response.status !== 200) {
+    throw new AnvilError(ErrorCode.Usage, `Could not fetch ${url}: HTTP ${response.status}`, {
+      hint: 'The URL must resolve to the playbook YAML itself, not to a page linking to it.',
+    })
+  }
+  const declared = Number(response.headers.get('content-length') ?? '0')
+  if (Number.isFinite(declared) && declared > MAX_PLAYBOOK_BYTES) {
+    throw new AnvilError(ErrorCode.Usage, `Refusing a ${declared}-byte playbook: ${url}`, {
+      hint: `A playbook is a few kB. The cap is ${MAX_PLAYBOOK_BYTES} bytes.`,
+    })
+  }
+  const text = await response.text()
+  if (Buffer.byteLength(text) > MAX_PLAYBOOK_BYTES) {
+    throw new AnvilError(ErrorCode.Usage, `Refusing a playbook larger than ${MAX_PLAYBOOK_BYTES} bytes: ${url}`)
+  }
+  return { text, origin: url }
 }
 
 function runList(ctx: CommandContext, playbooks: readonly Playbook[], warnings: readonly string[]): undefined {

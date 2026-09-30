@@ -9,7 +9,7 @@
 
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { addRisk, addTool, type ProfileDraft } from './detector.ts'
+import { addCommand, addRisk, addTool, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
 import type { Docs, InstructionFile } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
@@ -219,6 +219,63 @@ export function detectGenericTooling(draft: ProfileDraft, root: string, files: R
   for (const f of files) {
     if (!f.endsWith('.tf')) continue
     addTool(draft, 'iac', f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '.')
+  }
+  detectInstallCommand(draft, files)
+}
+
+/**
+ * The install command, derived from the lockfile.
+ *
+ * Ten real repositories, and every one of them reported "no documented dependency-install
+ * command" -- because nothing ever emitted an `install` command. The kind existed in the
+ * type, the generated `AGENTS.md` had a row for it, and no detector filled it in.
+ *
+ * A lockfile is the evidence, not a guess: `package-lock.json` means npm, `pnpm-lock.yaml`
+ * means pnpm, and the file's existence proves both the package manager and that the
+ * install is meant to be reproducible (`npm ci`, not `npm install`). Each is labelled
+ * `detected` because a file on disk is exactly that. Where the manager has a lockfile but
+ * the install needs arguments we cannot know, the plain form is still the honest answer --
+ * and the risk of a wrong one is an install that prints a warning, not a lost afternoon.
+ */
+function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>): void {
+  // A lockfile is the strongest evidence: it names the manager *and* proves the install is
+  // meant to be reproducible, so these are `detected`.
+  const byLockfile: ReadonlyArray<readonly [string, string]> = [
+    ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
+    ['yarn.lock', 'yarn install --frozen-lockfile'],
+    ['bun.lockb', 'bun install --frozen-lockfile'],
+    ['package-lock.json', 'npm ci'],
+    ['uv.lock', 'uv sync --frozen'],
+    ['poetry.lock', 'poetry install'],
+    ['Cargo.lock', 'cargo fetch --locked'],
+    ['Gemfile.lock', 'bundle install'],
+    ['gradle.lockfile', './gradlew dependencies --write-locks'],
+  ]
+  for (const [lockfile, cmd] of byLockfile) {
+    if (!files.has(lockfile)) continue
+    addCommand(draft, 'install', { cmd, source: 'detected', evidence: lockfile })
+    return
+  }
+
+  // No lockfile. The manifest still names the package manager, but the *form* of the
+  // install is a convention, so these are `inferred` and labelled as such.
+  //
+  // Note what is deliberately absent: `npm ci` requires a lockfile and fails without one,
+  // so a Node project that has committed no lockfile gets `npm install`. Recommending the
+  // reproducible form to a repository that cannot run it is the same confident-and-wrong
+  // failure this tool exists to avoid, and it would be the first command a new contributor
+  // types.
+  const byManifest: ReadonlyArray<readonly [string, string]> = [
+    ['composer.json', 'composer install'],
+    ['Gemfile', 'bundle install'],
+    ['requirements.txt', 'pip install -r requirements.txt'],
+    ['pyproject.toml', 'pip install -e .'],
+    ['package.json', 'npm install'],
+  ]
+  for (const [manifest, cmd] of byManifest) {
+    if (!files.has(manifest)) continue
+    addCommand(draft, 'install', { cmd, source: 'inferred', evidence: manifest })
+    return
   }
 }
 
