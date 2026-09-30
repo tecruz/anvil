@@ -15,9 +15,9 @@
  *    should not have secrets pushed into its context by a convenience feature.
  */
 
-import type { ProjectProfile, RiskPath, CommandEntry } from '@anvil/profile'
-import type { ReadinessReport, Finding } from '@anvil/audit'
+import type { Finding, ReadinessReport } from '@anvil/audit'
 import type { MatchResult } from '@anvil/playbooks'
+import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
 export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
 
@@ -78,7 +78,13 @@ export interface Brief {
     verify: Record<string, string[]>
     guidance: Array<{ kind: string; label: string; url: string; why: string }>
   }>
-  findings: Array<{ id: string; layer: string; status: string; severity: string; detail: string }>
+  findings: Array<{
+    id: string
+    layer: string
+    status: string
+    severity: string
+    detail: string
+  }>
   /** Excerpts from a small allowlist of manifest files. Never secrets. */
   excerpts: BriefFileExcerpt[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
@@ -121,7 +127,12 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   const commands: BriefCommand[] = []
   for (const kind of Object.keys(profile.commands).sort()) {
     for (const entry of profile.commands[kind as keyof typeof profile.commands] ?? []) {
-      commands.push({ kind, cmd: entry.cmd, source: entry.source, evidence: entry.evidence ?? null })
+      commands.push({
+        kind,
+        cmd: entry.cmd,
+        source: entry.source,
+        evidence: entry.evidence ?? null,
+      })
     }
   }
 
@@ -129,7 +140,13 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   const findings: Brief['findings'] = report.findings
     .filter((f) => f.status !== 'na')
     .filter((f) => layers === undefined || layers.includes(f.layer))
-    .map((f) => ({ id: f.id, layer: f.layer, status: f.status, severity: f.severity, detail: f.detail }))
+    .map((f) => ({
+      id: f.id,
+      layer: f.layer,
+      status: f.status,
+      severity: f.severity,
+      detail: f.detail,
+    }))
 
   const playbooks: Brief['playbooks'] = matches.map((m) => ({
     id: m.playbook.id,
@@ -150,7 +167,11 @@ export function buildBrief(options: BuildBriefOptions): Brief {
     const content = read(path)
     if (content === null) continue
     const truncated = content.length > maxBytes
-    excerpts.push({ path, content: truncated ? content.slice(0, maxBytes) : content, truncated })
+    excerpts.push({
+      path,
+      content: truncated ? content.slice(0, maxBytes) : content,
+      truncated,
+    })
   }
 
   return {
@@ -160,12 +181,17 @@ export function buildBrief(options: BuildBriefOptions): Brief {
       root: profile.root,
       vcs: profile.vcs.host,
       defaultBranch: profile.vcs.defaultBranch,
-      languages: profile.languages.map((l) => ({ id: l.id, files: l.files, primary: l.primary })),
-      stacks: profile.stacks.map((s) => ({ id: s.id, version: s.version, evidence: s.evidence })),
-      monorepo:
-        profile.monorepo === null
-          ? null
-          : { tool: profile.monorepo.tool, members: profile.monorepo.members },
+      languages: profile.languages.map((l) => ({
+        id: l.id,
+        files: l.files,
+        primary: l.primary,
+      })),
+      stacks: profile.stacks.map((s) => ({
+        id: s.id,
+        version: s.version,
+        evidence: s.evidence,
+      })),
+      monorepo: profile.monorepo === null ? null : { tool: profile.monorepo.tool, members: profile.monorepo.members },
     },
     commands,
     tooling: {
@@ -177,9 +203,16 @@ export function buildBrief(options: BuildBriefOptions): Brief {
       hooks: profile.tooling.hooks,
       container: profile.tooling.container,
     },
-    modules: profile.modules.map((m) => ({ id: m.id, path: m.path, dependsOn: m.deps })),
+    modules: profile.modules.map((m) => ({
+      id: m.id,
+      path: m.path,
+      dependsOn: m.deps,
+    })),
     docs: { ...profile.docs },
-    instructions: profile.instructions.map((i) => ({ path: i.path, category: i.category })),
+    instructions: profile.instructions.map((i) => ({
+      path: i.path,
+      category: i.category,
+    })),
     risk: profile.risk,
     playbooks,
     findings,
@@ -189,15 +222,64 @@ export function buildBrief(options: BuildBriefOptions): Brief {
 }
 
 function flattenGuidance(playbook: {
-  official: { docs: unknown[]; skills: unknown[]; agents: unknown[]; mcp: unknown[]; styleGuides: unknown[]; migrationGuides: unknown[] }
+  official: {
+    docs: unknown[]
+    skills: unknown[]
+    agents: unknown[]
+    mcp: unknown[]
+    styleGuides: unknown[]
+    migrationGuides: unknown[]
+  }
 }): Array<{ kind: string; label: string; url: string; why: string }> {
   const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
-    ['doc', playbook.official.docs as Array<{ label: string; url: string; why: string }>],
-    ['skill', playbook.official.skills as Array<{ label: string; url: string; why: string }>],
-    ['agent', playbook.official.agents as Array<{ label: string; url: string; why: string }>],
-    ['mcp', playbook.official.mcp as Array<{ label: string; url: string; why: string }>],
-    ['style', playbook.official.styleGuides as Array<{ label: string; url: string; why: string }>],
-    ['migration', playbook.official.migrationGuides as Array<{ label: string; url: string; why: string }>],
+    [
+      'doc',
+      playbook.official.docs as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
+    [
+      'skill',
+      playbook.official.skills as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
+    [
+      'agent',
+      playbook.official.agents as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
+    [
+      'mcp',
+      playbook.official.mcp as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
+    [
+      'style',
+      playbook.official.styleGuides as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
+    [
+      'migration',
+      playbook.official.migrationGuides as Array<{
+        label: string
+        url: string
+        why: string
+      }>,
+    ],
   ]
   return groups.flatMap(([kind, resources]) => resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why })))
 }

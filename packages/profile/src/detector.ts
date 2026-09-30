@@ -108,11 +108,7 @@ function dirPrefix(dir: string): string {
  * highest-priority-first, so `commands.test[0]` is the command a reader (or an agent)
  * should actually run.
  */
-export function addCommand(
-  draft: ProfileDraft,
-  kind: CommandKind,
-  entry: CommandEntry,
-): void {
+export function addCommand(draft: ProfileDraft, kind: CommandKind, entry: CommandEntry): void {
   const existing = draft.commands[kind] ?? []
   if (existing.some((e) => e.cmd === entry.cmd && e.source === entry.source)) {
     draft.commands[kind] = existing

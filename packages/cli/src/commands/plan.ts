@@ -6,11 +6,11 @@
  */
 
 import { resolve } from 'node:path'
+import { audit, type ReadinessReport } from '@anvil/audit'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
-import { audit, type ReadinessReport } from '@anvil/audit'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Command, CommandContext } from './types.ts'
 
 const TIERS: readonly PlanTier[] = ['derived', 'official', 'community']
@@ -48,9 +48,9 @@ export const planCommand: Command = {
   details: [
     'Three tiers, ranked in this order:',
     '',
-    '  derived    from this repository\'s own facts. Highest confidence, because nothing',
+    "  derived    from this repository's own facts. Highest confidence, because nothing",
     '             outside the repo was consulted.',
-    '  official   the technology\'s own documentation, skills and MCP servers.',
+    "  official   the technology's own documentation, skills and MCP servers.",
     '  community  well-known third-party resources, ranked below official because',
     '             "widely accepted" is a weaker claim than "maintained by the project".',
     '',
@@ -111,7 +111,9 @@ function parseTiers(value: unknown): Set<PlanTier> | null {
   const out = new Set<PlanTier>()
   for (const raw of cleaned) {
     if (!TIERS.includes(raw as PlanTier)) {
-      throw new AnvilError(ErrorCode.Usage, `Unknown tier: ${raw}`, { hint: `Expected one of: ${TIERS.join(', ')}` })
+      throw new AnvilError(ErrorCode.Usage, `Unknown tier: ${raw}`, {
+        hint: `Expected one of: ${TIERS.join(', ')}`,
+      })
     }
     out.add(raw as PlanTier)
   }
@@ -132,7 +134,9 @@ function parseLimit(value: unknown): number | null {
   if (typeof value !== 'string' || value === '') return null
   const n = Number.parseInt(value, 10)
   if (!Number.isFinite(n) || n < 1) {
-    throw new AnvilError(ErrorCode.Usage, `Invalid --limit: ${value}`, { hint: 'Expected a positive integer.' })
+    throw new AnvilError(ErrorCode.Usage, `Invalid --limit: ${value}`, {
+      hint: 'Expected a positive integer.',
+    })
   }
   return n
 }

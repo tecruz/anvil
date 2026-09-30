@@ -8,18 +8,18 @@
  * Neither runs a build, so both are safe on a repository you cannot modify.
  */
 
-import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
-  AnvilError,
-  ErrorCode,
-  ExitCode,
-  parseCliArgs,
-  renderTable,
-  type Style,
-} from '@anvil/core'
+  audit,
+  LAYER_QUESTIONS,
+  LAYER_TITLES,
+  LAYERS,
+  type Layer,
+  type ReadinessReport,
+  type Severity,
+} from '@anvil/audit'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable, type Style } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
-import { audit, LAYERS, LAYER_QUESTIONS, LAYER_TITLES, type Layer, type ReadinessReport, type Severity } from '@anvil/audit'
 import { buildProfile, type ProjectProfile, type VcsHost } from '@anvil/profile'
 import type { Command, CommandContext } from './types.ts'
 
@@ -102,7 +102,9 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   const out: string[] = []
 
   out.push(`${s.bold('root')}       ${p.root}`)
-  out.push(`${s.bold('vcs')}        ${p.vcs.host ?? s.dim('unknown')}${p.vcs.remote === null ? '' : ` ${s.dim(p.vcs.remote)}`}`)
+  out.push(
+    `${s.bold('vcs')}        ${p.vcs.host ?? s.dim('unknown')}${p.vcs.remote === null ? '' : ` ${s.dim(p.vcs.remote)}`}`,
+  )
   out.push(`${s.bold('default')}    ${p.vcs.defaultBranch ?? s.dim('(unknown)')}`)
 
   out.push('')
@@ -110,7 +112,9 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   out.push(
     p.languages.length === 0
       ? s.dim('  (none detected)')
-      : p.languages.map((l) => `  ${l.primary ? s.green('*') : ' '} ${l.id.padEnd(12)} ${String(l.files)} files`).join('\n'),
+      : p.languages
+          .map((l) => `  ${l.primary ? s.green('*') : ' '} ${l.id.padEnd(12)} ${String(l.files)} files`)
+          .join('\n'),
   )
 
   out.push('')
@@ -118,7 +122,9 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   out.push(
     p.stacks.length === 0
       ? s.dim('  (none detected)')
-      : p.stacks.map((st) => `  ${st.id.padEnd(14)} ${(st.version ?? '').padEnd(10)} ${s.dim(st.evidence[0] ?? '')}`).join('\n'),
+      : p.stacks
+          .map((st) => `  ${st.id.padEnd(14)} ${(st.version ?? '').padEnd(10)} ${s.dim(st.evidence[0] ?? '')}`)
+          .join('\n'),
   )
 
   if (p.monorepo !== null) {
@@ -147,7 +153,11 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
     for (const kind of kinds) {
       for (const entry of p.commands[kind as keyof typeof p.commands] ?? []) {
         const tag =
-          entry.source === 'documented' ? s.green('documented') : entry.source === 'detected' ? s.cyan('detected') : s.yellow('inferred')
+          entry.source === 'documented'
+            ? s.green('documented')
+            : entry.source === 'detected'
+              ? s.cyan('detected')
+              : s.yellow('inferred')
         out.push(`  ${kind.padEnd(10)} ${entry.cmd.padEnd(32)} ${tag} ${s.dim(entry.evidence ?? '')}`)
       }
     }
@@ -167,7 +177,10 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
     p.risk.length === 0
       ? s.dim('  (none)')
       : p.risk
-          .map((r) => `  ${(r.level === 'high' ? s.red('high  ') : s.yellow('medium'))} ${r.glob.padEnd(30)} ${s.dim(r.reason)}`)
+          .map(
+            (r) =>
+              `  ${r.level === 'high' ? s.red('high  ') : s.yellow('medium')} ${r.glob.padEnd(30)} ${s.dim(r.reason)}`,
+          )
           .join('\n'),
   )
 
@@ -178,7 +191,13 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
 // anvil doctor
 // ---------------------------------------------------------------------------
 
-const SEVERITY_RANK: Record<Severity, number> = { blocker: 0, high: 1, medium: 2, low: 3, info: 4 }
+const SEVERITY_RANK: Record<Severity, number> = {
+  blocker: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  info: 4,
+}
 
 export const doctorCommand: Command = {
   name: 'doctor',
@@ -217,9 +236,8 @@ export const doctorCommand: Command = {
     const breach =
       failOn === null
         ? null
-        : (report.findings.find(
-            (f) => f.status === 'fail' && SEVERITY_RANK[f.severity] <= SEVERITY_RANK[failOn],
-          ) ?? null)
+        : (report.findings.find((f) => f.status === 'fail' && SEVERITY_RANK[f.severity] <= SEVERITY_RANK[failOn]) ??
+          null)
 
     // The report is the answer; the exit code is the verdict. Emit the report first so a
     // caller parsing stdout gets the full payload either way.
@@ -231,7 +249,12 @@ export const doctorCommand: Command = {
         `Readiness threshold not met: ${breach.id} failed at severity ${breach.severity} (score ${report.score}/100, grade ${report.grade})`,
         {
           hint: 'Run `anvil doctor` without --fail-on to see every finding, or `anvil plan` for ranked fixes.',
-          details: { rule: breach.id, severity: breach.severity, score: report.score, grade: report.grade },
+          details: {
+            rule: breach.id,
+            severity: breach.severity,
+            score: report.score,
+            grade: report.grade,
+          },
         },
       )
       if (!ctx.json) {
@@ -296,7 +319,11 @@ function renderReport(ctx: CommandContext, report: ReadinessReport): string {
   const out: string[] = []
 
   const grade =
-    report.grade === 'A' || report.grade === 'B' ? s.green(report.grade) : report.grade === 'C' ? s.yellow(report.grade) : s.red(report.grade)
+    report.grade === 'A' || report.grade === 'B'
+      ? s.green(report.grade)
+      : report.grade === 'C'
+        ? s.yellow(report.grade)
+        : s.red(report.grade)
   out.push(`${s.bold('AI readiness')}  ${String(report.score)}/100  ${grade}`)
   out.push('')
   out.push(s.bold('By layer'))
@@ -327,7 +354,12 @@ function renderReport(ctx: CommandContext, report: ReadinessReport): string {
     for (const f of withFix) {
       const fix = f.fix
       if (fix === null) continue
-      const origin = fix.origin === 'derived' ? s.cyan('derived') : fix.origin === 'official' ? s.green('official') : s.yellow('community')
+      const origin =
+        fix.origin === 'derived'
+          ? s.cyan('derived')
+          : fix.origin === 'official'
+            ? s.green('official')
+            : s.yellow('community')
       out.push(`  ${f.id.padEnd(20)} ${origin}  ${fix.summary}`)
       if (fix.source?.url !== undefined) out.push(`      ${s.dim(fix.source.url)}`)
     }
@@ -345,5 +377,5 @@ function renderReport(ctx: CommandContext, report: ReadinessReport): string {
 function renderErrorText(err: AnvilError, s: Style): string {
   const lines = [`${s.red('error')} ${err.message}`]
   if (err.hint !== undefined) lines.push(`${s.dim('hint ')} ${err.hint}`)
-  return lines.join('\n') + '\n'
+  return `${lines.join('\n')}\n`
 }

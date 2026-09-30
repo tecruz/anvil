@@ -12,11 +12,11 @@
  * not existing.
  */
 
-import { readdirSync, readFileSync, existsSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
-import { parsePlaybook, type Playbook } from './schema.ts'
 import { BUILTIN_PLAYBOOK_SOURCE, generatedPlaybookFiles } from './generated.ts'
+import { type Playbook, parsePlaybook } from './schema.ts'
 
 export { BUILTIN_PLAYBOOK_SOURCE }
 
@@ -77,7 +77,10 @@ export function loadPlaybooksFromDirectory(dir: string): LoadResult {
   const byId = new Map(builtins.playbooks.map((p) => [p.id, p]))
   for (const playbook of loaded.playbooks) byId.set(playbook.id, playbook)
 
-  return { playbooks: [...byId.values()], warnings: [...builtins.warnings, ...loaded.warnings] }
+  return {
+    playbooks: [...byId.values()],
+    warnings: [...builtins.warnings, ...loaded.warnings],
+  }
 }
 
 /**

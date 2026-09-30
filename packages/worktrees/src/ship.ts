@@ -14,18 +14,18 @@
  *     last.
  */
 
-import { git, worktreeStatus, type WorktreeStatus } from '@anvil/git'
-import type { CommandSource, ProjectProfile } from '@anvil/profile'
-import type { NormalizedState, Ticket, TicketRef } from '@anvil/tickets'
+import { git, type WorktreeStatus, worktreeStatus } from '@anvil/git'
 import {
   analyzeRisk,
   codeownersFor,
+  type PrBodyInput,
+  type RiskAnalysis,
   renderPrBody,
   renderPrTitle,
   resolveReviewers,
-  type PrBodyInput,
-  type RiskAnalysis,
 } from '@anvil/pr'
+import type { CommandSource, ProjectProfile } from '@anvil/profile'
+import type { NormalizedState, Ticket, TicketRef } from '@anvil/tickets'
 
 /** What the pipeline needs from a forge. The `gh` transport implements this. */
 export interface ForgeTransport {
@@ -42,13 +42,19 @@ export interface ForgeTransport {
     reviewers: string[]
   }): Promise<{ number: number; url: string; created: boolean }>
   /** The PR currently open for a branch, if any. */
-  findPullRequest(options: { cwd: string; branch: string }): Promise<{ number: number; url: string; state: string } | null>
+  findPullRequest(options: {
+    cwd: string
+    branch: string
+  }): Promise<{ number: number; url: string; state: string } | null>
   /** A link GitHub renders back to the source, used for the ticket comment. */
   sourceLink(options: { cwd: string; branch: string }): Promise<string | null>
 }
 
 /** Runs a project's own verify command. Injected so tests never execute a build. */
-export type CommandRunner = (command: string, cwd: string) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>
+export type CommandRunner = (
+  command: string,
+  cwd: string,
+) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>
 
 export interface ShipOptions {
   repoRoot: string
@@ -102,13 +108,23 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   const refusal = await checkRefusals(options)
   stages.push({ name: 'refuse', ok: refusal.ok, detail: refusal.detail })
   if (!refusal.ok) {
-    return { ok: false, stages, risk: { touched: [], highPaths: [], mediumPaths: [], level: null }, reviewers: [], commandsRun }
+    return {
+      ok: false,
+      stages,
+      risk: { touched: [], highPaths: [], mediumPaths: [], level: null },
+      reviewers: [],
+      commandsRun,
+    }
   }
 
   // ---- 2. Verify -----------------------------------------------------------
   const verification: PrBodyInput['verification'] = []
   if (options.skipVerify) {
-    stages.push({ name: 'verify', ok: true, detail: 'skipped (--skip-verify)' })
+    stages.push({
+      name: 'verify',
+      ok: true,
+      detail: 'skipped (--skip-verify)',
+    })
   } else if (options.probe) {
     const entries = verifyCommandEntries(options.profile)
     for (const entry of entries) {
@@ -137,7 +153,14 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
     // A failed verify stops the ship *before* the push, so nothing broken reaches the
     // remote.
     if (failed.length > 0) {
-      return { ok: false, stages, risk: { touched: [], highPaths: [], mediumPaths: [], level: null }, reviewers: [], verification, commandsRun }
+      return {
+        ok: false,
+        stages,
+        risk: { touched: [], highPaths: [], mediumPaths: [], level: null },
+        reviewers: [],
+        verification,
+        commandsRun,
+      }
     }
   } else {
     stages.push({
@@ -153,18 +176,27 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
 
   const codeowners = codeownersFor(options.profile, options.read)
   const reviewers = [
-    ...new Set([...resolveReviewers(changed, codeowners ?? ''), ...options.extraReviewers.map((r) => r.replace(/^@/, ''))]),
+    ...new Set([
+      ...resolveReviewers(changed, codeowners ?? ''),
+      ...options.extraReviewers.map((r) => r.replace(/^@/, '')),
+    ]),
   ].sort()
 
   // ---- 4. Push -------------------------------------------------------------
-  const pushed = await options.transport.pushBranch({ cwd: options.worktreePath, branch: options.branch })
+  const pushed = await options.transport.pushBranch({
+    cwd: options.worktreePath,
+    branch: options.branch,
+  })
   stages.push({ name: 'push', ok: pushed.ok, detail: pushed.detail })
   if (!pushed.ok) {
     return { ok: false, stages, risk, reviewers, commandsRun }
   }
 
   // ---- 5. Pull request -----------------------------------------------------
-  const existing = await options.transport.findPullRequest({ cwd: options.worktreePath, branch: options.branch })
+  const existing = await options.transport.findPullRequest({
+    cwd: options.worktreePath,
+    branch: options.branch,
+  })
   const body = renderPrBody({
     ticket: options.ticket,
     risk,
@@ -186,7 +218,11 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
       reviewers,
     })
   } catch (err) {
-    stages.push({ name: 'pr', ok: false, detail: err instanceof Error ? err.message : String(err) })
+    stages.push({
+      name: 'pr',
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+    })
     return { ok: false, stages, risk, reviewers, commandsRun }
   }
   stages.push({
@@ -200,14 +236,26 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
     try {
       await options.ticketOps.comment(options.ticket.ref, prComment(pr, risk))
       await options.ticketOps.transition(options.ticket.ref, 'in_review')
-      stages.push({ name: 'ticket', ok: true, detail: `commented and moved to in_review` })
+      stages.push({
+        name: 'ticket',
+        ok: true,
+        detail: `commented and moved to in_review`,
+      })
     } catch (err) {
       // The PR exists. A failed ticket update is worth reporting, not worth discarding
       // the PR over -- and it must be visible, or the two systems silently diverge.
-      stages.push({ name: 'ticket', ok: false, detail: `PR opened but the ticket was not updated: ${err instanceof Error ? err.message : String(err)}` })
+      stages.push({
+        name: 'ticket',
+        ok: false,
+        detail: `PR opened but the ticket was not updated: ${err instanceof Error ? err.message : String(err)}`,
+      })
     }
   } else {
-    stages.push({ name: 'ticket', ok: true, detail: options.updateTicket ? 'no ticket adapter available' : 'skipped (--no-ticket-update)' })
+    stages.push({
+      name: 'ticket',
+      ok: true,
+      detail: options.updateTicket ? 'no ticket adapter available' : 'skipped (--no-ticket-update)',
+    })
   }
 
   return {
@@ -282,7 +330,10 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
 
   const head = await git(['rev-list', '--count', `${options.baseBranch}..HEAD`], { cwd: options.worktreePath })
   if (head.exitCode === 0 && head.stdout.trim() === '0') {
-    return { ok: false, detail: `No commits on ${options.branch} beyond ${options.baseBranch}.` }
+    return {
+      ok: false,
+      detail: `No commits on ${options.branch} beyond ${options.baseBranch}.`,
+    }
   }
 
   return { ok: true, detail: 'nothing to refuse' }
@@ -292,7 +343,10 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
 export async function changedPaths(options: { worktreePath: string; baseBranch: string }): Promise<string[]> {
   const res = await git(['diff', '--name-only', `${options.baseBranch}...HEAD`], { cwd: options.worktreePath })
   if (res.exitCode !== 0) return []
-  return res.stdout.split('\n').map((p) => p.trim()).filter((p) => p !== '')
+  return res.stdout
+    .split('\n')
+    .map((p) => p.trim())
+    .filter((p) => p !== '')
 }
 
 /** The comment posted back to the ticket, naming the risk when there is any. */
@@ -300,7 +354,12 @@ export function prComment(pr: { number: number; url: string }, risk: RiskAnalysi
   const lines = [`Opened a pull request for this ticket: **#${pr.number}** — ${pr.url}`]
   if (risk.level === 'high') {
     lines.push('')
-    lines.push(`⚠️ This change touches ${risk.highPaths.length} high-risk path(s): ${risk.highPaths.slice(0, 5).map((p) => `\`${p}\``).join(', ')}`)
+    lines.push(
+      `⚠️ This change touches ${risk.highPaths.length} high-risk path(s): ${risk.highPaths
+        .slice(0, 5)
+        .map((p) => `\`${p}\``)
+        .join(', ')}`,
+    )
     lines.push('It needs a closer look than usual.')
   } else if (risk.level === 'medium') {
     lines.push('')

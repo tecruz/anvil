@@ -1,0 +1,81 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/.anvil",
+      "!**/fixtures",
+      "!**/package-lock.json",
+      "!**/packages/playbooks/src/generated.ts"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "asNeeded",
+      "trailingCommas": "all",
+      "arrowParentheses": "always"
+    }
+  },
+  "json": {
+    "formatter": {
+      "indentWidth": 2
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // `preset` rather than the deprecated `recommended` flag, so this config keeps
+      // working on the next Biome major instead of failing on a removed key.
+      "preset": "recommended",
+      "suspicious": {
+        "noExplicitAny": "warn",
+        // Deliberately off. This codebase matches control characters on purpose: stripping
+        // a BOM, detecting a NUL to reject binary "manifests", handling CRLF. The rule
+        // exists to catch accidental invisible characters, which is not what these are.
+        "noControlCharactersInRegex": "off",
+        // Deliberately off. The `Command` interface is `run(): Promise<number | void>`,
+        // which is exactly what it means: a command either returns an exit code or
+        // returns nothing. `void` in that position is the honest type, not a confusion.
+        // Enabling the rule rewrites it to `number | undefined` and then strips the
+        // explicit `return undefined` at the end of every command, which is the opposite
+        // of clearer.
+        "noConfusingVoidType": "off"
+      },
+      "style": {
+        "useImportType": "error",
+        "noParameterAssign": "error",
+        // Deliberately off. Non-null assertions appear only after a check that proves the
+        // value is present (`lines[0]!`, `const el = row[1] as string`), where the
+        // alternative is a `?? throw` that adds a line to say nothing. Turning the rule on
+        // would be churn against a deliberate pattern, not a correctness gain.
+        "noNonNullAssertion": "off"
+      },
+      "complexity": {
+        // The rule functions are inherently branchy: one evaluates a whole ecosystem's
+        // detection, another resolves a state machine. Splitting them to satisfy a
+        // threshold would scatter the logic that has to be read as one piece.
+        "noExcessiveCognitiveComplexity": "off"
+      }
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  }
+}

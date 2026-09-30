@@ -13,12 +13,18 @@
     "build": "npm run gen:playbooks && node scripts/build.mjs",
     "gen:playbooks": "node scripts/gen-playbooks.ts",
     "typecheck": "tsc -p tsconfig.json",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
     "test": "node --test --test-reporter=spec \"packages/*/test/*.test.ts\"",
+    "test:live": "node --test --test-reporter=spec \"packages/providers/test/gh-live.test.ts\"",
+    "test:changed": "node scripts/test-changed.mjs",
     "test:watch": "node --test --watch \"packages/*/test/*.test.ts\"",
-    "check": "npm run typecheck && npm run test && npm run build",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "clean": "node scripts/clean.mjs"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.14",
     "@types/node": "^24.0.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.9.0"

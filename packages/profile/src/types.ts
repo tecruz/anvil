@@ -18,15 +18,7 @@
 
 export type SchemaVersion = 1
 
-export type CommandKind =
-  | 'install'
-  | 'build'
-  | 'test'
-  | 'testFast'
-  | 'lint'
-  | 'format'
-  | 'typecheck'
-  | 'run'
+export type CommandKind = 'install' | 'build' | 'test' | 'testFast' | 'lint' | 'format' | 'typecheck' | 'run'
 
 /** How much we trust a command, and where it came from. */
 export type CommandSource = 'documented' | 'detected' | 'inferred'
@@ -177,7 +169,16 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     modules: [],
     stacks: [],
     commands: {},
-    tooling: { ci: [], lint: [], formatter: [], typecheck: [], test: [], container: false, iac: [], hooks: [] },
+    tooling: {
+      ci: [],
+      lint: [],
+      formatter: [],
+      typecheck: [],
+      test: [],
+      container: false,
+      iac: [],
+      hooks: [],
+    },
     docs: {
       readme: null,
       contributing: null,

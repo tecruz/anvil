@@ -1,27 +1,25 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { mkdtemp } from 'node:fs/promises'
-
+import { audit } from '@anvil/audit'
 import {
   buildPlan,
   loadBuiltins,
   loadPlaybooksFromDirectory,
   matchPlaybooks,
+  type Plan,
   parsePlaybook,
   parsePlaybookFiles,
-  rankSuggestions,
-  validatePlaybook,
   parseYamlSubset,
-  type Plan,
-  type Playbook,
+  rankSuggestions,
   type Suggestion,
+  validatePlaybook,
 } from '@anvil/playbooks'
 import { buildProfile, matchesAny, type ProjectProfile } from '@anvil/profile'
-import { audit } from '@anvil/audit'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(here, '..', '..', '..')
@@ -54,9 +52,7 @@ describe('playbook validation', () => {
   test('rejects unknown keys rather than ignoring a typo', () => {
     // A typo in `riskGlobs` would silently stop covering a technology's dangerous
     // paths, with nothing reporting the loss.
-    const { playbook, issues } = validatePlaybook(
-      parseYamlSubset(`${MINIMAL}\nriskGlob: ['**/x']\n`),
-    )
+    const { playbook, issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}\nriskGlob: ['**/x']\n`))
     assert.equal(playbook, null)
     assert.ok(issues.some((i) => i.path === 'riskGlob' && i.message === 'unknown key'))
   })
@@ -82,9 +78,7 @@ describe('playbook validation', () => {
   })
 
   test('requires url and why on resources', () => {
-    const { issues } = validatePlaybook(
-      parseYamlSubset(`${MINIMAL}\nofficial:\n  docs:\n    - label: x\n`),
-    )
+    const { issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}\nofficial:\n  docs:\n    - label: x\n`))
     assert.ok(issues.some((i) => i.path === 'official.docs[0].url'))
     assert.ok(issues.some((i) => i.path === 'official.docs[0].why'))
   })
@@ -102,10 +96,7 @@ describe('playbook validation', () => {
   })
 
   test('parsePlaybook throws an AnvilError naming the file', () => {
-    assert.throws(
-      () => parsePlaybook('id: BAD\ntitle: X\nmatch:\n  files: [a]\n', 'thing.yaml'),
-      /thing\.yaml/,
-    )
+    assert.throws(() => parsePlaybook('id: BAD\ntitle: X\nmatch:\n  files: [a]\n', 'thing.yaml'), /thing\.yaml/)
   })
 
   test('parsePlaybook reports an unparseable file rather than guessing', () => {
@@ -218,7 +209,9 @@ describe('generated file is in sync with the YAML sources', () => {
   test('generated.ts matches registry/playbooks/*.yaml', async () => {
     const generated = await import('@anvil/playbooks/generated')
     const onDisk = new Map<string, string>()
-    for (const file of readdirSync(REGISTRY_DIR).filter((f) => /\.ya?ml$/.test(f)).sort()) {
+    for (const file of readdirSync(REGISTRY_DIR)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .sort()) {
       onDisk.set(file, readFileSync(join(REGISTRY_DIR, file), 'utf8'))
     }
     assert.deepEqual(
@@ -268,7 +261,7 @@ describe('user playbook directory', () => {
     }
   })
 
-  test('no playbook claims another ecosystem\'s framework', () => {
+  test("no playbook claims another ecosystem's framework", () => {
     // A `laravel` dep entry in the Ruby playbook made every PHP project match it, so
     // `plan` confidently recommended the Rails security guide to a Laravel codebase. A
     // cross-ecosystem match is worse than no match: it is confident and wrong, and the
@@ -287,11 +280,7 @@ describe('user playbook directory', () => {
       for (const dep of pb.match.deps) {
         const claimed = owner[dep]
         if (claimed === undefined) continue
-        assert.equal(
-          pb.id,
-          claimed,
-          `${pb.id} claims \`${dep}\`, which belongs to the ${claimed} playbook`,
-        )
+        assert.equal(pb.id, claimed, `${pb.id} claims \`${dep}\`, which belongs to the ${claimed} playbook`)
       }
     }
   })
@@ -357,7 +346,10 @@ describe('matching', () => {
 
   test('a Python repo does not match the node playbook', () => {
     const matches = matchPlaybooks(profileFor('python-django'), playbooks)
-    assert.equal(matches.find((m) => m.playbook.id === 'node'), undefined)
+    assert.equal(
+      matches.find((m) => m.playbook.id === 'node'),
+      undefined,
+    )
     assert.ok(matches.find((m) => m.playbook.id === 'python'))
   })
 
@@ -367,10 +359,7 @@ describe('matching', () => {
   })
 
   test('higher priority sorts first when several match', () => {
-    const generic = parsePlaybook(
-      'id: generic\ntitle: G\npriority: 1\nmatch:\n  files: ["package.json"]\n',
-      'g.yaml',
-    )
+    const generic = parsePlaybook('id: generic\ntitle: G\npriority: 1\nmatch:\n  files: ["package.json"]\n', 'g.yaml')
     const specific = parsePlaybook(
       'id: specific\ntitle: S\npriority: 99\nmatch:\n  files: ["package.json"]\n',
       's.yaml',
@@ -486,10 +475,7 @@ describe('plan', () => {
 
     for (const r of risks) {
       const glob = r.id.split(':').slice(2).join(':')
-      assert.ok(
-        matchesAny(profile.files, glob),
-        `${r.id} is suggested but no file in node-npm matches ${glob}`,
-      )
+      assert.ok(matchesAny(profile.files, glob), `${r.id} is suggested but no file in node-npm matches ${glob}`)
     }
   })
 
@@ -513,12 +499,9 @@ describe('plan', () => {
     const p = planFor('node-npm')
     const riskCount = p.suggestions.filter((s) => s.id.startsWith('risk:')).length
     assert.ok(riskCount > 0, 'the node fixture does have a package.json, so some apply')
-    assert.ok(
-      p.counts.official < p.counts.derived + p.counts.official,
-      'sanity: counts are still computed',
-    )
-    const allRiskGlobs = loadBuiltins().playbooks
-      .filter((pb) => pb.id === 'node')
+    assert.ok(p.counts.official < p.counts.derived + p.counts.official, 'sanity: counts are still computed')
+    const allRiskGlobs = loadBuiltins()
+      .playbooks.filter((pb) => pb.id === 'node')
       .flatMap((pb) => pb.riskGlobs)
     assert.ok(
       riskCount < allRiskGlobs.length,
@@ -535,7 +518,9 @@ describe('plan', () => {
     const matches = matchPlaybooks(profile, playbooks)
     assert.ok(matches.length > 1, 'this fixture should match more than one playbook')
     const plan = buildPlan(audit(profile), profile, matches)
-    const globs = plan.suggestions.filter((s) => s.id.startsWith('risk:')).map((s) => s.id.split(':').slice(2).join(':'))
+    const globs = plan.suggestions
+      .filter((s) => s.id.startsWith('risk:'))
+      .map((s) => s.id.split(':').slice(2).join(':'))
     assert.equal(new Set(globs).size, globs.length, `duplicate risk globs: ${globs.join(', ')}`)
   })
 
@@ -557,8 +542,22 @@ describe('plan', () => {
   })
 
   test('rankSuggestions is stable for equal inputs', () => {
-    const a: Suggestion = { id: 'a', tier: 'derived', title: 'a', detail: '', evidence: [], confidence: 0.5 }
-    const b: Suggestion = { id: 'b', tier: 'derived', title: 'b', detail: '', evidence: [], confidence: 0.5 }
+    const a: Suggestion = {
+      id: 'a',
+      tier: 'derived',
+      title: 'a',
+      detail: '',
+      evidence: [],
+      confidence: 0.5,
+    }
+    const b: Suggestion = {
+      id: 'b',
+      tier: 'derived',
+      title: 'b',
+      detail: '',
+      evidence: [],
+      confidence: 0.5,
+    }
     assert.deepEqual(
       rankSuggestions([b, a]).map((s) => s.id),
       rankSuggestions([a, b]).map((s) => s.id),
@@ -567,8 +566,24 @@ describe('plan', () => {
 
   test('blocker findings outrank a lower-severity fix within a tier', () => {
     const sorted = rankSuggestions([
-      { id: 'low', tier: 'derived', title: '', detail: '', evidence: [], confidence: 0.9, severity: 'low' },
-      { id: 'blocker', tier: 'derived', title: '', detail: '', evidence: [], confidence: 0.1, severity: 'blocker' },
+      {
+        id: 'low',
+        tier: 'derived',
+        title: '',
+        detail: '',
+        evidence: [],
+        confidence: 0.9,
+        severity: 'low',
+      },
+      {
+        id: 'blocker',
+        tier: 'derived',
+        title: '',
+        detail: '',
+        evidence: [],
+        confidence: 0.1,
+        severity: 'blocker',
+      },
     ])
     assert.equal(sorted[0]?.id, 'blocker')
   })
@@ -582,7 +597,10 @@ describe('parsePlaybookFiles', () => {
       ['z.yaml', 'not a playbook\n'],
     ])
     const { playbooks, warnings } = parsePlaybookFiles(files)
-    assert.deepEqual(playbooks.map((p) => p.id), ['a', 'b'])
+    assert.deepEqual(
+      playbooks.map((p) => p.id),
+      ['a', 'b'],
+    )
     assert.equal(warnings.length, 1)
     assert.match(warnings[0] ?? '', /z\.yaml/)
   })

@@ -12,15 +12,14 @@ import {
   addCommand,
   addStack,
   addTool,
-  filesUnder,
-  hasFile,
-  hasFileUnder,
-  setMonorepo,
   type Detector,
   type DetectorContext,
+  hasFile,
+  hasFileUnder,
   type ProfileDraft,
+  setMonorepo,
 } from '../detector.ts'
-import { asString, evidence, findLine, looseVersion, readJson } from '../manifest.ts'
+import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 
 /** Line-based readers for the flat formats Python uses. */
@@ -32,7 +31,7 @@ function readTomlish(ctx: DetectorContext, relPath: string): string | null {
 function depVersion(text: string, dep: string): string | null {
   // Match both PEP 621 `[project] dependencies = ["fastapi>=0.1"]` and requirement lines.
   const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`["'\\[]?${escaped}\\s*(?:[<>=!~]=?\\s*([0-9][^"'\s,\]]*))?`)
+  const re = new RegExp(`["'\\[]?${escaped}\\s*(?:[<>=!~]=?\\s*([0-9][^"'s,]]*))?`)
   const m = re.exec(text)
   return looseVersion(m?.[1] ?? null)
 }
@@ -72,24 +71,48 @@ export const pythonDetector: Detector = {
       }
       if (/\[tool\.(uv|poetry|hatch|flit|setuptools)\]/.test(pyproject)) {
         const line = findLine(pyproject, /\[tool\.(uv|poetry|hatch|flit|setuptools)\]/)
-        addStack(draft, { id: 'uv-or-poetry', version: null, evidence: [evidence('pyproject.toml', line)] })
+        addStack(draft, {
+          id: 'uv-or-poetry',
+          version: null,
+          evidence: [evidence('pyproject.toml', line)],
+        })
       }
       if (/\[tool\.pytest/.test(pyproject)) {
         addTool(draft, 'test', 'pytest')
-        addCommand(draft, 'test', { cmd: 'pytest', source: 'detected', evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.pytest/)) })
+        addCommand(draft, 'test', {
+          cmd: 'pytest',
+          source: 'detected',
+          evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.pytest/)),
+        })
       }
       if (/\[tool\.ruff/.test(pyproject)) {
         addTool(draft, 'lint', 'ruff')
-        addCommand(draft, 'lint', { cmd: 'ruff check .', source: 'detected', evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.ruff/)) })
-        addCommand(draft, 'format', { cmd: 'ruff format .', source: 'detected', evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.ruff/)) })
+        addCommand(draft, 'lint', {
+          cmd: 'ruff check .',
+          source: 'detected',
+          evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.ruff/)),
+        })
+        addCommand(draft, 'format', {
+          cmd: 'ruff format .',
+          source: 'detected',
+          evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.ruff/)),
+        })
       }
       if (/\[tool\.mypy/.test(pyproject)) {
         addTool(draft, 'typecheck', 'mypy')
-        addCommand(draft, 'typecheck', { cmd: 'mypy .', source: 'detected', evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.mypy/)) })
+        addCommand(draft, 'typecheck', {
+          cmd: 'mypy .',
+          source: 'detected',
+          evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.mypy/)),
+        })
       }
       if (/\[tool\.black/.test(pyproject)) {
         addTool(draft, 'formatter', 'black')
-        addCommand(draft, 'format', { cmd: 'black .', source: 'detected', evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.black/)) })
+        addCommand(draft, 'format', {
+          cmd: 'black .',
+          source: 'detected',
+          evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.black/)),
+        })
       }
       // Build backends imply a build step.
       if (/\[build-system\]/.test(pyproject) && /requires\s*=/.test(pyproject)) {
@@ -125,7 +148,11 @@ export const pythonDetector: Detector = {
     for (const [id, re] of KNOWN) {
       for (const { text, file } of sources) {
         if (!re.test(text)) continue
-        addStack(draft, { id, version: depVersion(text, id), evidence: [evidence(file, findLine(text, re))] })
+        addStack(draft, {
+          id,
+          version: depVersion(text, id),
+          evidence: [evidence(file, findLine(text, re))],
+        })
         break
       }
     }
@@ -155,7 +182,7 @@ export const pythonDetector: Detector = {
         if (!f.endsWith('/pyproject.toml')) continue
         const path = f.slice(0, -'/pyproject.toml'.length)
         const inner = readTomlish(ctx, f)
-        const name = inner === null ? null : /^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? null
+        const name = inner === null ? null : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? null)
         addModulePy(draft, name ?? path, path)
       }
     }

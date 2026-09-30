@@ -146,7 +146,10 @@ export function slugify(text: string, maxLength = 30): string {
 
 /** Branch name for a ticket: `<key-slug>` or `<type>/<key-slug>`. */
 export function branchNameFor(ref: TicketRef, title: string, prefix?: string): string {
-  const key = ref.key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  const key = ref.key
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
   const slug = slugify(title)
   const head = prefix === undefined || prefix === '' ? 'feat' : slugify(prefix, 12)
   return slug === '' ? head : `${head}/${key}-${slug}`
@@ -174,7 +177,11 @@ export function parseRef(input: string, defaultProvider: ProviderId = 'local'): 
   if (prefixed !== null) {
     const prefix = prefixed[1] as string
     const id = prefixed[2] as string
-    return { provider: defaultProvider, id, key: `${prefix.toLowerCase()}-${id}` }
+    return {
+      provider: defaultProvider,
+      id,
+      key: `${prefix.toLowerCase()}-${id}`,
+    }
   }
 
   const numeric = /^(\d+)$/.exec(raw)

@@ -7,68 +7,64 @@
  */
 
 export {
-  buildBrief,
-  computeGaps,
   type Brief,
   type BriefCommand,
   type BriefFileExcerpt,
   type BriefModule,
   type BriefTarget,
   type BuildBriefOptions,
+  buildBrief,
+  computeGaps,
 } from './brief.ts'
-
-export {
-  bestCommand,
-  generateAgentsFile,
-  generateReviewCommand,
-  generateVerifySkill,
-  type GenerateOptions,
-  type GeneratedArtifact,
-} from './generate.ts'
-
-export {
-  SKILL_DESCRIPTION_MAX,
-  SKILL_NAME_PATTERN,
-  classifyArtifact,
-  parseFrontmatter,
-  skillDirName,
-  validateAll,
-  validateArtifact,
-  type ArtifactKind,
-  type ArtifactValidation,
-  type ParsedFrontmatter,
-  type ValidateSummary,
-} from './validate.ts'
-
 export {
   buildHunks,
-  diffFile,
-  diffLines,
-  renderUnifiedDiff,
-  splitLines,
-  summarize,
   type DiffHunk,
   type DiffInput,
   type DiffLine,
+  diffFile,
+  diffLines,
   type FileDiff,
+  renderUnifiedDiff,
+  splitLines,
+  summarize,
 } from './diff.ts'
-
 export {
-  GITIGNORE_SNIPPET,
+  bestCommand,
+  type GeneratedArtifact,
+  type GenerateOptions,
+  generateAgentsFile,
+  generateReviewCommand,
+  generateVerifySkill,
+} from './generate.ts'
+export {
+  type ApplyPrecondition,
   applyStaging,
   checkApplyPreconditions,
   clearStaging,
+  GITIGNORE_SNIPPET,
   hashInputs,
   inspectStaging,
   manifestPath,
   readManifest,
   readRepoFile,
   readStaged,
-  sha256,
-  stagingRoot,
-  writeStaging,
-  type ApplyPrecondition,
   type StagedFile,
   type StagingManifest,
   type StagingState,
+  sha256,
+  stagingRoot,
+  writeStaging,
 } from './staging.ts'
+export {
+  type ArtifactKind,
+  type ArtifactValidation,
+  classifyArtifact,
+  type ParsedFrontmatter,
+  parseFrontmatter,
+  SKILL_DESCRIPTION_MAX,
+  SKILL_NAME_PATTERN,
+  skillDirName,
+  type ValidateSummary,
+  validateAll,
+  validateArtifact,
+} from './validate.ts'

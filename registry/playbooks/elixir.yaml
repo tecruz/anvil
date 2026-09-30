@@ -25,8 +25,8 @@ official:
         Covers the web layer, channels and LiveView. Phoenix generates a surprising amount
         of structure, so this is the reference for what a generated file is doing.
   skills:
-    - label: Elixir design patterns
-      url: 'https://hexdocs.pm/elixir/design_patterns.html'
+    - label: Elixir processes
+      url: 'https://hexdocs.pm/elixir/GenServer.html'
       why: >-
         The official guide to GenServer, Supervisor and Agent. Read it before adding a
         process, because the process is the unit of concurrency and failure here.

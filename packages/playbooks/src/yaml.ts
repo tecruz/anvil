@@ -115,7 +115,7 @@ function parseMapping(lines: Line[], index: number, indent: number): [Record<str
     const key = split.key
     const rest = split.rest
 
-    if (Object.prototype.hasOwnProperty.call(out, key)) {
+    if (Object.hasOwn(out, key)) {
       throw new YamlError(`duplicate key "${key}"`, line.lineNo)
     }
 
@@ -176,7 +176,11 @@ function parseSequence(lines: Line[], index: number, indent: number): [YamlValue
     // `- key: value` starts a mapping whose first key sits on the dash line. Its
     // continuation keys are indented to align just past the dash.
     if (isMappingStart(itemText)) {
-      const synthetic: Line = { indent: itemIndent, text: itemText, lineNo: line.lineNo }
+      const synthetic: Line = {
+        indent: itemIndent,
+        text: itemText,
+        lineNo: line.lineNo,
+      }
       const collected: Line[] = [synthetic]
       let j = i + 1
       while (j < lines.length && lines[j]!.indent >= itemIndent) {

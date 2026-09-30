@@ -37,7 +37,7 @@ official:
   styleGuides: []
   migrationGuides:
     - label: Android Jetpack release notes
-      url: 'https://developer.android.com/jetpack/androidx/jetpack-release-notes'
+      url: 'https://developer.android.com/jetpack/androidx/releases'
       why: >-
         Required before an AndroidX bump. Behaviour changes ship inside minor versions and
         are not always mentioned in release notes, so a diff of the release notes matters.

@@ -6,8 +6,8 @@
  * precise messages, and it re-reads the file with a stricter parser where that matters.
  */
 
-import { readText } from './walk.ts'
 import { join } from 'node:path'
+import { readText } from './walk.ts'
 
 export interface JsonObject {
   [key: string]: unknown

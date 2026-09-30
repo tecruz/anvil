@@ -52,7 +52,7 @@ community:
     why: >-
       The reference structure. Useful for deciding where new code belongs, which is a
       question more often answered by convention than by the docs.
-  - repo: 'sebastianbergmann/phpstan'
+  - repo: 'phpstan/phpstan'
     label: PHPStan
     why: >-
       The static analyser most PHP projects standardise on, and the level system documents

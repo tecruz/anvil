@@ -18,8 +18,8 @@
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
 import { matchesAny, matchesGlob, type ProjectProfile } from '@anvil/profile'
-import type { CommunityResource, Playbook, Resource } from './schema.ts'
 import type { MatchResult } from './match.ts'
+import type { CommunityResource, Playbook, Resource } from './schema.ts'
 
 export type PlanTier = 'derived' | 'official' | 'community'
 
@@ -48,16 +48,31 @@ export interface Plan {
   score: number
   grade: ReadinessReport['grade']
   /** Playbooks that matched, with why. */
-  playbooks: Array<{ id: string; title: string; confidence: number; reasons: string[] }>
+  playbooks: Array<{
+    id: string
+    title: string
+    confidence: number
+    reasons: string[]
+  }>
   suggestions: Suggestion[]
   counts: Record<PlanTier, number>
   /** Anything that could not be loaded, so it is visible rather than silent. */
   warnings: string[]
 }
 
-const TIER_ORDER: Record<PlanTier, number> = { derived: 0, official: 1, community: 2 }
+const TIER_ORDER: Record<PlanTier, number> = {
+  derived: 0,
+  official: 1,
+  community: 2,
+}
 
-const SEVERITY_ORDER: Record<Finding['severity'], number> = { blocker: 0, high: 1, medium: 2, low: 3, info: 4 }
+const SEVERITY_ORDER: Record<Finding['severity'], number> = {
+  blocker: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+  info: 4,
+}
 
 export function buildPlan(
   report: ReadinessReport,

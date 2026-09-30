@@ -10,11 +10,11 @@
  * sources, so editing a playbook without regenerating fails CI.
  */
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { type ValidationIssue, validatePlaybook } from '../packages/playbooks/src/schema.ts'
 import { parseYamlSubset, YamlError, type YamlValue } from '../packages/playbooks/src/yaml.ts'
-import { validatePlaybook, type ValidationIssue } from '../packages/playbooks/src/schema.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -58,7 +58,7 @@ for (const file of files) {
 }
 
 if (problems.length > 0) {
-  console.error('Playbook validation failed:\n\n' + problems.join('\n\n'))
+  console.error(`Playbook validation failed:\n\n${problems.join('\n\n')}`)
   process.exit(1)
 }
 

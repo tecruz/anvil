@@ -1,8 +1,9 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M6 complete.** The tool is built; what it has not done yet is run against ten
-> real repositories, which is the exit criterion M1 wrote.
+> Status: **M0–M6 complete**, plus a review pass (see
+> [Review pass](#review-pass--m6-hardening-2026-09-30)). The tool is built; what it has not
+> done yet is run against ten real repositories, which is the exit criterion M1 wrote.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -148,10 +149,14 @@ anvil/
     cli/             command wiring -> dist/cli.js (bin: "anvil")
     plugin-opencode/ tools + compaction hook + shell.env + toasts
   registry/playbooks/*.yaml
-  templates/                      agents, commands, skills, AGENTS.md
-  fixtures/                       mini repos, one per ecosystem
+  fixtures/                       mini repos, one per ecosystem (16)
   docs/adr/                       architecture decision records
 ```
+
+Generation templates live in `packages/derive/src/generate.ts` rather than a
+`templates/` directory: they are TypeScript that reads a `ProjectProfile`, so keeping them
+as functions means they are typechecked and unit-tested instead of being string templates
+that can drift from the data they read.
 
 `packages/cli` owns the `bin` entry (`"anvil": "./dist/cli.js"`) rather than the workspace
 root. The bundle is written to `packages/cli/dist/cli.js`, not a root `dist/` — a publishable
@@ -356,25 +361,41 @@ range and runs in CI.
 
 ## CLI surface
 
+What ships today. The planned-but-unbuilt remainder is listed under
+[Not built](#not-built) rather than mixed in here, because a surface that lists
+unimplemented commands as if they exist is how a plan stops being usable as a spec.
+
 ```
 anvil profile [--json] [--profile <dir>]
-anvil doctor  [--json] [--layer <l>] [--strict] [--fail-on blocker] [--probe]
-anvil plan    [--json] [--tier derived|official|community]
-anvil brief   --for agents|commands|skills        # verified facts for the LLM step
-anvil init    [--apply] [--only <artifact>]       # staging + diff; apply is explicit
-anvil playbook list|match|show|add|check
-anvil auth github [--check]
+anvil doctor  [--json] [--layer <l>] [--fail-on <severity>] [--profile <dir>]
+anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>]
+anvil brief   --for agents|commands|skills|all    # verified facts for the LLM step
+anvil init    [--apply] [--only <artifact>] [--allow-warnings]
+anvil playbook list | show <id> | check [--offline] [--concurrency n] [--timeout ms] [--warnings]
+anvil auth github | local
 
-anvil issue pull <ref> [--refresh]     # -> .anvil/tickets/<key>.md context bundle
-anvil issue show|list|comment|set-state <ref>
-anvil issue sync [<ref>]               # two-way links, status, comments
+anvil issue show|list|create|comment|set-state <ref>
+anvil issue pull|refresh <ref>              # -> .anvil/ticket.md context bundle
+anvil issue sync <ref>                      # PR -> ticket
 
-anvil claim <ref> [--base <branch>] [--runner opencode|manual|none] [--open]
+anvil claim <ref> [--prefix p] [--base <branch>] [--runner <name>] [--worktree-root <dir>]
 anvil release <key> [--delete-branch] [--force]
-anvil crew up [--tickets a,b,c] [--from <query>] [--limit N] [--jobs N]
-anvil crew status | verify [<key>]
-anvil ship <key> [--draft] [--reviewers ...] [--no-ticket-update] [--probe]
+anvil status [--orphans]
+anvil crew up [--tickets a,b,c] [--limit N] [--launch] [--runner <r>] [--jobs N] [--force-parallel]
+anvil crew status | verify [<key>]...
+anvil ship <key> [--draft] [--reviewers ...] [--no-ticket-update] [--probe] [--skip-verify]
+anvil config show | path | init
+anvil version
 ```
+
+### Not built
+
+- `anvil playbook add <path|url>`, for a company playbook without a fork. `list`, `show` and
+  `check` exist; `match` is deliberately absent because `plan` already reports what matched.
+- `anvil auth --check` as a distinct mode. `auth github` is already an offline probe, so
+  `--check` is accepted and ignored rather than being a different code path.
+- `crew up --from <query>`. Tickets are selected with `--tickets`, or by taking everything
+  in state `todo`.
 
 #### `auth github --check` unhappy path
 
@@ -502,7 +523,8 @@ confident wrong output. Six that are right beats twelve that are mostly right.
 - **Golden**: 10 fixture mini-repos → snapshot `ProjectProfile` + report. Every new
   detector ships with a new fixture.
 - **Contract**: the `gh` transport is mocked at the `execFile` boundary (record/replay
-  `argv → stdout`). Live suite behind `ANVIL_LIVE=1`, never in default CI.
+  `argv → stdout`). Live suite behind `ANVIL_LIVE=1`, never in default CI —
+  `packages/providers/test/gh-live.test.ts`, run with `npm run test:live`.
 - **Integration**: real `git` in temp dirs, full worktree lifecycle including removal.
 - **Self-referential** (the one that actually proves the tool works): `doctor` →
   `init --apply` → `doctor` again must score strictly higher, and `init` must be
@@ -955,7 +977,7 @@ is exactly the failure that would have been invisible with the old logger.
 
 416 tests (up from 409). Bundle 316.6 kB.
 
-### M6 — in progress
+### M6 — complete (2026-09-29)
 
 Two pieces done, two remaining. Done first because the deferred M2a/M2b defect was a known
 wrong output in a shipped command, and it made the expanded registry unusable.
@@ -1076,10 +1098,317 @@ to start changing tsconfig flags.
 
 442 tests (up from 429). Bundle 351.9 kB — up from 317.0 kB, because 12 new playbooks
 embedded ~35 kB of YAML-derived strings. The previous commit's figure was simply wrong.
+(The review pass below found and fixed seven defects this milestone did not catch; the
+442 were green while all seven were live.)
 
 ## First move
 
-**M6 is complete.** M7 does not exist yet, and the honest next step is to use the tool: run
-`anvil doctor` on ten real repositories, which is the exit criterion M1 wrote and the only
-thing that can tell us whether the detectors are right. Publishing to the npm registry needs
-credentials and a decision about the package name, so it is prepared but not performed.
+**M6 and the review pass are complete.** The remaining work, in the order it should be done:
+
+1. **`anvil playbook add <path|url>`**, so a company playbook can be added without a fork.
+   The rest of the `playbook` family now exists; this is the last piece of the
+   extensibility claim.
+2. **Run `anvil doctor` on ten real repositories** -- M1's exit criterion, still unmet.
+   Pointing it at this one found nine defects, so the other nine are likely to as well.
+3. **Governance decisions that need a human, not a tool**: CODEOWNERS, a PR template, a
+   LICENSE. `anvil doctor` will keep reporting them until someone decides.
+4. Publishing to the npm registry needs credentials and a decision about the package name,
+   so it is prepared but not performed.
+
+---
+
+## Review pass — M6 hardening and dogfooding (2026-09-30)
+
+A line-by-line review of every package, with the shipped bundle and the real `gh` CLI
+probed directly rather than trusted. The suite was green at 442/442 throughout; **every
+defect below was invisible to it**, and the reason is the same in all seven cases: the
+defect lived *inside a mocked boundary*.
+
+### The gh transport failed against real gh for every GitHub repository
+
+`hostArgs()` returned `['--hostname', host]`, and it was appended to every call:
+`issue view/list/create/comment/edit/close/reopen`, `pr view/create/edit`, `repo view`.
+**Those commands do not have a `--hostname` flag.** Verified against gh 2.97:
+
+```
+$ gh issue view 1 --hostname github.com
+unknown flag: --hostname
+```
+
+Only the `auth` family accepts it, which is exactly why `anvil auth github` reported
+success while every other GitHub operation would have failed. gh resolves the host from
+the repository's own remote for repo-scoped commands, so the flag was never needed. The
+failure was also late rather than early: `ship` authenticates, **pushes the branch**, and
+then dies creating the PR — the precise debris the refuse→verify→push→PR→ticket ordering
+exists to prevent. `issue sync` reported "no open pull request" for PRs that existed.
+
+The injected-runner tests could not catch this, because a fake runner accepts any argv.
+The plan's own answer to that risk — a live suite behind `ANVIL_LIVE=1` — was written into
+the testing strategy and never implemented.
+
+### `crew up --launch` could never start an agent on Windows
+
+`agentPrompt()` returns a multi-line document, and the Windows shim path **refuses** any
+argument containing a newline (through `cmd.exe` a newline is a command separator, and the
+module's stated policy is to refuse rather than escape). `opencode` is a `.CMD` shim. So
+every launch threw:
+
+```
+Refusing to run `opencode`: an argument contains a character Windows cmd would interpret
+```
+
+The launcher tests all used single-line prompts (`'hello'`, `'hi'`, `'do the thing'`), so
+the real prompt was never exercised. The M5 note's claim that a real launch was verified
+cannot be true of the code as written. Fixed by writing the prompt to
+`.anvil/agent-prompt.md` in the worktree and passing a single-line read instruction in argv:
+the safety invariant is untouched, and hostile prompt text can no longer reach a command
+line at all.
+
+### `anvil config init` produced a config anvil rejected
+
+The starter file contained `$schema`, which `mergeConfig` rejected as an unknown key — so
+`config init` made every subsequent command in that repository exit 3, and the error's own
+hint ("run `anvil config show`") was itself broken. The `$schema` also pointed at
+`https://opencode.ai/config.json`, another tool's schema. There is no published anvil
+schema, so the honest fix is to write no `$schema` at all and accept one if a user adds it.
+
+### `init --apply` could never update a pre-existing `AGENTS.md`
+
+`checkApplyPreconditions` compared the repository against the **staged** hash, which cannot
+distinguish "the repo changed since staging" from "the repo always differed from what anvil
+generates". On any repository that already had an `AGENTS.md` — the common case for a tool
+whose job is improving an existing repo — apply was refused **forever**, with a message
+claiming the file "has changed in the repository since the bundle was staged" when it never
+had. The hint ("re-run `anvil init`") could not help, because re-running regenerated the
+same differing content. The fix is to record the **repo-side** hash at staging time, which
+is what makes the two cases distinguishable. The second apply remains a no-op, because
+content identical to what would be written is always safe.
+
+### Three smaller ship-path defects
+
+- **`Closes gh-42`.** GitHub and GitLab only auto-close on a reference they can resolve
+  (`#42`, `owner/repo#42`, or a URL). The human key is prose, so the ticket stayed open
+  after merge, silently. The test asserted the wrong string.
+- **`--reviewer '@@backend'`.** CODEOWNERS owners keep their `@`, and the transport
+  prepended another. gh takes a bare handle or `org/team-name`; the unresolvable reviewer
+  failed the PR create — after the push.
+- **`claim --worktree-root` did nothing.** A duplicated object key meant the config value
+  (often `null`) overwrote the flag on every call.
+
+### The failure envelope said success
+
+`init --apply`, `ship`, `crew verify`, `release` and `auth` all emitted a **success**
+envelope (`ok: true`) with the error nested inside `data`, while returning a non-zero exit
+code. Any consumer branching on `ok` — which is the documented contract, and what the
+opencode plugin consumes — read a failed apply as a successful one. `FailureEnvelope` now
+carries an optional `data`, and a new `ctx.outFailure` is the only way to report a failure
+with a payload. Verified: `anvil init --apply --json` on a stale bundle now emits
+`"ok": false`.
+
+### Also fixed
+
+- Verify commands were split on naive whitespace, so `--tests "*Changed*"` reached the
+  process with literal quotes — a filtered run that matched nothing and still reported
+  green. There is now a quote-aware `tokenizeCommand` (no shell, no expansion).
+- **CODEOWNERS patterns containing a slash** are now anchored to the repo root, per
+  GitHub's rule. `docs/*` previously also claimed `packages/docs/x`, over-assigning
+  reviews to a team that never asked.
+- **A staging manifest inside the repository was trusted.** `.anvil/staging/` is data in a
+  repo anvil was told to run in, and a manifest with `../` paths would make `--apply`
+  write attacker-chosen bytes outside the repository. Every target is now validated as a
+  plain relative path. (The local ticket provider already guarded this class.)
+- **`hasUpstream` was always true** for anvil's own `feat/...` branches — it echoed the
+  branch name back and looked for a `/` in it — so `needsUpstream` was always false.
+- **The fetch lock had no stale-lock recovery.** A killed process left the lock file
+  behind and every later fetch in that repository timed out until someone deleted it by
+  hand. The lock records its holder's pid; a dead holder is now broken.
+- **`issue sync` did not check the ticket's provider**, so a local ticket on a
+  GitHub-remote repo commented on the same-numbered GitHub issue. A closed-unmerged PR
+  also mapped to `in_review` rather than back to work-in-progress.
+- `build.mjs` preferred `npm_package_version` while its own comment explained why that
+  variable is wrong.
+- The packaging test used `spawnSync(..., { shell: true })` — reintroducing, in the test
+  for the Windows-shim fix, the shell it exists to avoid. It now uses `runProcess`.
+
+### The live suite found an eighth defect on its first run
+
+`packages/providers/test/gh-live.test.ts`, run with `ANVIL_LIVE=1 npm run test:live`. It
+records the argv the provider actually builds, then asks the installed `gh` which flags it
+accepts — no credentials and no network required, which is what makes it affordable to run
+often. The first run failed on:
+
+```
+gh issue create does not accept --json
+```
+
+`gh issue create` has no `--json` output, so `GitHubProvider.create` — and therefore
+`anvil issue create` on GitHub — failed with "unknown flag" against real gh. It answers by
+printing the new issue's URL, which is now parsed. Eight defects in one family, and the
+mocked suite could not see a single one.
+
+The suite was verified by reintroducing the `--hostname` bug and confirming it fails.
+
+### Pointing anvil at itself found two more
+
+The cheapest version of the ten-real-repositories exit criterion, and it paid for itself
+immediately.
+
+**The fixtures were the project.** anvil reported `vue`, `dotnet` and `terraform` for
+itself, and offered `dotnet test` as a verify command, because `fixtures/` is a tree of
+miniature repositories that exist to be detected. This is the exact failure mode the plan
+names as unforgivable — confident and wrong — produced by the tool's own test data. The
+walk now skips conventional test-data directories (`fixtures`, `testdata`, `__fixtures__`,
+and a few more) for the same reason it skips `node_modules`: their contents are not the
+code an agent will be asked to change. The error direction is the safe one, and
+`followDirs` remains the escape hatch (now reachable through `buildProfile`).
+
+**A false validator warning blocked the tool's own output.** The `@file`-reference check
+fired on `@anvil/core` — a scoped package name in the module map the tool itself generates
+— and `init --apply` refuses to apply while any warning stands. So the tool could not
+apply its own AGENTS.md without `--allow-warnings`. The check now requires an extension,
+which is what separates `@src/config.ts` from `@scope/package`.
+
+### Dogfooding, measured
+
+`anvil doctor` on this repository, before and after `anvil init --apply`:
+
+| | before | after |
+|---|---|---|
+| score | 53 (D) | **75 (B)** |
+| Orientability | 17 | **89** |
+| `AGENTS_COMMANDS` (blocker) | FAIL | **ok** |
+| `MODULE_MAP` | warn | **ok** (12/12) |
+| false stacks (`vue`, `dotnet`, `terraform`) | 3 | 0 |
+
+The staged `AGENTS.md` was then edited before applying — the designed workflow — to add
+`npm run check`, the live suite, the "never invoke a shell" invariant, the envelope
+contract, and the fact that `fixtures/` is excluded. anvil reported the edit as kept.
+
+What it still fails is honest: no linter, no formatter, no CI, and no documented
+changed-files test subset. Those are real gaps, not tool defects -- and the next section
+closes them.
+
+### Closing the gaps the tool found in itself
+
+**Biome** (`biome.jsonc`), one devDependency, chosen because it lints *and* formats with a
+single native binary and matches this codebase's existing style, so adopting it produced a
+mechanical diff rather than a re-litigation of style. Three rules are off with the reason
+recorded next to them: `noControlCharactersInRegex` (this code matches BOMs and NULs on
+purpose), `noNonNullAssertion` (assertions appear only after a check that proves the value
+is there), and `noConfusingVoidType` (the `Command` interface is genuinely
+`Promise<number | void>`).
+
+Adopting a linter is a lesson in its own right. The first `--write` silently reformatted the
+whole repository with Biome's *defaults* — tabs, double quotes — because the comments in
+`biome.jsonc` were not the problem; the problem was that a file named `biome.json` must be
+strict JSON, and the config was being ignored. The tell was looking at a source file
+afterwards and finding tabs. Nothing failed, no test broke, and the diff would have been
+reviewed as "formatting".
+
+**A changed-files test subset** (`scripts/test-changed.mjs`, `npm run test:changed`), which
+is what `TEST_FAST` asks for and the rule the plan calls "the one that makes agents usable".
+It selects whole workspace packages rather than files, widens to every package that depends
+on a changed one, treats a root-config change as "run everything", and does nothing when
+nothing relevant changed. Three bugs in it, all found by running it rather than reading it:
+the dependency closure was keyed by manifest name while the change set speaks in directory
+names, so the blast radius silently collapsed; `git status --porcelain` output was passed
+through a `.trim()` that ate the leading status column, shifting every path by one
+character; and a package with no test directory (`plugin-opencode`) crashed the full-suite
+path. It reads git through `-z`, which also removes git's path quoting.
+
+**CI** (`.github/workflows/ci.yml`): the plan's Windows/Linux/macOS matrix, Windows first,
+every job running `npm run check` -- the same command `AGENTS.md` documents, because
+`CI_PARITY` exists to catch exactly the case where those two diverge. The live `gh` contract
+suite runs in its own job where `gh` is installed, so it cannot skip silently.
+
+**And one more false positive, from adding CI.** `CI_PARITY` reported that this repository's
+CI "does not appear to run: build, lint, typecheck" -- on a workflow that runs
+`npm run check`, which runs all three. The rule token-matched the workflow body and could
+not see through a composite script, so it named three specific gaps that did not exist. That
+is the worst failure mode this tool has: a confident, checkable, wrong claim. The rule now
+expands the npm scripts a workflow invokes, to a bounded depth, and `CI_PARITY` is `ok`.
+
+### The score, after all of it
+
+`anvil doctor` on this repository, over the whole session:
+
+| | start | after the review | after dogfooding |
+|---|---|---|---|
+| score | 53 (D) | 75 (B) | **92 (A)** |
+| Orientability | 17 | 89 | 94 |
+| Operability | 63 | 63 | **89** |
+| `AGENTS_COMMANDS` (blocker) | FAIL | ok | ok |
+| `TEST_FAST` | FAIL | FAIL | **ok** |
+| `LINT` / `FORMAT` | FAIL / warn | FAIL / warn | **ok / ok** |
+| `CI` / `CI_PARITY` | FAIL / na | FAIL / na | **ok / ok** |
+| false stacks from `fixtures/` | 3 | 0 | 0 |
+
+470 tests (up from 442; 28 added, and every test that had encoded a bug now asserts the
+corrected behaviour). Bundle 366.2 kB.
+
+### `anvil playbook check` -- the rot mitigation, built
+
+`anvil playbook list | show | check` shipped, and `check` is the mitigation risk 5 named and
+M2a never delivered. Two layers, deliberately separated:
+
+- **Structural checks** are pure and offline: a URL that is not absolute https, a resource
+  with no `why`, a duplicate playbook id (the merge key, so one of them is silently unused),
+  a risk glob claimed by several playbooks, and the same URL cited twice. Deterministic, so
+  they live in the normal suite. The shipped registry is asserted to have **zero** structural
+  errors -- a rot check that fails on the registry it ships with is a check nobody runs.
+- **Reachability** probes every distinct URL with an injected `fetch`, bounded concurrency
+  (six), a per-request timeout, `HEAD` falling back to `GET` on 405, and `--offline` to skip
+  it entirely. The classification is the delicate part and is biased hard against crying
+  wolf: **only 404 and 410 are rot.** A 403 from a bot wall, a 429, a timeout and a 5xx are
+  all "unconfirmed" and never fail the build, because a check that goes red on a flaky
+  network gets disabled, and a disabled rot check reads as coverage in every dashboard that
+  counts green runs.
+
+**It found six dead links on its first run**, which is the entire argument for it:
+
+| dead | verdict |
+|---|---|
+| `github/actions` | the monorepo no longer exists; first-party actions are per-repo under `actions/` |
+| `gruntwork-io/terraform-aws-project-layout` | gone, and both official "state per environment" pages had moved too |
+| `sebastianbergmann/phpstan` | the project moved to `phpstan/phpstan` |
+| `hexdocs.pm/elixir/design_patterns.html` | page restructured; now points at the `GenServer` docs its own `why` describes |
+| `docs.gradle.org/.../upgrading_version.html` | moved to the compatibility page |
+| `developer.android.com/.../jetpack-release-notes` | moved to `/androidx/releases` |
+
+Each replacement was probed before it was written down, and the one entry with no honest
+replacement was **deleted rather than repointed at something plausible** -- with a comment
+saying to re-add it when a URL resolves. Guessing a replacement is how a registry starts
+lying about things nobody has verified.
+
+`SCHEMA_URL` in `schema.ts` was itself rot: it pointed at `docs/playbook-schema.md`, which
+does not exist. Now the section of this document that actually specifies the format.
+
+**One promise narrowed rather than faked.** The plan said check would "validate every URL and
+version range". There is no version-range field anywhere in the schema, so there was nothing
+to validate; a fake version check would have been theatre. The structural half that the data
+*can* support is what shipped.
+
+### What is still open
+
+- **`anvil playbook add`** (`<path|url>`), the other half of the extensibility claim, and
+  `playbook match` as a standalone view. `plan` already reports what matched, so `match` is
+  redundant; `add` is not implemented.
+- **The ten real repositories.** M1's exit criterion is still unmet; this repository is
+  one, and it was enough to find nine defects, which is either an argument for doing the
+  other nine or an argument that this one was badly served.
+- Governance findings that need a human decision rather than a tool: no CODEOWNERS, no PR
+  or issue template, no LICENSE, no SECURITY.md, no CONTRIBUTING.
+
+### What the review says about the testing strategy
+
+The suite is strong at sequencing and behaviour, and the pack→install→run test is the best
+test in the repository. But it mocks two boundaries — the `gh` argv shape and the agent
+launch prompt — and **all four critical defects lived inside those two mocks**. A mock
+proves the pipeline calls what you told it to call; it cannot prove the thing you called is
+a real command with real flags. The remaining high-value additions are a live suite behind
+`ANVIL_LIVE=1` (as the testing strategy already promised) and a smoke test that runs the
+real `agentPrompt` through the real shim path.
+
+`anvil doctor` on anvil itself still fails `AGENTS_COMMANDS` — there is no `AGENTS.md` in
+this repository. The tool has not yet been pointed at its own repo, which is the cheapest
+possible version of the ten-real-repositories exit criterion.

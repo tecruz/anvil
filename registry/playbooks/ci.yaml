@@ -40,11 +40,12 @@ community:
     why: >-
         The most-used action on GitHub, and its README documents the credential and
         fetch-depth behaviour that causes confusing "cannot find branch" failures.
-  - repo: 'github/actions'
-    label: GitHub\'s own actions
+  - repo: 'actions/setup-node'
+    label: GitHub\'s own setup actions
     why: >-
-        Cache, setup and artifact actions maintained alongside the platform. The setup
-        actions are versioned per runtime, so a stale pin quietly tests an old Node.
+        Cache, setup and artifact actions are maintained per-action under the `actions`
+        organisation, and the setup actions are versioned per runtime, so a stale pin
+        quietly tests an old Node. There is no single monorepo to point at any more.
 
 verify:
   build: []

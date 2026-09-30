@@ -36,7 +36,7 @@ official:
         stated style.
   migrationGuides:
     - label: Gradle upgrade guide
-      url: 'https://docs.gradle.org/current/userguide/upgrading_version.html'
+      url: 'https://docs.gradle.org/current/userguide/compatibility.html'
       why: >-
         Required reading before a Gradle version bump. Deprecated APIs are removed, and the
         build breaks in ways unrelated to the change you were making.

@@ -15,16 +15,16 @@ import {
   addModule,
   addStack,
   addTool,
-  filesUnder,
-  hasFile,
-  setMonorepo,
   type Detector,
   type DetectorContext,
+  filesUnder,
+  hasFile,
   type ProfileDraft,
+  setMonorepo,
 } from '../detector.ts'
 import { asObject, asString, evidence, findLine, looseVersion, readJson } from '../manifest.ts'
-import { readText } from '../walk.ts'
 import type { CommandKind } from '../types.ts'
+import { readText } from '../walk.ts'
 
 interface Manifest {
   name: string | null
@@ -65,7 +65,10 @@ function readManifest(ctx: DetectorContext, relPath: string): { manifest: Manife
     manifest: {
       name: asString(raw.name),
       scripts: stringMap(raw.scripts),
-      deps: { ...stringMap(raw.dependencies), ...stringMap(raw.devDependencies) },
+      deps: {
+        ...stringMap(raw.dependencies),
+        ...stringMap(raw.devDependencies),
+      },
       workspaces,
       packageManager: asString(raw.packageManager),
       engines: stringMap(raw.engines),
@@ -93,8 +96,14 @@ function lineOfKey(text: string, key: string): number | null {
 const SCRIPT_PATTERNS: ReadonlyArray<{ kind: CommandKind; re: RegExp }> = [
   // `watch` is deliberately excluded: a watch process never exits, so it is a
   // developer-loop command, not a fast subset that `crew verify` could run.
-  { kind: 'testFast', re: /^(test|it)[-:]?(fast|changed|quick|sharded?|affected)$/i },
-  { kind: 'test', re: /^(test|it)[-:]?(spec|ci|all|unit|e2e|integration|coverage|jest|vitest|mocha|run)?$/i },
+  {
+    kind: 'testFast',
+    re: /^(test|it)[-:]?(fast|changed|quick|sharded?|affected)$/i,
+  },
+  {
+    kind: 'test',
+    re: /^(test|it)[-:]?(spec|ci|all|unit|e2e|integration|coverage|jest|vitest|mocha|run)?$/i,
+  },
   { kind: 'build', re: /^(build|compile|bundle|prepack|release)$/i },
   { kind: 'lint', re: /^(lint|style:check|eslint|biome:check)$/i },
   { kind: 'format', re: /^(fmt|format|pretty|prettier|write)$/i },
@@ -103,7 +112,11 @@ const SCRIPT_PATTERNS: ReadonlyArray<{ kind: CommandKind; re: RegExp }> = [
 ]
 
 /** Dev-dependency names that prove a tool is in use. */
-const TOOL_DEPS: ReadonlyArray<{ match: RegExp; field: 'lint' | 'formatter' | 'typecheck' | 'test'; name: string }> = [
+const TOOL_DEPS: ReadonlyArray<{
+  match: RegExp
+  field: 'lint' | 'formatter' | 'typecheck' | 'test'
+  name: string
+}> = [
   { match: /^eslint$|^eslint-/, field: 'lint', name: 'eslint' },
   { match: /^@biomejs\/biome$/, field: 'lint', name: 'biome' },
   { match: /^oxlint$/, field: 'lint', name: 'oxlint' },
@@ -144,14 +157,14 @@ export const nodeDetector: Detector = {
 
     addStack(draft, {
       id: 'node',
-      version: manifest.engines['node'] ? looseVersion(manifest.engines['node']) : null,
+      version: manifest.engines.node ? looseVersion(manifest.engines.node) : null,
       evidence: [evidence('package.json', lineOfKey(text, 'engines'))],
     })
 
-    if (manifest.deps['typescript'] !== undefined || hasFile(ctx, 'tsconfig.json') || hasFile(ctx, 'tsconfig.base.json')) {
+    if (manifest.deps.typescript !== undefined || hasFile(ctx, 'tsconfig.json') || hasFile(ctx, 'tsconfig.base.json')) {
       addStack(draft, {
         id: 'typescript',
-        version: looseVersion(manifest.deps['typescript'] ?? null),
+        version: looseVersion(manifest.deps.typescript ?? null),
         evidence: [evidence('package.json', lineOfKey(text, 'typescript'))],
       })
     }
@@ -225,7 +238,11 @@ export const nodeDetector: Detector = {
     if (hasFile(ctx, 'Dockerfile') || hasFile(ctx, 'docker-compose.yml') || hasFile(ctx, 'compose.yaml')) {
       addTool(draft, 'container', 'docker')
     }
-    if (hasFile(ctx, '.husky/pre-commit') || hasFile(ctx, '.husky/commit-msg') || hasFile(ctx, '.pre-commit-config.yaml')) {
+    if (
+      hasFile(ctx, '.husky/pre-commit') ||
+      hasFile(ctx, '.husky/commit-msg') ||
+      hasFile(ctx, '.pre-commit-config.yaml')
+    ) {
       addTool(draft, 'hooks', 'pre-commit')
     }
     for (const f of ctx.files) {
@@ -236,7 +253,12 @@ export const nodeDetector: Detector = {
     if (manifest.workspaces === null) {
       // A single-package project is still a module, and having it in the graph means the
       // module-map rule can describe the whole repo rather than saying "no modules".
-      addModule(draft, { id: manifest.name ?? '.', path: '.', kind: 'package', deps: [] })
+      addModule(draft, {
+        id: manifest.name ?? '.',
+        path: '.',
+        kind: 'package',
+        deps: [],
+      })
       return
     }
 

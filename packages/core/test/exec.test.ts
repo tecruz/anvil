@@ -1,8 +1,8 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { describe, test } from 'node:test'
 
 import { isUnsafeArgument, quoteForCmd, resolveCommand, runProcess } from '@anvil/core'
 
@@ -24,7 +24,18 @@ describe('argument safety', () => {
   })
 
   test('allows the characters real commands legitimately contain', () => {
-    for (const arg of ['run', 'test', './gradlew', '--tests', '*Changed*', 'path/with space', '%PATH%', '(x)', 'a,b', '-Dfoo=1']) {
+    for (const arg of [
+      'run',
+      'test',
+      './gradlew',
+      '--tests',
+      '*Changed*',
+      'path/with space',
+      '%PATH%',
+      '(x)',
+      'a,b',
+      '-Dfoo=1',
+    ]) {
       assert.equal(isUnsafeArgument(arg), false, JSON.stringify(arg))
     }
   })
@@ -121,7 +132,10 @@ describe('runProcess', () => {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-exec-npm-'))
     writeFileSync(
       join(dir, 'package.json'),
-      JSON.stringify({ name: 'x', scripts: { t: 'node -e "process.stdout.write(\'shim-ok\')"' } }),
+      JSON.stringify({
+        name: 'x',
+        scripts: { t: 'node -e "process.stdout.write(\'shim-ok\')"' },
+      }),
       'utf8',
     )
     const result = await runProcess('npm', ['run', 't'], { cwd: dir })

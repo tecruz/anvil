@@ -6,7 +6,7 @@
  * checked.
  */
 
-import { SCHEMA_VERSION, VERSION, parseCliArgs } from '@anvil/core'
+import { parseCliArgs, SCHEMA_VERSION, VERSION } from '@anvil/core'
 import type { Command } from './types.ts'
 
 export const versionCommand: Command = {
@@ -19,8 +19,12 @@ export const versionCommand: Command = {
     help: { type: 'boolean', short: 'h' },
   },
   async run(ctx, rawArgs) {
-    const args = parseCliArgs(rawArgs, versionCommand.flags)
-    const data = { version: VERSION, schemaVersion: SCHEMA_VERSION, node: process.versions.node }
+    const _args = parseCliArgs(rawArgs, versionCommand.flags)
+    const data = {
+      version: VERSION,
+      schemaVersion: SCHEMA_VERSION,
+      node: process.versions.node,
+    }
     ctx.out(data, () => `anvil ${VERSION} (schema v${SCHEMA_VERSION}, node ${process.versions.node})`)
   },
 }

@@ -80,7 +80,10 @@ export function matchPlaybooks(profile: ProjectProfile, playbooks: readonly Play
 
   // Highest priority first, then most confident, then id for a stable order.
   results.sort(
-    (a, b) => b.playbook.priority - a.playbook.priority || b.confidence - a.confidence || (a.playbook.id < b.playbook.id ? -1 : 1),
+    (a, b) =>
+      b.playbook.priority - a.playbook.priority ||
+      b.confidence - a.confidence ||
+      (a.playbook.id < b.playbook.id ? -1 : 1),
   )
   return results
 }

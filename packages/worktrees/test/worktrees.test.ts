@@ -1,9 +1,9 @@
-import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, appendFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { after, describe, test } from 'node:test'
 
 import {
   addWorktree,
@@ -17,15 +17,22 @@ import {
   preflightClaim,
   removeWorktree,
   resolveBaseRef,
-  worktreeStatus,
   WINDOWS_SAFE_PATH_BUDGET,
   withFetchLock,
+  worktreeStatus,
 } from '@anvil/git'
-import { branchNameFor, parseRef, slugify, type Ticket } from '@anvil/tickets'
-import { renderAgentsOverlay, renderContextBundle, CONTEXT_FILE, AGENTS_OVERLAY } from '@anvil/tickets/context'
-import { LocalTicketProvider, parseTicketFile, renderTicketFile } from '@anvil/providers'
 import { buildProfile } from '@anvil/profile'
-import { claimStatuses, claimTicket, defaultWorktreeRoot, findOrphanWorktrees, readClaims, releaseClaim } from '@anvil/worktrees'
+import { LocalTicketProvider, parseTicketFile, renderTicketFile } from '@anvil/providers'
+import { branchNameFor, parseRef, slugify, type Ticket } from '@anvil/tickets'
+import { AGENTS_OVERLAY, CONTEXT_FILE, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import {
+  claimStatuses,
+  claimTicket,
+  defaultWorktreeRoot,
+  findOrphanWorktrees,
+  readClaims,
+  releaseClaim,
+} from '@anvil/worktrees'
 
 const temps: string[] = []
 after(() => {
@@ -69,7 +76,11 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
 
 describe('refs and slugs', () => {
   test('parses a bare number', () => {
-    assert.deepEqual(parseRef('42', 'local'), { provider: 'local', id: '42', key: 'local-42' })
+    assert.deepEqual(parseRef('42', 'local'), {
+      provider: 'local',
+      id: '42',
+      key: 'local-42',
+    })
   })
 
   test('parses #42 and a prefixed key', () => {
@@ -125,7 +136,13 @@ describe('refs and slugs', () => {
 // ===========================================================================
 
 describe('preflight', () => {
-  const base = { root: '/repo', targetPath: '/wt/local-1', branch: 'feat/local-1-add-login', baseDirty: false, platform: 'linux' as NodeJS.Platform }
+  const base = {
+    root: '/repo',
+    targetPath: '/wt/local-1',
+    branch: 'feat/local-1-add-login',
+    baseDirty: false,
+    platform: 'linux' as NodeJS.Platform,
+  }
 
   test('passes a clean claim', () => {
     const result = preflightClaim(base)
@@ -139,8 +156,12 @@ describe('preflight', () => {
   })
 
   test('blocks a path over the Windows budget', () => {
-    const long = 'C:\\' + 'a'.repeat(WINDOWS_SAFE_PATH_BUDGET + 40)
-    const result = preflightClaim({ ...base, targetPath: long, platform: 'win32' })
+    const long = `C:\\${'a'.repeat(WINDOWS_SAFE_PATH_BUDGET + 40)}`
+    const result = preflightClaim({
+      ...base,
+      targetPath: long,
+      platform: 'win32',
+    })
     assert.equal(result.ok, false)
     const check = result.checks.find((c) => c.name === 'path-length')
     assert.equal(check?.ok, false)
@@ -148,13 +169,21 @@ describe('preflight', () => {
   })
 
   test('the path budget is not enforced off Windows', () => {
-    const long = '/' + 'a'.repeat(WINDOWS_SAFE_PATH_BUDGET + 40)
-    const check = preflightClaim({ ...base, targetPath: long, platform: 'linux' }).checks.find((c) => c.name === 'path-length')
+    const long = `/${'a'.repeat(WINDOWS_SAFE_PATH_BUDGET + 40)}`
+    const check = preflightClaim({
+      ...base,
+      targetPath: long,
+      platform: 'linux',
+    }).checks.find((c) => c.name === 'path-length')
     assert.equal(check?.ok, true)
   })
 
   test('warns, but does not block, on a dirty base worktree', () => {
-    const result = preflightClaim({ ...base, baseDirty: true, targetPath: join(temp('anvil-empty2-'), 'x') })
+    const result = preflightClaim({
+      ...base,
+      baseDirty: true,
+      targetPath: join(temp('anvil-empty2-'), 'x'),
+    })
     const check = result.checks.find((c) => c.name === 'base-worktree-clean')
     assert.equal(check?.ok, false)
     assert.equal(check?.level, 'warn')
@@ -183,7 +212,7 @@ describe('preflight', () => {
     }
   })
 
-  test('the path estimate leaves room for git\'s companion path', () => {
+  test("the path estimate leaves room for git's companion path", () => {
     assert.ok(estimateWorktreePathLength('C:\\wt\\x') > 'C:\\wt\\x'.length)
   })
 })
@@ -197,7 +226,12 @@ describe('worktree lifecycle', () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-wt-'), 'local-1')
 
-    const added = await addWorktree({ cwd: repo, path: wt, branch: 'feat/local-1-add-login', baseRef: 'main' })
+    const added = await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/local-1-add-login',
+      baseRef: 'main',
+    })
     assert.equal(added.exitCode, 0, added.stderr)
 
     assert.ok(existsSync(wt))
@@ -216,7 +250,12 @@ describe('worktree lifecycle', () => {
   test('a worktree is a full checkout, not a shallow one', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-wt2-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/deep', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/deep',
+      baseRef: 'main',
+    })
     assert.ok(existsSync(join(wt, 'README.md')), 'the worktree should contain the repo')
     // Each worktree has its own index and HEAD, which is what makes them independent.
     assert.notEqual(git(wt, 'rev-parse', '--git-dir').trim(), git(repo, 'rev-parse', '--git-dir').trim())
@@ -225,7 +264,12 @@ describe('worktree lifecycle', () => {
   test('discoverRepo identifies a linked worktree', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-wt3-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/x', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/x',
+      baseRef: 'main',
+    })
 
     const main = await discoverRepo(repo)
     const linked = await discoverRepo(wt)
@@ -237,7 +281,12 @@ describe('worktree lifecycle', () => {
   test('git refuses a duplicate branch, and we detect it before trying', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-wt4-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/dup', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/dup',
+      baseRef: 'main',
+    })
     assert.equal(await branchExists(repo, 'feat/dup'), true)
     assert.equal(await branchExists(repo, 'feat/nope'), false)
   })
@@ -251,7 +300,12 @@ describe('worktree lifecycle', () => {
   test('a worktree reports uncommitted and unpushed separately', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-wt5-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/status', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/status',
+      baseRef: 'main',
+    })
 
     const clean = await worktreeStatus(wt)
     assert.equal(clean.dirty, false)
@@ -267,12 +321,19 @@ describe('worktree lifecycle', () => {
     const repo = makeRepo()
     // A bare clone to act as the remote, so an upstream can be real.
     const origin = temp('anvil-m3-origin-')
-    execFileSync('git', ['init', '--bare', '--initial-branch=main', origin], { stdio: 'pipe' })
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', origin], {
+      stdio: 'pipe',
+    })
     git(repo, 'remote', 'add', 'origin', origin)
     git(repo, 'push', '-u', 'origin', 'main')
 
     const wt = join(temp('anvil-m3-wt6-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/push', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/push',
+      baseRef: 'main',
+    })
     git(wt, 'push', '-u', 'origin', 'feat/push')
     assert.equal((await worktreeStatus(wt)).unpushed, 0)
 
@@ -307,7 +368,10 @@ describe('local ticket provider', () => {
   test('round-trips a ticket through a file', async () => {
     const dir = temp('anvil-m3-tickets-')
     const provider = new LocalTicketProvider({ dir })
-    const ref = await provider.create({ title: 'Fix login redirect', body: 'Details here.' })
+    const ref = await provider.create({
+      title: 'Fix login redirect',
+      body: 'Details here.',
+    })
     const fetched = await provider.fetch(ref)
     assert.equal(fetched.title, 'Fix login redirect')
     assert.match(fetched.body ?? '', /Details here/)
@@ -363,12 +427,20 @@ describe('local ticket provider', () => {
     await provider.transition(b, 'done')
     assert.equal((await provider.list()).length, 2)
     const done = await provider.list({ state: 'done' })
-    assert.deepEqual(done.map((r) => r.id), [b.id])
-    assert.deepEqual((await provider.list({ state: 'todo' })).map((r) => r.id), [a.id])
+    assert.deepEqual(
+      done.map((r) => r.id),
+      [b.id],
+    )
+    assert.deepEqual(
+      (await provider.list({ state: 'todo' })).map((r) => r.id),
+      [a.id],
+    )
   })
 
   test('authStatus fails cleanly when the directory is missing', async () => {
-    const provider = new LocalTicketProvider({ dir: join(temp('anvil-m3-none-'), 'nope') })
+    const provider = new LocalTicketProvider({
+      dir: join(temp('anvil-m3-none-'), 'nope'),
+    })
     const status = await provider.authStatus()
     assert.equal(status.ok, false)
     assert.match(status.remediation ?? '', /anvil issue create/)
@@ -396,8 +468,17 @@ describe('local ticket provider', () => {
 describe('context bundle', () => {
   test('carries the task, criteria, verify commands and risks', () => {
     const dir = makeRepo()
-    const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
-    const bundle = renderContextBundle({ ticket: ticket(), profile, branch: 'feat/local-1-add-login' })
+    const profile = buildProfile(dir, {
+      root: dir,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
+    const bundle = renderContextBundle({
+      ticket: ticket(),
+      profile,
+      branch: 'feat/local-1-add-login',
+    })
     assert.match(bundle.content, /Add login redirect/)
     assert.match(bundle.content, /\[ \] Redirects to \/dashboard/)
     assert.match(bundle.content, /Working on local-1/)
@@ -406,26 +487,49 @@ describe('context bundle', () => {
 
   test('never states a command the profile did not detect', () => {
     const dir = makeRepo()
-    const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
-    const bundle = renderContextBundle({ ticket: ticket(), profile, branch: 'b' })
+    const profile = buildProfile(dir, {
+      root: dir,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
+    const bundle = renderContextBundle({
+      ticket: ticket(),
+      profile,
+      branch: 'b',
+    })
     // This repo has no test tooling at all, so the bundle must not invent any.
     assert.doesNotMatch(bundle.content, /`npm test`/)
   })
 
   test('marks a command that is only inferred', () => {
     const dir = makeRepo()
-    const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    const profile = buildProfile(dir, {
+      root: dir,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
     const withInferred: typeof profile = {
       ...profile,
       commands: { test: [{ cmd: 'cargo test', source: 'inferred' }] },
     }
-    const bundle = renderContextBundle({ ticket: ticket(), profile: withInferred, branch: 'b' })
+    const bundle = renderContextBundle({
+      ticket: ticket(),
+      profile: withInferred,
+      branch: 'b',
+    })
     assert.match(bundle.content, /inferred/)
   })
 
   test('the AGENTS overlay points at the bundle rather than restating the repo', () => {
     const dir = makeRepo()
-    const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    const profile = buildProfile(dir, {
+      root: dir,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
     const overlay = renderAgentsOverlay({ ticket: ticket(), profile })
     assert.match(overlay.content, /ticket\.md/)
     assert.match(overlay.content, /AGENTS\.md/)
@@ -450,7 +554,11 @@ describe('claims', () => {
 
   test('claim creates a warm worktree and records it', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-cw-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-cw-'), 'wt'),
+    })
 
     assert.ok(existsSync(result.claim.worktreePath))
     assert.equal(result.claim.branch, 'feat/local-1-add-login-redirect')
@@ -463,7 +571,10 @@ describe('claims', () => {
     // And the ticket context is kept out of git, because it is company-internal.
     // This must NOT dirty the worktree: an edit to .gitignore would make every claim look
     // uncommitted, and `release` would then always refuse.
-    const ignoreCheck = execFileSync('git', ['status', '--porcelain'], { cwd: result.claim.worktreePath, encoding: 'utf8' })
+    const ignoreCheck = execFileSync('git', ['status', '--porcelain'], {
+      cwd: result.claim.worktreePath,
+      encoding: 'utf8',
+    })
     assert.equal(ignoreCheck.trim(), '', 'a fresh claim must leave the worktree clean')
 
     const registry = readClaims(repo)
@@ -474,7 +585,11 @@ describe('claims', () => {
   test('claiming twice for the same ticket is refused, not renamed', async () => {
     const repo = makeRepo()
     const wtRoot = join(temp('anvil-m3-cw2-'), 'wt')
-    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot })
+    await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: wtRoot,
+    })
     await assert.rejects(
       () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
       /already exists/,
@@ -486,7 +601,12 @@ describe('claims', () => {
     // Something else -- a stale claim, or a human -- already made this branch.
     git(repo, 'branch', 'feat/local-1-add-login-redirect')
     await assert.rejects(
-      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-cw3-'), 'wt') }),
+      () =>
+        claimTicket({
+          repoRoot: repo,
+          ticket: ticket(),
+          worktreeRoot: join(temp('anvil-m3-cw3-'), 'wt'),
+        }),
       /already exists/,
     )
     assert.equal(readClaims(repo).claims.length, 0, 'a refused claim must register nothing')
@@ -495,9 +615,19 @@ describe('claims', () => {
   test('two tickets with the same title get distinct branches', async () => {
     const repo = makeRepo()
     const wtRoot = join(temp('anvil-m3-cw3b-'), 'wt')
-    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot })
-    const other = ticket({ ref: { provider: 'local', id: '2', key: 'local-2' } })
-    const second = await claimTicket({ repoRoot: repo, ticket: other, worktreeRoot: wtRoot })
+    await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: wtRoot,
+    })
+    const other = ticket({
+      ref: { provider: 'local', id: '2', key: 'local-2' },
+    })
+    const second = await claimTicket({
+      repoRoot: repo,
+      ticket: other,
+      worktreeRoot: wtRoot,
+    })
     assert.equal(second.claim.branch, 'feat/local-2-add-login-redirect')
   })
 
@@ -516,18 +646,26 @@ describe('claims', () => {
 
   test('status reports uncommitted and unpushed separately', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-st-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-st-'), 'wt'),
+    })
     writeFileSync(join(result.claim.worktreePath, 'scratch.txt'), 'x', 'utf8')
 
     const [status] = await claimStatuses(repo)
-    assert.equal(status?.uncommitted, 1, 'only the test\'s own scratch file')
+    assert.equal(status?.uncommitted, 1, "only the test's own scratch file")
     assert.equal(status?.unpushed, null, 'no upstream yet')
     assert.equal(status?.orphaned, false)
   })
 
   test('status marks a claim whose worktree vanished as orphaned', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-st2-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-st2-'), 'wt'),
+    })
     rmSync(result.claim.worktreePath, { recursive: true, force: true })
 
     const [status] = await claimStatuses(repo)
@@ -537,7 +675,11 @@ describe('claims', () => {
 
   test('release refuses to discard uncommitted work, and says why', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-rel-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel-'), 'wt'),
+    })
     writeFileSync(join(result.claim.worktreePath, 'scratch.txt'), 'important', 'utf8')
 
     const rel = await releaseClaim({ repoRoot: repo, key: 'local-1' })
@@ -548,10 +690,19 @@ describe('claims', () => {
 
   test('release --force discards and removes', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-rel2-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel2-'), 'wt'),
+    })
     writeFileSync(join(result.claim.worktreePath, 'scratch.txt'), 'junk', 'utf8')
 
-    const rel = await releaseClaim({ repoRoot: repo, key: 'local-1', force: true, deleteBranch: true })
+    const rel = await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      force: true,
+      deleteBranch: true,
+    })
     assert.equal(rel.worktreeRemoved, true)
     assert.equal(rel.branchDeleted, true)
     assert.equal(existsSync(result.claim.worktreePath), false)
@@ -560,7 +711,11 @@ describe('claims', () => {
 
   test('releasing a clean claim works without --force', async () => {
     const repo = makeRepo()
-    const result = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-m3-rel3-'), 'wt') })
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel3-'), 'wt'),
+    })
     const rel = await releaseClaim({ repoRoot: repo, key: 'local-1' })
     assert.equal(rel.worktreeRemoved, true)
     assert.equal(existsSync(result.claim.worktreePath), false)
@@ -571,8 +726,15 @@ describe('claims', () => {
     const wtRoot = join(temp('anvil-m3-crew-'), 'wt')
     const paths: string[] = []
     for (const n of [1, 2, 3]) {
-      const t = ticket({ ref: { provider: 'local', id: String(n), key: `local-${n}` }, title: `Task number ${n}` })
-      const r = await claimTicket({ repoRoot: repo, ticket: t, worktreeRoot: wtRoot })
+      const t = ticket({
+        ref: { provider: 'local', id: String(n), key: `local-${n}` },
+        title: `Task number ${n}`,
+      })
+      const r = await claimTicket({
+        repoRoot: repo,
+        ticket: t,
+        worktreeRoot: wtRoot,
+      })
       paths.push(r.claim.worktreePath)
     }
 
@@ -597,7 +759,12 @@ describe('claims', () => {
   test('orphan worktrees are found', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-orphan-'), 'stray')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/stray', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/stray',
+      baseRef: 'main',
+    })
     const orphans = await findOrphanWorktrees(repo)
     assert.equal(orphans.length, 1)
     assert.ok((orphans[0] ?? '').endsWith('stray'))
@@ -620,7 +787,12 @@ describe('shared state resolves against the main worktree', () => {
   test('mainWorktreeRoot returns the main repo from inside a worktree', async () => {
     const repo = makeRepo()
     const wt = join(temp('anvil-m3-main-'), 'local-1')
-    await addWorktree({ cwd: repo, path: wt, branch: 'feat/x', baseRef: 'main' })
+    await addWorktree({
+      cwd: repo,
+      path: wt,
+      branch: 'feat/x',
+      baseRef: 'main',
+    })
 
     const fromMain = await mainWorktreeRoot(repo)
     const fromWorktree = await mainWorktreeRoot(wt)
@@ -635,12 +807,16 @@ describe('shared state resolves against the main worktree', () => {
   test('the claims registry is shared: a claim made from a worktree is visible outside', async () => {
     const repo = makeRepo()
     const wtRoot = join(temp('anvil-m3-shared-'), 'wt')
-    const first = await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot })
+    const first = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: wtRoot,
+    })
     assert.equal(readClaims(repo).claims.length, 1)
 
     // Status run against the worktree's own path must still find the registry in the
     // main worktree, not look for one inside the worktree.
-    const seenFromWorktree = await claimStatuses(await mainWorktreeRoot(first.claim.worktreePath) ?? repo)
+    const seenFromWorktree = await claimStatuses((await mainWorktreeRoot(first.claim.worktreePath)) ?? repo)
     assert.equal(seenFromWorktree.length, 1)
     assert.equal(seenFromWorktree[0]?.claim.key, 'local-1')
   })

@@ -10,7 +10,7 @@
  * markdown, so there is no format conversion and nothing to get wrong.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 import type {
@@ -95,7 +95,11 @@ export class LocalTicketProvider implements TicketProvider {
     for (const file of readdirSync(this.dir)) {
       if (!file.endsWith('.md')) continue
       const id = file.slice(0, -'.md'.length)
-      const ref: TicketRef = { provider: this.id, id, key: keyFor(this.id, id) }
+      const ref: TicketRef = {
+        provider: this.id,
+        id,
+        key: keyFor(this.id, id),
+      }
       if (query.state !== undefined) {
         const state = peekState(readFileSync(join(this.dir, file), 'utf8'))
         if (state !== query.state) continue
@@ -134,7 +138,10 @@ export class LocalTicketProvider implements TicketProvider {
   }
 
   async transitions(_ref: TicketRef): Promise<Transition[]> {
-    return STATES.filter((s) => s !== 'unknown').map((to) => ({ to, name: to }))
+    return STATES.filter((s) => s !== 'unknown').map((to) => ({
+      to,
+      name: to,
+    }))
   }
 
   async transition(ref: TicketRef, to: NormalizedState): Promise<void> {
@@ -260,9 +267,11 @@ export function parseTicketFile(text: string, ref: TicketRef, path: string): Loc
   const { fm, body } = splitFrontmatter(text)
   const title = fm.title ?? firstHeading(body) ?? ref.key
   const acceptance = [...body.matchAll(/^\s*[-*]\s*\[ \]\s*(.+)$/gm)].map((m) => (m[1] ?? '').trim())
-  const comments: TicketComment[] = [
-    ...body.matchAll(/^## Comment[^\n]*\n\n([\s\S]*?)(?=\n## |\n*$)/gm),
-  ].map((m) => ({ author: 'local', body: (m[1] ?? '').trim(), at: '' }))
+  const comments: TicketComment[] = [...body.matchAll(/^## Comment[^\n]*\n\n([\s\S]*?)(?=\n## |\n*$)/gm)].map((m) => ({
+    author: 'local',
+    body: (m[1] ?? '').trim(),
+    at: '',
+  }))
 
   return {
     ref: { ...ref, url: ref.url ?? `file://${path.split('\\').join('/')}` },

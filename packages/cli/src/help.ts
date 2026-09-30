@@ -6,9 +6,12 @@
  */
 
 import { renderTable, type Style } from '@anvil/core'
-import { PLANNED_COMMANDS, type Command } from './commands/types.ts'
+import { type Command, PLANNED_COMMANDS } from './commands/types.ts'
 
-function renderFlagTable(flags: Record<string, { type: string; short?: string; multiple?: boolean }>, style: Style): string {
+function renderFlagTable(
+  flags: Record<string, { type: string; short?: string; multiple?: boolean }>,
+  style: Style,
+): string {
   const rows = Object.entries(flags).map(([name, spec]) => {
     const short = spec.short === undefined ? '    ' : `-${spec.short}, `
     const nameCell = `${short}--${name}`
@@ -22,7 +25,7 @@ function renderFlagTable(flags: Record<string, { type: string; short?: string; m
 
 export function renderRootHelp(commands: Command[], style: Style): string {
   const lines: string[] = []
-  lines.push(style.bold('anvil') + ' - AI-ready dev harness')
+  lines.push(`${style.bold('anvil')} - AI-ready dev harness`)
   lines.push('')
   lines.push('Audit a repo for AI-readiness, derive agent context, and work tickets')
   lines.push('in parallel git worktrees.')
@@ -59,7 +62,7 @@ export function renderRootHelp(commands: Command[], style: Style): string {
 
 export function renderCommandHelp(command: Command, style: Style): string {
   const lines: string[] = []
-  lines.push(style.bold(`anvil ${command.name}`) + ' - ' + command.summary)
+  lines.push(`${style.bold(`anvil ${command.name}`)} - ${command.summary}`)
   lines.push('')
   lines.push(style.bold('USAGE'))
   lines.push(`  ${command.usage}`)

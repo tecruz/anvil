@@ -5,8 +5,9 @@
  * resolution across global + repo layers, and both output modes.
  */
 
-import { writeFileSync, existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import {
+  type AnvilConfig,
   AnvilError,
   CONFIG_FILE_NAME,
   ErrorCode,
@@ -15,13 +16,8 @@ import {
   renderKeyValues,
   repoConfigPath,
   starterConfigJson,
-  type AnvilConfig,
 } from '@anvil/core'
-import {
-  CONFIG_SUBCOMMANDS,
-  type Command,
-  type CommandContext,
-} from './types.ts'
+import { CONFIG_SUBCOMMANDS, type Command, type CommandContext } from './types.ts'
 
 function describe(config: AnvilConfig): Array<[string, string]> {
   const opt = (v: string | null): string => (v === null ? '(auto)' : v)
@@ -54,11 +50,9 @@ export const configCommand: Command = {
     const sub = args.positionals[0] ?? 'show'
 
     if (!CONFIG_SUBCOMMANDS.includes(sub as (typeof CONFIG_SUBCOMMANDS)[number])) {
-      throw new AnvilError(
-        ErrorCode.Usage,
-        `Unknown config subcommand: ${sub}`,
-        { hint: `Expected one of: ${CONFIG_SUBCOMMANDS.join(', ')}` },
-      )
+      throw new AnvilError(ErrorCode.Usage, `Unknown config subcommand: ${sub}`, {
+        hint: `Expected one of: ${CONFIG_SUBCOMMANDS.join(', ')}`,
+      })
     }
 
     if (sub === 'init') return runInit(ctx, args.positionals[1])

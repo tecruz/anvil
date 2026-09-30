@@ -1,9 +1,9 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { describe, test } from 'node:test'
 
 /**
  * End-to-end tests that spawn the real CLI.
@@ -37,7 +37,10 @@ function runAnvil(args: string[], opts: RunOptions = {}): RunResult {
   const configHome = opts.env?.ANVIL_CONFIG_HOME ?? join(scratch, 'config-home')
   try {
     if (opts.cwd === undefined && opts.inRepo !== false) {
-      execFileSync('git', ['init', '--initial-branch=main'], { cwd, stdio: 'pipe' })
+      execFileSync('git', ['init', '--initial-branch=main'], {
+        cwd,
+        stdio: 'pipe',
+      })
     }
     const res = execFileSync(process.execPath, [CLI, ...args], {
       cwd,
@@ -54,7 +57,11 @@ function runAnvil(args: string[], opts: RunOptions = {}): RunResult {
     return { code: 0, stdout: res, stderr: '' }
   } catch (err) {
     const e = err as { status?: number; stdout?: string; stderr?: string }
-    return { code: e.status ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }
+    return {
+      code: e.status ?? -1,
+      stdout: e.stdout ?? '',
+      stderr: e.stderr ?? '',
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
@@ -72,13 +79,18 @@ describe('anvil (no args)', () => {
     assert.match(res.stdout, /COMMANDS/)
   })
 
-  test('lists the planned surface, tagged with its milestone', () => {
+  test('the planned surface is only what is genuinely unimplemented', () => {
     const res = runAnvil([])
     assert.match(res.stdout, /PLANNED/)
-    assert.match(res.stdout, /anvil doctor\s+Audit AI-readiness/)  // implemented, not planned
-    assert.doesNotMatch(res.stdout, /anvil doctor.*M1/)               // M1 is done
-    assert.match(res.stdout, /anvil plan/)                            // still planned
-    assert.match(res.stdout, /M2a/)                                   // with its milestone
+    assert.match(res.stdout, /anvil doctor\s+Audit AI-readiness/) // implemented, not planned
+    assert.doesNotMatch(res.stdout, /anvil doctor.*M1/) // M1 is done
+
+    // `anvil playbook` is listed under COMMANDS now that `check` exists, so it must not
+    // also appear in PLANNED. An entry that graduated out of the roadmap list but stayed
+    // in it would be help output that lies about what runs.
+    assert.match(res.stdout, /anvil playbook\s+Inspect the playbook registry/)
+    const planned = res.stdout.slice(res.stdout.indexOf('PLANNED'))
+    assert.doesNotMatch(planned, /anvil playbook/)
   })
 
   test('--json with no command emits an envelope, not a help page', () => {
@@ -96,7 +108,7 @@ describe('unknown command', () => {
     const res = runAnvil(['bogus'])
     assert.equal(res.code, 2)
     assert.match(res.stderr, /Unknown command: bogus/)
-    assert.match(res.stderr, /code  UNKNOWN_COMMAND/)
+    assert.match(res.stderr, /code {2}UNKNOWN_COMMAND/)
   })
 
   test('exits 2 and emits a failure envelope in json mode', () => {
@@ -104,7 +116,11 @@ describe('unknown command', () => {
     assert.equal(res.code, 2)
     const body = jsonOf(res)
     assert.equal(body.ok, false)
-    const error = body.error as { code: string; message: string; hint?: string }
+    const error = body.error as {
+      code: string
+      message: string
+      hint?: string
+    }
     assert.equal(error.code, 'UNKNOWN_COMMAND')
     assert.match(error.message, /Unknown command/)
     assert.match(error.hint ?? '', /anvil --help/)
@@ -125,6 +141,61 @@ describe('anvil version', () => {
     assert.equal(data.schemaVersion, 1)
     assert.equal(typeof data.version, 'string')
     assert.equal(typeof data.node, 'string')
+  })
+})
+
+describe('anvil playbook', () => {
+  test('list names the registry and every playbook in it', () => {
+    const res = runAnvil(['playbook', 'list'])
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /Playbooks \d+/)
+    // Every id the built-in registry carries. A count alone would pass if the table were
+    // empty, which is the failure mode a smoke assertion always has.
+    for (const id of ['android', 'node', 'terraform', 'ci']) {
+      assert.match(res.stdout, new RegExp(`\\b${id}\\b`), `${id} missing from playbook list`)
+    }
+  })
+
+  test('show takes the id positionally', () => {
+    // The bug this pins: `show` accepted only `--id`, so the documented `show <id>` failed
+    // with a usage error while the flag was never mentioned in the usage line.
+    const res = runAnvil(['playbook', 'show', 'terraform'])
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /terraform, priority/)
+    assert.match(res.stdout, /High-risk paths/)
+  })
+
+  test('show also accepts --id, and says so when the id is unknown', () => {
+    assert.equal(runAnvil(['playbook', 'show', '--id', 'node']).code, 0)
+    const missing = runAnvil(['playbook', 'show', 'nope'])
+    assert.equal(missing.code, 2)
+    assert.match(missing.stderr, /No playbook "nope"/)
+  })
+
+  test('check --offline needs no network and passes on the shipped registry', () => {
+    // A rot check that fails on the registry it ships with is a check nobody runs, so this
+    // is asserted against the real built-ins rather than a fixture.
+    const res = runAnvil(['playbook', 'check', '--offline'])
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+    assert.match(res.stdout, /playbook check clean/)
+    assert.match(res.stdout, /not probed \(offline\)/)
+  })
+
+  test('check --offline --json reports ok on a failure envelope shape', () => {
+    const res = runAnvil(['playbook', 'check', '--offline', '--json'])
+    const body = jsonOf(res)
+    assert.equal(body.ok, true)
+    assert.equal(body.schemaVersion, 1)
+    const data = body.data as { probed: boolean; playbooks: number; counts: { error: number } }
+    assert.equal(data.probed, false)
+    assert.ok(data.playbooks >= 15)
+    assert.equal(data.counts.error, 0)
+  })
+
+  test('an unknown subcommand is a usage error naming the real ones', () => {
+    const res = runAnvil(['playbook', 'frobnicate'])
+    assert.equal(res.code, 2)
+    assert.match(res.stderr, /list, show, check/)
   })
 })
 
@@ -153,7 +224,9 @@ describe('anvil config', () => {
   test('path lists only real files, in both output modes', () => {
     const res = runAnvil(['config', 'path', '--json'])
     assert.equal(res.code, 0)
-    const data = jsonOf(res).data as { paths: Array<{ kind: string; present: boolean }> }
+    const data = jsonOf(res).data as {
+      paths: Array<{ kind: string; present: boolean }>
+    }
     assert.deepEqual(
       data.paths.map((p) => p.kind),
       ['global', 'repo'],
@@ -197,7 +270,10 @@ describe('anvil config init inside a repo', () => {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-cli-repo-'))
     const home = mkdtempSync(join(tmpdir(), 'anvil-cli-home2-'))
     try {
-      execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+      execFileSync('git', ['init', '--initial-branch=main'], {
+        cwd: dir,
+        stdio: 'pipe',
+      })
       const env = { ANVIL_CONFIG_HOME: join(home, 'cfg') }
 
       const first = runAnvil(['config', 'init'], { cwd: dir, env })
@@ -219,13 +295,25 @@ describe('anvil config init inside a repo', () => {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-cli-repo2-'))
     const home = mkdtempSync(join(tmpdir(), 'anvil-cli-home3-'))
     try {
-      execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+      execFileSync('git', ['init', '--initial-branch=main'], {
+        cwd: dir,
+        stdio: 'pipe',
+      })
       const configHome = join(home, 'cfg')
-      runAnvil(['config', 'init'], { cwd: dir, env: { ANVIL_CONFIG_HOME: configHome } })
+      runAnvil(['config', 'init'], {
+        cwd: dir,
+        env: { ANVIL_CONFIG_HOME: configHome },
+      })
       writeFileSync(join(dir, 'anvil.config.json'), JSON.stringify({ provider: { default: 'github' } }))
 
-      const res = runAnvil(['config', 'show', '--json'], { cwd: dir, env: { ANVIL_CONFIG_HOME: configHome } })
-      const data = jsonOf(res).data as { config: { provider: { default: string } }; sources: Array<{ kind: string; present: boolean }> }
+      const res = runAnvil(['config', 'show', '--json'], {
+        cwd: dir,
+        env: { ANVIL_CONFIG_HOME: configHome },
+      })
+      const data = jsonOf(res).data as {
+        config: { provider: { default: string } }
+        sources: Array<{ kind: string; present: boolean }>
+      }
       assert.equal(data.config.provider.default, 'github')
       assert.equal(data.sources.find((s) => s.kind === 'repo')?.present, true)
     } finally {
@@ -247,10 +335,7 @@ describe('anvil profile / doctor with --profile', () => {
       modules: Array<{ id: string }>
       stacks: Array<{ id: string }>
     }
-    assert.ok(
-      data.root.toLowerCase().includes('node-workspace'),
-      `expected the fixture root, got ${data.root}`,
-    )
+    assert.ok(data.root.toLowerCase().includes('node-workspace'), `expected the fixture root, got ${data.root}`)
     assert.equal(data.modules.length, 3, 'the workspace fixture has three members')
     assert.ok(!data.stacks.some((s) => s.id === 'dotnet'), 'must not pick up sibling fixtures')
   })
@@ -258,7 +343,9 @@ describe('anvil profile / doctor with --profile', () => {
   test('doctor --profile reports the fixture, not the parent', () => {
     const fixtures = join(import.meta.dirname, '..', '..', '..', 'fixtures', 'node-workspace')
     const fixtureScore = jsonOf(runAnvil(['doctor', '--profile', fixtures, '--json'])).data as { score: number }
-    const repoScore = jsonOf(runAnvil(['doctor', '--json'])).data as { score: number }
+    const repoScore = jsonOf(runAnvil(['doctor', '--json'])).data as {
+      score: number
+    }
     assert.notEqual(
       fixtureScore.score,
       repoScore.score,

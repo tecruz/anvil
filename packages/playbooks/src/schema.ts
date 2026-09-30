@@ -7,11 +7,17 @@
  * anywhere reporting the loss.
  */
 
-import { parseYamlSubset, YamlError, type YamlValue } from './yaml.ts'
 import { AnvilError, ErrorCode } from '@anvil/core'
+import { parseYamlSubset, YamlError, type YamlValue } from './yaml.ts'
 
-/** Where a playbook came from, for provenance in the plan. */
-export const SCHEMA_URL = 'https://github.com/anomalyco/anvil/blob/main/docs/playbook-schema.md'
+/**
+ * Where the playbook format is documented.
+ *
+ * This pointed at `docs/playbook-schema.md`, which does not exist -- the first thing
+ * `anvil playbook check` would have flagged as a dead link if the constant had been on its
+ * list. It now points at the section of the plan that actually specifies the format.
+ */
+export const SCHEMA_URL = 'https://github.com/anomalyco/anvil/blob/main/IMPLEMENTATION_PLAN.md#playbook-registry'
 
 export interface Resource {
   label: string
@@ -119,10 +125,18 @@ function strArray(value: YamlValue | undefined, path: string, issues: Validation
   return out
 }
 
-function checkKeys(obj: Record<string, YamlValue>, allowed: readonly string[], path: string, issues: ValidationIssue[]): void {
+function checkKeys(
+  obj: Record<string, YamlValue>,
+  allowed: readonly string[],
+  path: string,
+  issues: ValidationIssue[],
+): void {
   for (const key of Object.keys(obj)) {
     if (!allowed.includes(key)) {
-      issues.push({ path: path === '' ? key : `${path}.${key}`, message: 'unknown key' })
+      issues.push({
+        path: path === '' ? key : `${path}.${key}`,
+        message: 'unknown key',
+      })
     }
   }
 }
@@ -148,8 +162,10 @@ function resourceList(
     const label = obj.label
     const url = obj.url
     const why = obj.why
-    if (typeof label !== 'string' || label === '') issues.push({ path: `${path}[${i}].label`, message: 'required string' })
-    if (requireUrl && (typeof url !== 'string' || url === '')) issues.push({ path: `${path}[${i}].url`, message: 'required url' })
+    if (typeof label !== 'string' || label === '')
+      issues.push({ path: `${path}[${i}].label`, message: 'required string' })
+    if (requireUrl && (typeof url !== 'string' || url === ''))
+      issues.push({ path: `${path}[${i}].url`, message: 'required url' })
     if (typeof why !== 'string') issues.push({ path: `${path}[${i}].why`, message: 'required string' })
     out.push({
       label: typeof label === 'string' ? label : '',
@@ -171,7 +187,10 @@ function strOrNull(value: YamlValue | undefined, path: string, issues: Validatio
 }
 
 /** Validate a parsed YAML document into a Playbook, collecting every issue. */
-export function validatePlaybook(raw: YamlValue, source = '<memory>'): { playbook: Playbook | null; issues: ValidationIssue[] } {
+export function validatePlaybook(
+  raw: YamlValue,
+  source = '<memory>',
+): { playbook: Playbook | null; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = []
   const doc = issuesOn(raw, '', issues)
   checkKeys(
@@ -191,7 +210,11 @@ export function validatePlaybook(raw: YamlValue, source = '<memory>'): { playboo
   }
 
   if (id !== '') {
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) issues.push({ path: 'id', message: 'must be lowercase alphanumeric with hyphens' })
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(id))
+      issues.push({
+        path: 'id',
+        message: 'must be lowercase alphanumeric with hyphens',
+      })
   } else {
     issues.push({ path: 'id', message: 'required' })
   }
@@ -217,15 +240,23 @@ export function validatePlaybook(raw: YamlValue, source = '<memory>'): { playboo
       const obj = issuesOn(item, `community[${i}]`, issues)
       checkKeys(obj, [...RESOURCE_KEYS, 'repo', 'stars'], `community[${i}]`, issues)
       const repo = obj.repo
-      if (typeof repo !== 'string' || repo === '') issues.push({ path: `community[${i}].repo`, message: 'required string' })
+      if (typeof repo !== 'string' || repo === '')
+        issues.push({
+          path: `community[${i}].repo`,
+          message: 'required string',
+        })
       let stars: number | null = null
       if (typeof obj.stars === 'number') stars = obj.stars
-      else if (obj.stars !== undefined && obj.stars !== null) issues.push({ path: `community[${i}].stars`, message: 'expected a number' })
+      else if (obj.stars !== undefined && obj.stars !== null)
+        issues.push({
+          path: `community[${i}].stars`,
+          message: 'expected a number',
+        })
       community.push({
         repo: typeof repo === 'string' ? repo : '',
         stars,
-        label: typeof obj.label === 'string' ? obj.label : (typeof repo === 'string' ? repo : ''),
-        url: typeof obj.url === 'string' ? obj.url : (typeof repo === 'string' ? `https://github.com/${repo}` : ''),
+        label: typeof obj.label === 'string' ? obj.label : typeof repo === 'string' ? repo : '',
+        url: typeof obj.url === 'string' ? obj.url : typeof repo === 'string' ? `https://github.com/${repo}` : '',
         why: typeof obj.why === 'string' ? obj.why.trim() : '',
         ...(typeof obj.install === 'string' ? { install: obj.install } : {}),
       })
@@ -241,7 +272,10 @@ export function validatePlaybook(raw: YamlValue, source = '<memory>'): { playboo
     importPrefixes: strArray(m.importPrefixes, 'match.importPrefixes', issues),
   }
   if (match.files.length === 0 && match.deps.length === 0 && match.importPrefixes.length === 0) {
-    issues.push({ path: 'match', message: 'a playbook must match something (files, deps or importPrefixes)' })
+    issues.push({
+      path: 'match',
+      message: 'a playbook must match something (files, deps or importPrefixes)',
+    })
   }
 
   if (issues.length > 0) return { playbook: null, issues }

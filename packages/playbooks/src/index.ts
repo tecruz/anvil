@@ -7,42 +7,51 @@
  * resulting fixes by origin and confidence.
  */
 
-export { parseYamlSubset, YamlError, type YamlValue } from './yaml.ts'
-
 export {
-  SCHEMA_URL,
-  validatePlaybook,
-  parsePlaybook,
+  type CheckReport,
+  checkPlaybooks,
+  checkStructure,
+  classifyStatus,
+  collectUrls,
+  type ProbeFetch,
+  type ProbeOptions,
+  type Problem,
+  type ProblemLevel,
+  probeUrls,
+  type UrlStatus,
+} from './check.ts'
+export {
+  type MatchResult,
+  matchPlaybooks,
+  type PlaybookMatchReason,
+} from './match.ts'
+export {
+  buildPlan,
+  type Plan,
+  type PlanTier,
+  rankSuggestions,
+  type Suggestion,
+} from './plan.ts'
+export {
+  BUILTIN_PLAYBOOK_SOURCE,
+  type LoadResult,
+  loadBuiltins,
+  loadPlaybooks,
+  loadPlaybooksFromDirectory,
+  parsePlaybookFiles,
+  requireDirectory,
+} from './registry.ts'
+export {
   type CommunityResource,
   type Conventions,
   type OfficialResources,
   type Playbook,
   type PlaybookMatch,
   type PlaybookVerify,
+  parsePlaybook,
   type Resource,
+  SCHEMA_URL,
   type ValidationIssue,
+  validatePlaybook,
 } from './schema.ts'
-
-export {
-  BUILTIN_PLAYBOOK_SOURCE,
-  loadBuiltins,
-  loadPlaybooks,
-  loadPlaybooksFromDirectory,
-  parsePlaybookFiles,
-  requireDirectory,
-  type LoadResult,
-} from './registry.ts'
-
-export {
-  matchPlaybooks,
-  type MatchResult,
-  type PlaybookMatchReason,
-} from './match.ts'
-
-export {
-  buildPlan,
-  rankSuggestions,
-  type Plan,
-  type PlanTier,
-  type Suggestion,
-} from './plan.ts'
+export { parseYamlSubset, YamlError, type YamlValue } from './yaml.ts'

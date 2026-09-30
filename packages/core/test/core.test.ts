@@ -1,11 +1,12 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
+import { describe, test } from 'node:test'
 
 import {
   AnvilError,
   ErrorCode,
+  type ErrorCodeValue,
   ExitCode,
-  SCHEMA_VERSION,
+  type ExitCodeValue,
   emitJson,
   failure,
   getBool,
@@ -15,11 +16,10 @@ import {
   parseCliArgs,
   renderKeyValues,
   renderTable,
+  SCHEMA_VERSION,
   shouldUseColor,
   success,
   toAnvilError,
-  type ErrorCodeValue,
-  type ExitCodeValue,
 } from '@anvil/core'
 
 function capture(): { lines: string[]; write: (chunk: string) => void } {
@@ -99,7 +99,9 @@ describe('error codes and exit codes', () => {
 
 describe('parseCliArgs', () => {
   test('parses long and short flags', () => {
-    const args = parseCliArgs(['--json', '-j'], { json: { type: 'boolean', short: 'j' } })
+    const args = parseCliArgs(['--json', '-j'], {
+      json: { type: 'boolean', short: 'j' },
+    })
     assert.equal(getBool(args, 'json'), true)
   })
 
@@ -128,12 +130,16 @@ describe('parseCliArgs', () => {
   })
 
   test('getList splits comma-separated values', () => {
-    const args = parseCliArgs(['--tickets', 'a, b ,c'], { tickets: { type: 'string' } })
+    const args = parseCliArgs(['--tickets', 'a, b ,c'], {
+      tickets: { type: 'string' },
+    })
     assert.deepEqual(getList(args, 'tickets'), ['a', 'b', 'c'])
   })
 
   test('getList handles a repeated flag', () => {
-    const args = parseCliArgs(['--t', 'a', '--t', 'b'], { t: { type: 'string', multiple: true } })
+    const args = parseCliArgs(['--t', 'a', '--t', 'b'], {
+      t: { type: 'string', multiple: true },
+    })
     assert.deepEqual(getList(args, 't'), ['a', 'b'])
   })
 
@@ -155,7 +161,14 @@ describe('color detection', () => {
   })
 
   test('honors FORCE_COLOR', () => {
-    assert.equal(shouldUseColor({ noColor: false, stream: { isTTY: false } as NodeJS.WriteStream, env: { FORCE_COLOR: '1' } }), true)
+    assert.equal(
+      shouldUseColor({
+        noColor: false,
+        stream: { isTTY: false } as NodeJS.WriteStream,
+        env: { FORCE_COLOR: '1' },
+      }),
+      true,
+    )
   })
 
   test('TERM=dumb disables color', () => {
@@ -163,7 +176,14 @@ describe('color detection', () => {
   })
 
   test('non-TTY disables color by default', () => {
-    assert.equal(shouldUseColor({ noColor: false, stream: { isTTY: false } as NodeJS.WriteStream, env: {} }), false)
+    assert.equal(
+      shouldUseColor({
+        noColor: false,
+        stream: { isTTY: false } as NodeJS.WriteStream,
+        env: {},
+      }),
+      false,
+    )
   })
 
   test('FORCE_COLOR=0 disables color even on a TTY', () => {
@@ -193,7 +213,14 @@ describe('renderTable', () => {
   })
 
   test('renders a header and every row', () => {
-    const out = renderTable(['name', 'state'], [['a', 'ok'], ['b', 'bad']], style)
+    const out = renderTable(
+      ['name', 'state'],
+      [
+        ['a', 'ok'],
+        ['b', 'bad'],
+      ],
+      style,
+    )
     assert.match(out, /name/)
     assert.match(out, /state/)
     assert.match(out, /a\s+ok/)

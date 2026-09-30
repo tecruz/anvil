@@ -42,11 +42,11 @@ community:
     why: >-
       The source and issue tracker settle provider and core behaviour questions that the
       documentation leaves ambiguous.
-  - repo: 'gruntwork-io/terraform-aws-project-layout'
-    label: Gruntwork reference layout
-    why: >-
-      A widely used convention for separating environments, which keeps a state file per
-      environment and makes partial applies less dangerous.
+  # The Gruntwork reference layout was here until `anvil playbook check` found it dead: the
+  # repository no longer exists, and both official "keep a state file per environment"
+  # pages have moved. The convention is still good advice, but there was nowhere honest to
+  # send a reader, and a dead link is worse than no link -- it teaches a reader that the
+  # whole registry is unmaintained. Re-add it when there is a URL that resolves.
 
 verify:
   build: ['terraform init -backend=false', 'terraform validate']

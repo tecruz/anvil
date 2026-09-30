@@ -12,20 +12,13 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join } from 'node:path'
 import type { Plugin } from '@opencode-ai/plugin'
 import { tool } from '@opencode-ai/plugin'
 
 /** Where a claim writes the ticket context inside its worktree. */
 const CONTEXT_FILE = join('.anvil', 'ticket.md')
 const OVERLAY_FILE = join('.anvil', 'AGENTS.md')
-
-interface Envelope {
-  ok: boolean
-  command?: string
-  data?: unknown
-  error?: { code: string; message: string; hint?: string }
-}
 
 function readIfPresent(path: string): string | null {
   if (!existsSync(path)) return null
@@ -47,9 +40,15 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
       const result = await $`anvil ${args} --json`
       // Bun's shell resolves stdout as a Buffer; the tools return text.
       const stdout = result.stdout
-      return { ok: true, output: typeof stdout === 'string' ? stdout : Buffer.from(stdout ?? '').toString('utf8') }
+      return {
+        ok: true,
+        output: typeof stdout === 'string' ? stdout : Buffer.from(stdout ?? '').toString('utf8'),
+      }
     } catch (err) {
-      return { ok: false, output: err instanceof Error ? err.message : String(err) }
+      return {
+        ok: false,
+        output: err instanceof Error ? err.message : String(err),
+      }
     }
   }
 
@@ -75,8 +74,8 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
 
       anvil_plan: tool({
         description:
-          'Ranked fixes for the current repository, in three tiers: derived (from this repo\'s own facts), ' +
-          'official (the technology\'s own documentation and skills) and community. Read-only.',
+          "Ranked fixes for the current repository, in three tiers: derived (from this repo's own facts), " +
+          "official (the technology's own documentation and skills) and community. Read-only.",
         args: {
           tier: tool.schema.enum(['derived', 'official', 'community']).optional().describe('Only this tier'),
           limit: tool.schema.number().optional().describe('Maximum suggestions to return'),
@@ -92,7 +91,7 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
 
       anvil_ticket: tool({
         description:
-          'Read the ticket this worktree was claimed for, including acceptance criteria and the repository\'s ' +
+          "Read the ticket this worktree was claimed for, including acceptance criteria and the repository's " +
           'verify commands. Use this when you need to re-check what you were asked to do, especially after a ' +
           'context compaction.',
         args: {},

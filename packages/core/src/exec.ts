@@ -129,7 +129,10 @@ export interface ResolvedCommand {
  * On Windows this is the step `execFile` refuses to do. On other platforms it just checks
  * that the thing exists before we bother spawning.
  */
-export function resolveCommand(bin: string, opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): ResolvedCommand | null {
+export function resolveCommand(
+  bin: string,
+  opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
+): ResolvedCommand | null {
   const env = opts.env ?? process.env
   const platform = opts.platform ?? process.platform
 
@@ -173,13 +176,9 @@ function assertSafeArgument(arg: string, bin: string, platform: NodeJS.Platform)
     platform === 'win32'
       ? 'an argument contains a character Windows cmd would interpret'
       : 'an argument contains a character that would need shell escaping'
-  throw new AnvilError(
-    ErrorCode.Usage,
-    `Refusing to run \`${bin}\`: ${detail}: ${JSON.stringify(arg)}`,
-    {
-      hint: 'This is a shell-metacharacter safety check, not a bug. anvil only runs commands whose arguments it can verify are inert.',
-    },
-  )
+  throw new AnvilError(ErrorCode.Usage, `Refusing to run \`${bin}\`: ${detail}: ${JSON.stringify(arg)}`, {
+    hint: 'This is a shell-metacharacter safety check, not a bug. anvil only runs commands whose arguments it can verify are inert.',
+  })
 }
 
 /**
@@ -196,7 +195,10 @@ export function spawnArgv(
   opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
 ): { file: string; args: string[]; resolved: ResolvedCommand } {
   const platform = opts.platform ?? process.platform
-  const resolved = resolveCommand(bin, { ...(opts.env === undefined ? {} : { env: opts.env }), platform })
+  const resolved = resolveCommand(bin, {
+    ...(opts.env === undefined ? {} : { env: opts.env }),
+    platform,
+  })
   if (resolved === null) {
     throw new AnvilError(ErrorCode.ToolMissing, `Command not found: ${bin}`, {
       hint: hintFor(bin, platform),
@@ -212,10 +214,19 @@ export function spawnArgv(
 }
 
 /** True when a launch needs `windowsVerbatimArguments` to keep its quoting intact. */
-export function needsVerbatimArguments(bin: string, opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {}): boolean {
+export function needsVerbatimArguments(
+  bin: string,
+  opts: { env?: NodeJS.ProcessEnv; platform?: NodeJS.Platform } = {},
+): boolean {
   const platform = opts.platform ?? process.platform
-  const resolved = resolveCommand(bin, { ...(opts.env === undefined ? {} : { env: opts.env }), platform })
-  return resolved !== null && resolved.isShim
+  const resolved = resolveCommand(bin, {
+    ...(opts.env === undefined ? {} : { env: opts.env }),
+    platform,
+  })
+  // Not `resolved?.isShim`: this returns `boolean`, and an optional chain would widen it
+  // to `boolean | undefined` -- a lie about a question that always has an answer.
+  if (resolved === null) return false
+  return resolved.isShim
 }
 
 /**
@@ -230,7 +241,10 @@ export async function runProcess(
   options: RunProcessOptions = {},
 ): Promise<ProcessResult> {
   const platform = options.platform ?? process.platform
-  const resolved = resolveCommand(bin, { ...(options.env === undefined ? {} : { env: options.env }), platform })
+  const resolved = resolveCommand(bin, {
+    ...(options.env === undefined ? {} : { env: options.env }),
+    platform,
+  })
 
   if (resolved === null) {
     throw new AnvilError(ErrorCode.ToolMissing, `Command not found: ${bin}`, {
@@ -259,9 +273,18 @@ export async function runProcess(
     })
     return { stdout, stderr, exitCode: 0 }
   } catch (err) {
-    const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string }
+    const e = err as {
+      code?: number | string
+      stdout?: string
+      stderr?: string
+      message?: string
+    }
     if (e !== null && typeof e === 'object' && typeof e.code === 'number') {
-      return { stdout: e.stdout ?? '', stderr: e.stderr ?? e.message ?? '', exitCode: e.code }
+      return {
+        stdout: e.stdout ?? '',
+        stderr: e.stderr ?? e.message ?? '',
+        exitCode: e.code,
+      }
     }
     throw new AnvilError(ErrorCode.Internal, `Failed to run ${bin}: ${e?.message ?? String(err)}`, { cause: err })
   }

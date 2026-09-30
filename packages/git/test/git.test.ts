@@ -1,9 +1,9 @@
-import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { after, describe, test } from 'node:test'
 
 import { discoverRepo, git, gitOrThrow } from '@anvil/git'
 
@@ -20,9 +20,18 @@ function tempDir(): string {
 }
 
 function initRepo(dir: string): void {
-  execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
-  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir, stdio: 'pipe' })
-  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir, stdio: 'pipe' })
+  execFileSync('git', ['init', '--initial-branch=main'], {
+    cwd: dir,
+    stdio: 'pipe',
+  })
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: dir,
+    stdio: 'pipe',
+  })
+  execFileSync('git', ['config', 'user.name', 'Test'], {
+    cwd: dir,
+    stdio: 'pipe',
+  })
 }
 
 /** A repo with a real HEAD, so branch detection has something to resolve. */
@@ -37,14 +46,18 @@ describe('git', () => {
   test('runs a subcommand and returns stdout', async () => {
     const dir = tempDir()
     initRepo(dir)
-    const out = await gitOrThrow(['rev-parse', '--is-inside-work-tree'], { cwd: dir })
+    const out = await gitOrThrow(['rev-parse', '--is-inside-work-tree'], {
+      cwd: dir,
+    })
     assert.equal(out.trim(), 'true')
   })
 
   test('returns a non-zero exit code instead of throwing', async () => {
     const dir = tempDir()
     initRepo(dir)
-    const res = await git(['rev-parse', '--verify', 'no-such-ref'], { cwd: dir })
+    const res = await git(['rev-parse', '--verify', 'no-such-ref'], {
+      cwd: dir,
+    })
     assert.notEqual(res.exitCode, 0)
   })
 
@@ -106,7 +119,10 @@ describe('discoverRepo', () => {
     writeFileSync(join(dir, 'file.txt'), 'hello\n')
     execFileSync('git', ['add', '.'], { cwd: dir, stdio: 'pipe' })
     execFileSync('git', ['commit', '-m', 'init'], { cwd: dir, stdio: 'pipe' })
-    execFileSync('git', ['checkout', '--detach', 'HEAD'], { cwd: dir, stdio: 'pipe' })
+    execFileSync('git', ['checkout', '--detach', 'HEAD'], {
+      cwd: dir,
+      stdio: 'pipe',
+    })
 
     const info = await discoverRepo(dir)
     assert.equal(info?.branch, null)

@@ -1,7 +1,7 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
+import { describe, test } from 'node:test'
 
-import { YamlError, parseYamlSubset } from '@anvil/playbooks'
+import { parseYamlSubset, YamlError } from '@anvil/playbooks'
 
 /**
  * The YAML subset is load-bearing: a misparse would point an agent at the wrong
@@ -50,7 +50,9 @@ describe('scalars', () => {
   })
 
   test('a value containing a colon is not split', () => {
-    assert.deepEqual(parse('a: https://example.com/x'), { a: 'https://example.com/x' })
+    assert.deepEqual(parse('a: https://example.com/x'), {
+      a: 'https://example.com/x',
+    })
   })
 })
 
@@ -94,10 +96,7 @@ describe('sequences', () => {
 
   test('parses maps as sequence items', () => {
     assert.deepEqual(parse('items:\n  - name: a\n    why: b\n  - name: c'), {
-      items: [
-        { name: 'a', why: 'b' },
-        { name: 'c' },
-      ],
+      items: [{ name: 'a', why: 'b' }, { name: 'c' }],
     })
   })
 
@@ -114,7 +113,9 @@ describe('flow collections', () => {
 
   test('parses inline maps, including nested', () => {
     assert.deepEqual(parse('a: {x: 1, y: two}'), { a: { x: 1, y: 'two' } })
-    assert.deepEqual(parse('a: {x: {z: 1}, y: 2}'), { a: { x: { z: 1 }, y: 2 } })
+    assert.deepEqual(parse('a: {x: {z: 1}, y: 2}'), {
+      a: { x: { z: 1 }, y: 2 },
+    })
   })
 
   test('a comma inside quotes does not split an item', () => {

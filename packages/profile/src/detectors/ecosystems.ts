@@ -15,19 +15,17 @@ import {
   addModule,
   addStack,
   addTool,
-  filesUnder,
-  hasFile,
-  hasFileUnder,
-  setMonorepo,
   type Detector,
   type DetectorContext,
-  type ProfileDraft,
+  filesUnder,
+  hasFile,
+  setMonorepo,
 } from '../detector.ts'
-import { evidence, findLine, looseVersion } from '../manifest.ts'
+import { evidence, findLine } from '../manifest.ts'
+import type { CommandEntry } from '../types.ts'
 import { readText } from '../walk.ts'
 import { nodeDetector } from './node.ts'
 import { pythonDetector } from './python.ts'
-import type { CommandEntry, CommandKind } from '../types.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
   return readText(join(ctx.root, rel)).text
@@ -77,16 +75,32 @@ export const goDetector: Detector = {
       const t = read(ctx, f)
       return t !== null && /testing\.Short\(\)/.test(t)
     })
-    addCommand(draft, 'test', { cmd: 'go test ./...', source: 'detected', evidence: 'go.mod' })
+    addCommand(draft, 'test', {
+      cmd: 'go test ./...',
+      source: 'detected',
+      evidence: 'go.mod',
+    })
     if (hasShort) {
-      addCommand(draft, 'testFast', { cmd: 'go test -short ./...', source: 'detected', evidence: 'testing.Short() guard found' })
+      addCommand(draft, 'testFast', {
+        cmd: 'go test -short ./...',
+        source: 'detected',
+        evidence: 'testing.Short() guard found',
+      })
     }
     if (hasFile(ctx, '.golangci.yml') || hasFile(ctx, '.golangci.yaml')) {
       addTool(draft, 'lint', 'golangci-lint')
-      addCommand(draft, 'lint', { cmd: 'golangci-lint run', source: 'detected', evidence: '.golangci.yml' })
+      addCommand(draft, 'lint', {
+        cmd: 'golangci-lint run',
+        source: 'detected',
+        evidence: '.golangci.yml',
+      })
     }
     if (hasFile(ctx, 'Makefile')) {
-      addCommand(draft, 'build', { cmd: 'make build', source: 'detected', evidence: 'Makefile' })
+      addCommand(draft, 'build', {
+        cmd: 'make build',
+        source: 'detected',
+        evidence: 'Makefile',
+      })
     }
   },
 }
@@ -109,7 +123,11 @@ export const rustDetector: Detector = {
     })
 
     if (cargo !== null && /\[workspace\]/.test(cargo)) {
-      setMonorepo(draft, { tool: 'cargo-workspace', evidence: evidence('Cargo.toml', findLine(cargo, /\[workspace\]/)), members: [] })
+      setMonorepo(draft, {
+        tool: 'cargo-workspace',
+        evidence: evidence('Cargo.toml', findLine(cargo, /\[workspace\]/)),
+        members: [],
+      })
       for (const f of ctx.files) {
         if (!f.endsWith('/Cargo.toml')) continue
         const path = f === 'Cargo.toml' ? '.' : f.slice(0, -'/Cargo.toml'.length)
@@ -119,7 +137,7 @@ export const rustDetector: Detector = {
       }
     }
 
-    const commands: Array<[ 'build' | 'test' | 'testFast' | 'lint' | 'format', CommandEntry ]> = [
+    const commands: Array<['build' | 'test' | 'testFast' | 'lint' | 'format', CommandEntry]> = [
       ['build', { cmd: 'cargo build', source: 'inferred' }],
       ['test', { cmd: 'cargo test', source: 'inferred' }],
       ['format', { cmd: 'cargo fmt --check', source: 'inferred' }],
@@ -127,16 +145,31 @@ export const rustDetector: Detector = {
     for (const [kind, entry] of commands) addCommand(draft, kind, entry)
 
     if (hasFile(ctx, 'clippy.toml') || (cargo !== null && /clippy/.test(cargo))) {
-      addCommand(draft, 'lint', { cmd: 'cargo clippy --all-targets -- -D warnings', source: 'inferred' })
+      addCommand(draft, 'lint', {
+        cmd: 'cargo clippy --all-targets -- -D warnings',
+        source: 'inferred',
+      })
     }
     // `cargo nextest run` is the fast path; its presence is a real, checkable signal.
     if (cargo !== null && /nextest/.test(cargo)) {
-      addCommand(draft, 'testFast', { cmd: 'cargo nextest run', source: 'detected', evidence: 'Cargo.toml' })
+      addCommand(draft, 'testFast', {
+        cmd: 'cargo nextest run',
+        source: 'detected',
+        evidence: 'Cargo.toml',
+      })
     } else if (hasFile(ctx, '.config/nextest.toml')) {
-      addCommand(draft, 'testFast', { cmd: 'cargo nextest run', source: 'detected', evidence: '.config/nextest.toml' })
+      addCommand(draft, 'testFast', {
+        cmd: 'cargo nextest run',
+        source: 'detected',
+        evidence: '.config/nextest.toml',
+      })
     }
     if (hasFile(ctx, 'rust-toolchain.toml') || hasFile(ctx, 'rust-toolchain')) {
-      addStack(draft, { id: 'rust-toolchain', version: null, evidence: ['rust-toolchain.toml'] })
+      addStack(draft, {
+        id: 'rust-toolchain',
+        version: null,
+        evidence: ['rust-toolchain.toml'],
+      })
     }
   },
 }
@@ -162,12 +195,26 @@ export const jvmDetector: Detector = {
     const maven = hasFile(ctx, 'pom.xml')
 
     if (gradleFiles.length > 0) {
-      addStack(draft, { id: 'gradle', version: null, evidence: [gradleFiles[0] as string] })
+      addStack(draft, {
+        id: 'gradle',
+        version: null,
+        evidence: [gradleFiles[0] as string],
+      })
       const { cmd, wrapper } = gradlew(ctx)
-      setMonorepo(draft, { tool: 'gradle', evidence: gradleFiles[0] as string, members: [] })
+      setMonorepo(draft, {
+        tool: 'gradle',
+        evidence: gradleFiles[0] as string,
+        members: [],
+      })
 
-      addCommand(draft, 'build', { cmd: `${cmd} build`, source: wrapper ? 'detected' : 'inferred' })
-      addCommand(draft, 'test', { cmd: `${cmd} test`, source: wrapper ? 'detected' : 'inferred' })
+      addCommand(draft, 'build', {
+        cmd: `${cmd} build`,
+        source: wrapper ? 'detected' : 'inferred',
+      })
+      addCommand(draft, 'test', {
+        cmd: `${cmd} test`,
+        source: wrapper ? 'detected' : 'inferred',
+      })
       // A changed-files test subset needs a task the project actually defines; without one
       // this is a genuine readiness gap, which the TEST_FAST rule should report.
       if (hasFile(ctx, 'gradlew')) {
@@ -192,16 +239,30 @@ export const jvmDetector: Detector = {
       }
       if (!wrapper) {
         // Worth surfacing: without the wrapper the build is not reproducible.
-        addStack(draft, { id: 'gradle-no-wrapper', version: null, evidence: ['(gradlew absent)'] })
+        addStack(draft, {
+          id: 'gradle-no-wrapper',
+          version: null,
+          evidence: ['(gradlew absent)'],
+        })
       }
     }
 
     if (maven) {
       addStack(draft, { id: 'maven', version: null, evidence: ['pom.xml'] })
       const mvn = hasFile(ctx, 'mvnw') ? './mvnw' : 'mvn'
-      addCommand(draft, 'build', { cmd: `${mvn} -q package -DskipTests`, source: hasFile(ctx, 'mvnw') ? 'detected' : 'inferred' })
-      addCommand(draft, 'test', { cmd: `${mvn} -q test`, source: hasFile(ctx, 'mvnw') ? 'detected' : 'inferred' })
-      if (hasFile(ctx, 'mvnw')) addCommand(draft, 'testFast', { cmd: `${mvn} test -Dit.test=*Changed*`, source: 'inferred' })
+      addCommand(draft, 'build', {
+        cmd: `${mvn} -q package -DskipTests`,
+        source: hasFile(ctx, 'mvnw') ? 'detected' : 'inferred',
+      })
+      addCommand(draft, 'test', {
+        cmd: `${mvn} -q test`,
+        source: hasFile(ctx, 'mvnw') ? 'detected' : 'inferred',
+      })
+      if (hasFile(ctx, 'mvnw'))
+        addCommand(draft, 'testFast', {
+          cmd: `${mvn} test -Dit.test=*Changed*`,
+          source: 'inferred',
+        })
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
     }
 
@@ -223,10 +284,15 @@ export const dotnetDetector: Detector = {
   id: 'dotnet',
   title: '.NET',
   priority: 50,
-  matches: (ctx) => filesUnder(ctx, '').some((f) => f.endsWith('.csproj') || f.endsWith('.fsproj')) || hasFile(ctx, 'global.json'),
+  matches: (ctx) =>
+    filesUnder(ctx, '').some((f) => f.endsWith('.csproj') || f.endsWith('.fsproj')) || hasFile(ctx, 'global.json'),
   detect(ctx, draft) {
     const projects = filesUnder(ctx, '').filter((f) => f.endsWith('.csproj') || f.endsWith('.fsproj'))
-    addStack(draft, { id: 'dotnet', version: null, evidence: [projects[0] ?? 'global.json'] })
+    addStack(draft, {
+      id: 'dotnet',
+      version: null,
+      evidence: [projects[0] ?? 'global.json'],
+    })
 
     for (const p of projects) {
       const dir = p.slice(0, p.lastIndexOf('/') + 1) || '.'
@@ -248,4 +314,11 @@ export const dotnetDetector: Detector = {
   },
 }
 
-export const ecosystemDetectors: readonly Detector[] = [jvmDetector, nodeDetector, pythonDetector, goDetector, rustDetector, dotnetDetector]
+export const ecosystemDetectors: readonly Detector[] = [
+  jvmDetector,
+  nodeDetector,
+  pythonDetector,
+  goDetector,
+  rustDetector,
+  dotnetDetector,
+]

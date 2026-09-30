@@ -10,9 +10,9 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { addRisk, addTool, type ProfileDraft } from './detector.ts'
-import { evidence, findLine } from './manifest.ts'
-import { firstExisting, readText } from './walk.ts'
+import { evidence } from './manifest.ts'
 import type { Docs, InstructionFile } from './types.ts'
+import { firstExisting, readText } from './walk.ts'
 
 /**
  * Instruction files, in the precedence order opencode applies.
@@ -21,7 +21,10 @@ import type { Docs, InstructionFile } from './types.ts'
  * tools, and a profile that claims "AGENTS.md is the source of truth" when the repo only
  * has CLAUDE.md sends a reviewer down the wrong path.
  */
-const INSTRUCTION_CANDIDATES: ReadonlyArray<{ rel: string; category: InstructionFile['category'] }> = [
+const INSTRUCTION_CANDIDATES: ReadonlyArray<{
+  rel: string
+  category: InstructionFile['category']
+}> = [
   { rel: 'AGENTS.md', category: 'agents' },
   { rel: 'CLAUDE.md', category: 'claude' },
   { rel: '.github/copilot-instructions.md', category: 'copilot' },
@@ -80,35 +83,83 @@ export function detectDocs(root: string): Docs {
  * dangerous. The globs are deliberately language-agnostic: the migrations pattern matches
  * a Django migration, a Rails migration and a Flyway migration alike.
  */
-const RISK_HEURISTICS: ReadonlyArray<{ glob: string; level: 'high' | 'medium'; reason: string }> = [
-  { glob: '**/migrations/**', level: 'high', reason: 'schema or data migration' },
-  { glob: '**/migration/**', level: 'high', reason: 'schema or data migration' },
+const RISK_HEURISTICS: ReadonlyArray<{
+  glob: string
+  level: 'high' | 'medium'
+  reason: string
+}> = [
+  {
+    glob: '**/migrations/**',
+    level: 'high',
+    reason: 'schema or data migration',
+  },
+  {
+    glob: '**/migration/**',
+    level: 'high',
+    reason: 'schema or data migration',
+  },
   { glob: '**/alembic/**', level: 'high', reason: 'database migration' },
   { glob: '**/db/migrate/**', level: 'high', reason: 'database migration' },
   { glob: '**/*.tf', level: 'high', reason: 'infrastructure-as-code' },
-  { glob: '**/*.tfvars', level: 'high', reason: 'infrastructure variables, may hold secrets' },
+  {
+    glob: '**/*.tfvars',
+    level: 'high',
+    reason: 'infrastructure variables, may hold secrets',
+  },
   { glob: 'infra/**', level: 'high', reason: 'infrastructure definitions' },
   { glob: 'terraform/**', level: 'high', reason: 'infrastructure definitions' },
   { glob: 'deploy/**', level: 'high', reason: 'deployment configuration' },
   { glob: 'k8s/**', level: 'high', reason: 'kubernetes manifests' },
   { glob: '**/k8s/**', level: 'high', reason: 'kubernetes manifests' },
   { glob: 'helm/**', level: 'high', reason: 'helm charts' },
-  { glob: '.github/workflows/**', level: 'high', reason: 'CI definition; a change can silently disable checks' },
-  { glob: 'Dockerfile*', level: 'medium', reason: 'build and runtime image definition' },
-  { glob: '**/Dockerfile*', level: 'medium', reason: 'build and runtime image definition' },
-  { glob: 'docker-compose*.y*ml', level: 'medium', reason: 'local service topology' },
-  { glob: '**/auth/**', level: 'high', reason: 'authentication or authorization logic' },
+  {
+    glob: '.github/workflows/**',
+    level: 'high',
+    reason: 'CI definition; a change can silently disable checks',
+  },
+  {
+    glob: 'Dockerfile*',
+    level: 'medium',
+    reason: 'build and runtime image definition',
+  },
+  {
+    glob: '**/Dockerfile*',
+    level: 'medium',
+    reason: 'build and runtime image definition',
+  },
+  {
+    glob: 'docker-compose*.y*ml',
+    level: 'medium',
+    reason: 'local service topology',
+  },
+  {
+    glob: '**/auth/**',
+    level: 'high',
+    reason: 'authentication or authorization logic',
+  },
   { glob: '**/security/**', level: 'high', reason: 'security logic' },
   { glob: '**/permissions/**', level: 'high', reason: 'permissions logic' },
   { glob: '**/crypto/**', level: 'high', reason: 'cryptography' },
   { glob: '**/payments/**', level: 'high', reason: 'payment processing' },
   { glob: '**/billing/**', level: 'high', reason: 'billing logic' },
-  { glob: '**/package.json', level: 'medium', reason: 'dependency manifest; a change moves the supply chain' },
+  {
+    glob: '**/package.json',
+    level: 'medium',
+    reason: 'dependency manifest; a change moves the supply chain',
+  },
   { glob: 'Cargo.lock', level: 'medium', reason: 'pinned dependency graph' },
   { glob: 'poetry.lock', level: 'medium', reason: 'pinned dependency graph' },
   { glob: 'go.sum', level: 'medium', reason: 'pinned dependency checksums' },
-  { glob: 'gradle.lockfile', level: 'medium', reason: 'pinned dependency graph' },
-  { glob: 'pnpm-lock.yaml', level: 'medium', reason: 'pinned dependency graph' },
+  {
+    glob: 'gradle.lockfile',
+    level: 'medium',
+    reason: 'pinned dependency graph',
+  },
+  {
+    glob: 'pnpm-lock.yaml',
+    level: 'medium',
+    reason: 'pinned dependency graph',
+  },
   { glob: 'uv.lock', level: 'medium', reason: 'pinned dependency graph' },
 ]
 
@@ -203,9 +254,18 @@ const DOC_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
     // the marker to match.
     re: /(?:\b(?:npm|pnpm|yarn|bun)\s+run\s+test[:-](?:fast|changed|quick|affected)\b)|(?:\b(?:test|it)\b[^\n]{0,50}(?:--changed|--changedSince|-k\s|--onlyChanged|--tests|nextest))/i,
   },
-  { kind: 'test', re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|jest\b|vitest\b)/ },
-  { kind: 'build', re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build)/ },
-  { kind: 'lint', re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format)/ },
+  {
+    kind: 'test',
+    re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|jest\b|vitest\b)/,
+  },
+  {
+    kind: 'build',
+    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build)/,
+  },
+  {
+    kind: 'lint',
+    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format)/,
+  },
   { kind: 'typecheck', re: /(tsc --noEmit|typecheck|pyright|mypy)/ },
 ]
 
@@ -250,7 +310,10 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
 }
 
 function looksLikeCommandLine(line: string): boolean {
-  const hasRunner = /(^|\s|\$|`)(npm|pnpm|yarn|bun|cargo|go|dotnet|gradlew?|mvnw?|pytest|ruff|mypy|make|jest|vitest|nextest|tsc)\b/.test(line)
+  const hasRunner =
+    /(^|\s|\$|`)(npm|pnpm|yarn|bun|cargo|go|dotnet|gradlew?|mvnw?|pytest|ruff|mypy|make|jest|vitest|nextest|tsc)\b/.test(
+      line,
+    )
   const fenced = /^\s{0,4}(?:\$|#|>)\s/.test(line) || /```/.test(line)
   return hasRunner && (line.includes('`') || fenced)
 }
@@ -262,7 +325,7 @@ function extractCommand(line: string): string | null {
     const candidate = (inline[1] as string).trim()
     if (/^[a-z][\w.-]*\s+\S/.test(candidate)) return candidate
   }
-  const plain = /^\s{0,4}(?:\$\s*)?([a-z][\w.\/-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
+  const plain = /^\s{0,4}(?:\$\s*)?([a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
   if (plain !== null) {
     const candidate = (plain[1] as string).trim()
     if (candidate.includes(' ')) return candidate

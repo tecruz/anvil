@@ -1,0 +1,97 @@
+# CI for anvil.
+#
+# The matrix is the plan's, and the order is the plan's too: Windows first, because path
+# length, CRLF and the `.cmd` shim behaviour are where this tool's process layer breaks
+# first. A green Linux run says very little about a tool whose hardest requirement is
+# running on someone else's Windows machine.
+#
+# What CI runs is exactly what `npm run check` runs, because the `CI_PARITY` rule exists to
+# catch the case where they diverge: an agent is told "verified" on the strength of a
+# command CI never executes. One command, run in both places, is the only version of that
+# rule that holds.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run for the same ref is not interesting, and cancelling it frees a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The engines field, not a pinned patch: the test suite runs TypeScript through
+          # `node --test`, so a too-old node fails in a way that looks like a test bug.
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+
+      - name: check (lint, typecheck, test, build)
+        run: npm run check
+
+  # The playbook rot check. Separate from the matrix because it needs the network, and
+  # because it is a different kind of assertion: `npm run check` proves the code works,
+  # this proves the *data* is still true. It found six dead links the first time it ran.
+  playbooks:
+    name: playbook registry (rot check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      # A 403, a rate limit or a timeout is reported but never fails the build: a rot check
+      # that goes red on a flaky network is a rot check that gets disabled, and a disabled
+      # check reads as coverage everywhere green runs are counted.
+      - name: every url in the registry still resolves
+        run: node packages/cli/dist/cli.js playbook check
+
+  # The live `gh` contract suite is deliberately not in the matrix above: it needs the gh
+  # binary, and on some runners it would authenticate as nobody. It is the check that
+  # catches "the flag we pass is not a flag gh has", so it runs where gh is available and
+  # fails loudly rather than silently skipping.
+  gh-contract:
+    name: gh contract (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+
+      - name: install gh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: gh is present, so the contract suite really runs
+        run: gh --version
+
+      - name: every flag anvil sends is a flag gh accepts
+        run: npm run test:live
