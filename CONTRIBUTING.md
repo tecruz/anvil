@@ -14,6 +14,13 @@ thing out: this project has a `CI_PARITY` rule whose whole job is to catch the c
 the command in `AGENTS.md` and the command in CI are different. Running anything else
 leaves the reader guessing which one is real.
 
+**Before pushing, run `npm run ci:local`**, which is `npm ci` followed by `npm run check`.
+The second half is not enough on its own, and finding that out the hard way is what this
+line is for: `npm run check` never touches the lockfile, so a `package.json` change that
+desyncs it -- renaming a workspace package, adding a dependency -- passes locally and then
+fails CI on a machine that is not yours, at the one step a contributor would have run
+anyway. The lockfile is committed, so a stale one is a real defect, not a local artefact.
+
 While iterating, `npm run test:changed` runs the tests of the packages whose source changed,
 widened to everything that depends on them -- usually a fraction of the full suite.
 
