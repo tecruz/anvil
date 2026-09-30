@@ -182,12 +182,16 @@ describe('a workspace member can supply the command the root has no script for',
     )
   })
 
-  test('with no manager and no workspaces, no command is invented', () => {
+  test('a member with no manager hint is inferred, not claimed', () => {
+    // `workspaces` is npm's own field and yarn and pnpm both require a lockfile that the
+    // lockfile check would have found, so this is npm -- and the command says `inferred`
+    // rather than pretending it was read off a lockfile.
     const c = commandsOf({
-      'services/api/package.json': '{ "name": "@platform/api", "scripts": { "test": "vitest run" } }',
-      'services/api/src/a.test.ts': "test('a', () => {})\n",
+      'package.json': '{ "name": "platform", "workspaces": ["packages/*"] }',
+      'packages/core/package.json': '{ "name": "@p/core", "scripts": { "test": "vitest run" } }',
     })
-    assert.equal(c.test, undefined)
+    assert.equal(c.test?.[0]?.cmd, 'npm run test --workspace @p/core')
+    assert.equal(c.test?.[0]?.source, 'inferred')
   })
 })
 
@@ -216,6 +220,96 @@ describe('a bzlmod Bazel tree is understood', () => {
   test('no install command, because Bazel fetches its own dependencies', () => {
     const p = profileOf({ 'MODULE.bazel': 'module(name = "rules")\n' })
     assert.equal(p.commands.install, undefined)
+  })
+})
+
+describe('a project that does not live at the repository root is found', () => {
+  // A Rust crate under `engine/` -- manifest, sources and tests all in the subdirectory --
+  // produced no stack, no commands, and a TEST blocker claiming the tests could not be run.
+  // They run `cargo test`. The reason it was left broken rather than patched is worth
+  // recording: every detector's evidence is a root-relative path, so detecting the crate
+  // while citing `Cargo.toml` would produce evidence pointing at a file that is not there.
+  // Detection and evidence had to be resolved by the same rule, or neither could be trusted.
+  const crate = {
+    'README.md': '# host\n',
+    'engine/Cargo.toml': '[package]\nname = "engine"\nversion = "0.1.0"\n',
+    'engine/Cargo.lock': 'version = 3\n',
+    'engine/src/lib.rs': 'pub fn go() {}\n',
+    'engine/tests/it.rs': '#[test]\nfn t() {}\n',
+  }
+  const profileOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+  }
+
+  test('the stack is detected, and the evidence names the file that exists', () => {
+    const p = profileOf(crate)
+    const rust = p.stacks.find((s) => s.id === 'rust')
+    assert.ok(rust, 'rust should be detected from engine/Cargo.toml')
+    // Not `Cargo.toml`: that file does not exist in this repository, and an evidence path
+    // that names a missing file cannot be checked by whoever reads the finding.
+    assert.equal(rust.evidence[0], 'engine/Cargo.toml:1')
+  })
+
+  test('the commands come with resolved evidence too', () => {
+    const p = profileOf(crate)
+    assert.equal(p.commands.test?.[0]?.cmd, 'cargo test')
+    assert.equal(p.commands.install?.[0]?.cmd, 'cargo fetch --locked')
+    assert.equal(p.commands.install?.[0]?.evidence, 'engine/Cargo.lock')
+  })
+
+  test('evidence that already names a root file is left alone', () => {
+    // The project is in `engine/`, but the README is still at the root, and rewriting it to
+    // `engine/README.md` would be a new wrong answer.
+    assert.equal(profileOf(crate).docs.readme, 'README.md')
+  })
+
+  test('a repository whose manifest is at the root resolves to itself', () => {
+    // The identity case, and the reason the ten audited repositories are unaffected.
+    const p = profileOf({ 'Cargo.toml': '[package]\nname = "x"\n', 'src/lib.rs': 'pub fn go() {}\n' })
+    assert.equal(p.stacks.find((s) => s.id === 'rust')?.evidence[0], 'Cargo.toml:1')
+  })
+
+  test('two projects in two subdirectories resolve to neither', () => {
+    // A tree with `svc/go.mod` and `web/package.json` has two projects. Reporting either
+    // one would be confidently wrong about the other, so nothing is resolved -- which is
+    // the previous behaviour, and the honest one.
+    const p = profileOf({
+      'svc/go.mod': 'module example.com/svc\ngo 1.22\n',
+      'svc/main.go': 'package main\n',
+      'web/package.json': '{ "name": "web" }',
+      'web/src/main.ts': 'export const w = 1\n',
+    })
+    assert.equal(p.stacks.length, 0)
+  })
+
+  test('a single package in a subdirectory is the project', () => {
+    // The root holds no manifest and exactly one directory does, so the project is
+    // `services/api`. The command is written the way npm writes it -- relative to the
+    // project, not to wherever the reader is standing -- which is why the profile also
+    // records `projectDir` for whoever consumes the command.
+    const p = profileOf({
+      'services/api/package.json': '{ "name": "@platform/api", "scripts": { "test": "vitest run" } }',
+      'services/api/src/a.test.ts': "test('a', () => {})\n",
+    })
+    assert.equal(p.projectDir, 'services/api')
+    assert.equal(p.commands.test?.[0]?.cmd, 'npm run test')
+    assert.equal(p.commands.test?.[0]?.evidence, 'services/api/package.json:1')
+  })
+
+  test('a lockfile alone does not make a directory the project', () => {
+    // `engine/Cargo.lock` is not a manifest. Treating one as a project descriptor would let
+    // a vendored lockfile in a fixture decide where the project is.
+    const p = profileOf({
+      'README.md': '# host\n',
+      'engine/Cargo.lock': 'version = 3\n',
+      'engine/src/lib.rs': 'pub fn go() {}\n',
+    })
+    assert.equal(p.stacks.length, 0)
+  })
+
+  test('a project at the root records no project directory', () => {
+    assert.equal(profileOf({ 'Cargo.toml': '[package]\nname = "x"\n' }).projectDir, '')
   })
 })
 

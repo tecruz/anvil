@@ -4,7 +4,7 @@
 > Status: **M0–M6 complete**, plus a review pass, the ten-repository audit and the last
 > two items (see [Review pass](#review-pass--m6-hardening-2026-09-30)). M1's exit
 > criterion -- ten real repositories, no false blockers -- is met, and extended to
-> five deliberately awkward shapes.
+> five deliberately awkward shapes and a subdirectory project.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -1136,18 +1136,13 @@ is left, in the order it should be done:
 1. **Replace the placeholders**: real handles in `CODEOWNERS`, a monitored address in
    `SECURITY.md`. Until then `anvil doctor` will keep reporting both, which is correct.
 2. **More real repositories.** Fifteen have now been audited -- ten mid-to-large
-   single-ecosystem projects, plus five deliberately awkward shapes. What is still missing
-   is a genuinely different *kind* of repository: a very large monorepo whose tooling is
-   centralised in a root `tools/` package, a project with two languages in one build and a
-   documented test matrix, and a repository whose lockfile lives somewhere the ten did not
-   put one. The subdirectory-manifest gap is the one open false negative, and closing it
-   properly means detectors reporting resolved paths rather than root-relative ones.
+   single-ecosystem projects, plus five deliberately awkward shapes. One shape is still
+   unresolved by design: a repository with *two* projects in two subdirectories is reported
+   as unknown rather than guessed at.
 3. **A pre-commit hook** (`PRECOMMIT` still warns -- deliberately, since a hook that runs
    formatting on every commit for every contributor is a choice, not a default).
-4. **Publishing** needs credentials and a decision about the package name, so it is prepared
-   but not performed.
-4. Publishing to the npm registry needs credentials and a decision about the package name,
-   so it is prepared but not performed.
+4. **Publishing** to the npm registry needs credentials and a decision about the package
+   name, so it is prepared but not performed.
 
 ---
 
@@ -1522,12 +1517,47 @@ stack was identified, naming the real reason. The guard is deliberately narrow, 
 pins that: for any repository where a stack *was* found, a missing test command is still a
 blocker, because otherwise this becomes a tidy way to lose a real finding.
 
-Fixing the *detection* here -- resolving manifests at any depth -- is deliberately not
-done, and the reason is worth recording. Every detector's evidence string is a hardcoded
-root-relative path, so a nested manifest would be reported as `Cargo.toml` when the file is
-`engine/Cargo.toml`. An audit tool whose evidence points at the wrong file is worse than one
-that admits it does not know, so the honest unknown was chosen over a confident wrong
-answer. This is the one gap left open on purpose.
+**The underlying gap was then closed properly, which is the interesting part.** The first
+response was to leave the detection broken on purpose, on the grounds that every detector's
+evidence is a root-relative path -- so detecting the crate while citing `Cargo.toml` would
+produce evidence pointing at a file that does not exist, and wrong-file evidence is worse
+than an admitted unknown. The reasoning was sound and the conclusion was wrong: it treated
+evidence accuracy and detection as a trade-off when the fix is to make them *agree*.
+
+So the project directory is now resolved once per profile, before any detector runs, and
+handed to every detector as `ctx.resolve`. Every probe seam -- `hasFile`, the two JSON
+readers, the three local `read` helpers -- routes through it, and one pass at the end
+rewrites the evidence strings, so detection and citation cannot drift apart. The result is
+that `engine/Cargo.toml:1` is claimed and *`engine/Cargo.toml:1` is what gets printed*.
+
+Two conditions guard the resolution, both required, because guessing is the worse failure:
+
+1. **The root holds no manifest.** If it does, the root is the project and every existing
+   behaviour is preserved exactly -- which is why the ten audited repositories are unchanged
+   score for score, and why the identity case is itself tested.
+2. **Exactly one directory at the shallowest manifest depth holds one.** A tree with
+   `svc/go.mod` and `web/package.json` has two projects; reporting either would be
+   confidently wrong about the other, so nothing resolves and the repository is honestly
+   unknown.
+
+A lockfile is deliberately *not* a project descriptor, so a vendored `Cargo.lock` in a
+fixture cannot decide where the project is -- which is the same reasoning that keeps
+`fixtures/` out of the walk in the first place.
+
+One consequence had to be handled rather than ignored. `cargo test` and `npm run test` are
+written the way their ecosystems write them: relative to the project, not to wherever the
+reader is standing. So a profile now carries `projectDir`, and the generated `AGENTS.md`
+states the directory *above* the command list. Printing `cargo test` without it produces a
+command that fails while looking entirely correct, which is the most expensive kind of wrong.
+
+A bug worth recording, because it was mine and it was nearly invisible. The first version
+of the evidence pass carried a guard comparing the evidence suffix before and after
+rewriting, to avoid touching entries with no `:line`. It compared the *suffixes* rather than
+the paths, so for a bare path with no line number both suffixes were the empty string, they
+matched, and the rewrite was skipped -- silently, for exactly the case that had no line
+number. The stack evidence (`engine/Cargo.toml:1`, which has a line) worked, and the install
+evidence (`engine/Cargo.lock`, which does not) did not. Two entries in one profile, one
+right and one wrong, is the worst shape a bug can have: it survives a spot check.
 
 **2. A workspace's tests, invisible.** `services/api/package.json` declaring
 `"test": "vitest run"`, with the root `workspaces` field pointing at it, produced no test
@@ -1555,13 +1585,13 @@ command, because Bazel fetches its own dependencies and there is nothing to inst
 | workspace, no root lockfile | 28 (F) | **52 (D)** | member scripts used; TEST/BUILD blockers gone |
 | workspace, root + nested lockfile | 50 (D) | 50 (D) | already correct: the root lockfile wins |
 | polyglot Go/Python/TS | 48 (D) | 48 (D) | one test command of three; see below |
-| project in a subdirectory | 22 (F) | **33 (F)** | false blockers became honest unknowns |
+| project in a subdirectory | 22 (F) | **52 (D)** | resolved, with evidence naming the real files |
 
-Two of the five are still not fully solved, and both are recorded rather than papered over.
+One of the five is still not fully solved, and it is recorded rather than papered over.
 The polyglot tree reports `pytest` and not the Go and TypeScript suites beside it: the
 profile model holds one command per kind, and choosing between three real runners is a
-different problem from detecting one. The subdirectory project still has no detection at
-all -- see the deliberate decision above.
+different problem from detecting one. A tree with *two* projects in two subdirectories
+resolves to neither, by design -- see the two conditions above.
 
 A note on method, because it nearly produced a false conclusion. The first pass at these
 five repositories appeared to show that *none* of them had any commands at all -- which

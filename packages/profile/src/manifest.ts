@@ -13,8 +13,11 @@ export interface JsonObject {
   [key: string]: unknown
 }
 
-export function readJson(ctx: { root: string; maxFileBytes: number }, relPath: string): JsonObject | null {
-  const { text, bytes } = readText(join(ctx.root, relPath))
+export function readJson(
+  ctx: { root: string; maxFileBytes: number; resolve?: (rel: string) => string },
+  relPath: string,
+): JsonObject | null {
+  const { text, bytes } = readText(join(ctx.root, ctx.resolve?.(relPath) ?? relPath))
   if (text === null || bytes > ctx.maxFileBytes) return null
   try {
     const parsed: unknown = JSON.parse(text)
@@ -25,8 +28,11 @@ export function readJson(ctx: { root: string; maxFileBytes: number }, relPath: s
   }
 }
 
-export function readJsonc(ctx: { root: string; maxFileBytes: number }, relPath: string): JsonObject | null {
-  const { text, bytes } = readText(join(ctx.root, relPath))
+export function readJsonc(
+  ctx: { root: string; maxFileBytes: number; resolve?: (rel: string) => string },
+  relPath: string,
+): JsonObject | null {
+  const { text, bytes } = readText(join(ctx.root, ctx.resolve?.(relPath) ?? relPath))
   if (text === null || bytes > ctx.maxFileBytes) return null
   return parseJsonc(text)
 }

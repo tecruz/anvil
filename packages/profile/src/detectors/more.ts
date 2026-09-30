@@ -27,7 +27,7 @@ import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
-  return readText(join(ctx.root, rel)).text
+  return readText(join(ctx.root, ctx.resolve(rel))).text
 }
 
 /**

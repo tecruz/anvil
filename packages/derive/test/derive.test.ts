@@ -152,6 +152,34 @@ describe('self-referential: init must improve the readiness score', () => {
     const after = audit(profileIn(dir)).score
     assert.ok(after > before, `expected ${after} > ${before}`)
   })
+
+  test('a project in a subdirectory says where to run the commands from', () => {
+    // `cargo test` is written the way cargo writes it: relative to the project. Printed
+    // without the directory, it is a command that fails, and it fails in the most expensive
+    // way -- it looks right.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-subdir-'))
+    try {
+      mkdirSync(join(dir, 'engine', 'src'), { recursive: true })
+      mkdirSync(join(dir, 'engine', 'tests'), { recursive: true })
+      writeFileSync(join(dir, 'engine', 'Cargo.toml'), '[package]\nname = "engine"\nversion = "0.1.0"\n')
+      writeFileSync(join(dir, 'engine', 'src', 'lib.rs'), 'pub fn go() {}\n')
+      writeFileSync(join(dir, 'engine', 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+      const profile = profileIn(dir)
+      assert.equal(profile.projectDir, 'engine')
+      const content = generateAgentsFile({ profile, matches: matchesFor(profile) }).content
+      assert.match(content, /The project lives in `engine\/`/)
+      assert.match(content, /cargo test/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a project at the root says nothing about directories', () => {
+    const profile = profileIn(materialize('rust-crate'))
+    assert.equal(profile.projectDir, '')
+    const content = generateAgentsFile({ profile, matches: matchesFor(profile) }).content
+    assert.doesNotMatch(content, /The project lives in/)
+  })
 })
 
 describe('idempotence', () => {

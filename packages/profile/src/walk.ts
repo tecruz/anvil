@@ -212,4 +212,119 @@ export function firstExisting(root: string, candidates: readonly string[]): stri
   return null
 }
 
+// ---------------------------------------------------------------------------
+// Project directory
+// ---------------------------------------------------------------------------
+
+/**
+ * Files that identify a project, used *only* to choose the project directory below.
+ *
+ * Deliberately not the whole set of files a detector probes: a linter's config is not a
+ * statement of where the project lives. A name missing from this list costs a resolution,
+ * which degrades to the previous behaviour (project not detected) rather than to a wrong
+ * directory.
+ */
+const PROJECT_MANIFESTS: ReadonlySet<string> = new Set([
+  'Cargo.toml',
+  'go.mod',
+  'go.work',
+  'package.json',
+  'pyproject.toml',
+  'setup.py',
+  'setup.cfg',
+  'requirements.txt',
+  'Pipfile',
+  'Gemfile',
+  'composer.json',
+  'mix.exs',
+  'pubspec.yaml',
+  'Package.swift',
+  'pom.xml',
+  'build.gradle',
+  'build.gradle.kts',
+  'settings.gradle',
+  'settings.gradle.kts',
+  'build.sbt',
+  'Project.toml',
+  'MODULE.bazel',
+  'WORKSPACE',
+  'WORKSPACE.bazel',
+  'BUILD.bazel',
+  'deno.json',
+  'deno.jsonc',
+  'CMakeLists.txt',
+])
+
+/** Manifests whose name is not fixed: one per project, matched by extension. */
+const PROJECT_MANIFEST_EXTENSIONS: ReadonlySet<string> = new Set(['.csproj', '.fsproj', '.vbproj', '.sln'])
+
+function isProjectManifest(relPath: string): boolean {
+  const name = relPath.slice(relPath.lastIndexOf('/') + 1)
+  if (PROJECT_MANIFESTS.has(name)) return true
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && PROJECT_MANIFEST_EXTENSIONS.has(name.slice(dot))
+}
+
+/**
+ * The directory holding the project, when it is not the repository root.
+ *
+ * A Rust crate under `engine/` -- `engine/Cargo.toml`, `engine/src/lib.rs`,
+ * `engine/tests/it.rs`, and nothing at the root but a README -- is a real and ordinary
+ * layout, and it defeated root-level detection completely: no stack, no commands, and a
+ * `TEST` blocker claiming the tests could not be run. They run `cargo test`.
+ *
+ * Two conditions, both required, because the failure mode of guessing is worse than not
+ * guessing:
+ *
+ * 1. The root holds no manifest. If it does, the root *is* the project, and every existing
+ *    behaviour is preserved exactly -- this is why the ten audited repositories are
+ *    unaffected.
+ * 2. Exactly one directory at the shallowest manifest depth holds one. A tree with
+ *    `svc/go.mod` and `web/package.json` is two projects, and choosing either would mean
+ *    confidently reporting a stack for a repository that has two.
+ *
+ * Returns `''` for the ordinary case, which makes every call site a no-op.
+ */
+export function projectDirOf(files: ReadonlySet<string>): string {
+  let shallowest = Number.POSITIVE_INFINITY
+  let candidate = ''
+  let ambiguous = false
+  for (const f of files) {
+    if (!isProjectManifest(f)) continue
+    const slash = f.lastIndexOf('/')
+    if (slash < 0) return '' // the root holds a manifest: it is the project
+    const dir = f.slice(0, slash)
+    const depth = dir.split('/').length
+    if (depth < shallowest) {
+      shallowest = depth
+      candidate = dir
+      ambiguous = false
+    } else if (depth === shallowest && dir !== candidate) {
+      ambiguous = true
+    }
+  }
+  if (ambiguous || candidate === '') return ''
+  return candidate
+}
+
+/**
+ * Resolve a probed root-relative name to the file that actually exists.
+ *
+ * Root first, then the project directory, then the name unchanged. Returning the name
+ * unchanged when nothing matches is what keeps this safe: every caller was already
+ * handling "absent" for that name, so an unresolved probe behaves exactly as it did before.
+ *
+ * Resolution is confined to the single chosen project directory, so a probe cannot pick up
+ * a same-named file in an unrelated `examples/` tree.
+ */
+export function makeResolver(files: ReadonlySet<string>, projectDir: string): (rel: string) => string {
+  if (projectDir === '') return (rel) => rel
+  const prefix = `${projectDir}/`
+  return (rel) => {
+    if (files.has(rel)) return rel
+    const nested = prefix + rel
+    return files.has(nested) ? nested : rel
+  }
+}
+
 export { toPosix }

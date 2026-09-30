@@ -148,6 +148,16 @@ export interface ProjectProfile {
    * separate from `docs` so a rule can distinguish "documented" from "declared".
    */
   files: string[]
+  /**
+   * Directory holding the project, when it is not the repository root. `''` otherwise.
+   *
+   * A crate under `engine/`, a service under `services/api/`. This exists because the
+   * commands in a profile are written the way each ecosystem writes them -- `cargo test`,
+   * `npm run test` -- and those run *from the project directory*, not from wherever the
+   * agent happens to be. Without this field a consumer would have to infer the working
+   * directory from an evidence path, and would then be the one guessing.
+   */
+  projectDir: string
 }
 
 export interface InstructionFile {
@@ -193,6 +203,7 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     risk: [],
     instructions: [],
     files: [],
+    projectDir: '',
   }
 }
 

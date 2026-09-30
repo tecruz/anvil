@@ -44,6 +44,19 @@ export interface DetectorContext {
   files: ReadonlySet<string>
   /** Max bytes any detector may read. Manifests are small; this bounds a mistake. */
   maxFileBytes: number
+  /**
+   * Resolve a root-relative name to the file that exists.
+   *
+   * A detector asks "is there a Cargo.toml?", meaning the repository root, and this is the
+   * one place that knows whether the answer is `Cargo.toml` or `engine/Cargo.toml`. The
+   * returned path is the real one, which is what makes the evidence honest: a claim about
+   * `engine/Cargo.toml:12` can be opened, and a claim about `Cargo.toml` in a repository
+   * with no such file could not.
+   *
+   * It is the identity function whenever the project is at the root, so this costs nothing
+   * for the ordinary layout.
+   */
+  resolve(rel: string): string
 }
 
 export interface Detector {
@@ -58,11 +71,11 @@ export interface Detector {
 }
 
 export function hasFile(ctx: DetectorContext, relPath: string): boolean {
-  return ctx.files.has(relPath)
+  return ctx.files.has(ctx.resolve(relPath))
 }
 
 export function hasAnyFile(ctx: DetectorContext, relPaths: readonly string[]): boolean {
-  return relPaths.some((p) => ctx.files.has(p))
+  return relPaths.some((p) => ctx.files.has(ctx.resolve(p)))
 }
 
 /**

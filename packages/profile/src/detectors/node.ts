@@ -46,7 +46,7 @@ function stringMap(v: unknown): Record<string, string> {
 }
 
 function readManifest(ctx: DetectorContext, relPath: string): { manifest: Manifest; text: string } | null {
-  const { text } = readText(join(ctx.root, relPath))
+  const { text } = readText(join(ctx.root, ctx.resolve(relPath)))
   if (text === null) return null
   const raw = readJson(ctx, relPath)
   if (raw === null) return null

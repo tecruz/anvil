@@ -89,6 +89,13 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   if (commandRows.length > 0) {
     lines.push('## Commands')
     lines.push('')
+    // A project in a subdirectory is stated before the commands, because a command like
+    // `cargo test` is written the way its ecosystem writes it -- relative to the project,
+    // not to wherever the reader is standing. Without this line the command is a trap.
+    if (profile.projectDir !== '') {
+      lines.push(`> The project lives in \`${profile.projectDir}/\`. Run the commands below from that directory.`)
+      lines.push('')
+    }
     lines.push(...commandRows)
     const inferred = countInferred(profile)
     if (inferred > 0) {

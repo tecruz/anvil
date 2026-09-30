@@ -203,7 +203,12 @@ export function matchesGlob(path: string, glob: string): boolean {
 }
 
 /** CI, hooks, container and IaC detection, shared across ecosystems. */
-export function detectGenericTooling(draft: ProfileDraft, root: string, files: ReadonlySet<string>): void {
+export function detectGenericTooling(
+  draft: ProfileDraft,
+  root: string,
+  files: ReadonlySet<string>,
+  resolve: (rel: string) => string = (rel) => rel,
+): void {
   for (const f of files) {
     if (f.startsWith('.github/workflows/') && /\.ya?ml$/.test(f)) addTool(draft, 'ci', f)
     else if (/^\.gitlab-ci\.ya?ml$/.test(f)) addTool(draft, 'ci', f)
@@ -220,7 +225,7 @@ export function detectGenericTooling(draft: ProfileDraft, root: string, files: R
     if (!f.endsWith('.tf')) continue
     addTool(draft, 'iac', f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '.')
   }
-  detectInstallCommand(draft, files)
+  detectInstallCommand(draft, files, resolve)
 }
 
 /**
@@ -237,7 +242,7 @@ export function detectGenericTooling(draft: ProfileDraft, root: string, files: R
  * the install needs arguments we cannot know, the plain form is still the honest answer --
  * and the risk of a wrong one is an install that prints a warning, not a lost afternoon.
  */
-function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>): void {
+function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>, resolve: (rel: string) => string): void {
   // A lockfile is the strongest evidence: it names the manager *and* proves the install is
   // meant to be reproducible, so these are `detected`.
   const byLockfile: ReadonlyArray<readonly [string, string]> = [
@@ -252,7 +257,7 @@ function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>): 
     ['gradle.lockfile', './gradlew dependencies --write-locks'],
   ]
   for (const [lockfile, cmd] of byLockfile) {
-    if (!files.has(lockfile)) continue
+    if (!files.has(resolve(lockfile))) continue
     addCommand(draft, 'install', { cmd, source: 'detected', evidence: lockfile })
     return
   }
@@ -273,7 +278,7 @@ function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>): 
     ['package.json', 'npm install'],
   ]
   for (const [manifest, cmd] of byManifest) {
-    if (!files.has(manifest)) continue
+    if (!files.has(resolve(manifest))) continue
     addCommand(draft, 'install', { cmd, source: 'inferred', evidence: manifest })
     return
   }

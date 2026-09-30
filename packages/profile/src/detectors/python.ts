@@ -24,7 +24,7 @@ import { readText } from '../walk.ts'
 
 /** Line-based readers for the flat formats Python uses. */
 function readTomlish(ctx: DetectorContext, relPath: string): string | null {
-  const { text } = readText(join(ctx.root, relPath))
+  const { text } = readText(join(ctx.root, ctx.resolve(relPath)))
   return text
 }
 

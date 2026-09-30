@@ -19,7 +19,7 @@ import {
 } from './general.ts'
 import type { CommandKind } from './types.ts'
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
-import { extensionOf, walkFiles } from './walk.ts'
+import { extensionOf, makeResolver, projectDirOf, walkFiles } from './walk.ts'
 
 /** Extension → language. The set that matters for agent context, not an exhaustive map. */
 const EXTENSION_LANGUAGES: ReadonlyArray<[ext: string, lang: string]> = [
@@ -101,10 +101,18 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
   })
   const fileSet = new Set(files)
 
+  // A project that does not live at the repository root is resolved once, here, and handed
+  // to every detector as `ctx.resolve`. Computing it in one place is what keeps detection
+  // and evidence in agreement: a claim about `engine/Cargo.toml:12` is made by the same
+  // rule that decided the stack is rust, so the two cannot drift apart.
+  const projectDir = projectDirOf(fileSet)
+  const resolve = makeResolver(fileSet, projectDir)
+
   const ctx: DetectorContext = {
     root,
     files: fileSet,
     maxFileBytes: MAX_MANIFEST_BYTES,
+    resolve,
   }
 
   const draft: ProfileDraft = {
@@ -149,7 +157,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
   // repo is still reported when no manifest was found to claim it.
   applyLanguageCounts(draft, files)
 
-  detectGenericTooling(draft, root, fileSet)
+  detectGenericTooling(draft, root, fileSet, resolve)
   addRiskHeuristics(draft, fileSet)
 
   // Prose commands outrank script-name heuristics. This is the documented > detected
@@ -174,9 +182,50 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     instructions: detectInstructionFiles(root, fileSet),
     docs: detectDocs(root),
     files,
+    projectDir,
   }
 
+  // Detectors ask for `Cargo.toml` and were answered about `engine/Cargo.toml`; the paths
+  // they recorded as evidence still say the former. One pass fixes every claim in the
+  // profile, which is the only place that can -- an evidence string is a plain string, and
+  // correcting it at each construction site would mean one omission per detector per call.
+  //
+  // A no-op when the project is at the root, because `resolve` is then the identity.
+  resolveProfileEvidence(profile, resolve)
+
   return { profile, failedDetectors, truncated }
+}
+
+/**
+ * Rewrite evidence paths that resolve to a different file than they name.
+ *
+ * Only rewrites when the bare name does *not* exist at the root and the resolved one does,
+ * so evidence that is already correct -- including paths that legitimately point at the
+ * root, like `README.md` or `.github/workflows/ci.yml`, in a repository whose project is in
+ * a subdirectory -- is left exactly as it is. Anything unresolved keeps its original
+ * string: an evidence path that names a file which is not there is a weaker claim than one
+ * that names the wrong file, and neither may be invented.
+ */
+function resolveProfileEvidence(profile: ProjectProfile, resolve: (rel: string) => string): void {
+  const fix = (entry: string): string => {
+    const colon = entry.lastIndexOf(':')
+    const hasLine = colon > 0 && /^\d+$/.test(entry.slice(colon + 1))
+    const path = hasLine ? entry.slice(0, colon) : entry
+    const resolved = resolve(path)
+    if (resolved === path) return entry
+    return hasLine ? `${resolved}:${entry.slice(colon + 1)}` : resolved
+  }
+  for (const stack of profile.stacks) {
+    stack.evidence = stack.evidence.map(fix)
+  }
+  for (const entries of Object.values(profile.commands)) {
+    for (const entry of entries) {
+      if (entry.evidence !== undefined) entry.evidence = fix(entry.evidence)
+    }
+  }
+  if (profile.monorepo !== null) {
+    profile.monorepo.evidence = fix(profile.monorepo.evidence)
+  }
 }
 
 function applyLanguageCounts(draft: ProfileDraft, files: readonly string[]): void {

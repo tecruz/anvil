@@ -28,7 +28,7 @@ import { nodeDetector } from './node.ts'
 import { pythonDetector } from './python.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
-  return readText(join(ctx.root, rel)).text
+  return readText(join(ctx.root, ctx.resolve(rel))).text
 }
 
 /** Only use ./gradlew when the wrapper is actually committed. */
