@@ -1,25 +1,19 @@
 # Code owners
 
-> **This file is a template. Replace the placeholder handles before relying on it.**
->
-> A CODEOWNERS rule naming a team or person that does not exist does not fail loudly: GitHub
-> silently falls back to whoever is eligible to review. Every rule below is currently a
-> placeholder, so today it routes everything to the repository default and nothing more.
-> `anvil doctor` will keep reporting `CODEOWNERS` as unverified until real handles are in
-> place -- delete this file rather than shipping it with the placeholders still here.
+# Default owner for everything. Taken from the authenticated GitHub account, not guessed
+# from a directory name -- a CODEOWNERS rule pointing at a real person who is not the owner
+# routes review to a stranger, which is worse than having no rule at all.
+*                       @tecruz
 
-# Default owner for everything. Replace `TODO-OWNER-default` with a real handle.
-*                       @TODO-OWNER-default
-
-# Anvil changes are the highest-risk changes in this repository: the CLI writes into
-# repositories it does not own, executes commands on a user's machine, and holds the
-# process layer that runs on other people's Windows boxes. Uncomment and fill these in.
+# The paths below are where a mistake reaches past code review. They are listed so the next
+# person to add an owner knows where the second pair of eyes is needed; the default above
+# already covers them until then.
 #
-# packages/core/         @TODO-OWNER-core        # exec shim handling, the JSON contract
-# packages/providers/    @TODO-OWNER-providers   # the gh transport, the local provider
-# packages/worktrees/    @TODO-OWNER-worktrees   # claim/release/crew state machines
-# packages/derive/       @TODO-OWNER-derive      # staging lifecycle, the write path
-# registry/playbooks/    @TODO-OWNER-playbooks   # data: every URL is hand-maintained
-
-# An agent's own pull requests should not be self-reviewed. Replace the placeholder.
-# /.*copilot.*/          @TODO-OWNER-default
+# packages/core/       exec shim handling, the JSON envelope contract
+# packages/providers/  the gh transport, the local provider
+# packages/worktrees/  claim/release/crew state machines
+# packages/derive/     staging lifecycle, the write path
+# packages/playbooks/  data: every URL is hand-maintained
+#
+# An agent's own pull requests should not be self-reviewed. That needs a second owner, so
+# add one here when there is a second person: /.*copilot.*/  @tecruz @second-owner

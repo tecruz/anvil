@@ -1133,10 +1133,15 @@ contributing guide repeats that `playbook check` runs in CI.
 **M6, the review pass, the repository audits, `playbook add`, the governance files and the
 pre-commit hook are all done.** What is left, in the order it should be done:
 
-1. **Replace the placeholders**: a real owner handle in `CODEOWNERS`, a monitored address in
-   `SECURITY.md`. This is now the *only* thing standing between this repository and a clean
-   governance layer, and `anvil doctor` names both by name until it is done -- which is
-   correct, and is the first time that sentence was true of this tool.
+1. **A monitored address in `SECURITY.md`.** `CODEOWNERS` is done -- and getting the handle
+   right nearly went wrong in an instructive way. The obvious guess was the account name in
+   the directory path, `@tiago`; asking GitHub instead (`gh api user --jq .login`) returned
+   `tecruz`. A CODEOWNERS rule pointing at a real person who is not the owner routes review
+   to a stranger, which is worse than a placeholder, because a placeholder at least announces
+   itself. Verify an identity; do not infer one.
+
+   The security address is still `TODO`, deliberately, and `anvil doctor` says so on every
+   run.
 2. **More real repositories.** Fifteen have now been audited -- ten mid-to-large
    single-ecosystem projects, plus five deliberately awkward shapes. One shape is still
    unresolved by design: a repository with *two* projects in two subdirectories is reported
