@@ -13,15 +13,18 @@
 
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
-import { discoverRepo } from '@anvil/git'
 import { audit, type ReadinessReport } from '@anvil/audit'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
-import { loadPlaybooks, matchPlaybooks, type MatchResult, type Playbook } from '@anvil/playbooks'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import {
+  applyStaging,
+  type Brief,
+  type BriefTarget,
   buildBrief,
   checkApplyPreconditions,
+  clearStaging,
   diffFile,
+  type FileDiff,
+  type GeneratedArtifact,
   generateAgentsFile,
   generateReviewCommand,
   generateVerifySkill,
@@ -33,13 +36,10 @@ import {
   summarize,
   validateAll,
   writeStaging,
-  applyStaging,
-  clearStaging,
-  type Brief,
-  type BriefTarget,
-  type FileDiff,
-  type GeneratedArtifact,
 } from '@anvil/derive'
+import { discoverRepo } from '@anvil/git'
+import { loadPlaybooks, type MatchResult, matchPlaybooks, type Playbook } from '@anvil/playbooks'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Command, CommandContext } from './types.ts'
 
 function detectHost(remote: string | null): 'github' | 'gitlab' | 'bitbucket' | 'azure' | null {
@@ -78,7 +78,14 @@ async function loadAll(ctx: CommandContext, target: string | undefined): Promise
 
   const { playbooks, warnings } = loadPlaybooks(process.env)
   const matches = matchPlaybooks(profile, playbooks)
-  return { root, profile, report: audit(profile), matches, playbooks, warnings }
+  return {
+    root,
+    profile,
+    report: audit(profile),
+    matches,
+    playbooks,
+    warnings,
+  }
 }
 
 const TARGETS: readonly BriefTarget[] = ['agents', 'commands', 'skills', 'all']
@@ -166,7 +173,7 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
   out.push(s.bold('Gaps the generated guidance must not contradict'))
   out.push(brief.gaps.length === 0 ? s.dim('  (none)') : brief.gaps.map((g) => `  - ${g}`).join('\n'))
   out.push('')
-  out.push(s.dim('Full JSON: anvil brief --for ' + brief.target + ' --json'))
+  out.push(s.dim(`Full JSON: anvil brief --for ${brief.target} --json`))
   return out.join('\n')
 }
 
@@ -221,7 +228,8 @@ export const initCommand: Command = {
       playbookIds: playbooks.map((p) => p.id),
     })
 
-    if (args.values.apply === true) return applyFlow(ctx, root, currentHash, args.values.json === true, args.values['allow-warnings'] === true)
+    if (args.values.apply === true)
+      return applyFlow(ctx, root, currentHash, args.values.json === true, args.values['allow-warnings'] === true)
 
     // ---- build and stage ----
     const artifacts = buildArtifacts(profile, matches, only)
@@ -235,7 +243,10 @@ export const initCommand: Command = {
     const manifest = writeStaging(root, { inputHash: currentHash, generator: 'anvil init' }, contents)
 
     const state = inspectStaging(root)
-    const diffs = computeDiffs(root, manifest.files.map((f) => ({ path: f.path, stagedPath: f.stagedPath })))
+    const diffs = computeDiffs(
+      root,
+      manifest.files.map((f) => ({ path: f.path, stagedPath: f.stagedPath })),
+    )
     const validation = validateAll(artifacts.map((a) => ({ path: a.path, content: a.content })))
     const totals = summarize(diffs)
 
@@ -244,7 +255,11 @@ export const initCommand: Command = {
       staged: true,
       applied: false,
       inputHash: currentHash,
-      artifacts: artifacts.map((a) => ({ path: a.path, reason: a.reason, bytes: Buffer.byteLength(a.content) })),
+      artifacts: artifacts.map((a) => ({
+        path: a.path,
+        reason: a.reason,
+        bytes: Buffer.byteLength(a.content),
+      })),
       tampered: state.tampered,
       validation,
       diff: { ...totals, text: renderUnifiedDiff(diffs) },
@@ -263,8 +278,7 @@ export const initCommand: Command = {
         },
       )
       if (args.values.json === true) {
-        ctx.out(data, () => '')
-        ctx.writeError(renderInitError(ctx, err, diffs, validation, totals))
+        ctx.outFailure(data, err, () => renderInitError(ctx, err, diffs, validation, totals))
         return err.exitCode
       }
       ctx.writeError(renderInitError(ctx, err, diffs, validation, totals))
@@ -275,7 +289,11 @@ export const initCommand: Command = {
   },
 }
 
-function buildArtifacts(profile: ProjectProfile, matches: readonly MatchResult[], only: string | null): GeneratedArtifact[] {
+function buildArtifacts(
+  profile: ProjectProfile,
+  matches: readonly MatchResult[],
+  only: string | null,
+): GeneratedArtifact[] {
   const options = { profile, matches }
   const out: GeneratedArtifact[] = []
   if (only === null || only === 'agents-file') out.push(generateAgentsFile(options))
@@ -307,22 +325,20 @@ function computeDiffs(root: string, files: ReadonlyArray<{ path: string; stagedP
   return out
 }
 
-function applyFlow(ctx: CommandContext, root: string, currentHash: string, json: boolean, allowWarnings: boolean): number {
+function applyFlow(
+  ctx: CommandContext,
+  root: string,
+  currentHash: string,
+  json: boolean,
+  allowWarnings: boolean,
+): number {
   const manifest = readManifest(root)
   const check = checkApplyPreconditions(root, manifest, currentHash)
 
-  if (!check.ok) {
-    const err = new AnvilError(ErrorCode.StaleStaging, check.reason ?? 'Cannot apply', {
-      ...(check.hint === undefined ? {} : { hint: check.hint }),
-    })
-    if (json) {
-      ctx.out({ schemaVersion: 1, staged: manifest !== null, applied: false, error: err.toJSON() }, () => '')
-    }
-    ctx.writeError(`\n${ctx.style.red('error')} ${err.message}\n${ctx.style.dim('hint ')} ${err.hint ?? ''}\n`)
-    return err.exitCode
-  }
-
-  const state = inspectStaging(root)
+  // The diff is computed before the precondition check on purpose: the refusal message
+  // says "inspect the diff above", so a diff has to actually be above it. On a stale
+  // bundle that diff is also the most useful thing to show -- it is what changed under
+  // the bundle.
   const artifacts = (manifest?.files ?? []).map((f) => {
     const staged = join(root, '.anvil', 'staging', f.stagedPath)
     let content = ''
@@ -333,27 +349,95 @@ function applyFlow(ctx: CommandContext, root: string, currentHash: string, json:
     }
     return { path: f.path, content }
   })
+  const diffs = computeDiffs(
+    root,
+    (manifest?.files ?? []).map((f) => ({
+      path: f.path,
+      stagedPath: f.stagedPath,
+    })),
+  )
+  const diffText = renderUnifiedDiff(diffs)
+
+  if (!check.ok) {
+    const err = new AnvilError(ErrorCode.StaleStaging, check.reason ?? 'Cannot apply', {
+      ...(check.hint === undefined ? {} : { hint: check.hint }),
+    })
+    const data = {
+      schemaVersion: 1,
+      staged: manifest !== null,
+      applied: false,
+      diff: diffText,
+    }
+    ctx.outFailure(data, err, () => {
+      const s = ctx.style
+      const out = [`\n${s.red('error')} ${err.message}`, '']
+      if (diffText !== '') {
+        out.push(s.bold('Staged diff'), diffText, '')
+      }
+      out.push(`${s.dim('hint ')} ${err.hint ?? ''}`, '')
+      return out.join('\n')
+    })
+    return err.exitCode
+  }
+
   const validation = validateAll(artifacts)
 
   if (!validation.ok) {
-    const err = new AnvilError(
-      ErrorCode.Internal,
-      `Staged artifacts failed validation; nothing was written`,
-      { hint: validation.errors.map((e) => `${e.path}: ${e.message}`).join('\n') },
+    const err = new AnvilError(ErrorCode.Internal, `Staged artifacts failed validation; nothing was written`, {
+      hint: validation.errors.map((e) => `${e.path}: ${e.message}`).join('\n'),
+    })
+    ctx.outFailure(
+      {
+        schemaVersion: 1,
+        staged: true,
+        applied: false,
+        validation,
+        diff: diffText,
+      },
+      err,
+      () => {
+        const s = ctx.style
+        const out = [`\n${s.red('error')} ${err.message}`, '']
+        if (diffText !== '') {
+          out.push(s.bold('Staged diff'), diffText, '')
+        }
+        out.push(`${s.dim('hint ')} ${err.hint ?? ''}`, '')
+        return out.join('\n')
+      },
     )
-    if (json) ctx.out({ schemaVersion: 1, staged: true, applied: false, error: err.toJSON() }, () => '')
-    ctx.writeError(`\n${ctx.style.red('error')} ${err.message}\n${ctx.style.dim('hint ')} ${err.hint ?? ''}\n`)
     return err.exitCode
   }
   if (validation.warnings.length > 0 && !allowWarnings) {
-    const err = new AnvilError(ErrorCode.Usage, `${validation.warnings.length} staged artifact warning(s); refusing to apply`, {
-      hint: `${validation.warnings.map((w) => `${w.path}: ${w.message}`).join('\n')}\n\nRe-run with --allow-warnings if these are expected.`,
-    })
-    if (json) ctx.out({ schemaVersion: 1, staged: true, applied: false, error: err.toJSON() }, () => '')
-    ctx.writeError(`\n${ctx.style.red('error')} ${err.message}\n${ctx.style.dim('hint ')} ${err.hint ?? ''}\n`)
+    const err = new AnvilError(
+      ErrorCode.Usage,
+      `${validation.warnings.length} staged artifact warning(s); refusing to apply`,
+      {
+        hint: `${validation.warnings.map((w) => `${w.path}: ${w.message}`).join('\n')}\n\nRe-run with --allow-warnings if these are expected.`,
+      },
+    )
+    ctx.outFailure(
+      {
+        schemaVersion: 1,
+        staged: true,
+        applied: false,
+        validation,
+        diff: diffText,
+      },
+      err,
+      () => {
+        const s = ctx.style
+        const out = [`\n${s.red('error')} ${err.message}`, '']
+        if (diffText !== '') {
+          out.push(s.bold('Staged diff'), diffText, '')
+        }
+        out.push(`${s.dim('hint ')} ${err.hint ?? ''}`, '')
+        return out.join('\n')
+      },
+    )
     return err.exitCode
   }
 
+  const state = inspectStaging(root)
   const written = applyStaging(root, manifest as NonNullable<typeof manifest>)
   clearStaging(root)
 
@@ -378,7 +462,9 @@ function applyFlow(ctx: CommandContext, root: string, currentHash: string, json:
   for (const p of written) lines.push(`  ${p}`)
   if (state.tampered.length > 0) {
     lines.push('')
-    lines.push(s.yellow(`note: ${state.tampered.length} staged file(s) were edited before applying; those edits were kept`))
+    lines.push(
+      s.yellow(`note: ${state.tampered.length} staged file(s) were edited before applying; those edits were kept`),
+    )
     for (const p of state.tampered) lines.push(`  ${p}`)
   }
   lines.push('')
@@ -398,7 +484,9 @@ function renderStaged(
   const s = ctx.style
   const out: string[] = []
 
-  out.push(`${s.bold('staged')} ${totals.files} file(s), +${totals.added} -${totals.removed} ${s.dim('(nothing written to the repository)')}`)
+  out.push(
+    `${s.bold('staged')} ${totals.files} file(s), +${totals.added} -${totals.removed} ${s.dim('(nothing written to the repository)')}`,
+  )
   out.push('')
   out.push(s.bold('Artifacts'))
   out.push(
@@ -442,5 +530,5 @@ function renderInitError(
   out.push('')
   out.push(s.bold(`Diff (${totals.files} files, +${totals.added} -${totals.removed})`))
   out.push(renderUnifiedDiff(diffs))
-  return out.join('\n') + '\n'
+  return `${out.join('\n')}\n`
 }

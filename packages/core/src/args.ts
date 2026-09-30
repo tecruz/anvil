@@ -7,7 +7,7 @@
  * something else is consuming your stdout).
  */
 
-import { parseArgs, type ParseArgsConfig } from 'node:util'
+import { type ParseArgsConfig, parseArgs } from 'node:util'
 import { AnvilError, ErrorCode } from './errors.ts'
 
 export interface FlagSpec {
@@ -26,7 +26,10 @@ export interface ParsedArgs {
   positionals: string[]
 }
 
-function toParseArgsConfig(specs: FlagSpecs, args: string[]): {
+function toParseArgsConfig(
+  specs: FlagSpecs,
+  args: string[],
+): {
   config: ParseArgsConfig
   parsed: ReturnType<typeof parseArgs>
 } {
@@ -79,6 +82,63 @@ export function getBool(args: ParsedArgs, name: string): boolean {
 export function getList(args: ParsedArgs, name: string): string[] {
   const v = args.values[name]
   if (Array.isArray(v)) return v
-  if (typeof v === 'string') return v.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+  if (typeof v === 'string')
+    return v
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
   return []
+}
+
+/**
+ * Split a command string into argv, honouring quotes.
+ *
+ * A verify command is stored and rendered as one string (detectors find
+ * `./gradlew test --tests "*Changed*"` in a manifest, and it is printed the same way in
+ * the PR body), but it has to reach the process as an argument array. Splitting on
+ * whitespace passes `--tests` the literal `"*Changed*"` including the quotes, which makes
+ * a filtered Gradle test run match nothing and looks like a green build. This is a small
+ * POSIX-ish tokenizer: single and double quotes group, and a backslash escapes the next
+ * character inside double quotes. It is not a shell -- it performs no expansion, no
+ * substitution and no globbing.
+ */
+export function tokenizeCommand(command: string): string[] {
+  const out: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let hasToken = false
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i] as string
+    if (quote !== null) {
+      if (ch === '\\' && quote === '"' && i + 1 < command.length) {
+        current += command[i + 1]
+        i++
+        continue
+      }
+      if (ch === quote) {
+        quote = null
+        continue
+      }
+      current += ch
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      hasToken = true
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (hasToken) {
+        out.push(current)
+        current = ''
+        hasToken = false
+      }
+      continue
+    }
+    current += ch
+    hasToken = true
+  }
+  if (hasToken) out.push(current)
+  return out
 }

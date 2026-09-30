@@ -6,13 +6,14 @@
  * Every assertion here is about the *tarball* and the *installed binary*, not about source.
  */
 
-import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { runProcess } from '@anvil/core'
 
 // packages/cli/test -> packages/cli -> packages -> repo root
 const here = dirname(fileURLToPath(import.meta.url))
@@ -57,7 +58,9 @@ describe('publishable package', () => {
     // trusted it alone shipped a binary reporting 0.1.0-dev forever.
     const bundle = join(CLI_DIR, 'dist', 'cli.js')
     if (!existsSync(bundle)) return // covered by the build step; nothing to assert yet
-    const out = execFileSync(process.execPath, [bundle, 'version', '--json'], { encoding: 'utf8' })
+    const out = execFileSync(process.execPath, [bundle, 'version', '--json'], {
+      encoding: 'utf8',
+    })
     const parsed = JSON.parse(out) as { data: { version: string } }
     assert.equal(
       parsed.data.version,
@@ -135,7 +138,7 @@ describe('the opencode plugin package', () => {
     assert.match(
       source,
       /from\s*["']@opencode-ai\/plugin["']/,
-      'the SDK should be imported, not inlined; a vendored copy breaks the host\'s tool registry',
+      "the SDK should be imported, not inlined; a vendored copy breaks the host's tool registry",
     )
   })
 
@@ -156,14 +159,16 @@ describe('the packed tarball installs and runs', () => {
   // A single test, because the expensive part is `npm pack` plus `npm install` and splitting
   // it would pay that cost repeatedly. Each assertion below is a separate way a package
   // breaks, so one failure still names which one.
-  test('npm pack -> npm install -> the installed binary does real work', { timeout: 300_000 }, () => {
+  test('npm pack -> npm install -> the installed binary does real work', {
+    timeout: 300_000,
+  }, async () => {
     const packDir = tempDir('anvil-pack-')
-    const packed = spawnSync('npm', ['pack', '--pack-destination', packDir], {
-      cwd: CLI_DIR,
-      encoding: 'utf8',
-      shell: true,
-    })
-    assert.equal(packed.status, 0, `npm pack failed: ${packed.stderr}`)
+    // `runProcess`, not `spawnSync(..., { shell: true })`: the project resolved the
+    // Windows-shim problem for the CLI, and its own test should not reintroduce it (or the
+    // DEP0190 deprecation warning) by going through a shell. The arguments here are
+    // controlled, so the shim path passes the safety check untouched.
+    const packed = await runProcess('npm', ['pack', '--pack-destination', packDir], { cwd: CLI_DIR })
+    assert.equal(packed.exitCode, 0, `npm pack failed: ${packed.stderr}`)
 
     const tarball = join(packDir, `${String(CLI_PKG.name)}-${String(CLI_PKG.version)}.tgz`)
     assert.ok(existsSync(tarball), `expected ${tarball} to exist`)
@@ -172,46 +177,53 @@ describe('the packed tarball installs and runs', () => {
     const consumer = tempDir('anvil-consumer-')
     writeFileSync(
       join(consumer, 'package.json'),
-      JSON.stringify({ name: 'consumer', private: true, scripts: { test: 'node -e "process.exit(0)"' } }),
+      JSON.stringify({
+        name: 'consumer',
+        private: true,
+        scripts: { test: 'node -e "process.exit(0)"' },
+      }),
       'utf8',
     )
     const git = (...args: string[]) =>
-      execFileSync('git', args, { cwd: consumer, encoding: 'utf8', stdio: 'pipe' })
+      execFileSync('git', args, {
+        cwd: consumer,
+        encoding: 'utf8',
+        stdio: 'pipe',
+      })
     git('init', '-q', '-b', 'main')
     git('add', '-A')
     git('-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'init')
 
-    const installed = spawnSync('npm', ['install', '--no-save', tarball], {
-      cwd: consumer,
-      encoding: 'utf8',
-      shell: true,
-    })
-    assert.equal(installed.status, 0, `npm install failed: ${installed.stderr}`)
+    const installed = await runProcess('npm', ['install', '--no-save', tarball], { cwd: consumer })
+    assert.equal(installed.exitCode, 0, `npm install failed: ${installed.stderr}`)
 
     // The bin shim, not the bundle path. On Windows npm writes an anvil.cmd, and this is
     // exactly where a package that only works when invoked as `node dist/cli.js` breaks.
     const bin = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'anvil.cmd' : 'anvil')
     assert.ok(existsSync(bin), `bin shim missing at ${bin}`)
 
-    const run = (...args: string[]): { status: number | null; stdout: string; stderr: string } => {
-      const r = spawnSync(bin, args, {
+    const run = async (...args: string[]): Promise<{ status: number; stdout: string; stderr: string }> => {
+      // Through `runProcess` here too: on Windows `anvil.cmd` is a cmd shim, and running
+      // it via a shell would mask exactly the breakage this test exists to catch.
+      const r = await runProcess(bin, args, {
         cwd: consumer,
-        encoding: 'utf8',
-        shell: process.platform === 'win32',
         env: { ...process.env, NO_COLOR: '1' },
       })
-      return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' }
+      return { status: r.exitCode, stdout: r.stdout, stderr: r.stderr }
     }
 
     // 1. It reports its own version, which is what a user pastes into a bug report.
-    const version = run('version', '--json')
+    const version = await run('version', '--json')
     assert.equal(version.status, 0, `version failed: ${version.stderr}`)
     assert.equal((JSON.parse(version.stdout) as { data: { version: string } }).data.version, CLI_PKG.version)
 
     // 2. The JSON envelope survives bundling and minification.
-    const doctor = run('doctor', '--json')
+    const doctor = await run('doctor', '--json')
     assert.equal(doctor.status, 0, `doctor failed: ${doctor.stderr}`)
-    const envelope = JSON.parse(doctor.stdout) as { schemaVersion: number; ok: boolean }
+    const envelope = JSON.parse(doctor.stdout) as {
+      schemaVersion: number
+      ok: boolean
+    }
     assert.equal(envelope.schemaVersion, 1)
     assert.equal(envelope.ok, true)
 
@@ -219,17 +231,17 @@ describe('the packed tarball installs and runs', () => {
     //    path that exercises playbooks, profile, the worktree registry and the process
     //    layer, and it is the only way to know the bundle is complete rather than merely
     //    importable.
-    const created = run('issue', 'create', 'Real install smoke task')
+    const created = await run('issue', 'create', 'Real install smoke task')
     assert.equal(created.status, 0, `issue create failed: ${created.stderr}`)
 
-    const claimed = run('claim', 'local-1')
+    const claimed = await run('claim', 'local-1')
     assert.equal(claimed.status, 0, `claim failed: ${claimed.stderr}`)
     assert.match(claimed.stdout, /claimed local-1/)
 
     // Windows shim handling, end to end, on a real `npm run` from an installed bundle. This
     // is the defect that made the tool non-functional on Windows, and the unit tests cannot
     // see it because they run from the repo rather than from node_modules.
-    const verified = run('crew', 'verify')
+    const verified = await run('crew', 'verify')
     assert.equal(verified.status, 0, `crew verify failed: ${verified.stderr}\n${verified.stdout}`)
     assert.match(verified.stdout, /pass/)
   })

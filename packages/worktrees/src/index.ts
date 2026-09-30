@@ -18,28 +18,26 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, resolve, dirname, basename } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 import {
   addWorktree,
   branchExists,
   currentBranch,
   deleteBranch,
-  discoverRepo,
   environmentNotes,
   git,
   listWorktrees,
   normalizeGitPath,
+  type PreflightCheck,
   preflightClaim,
   removeWorktree,
   resolveBaseRef,
-  worktreeStatus,
-  WINDOWS_SAFE_PATH_BUDGET,
-  type PreflightCheck,
   type WorktreeStatus,
+  worktreeStatus,
 } from '@anvil/git'
-import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
 import { buildProfile } from '@anvil/profile'
+import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
 import { renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
 
 export type ClaimState = 'active' | 'shipped' | 'released' | 'stale'
@@ -53,7 +51,10 @@ export interface Claim {
   /** The ref the branch was actually created from, e.g. `origin/main`. */
   baseRef: string
   worktreePath: string
-  /** git's own worktree id, so removal does not depend on path formatting. */
+  /**
+   * The `HEAD` porcelain value recorded for this worktree, for cross-referencing against
+   * `git worktree list`. Not a git-assigned stable id (git has none); removal goes by path.
+   */
   worktreeId: string | null
   state: ClaimState
   createdAt: string
@@ -90,7 +91,7 @@ export function readClaims(repoRoot: string): ClaimRegistry {
 export function writeClaims(repoRoot: string, registry: ClaimRegistry): void {
   const path = claimsPath(repoRoot)
   mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, JSON.stringify(registry, null, 2) + '\n', 'utf8')
+  writeFileSync(path, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
 }
 
 /**
@@ -170,7 +171,10 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
       ErrorCode.PreflightFailed,
       `Refusing to claim ${ticket.ref.key}: ${blocking.map((c) => c.detail).join('; ')}`,
       {
-        hint: blocking.map((c) => c.hint).filter(Boolean).join(' '),
+        hint: blocking
+          .map((c) => c.hint)
+          .filter(Boolean)
+          .join(' '),
         details: { checks: pre.checks },
       },
     )
@@ -179,11 +183,20 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
 
   // 5. Create. `git worktree add -b` is a single atomic step: a half-created worktree
   //    with no branch is a mess to clean up by hand.
-  const added = await addWorktree({ cwd: repoRoot, path: worktreePath, branch, baseRef: base.ref })
+  const added = await addWorktree({
+    cwd: repoRoot,
+    path: worktreePath,
+    branch,
+    baseRef: base.ref,
+  })
   if (added.exitCode !== 0) {
-    throw new AnvilError(ErrorCode.PreflightFailed, `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`, {
-      hint: 'Check that the base ref exists and the target directory is writable.',
-    })
+    throw new AnvilError(
+      ErrorCode.PreflightFailed,
+      `git worktree add failed: ${added.stderr.trim() || added.stdout.trim()}`,
+      {
+        hint: 'Check that the base ref exists and the target directory is writable.',
+      },
+    )
   }
 
   // 6. Make the worktree warm: ticket context, AGENTS overlay, and an exclusion so
@@ -200,7 +213,7 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
   mkdirSync(join(worktreePath, '.anvil'), { recursive: true })
   writeFileSync(join(worktreePath, context.path), context.content, 'utf8')
   writeFileSync(join(worktreePath, overlay.path), overlay.content, 'utf8')
-  const excluded = await excludeAnvilState(repoRoot)
+  const _excluded = await excludeAnvilState(repoRoot)
 
   const worktrees = await listWorktrees(repoRoot)
   const entry = worktrees.find((w) => w.branch === branch)
@@ -231,8 +244,12 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
 }
 
 async function hasUpstream(cwd: string, branch: string): Promise<boolean> {
-  const res = await import('@anvil/git').then((m) => m.git(['rev-parse', '--abbrev-ref', branch], { cwd }))
-  return res.exitCode === 0 && res.stdout.includes('/')
+  // `<branch>@{upstream}` is the ref that *is* the upstream. `rev-parse --abbrev-ref
+  // <branch>` just echoes the branch name back, and every anvil branch contains a `/`
+  // (`feat/...`), so the old check reported true for every claim and `needsUpstream` was
+  // always false.
+  const res = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', `${branch}@{upstream}`], { cwd })
+  return res.exitCode === 0 && res.stdout.trim() !== ''
 }
 
 /** Add an exclusion to the repository's shared `info/exclude`. Returns false if unavailable. */
@@ -418,7 +435,5 @@ export async function findOrphanWorktrees(repoRoot: string): Promise<string[]> {
   const registry = readClaims(repoRoot)
   const known = new Set(registry.claims.map((c) => c.worktreePath.toLowerCase()))
   const worktrees = await listWorktrees(repoRoot)
-  return worktrees
-    .filter((w) => !w.isMain && !known.has(w.path.toLowerCase()))
-    .map((w) => w.path)
+  return worktrees.filter((w) => !w.isMain && !known.has(w.path.toLowerCase())).map((w) => w.path)
 }

@@ -16,21 +16,22 @@
 
 import { join } from 'node:path'
 import type { ProjectProfile } from '@anvil/profile'
-import type { Ticket, TicketRef } from './index.ts'
+import type { Ticket } from './index.ts'
 
-/** Where the bundle lives inside a worktree. Gitignored by `anvil claim`. */
+/**
+ * Where the bundle lives inside a worktree. Gitignored by `anvil claim`.
+ *
+ * Written as literal POSIX-ish paths rather than `join` output: these strings are shown to
+ * an agent as instructions (`Read .anvil/ticket.md first`), and on Windows `join` would
+ * render them as `.anvil\ticket.md`, which is not what the agent should type.
+ */
 export const CONTEXT_DIR = '.anvil'
-export const CONTEXT_FILE = join(CONTEXT_DIR, 'ticket.md')
-export const AGENTS_OVERLAY = join(CONTEXT_DIR, 'AGENTS.md')
+export const CONTEXT_FILE = `${CONTEXT_DIR}/ticket.md`
+export const AGENTS_OVERLAY = `${CONTEXT_DIR}/AGENTS.md`
 
 export interface ContextBundle {
   path: string
   content: string
-}
-
-function bulletOrDash(value: string | undefined | null, fallback = '_none detected_'): string {
-  const v = value?.trim()
-  return v === undefined || v === '' ? fallback : v
 }
 
 /**
@@ -40,7 +41,11 @@ function bulletOrDash(value: string | undefined | null, fallback = '_none detect
  * that is the agent's job, and pre-writing it is how a context file turns into a
  * prescription the agent follows without checking.
  */
-export function renderContextBundle(options: { ticket: Ticket; profile: ProjectProfile; branch: string }): ContextBundle {
+export function renderContextBundle(options: {
+  ticket: Ticket
+  profile: ProjectProfile
+  branch: string
+}): ContextBundle {
   const { ticket, profile, branch } = options
   const out: string[] = []
 
@@ -48,7 +53,10 @@ export function renderContextBundle(options: { ticket: Ticket; profile: ProjectP
   out.push('')
   out.push(`**Branch:** \`${branch}\``)
   if (ticket.ref.url !== undefined) out.push(`**Ticket:** ${ticket.ref.url}`)
-  if (ticket.state !== undefined) out.push(`**State:** ${ticket.state}${ticket.state !== ticket.normalizedState ? ` (anvil: ${ticket.normalizedState})` : ''}`)
+  if (ticket.state !== undefined)
+    out.push(
+      `**State:** ${ticket.state}${ticket.state !== ticket.normalizedState ? ` (anvil: ${ticket.normalizedState})` : ''}`,
+    )
   if (ticket.priority !== undefined && ticket.priority !== '') out.push(`**Priority:** ${ticket.priority}`)
   if (ticket.labels !== undefined && ticket.labels.length > 0) out.push(`**Labels:** ${ticket.labels.join(', ')}`)
   if (ticket.assignee !== undefined && ticket.assignee !== '') out.push(`**Assignee:** ${ticket.assignee}`)

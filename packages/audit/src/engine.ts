@@ -14,15 +14,15 @@ import { join } from 'node:path'
 import type { ProjectProfile } from '@anvil/profile'
 import { RULES, type Rule, type RuleContext } from './rules.ts'
 import {
-  LAYERS,
-  LAYER_TITLES,
-  SEVERITY_WEIGHT,
-  STATUS_CREDIT,
-  gradeFor,
   type Finding,
+  gradeFor,
+  LAYER_TITLES,
+  LAYERS,
   type Layer,
   type LayerScore,
   type ReadinessReport,
+  SEVERITY_WEIGHT,
+  STATUS_CREDIT,
   type Status,
 } from './types.ts'
 
@@ -64,13 +64,45 @@ export function buildRuleContext(profile: ProjectProfile, options: AuditOptions 
   }
 
   const hasCode = profile.languages.some((l) => l.primary && l.files > 0)
-  const hasTests = profile.files.some((f) =>
-    /(^|\/)(tests?|__tests__|spec)\//i.test(f) ||
-    /(_test\.|\.test\.|\.spec\.|Test\.java$|Tests\.cs$|_spec\.rb$)/.test(f) ||
-    /(^|\/)test_[^/]+\.py$/.test(f),
+  const hasTests = profile.files.some(
+    (f) =>
+      /(^|\/)(tests?|__tests__|spec)\//i.test(f) ||
+      /(_test\.|\.test\.|\.spec\.|Test\.java$|Tests\.cs$|_spec\.rb$)/.test(f) ||
+      /(^|\/)test_[^/]+\.py$/.test(f),
   )
 
-  return { profile, hasCode, hasTests, instructionsText: instructionText, ciWorkflows }
+  return {
+    profile,
+    hasCode,
+    hasTests,
+    instructionsText: instructionText,
+    ciWorkflows,
+    npmScripts: readNpmScripts(root),
+  }
+}
+
+/**
+ * The root package.json's `scripts` block, or `{}`.
+ *
+ * Only CI_PARITY uses it, and only to expand a composite script: a workflow step that runs
+ * `npm run check` runs whatever `check` runs, and a rule that reports "CI does not appear
+ * to run lint" for that is wrong in the most misleading way available -- it names a
+ * specific gap that does not exist, which teaches the reader to discount the report.
+ */
+function readNpmScripts(root: string): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return {}
+    const scripts = (parsed as { scripts?: unknown }).scripts
+    if (typeof scripts !== 'object' || scripts === null) return {}
+    const out: Record<string, string> = {}
+    for (const [name, body] of Object.entries(scripts as Record<string, unknown>)) {
+      if (typeof body === 'string') out[name] = body
+    }
+    return out
+  } catch {
+    return {}
+  }
 }
 
 export function audit(profile: ProjectProfile, options: AuditOptions = {}): ReadinessReport {

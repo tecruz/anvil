@@ -96,26 +96,39 @@ export function diffLines(oldText: string, newText: string): DiffLine[] {
   const b = splitLines(newText)
   const out: DiffLine[] = []
   const pairs = lcsPairs(a, b)
-  const matched = new Set(pairs.map(([i]) => i))
 
   let ai = 0
   let bi = 0
   for (const [pa, pb] of [...pairs, [a.length, b.length] as [number, number]]) {
     while (ai < pa) {
-      out.push({ op: 'remove', text: a[ai] as string, oldLine: ai + 1, newLine: null })
+      out.push({
+        op: 'remove',
+        text: a[ai] as string,
+        oldLine: ai + 1,
+        newLine: null,
+      })
       ai++
     }
     while (bi < pb) {
-      out.push({ op: 'add', text: b[bi] as string, oldLine: null, newLine: bi + 1 })
+      out.push({
+        op: 'add',
+        text: b[bi] as string,
+        oldLine: null,
+        newLine: bi + 1,
+      })
       bi++
     }
     if (pa < a.length && pb < b.length) {
-      out.push({ op: 'context', text: a[pa] as string, oldLine: pa + 1, newLine: pb + 1 })
+      out.push({
+        op: 'context',
+        text: a[pa] as string,
+        oldLine: pa + 1,
+        newLine: pb + 1,
+      })
       ai++
       bi++
     }
   }
-  void matched
   return out
 }
 
@@ -182,7 +195,18 @@ export function diffFile(input: DiffInput): FileDiff | null {
     return {
       path: input.path,
       kind: 'add',
-      hunks: lines.length === 0 ? [] : [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: lines.length, lines }],
+      hunks:
+        lines.length === 0
+          ? []
+          : [
+              {
+                oldStart: 0,
+                oldCount: 0,
+                newStart: 1,
+                newCount: lines.length,
+                lines,
+              },
+            ],
       added: lines.length,
       removed: 0,
     }
@@ -198,7 +222,15 @@ export function diffFile(input: DiffInput): FileDiff | null {
     return {
       path: input.path,
       kind: 'delete',
-      hunks: [{ oldStart: 1, oldCount: lines.length, newStart: 0, newCount: 0, lines }],
+      hunks: [
+        {
+          oldStart: 1,
+          oldCount: lines.length,
+          newStart: 0,
+          newCount: 0,
+          lines,
+        },
+      ],
       added: 0,
       removed: lines.length,
     }
@@ -209,7 +241,13 @@ export function diffFile(input: DiffInput): FileDiff | null {
   const removed = lines.filter((l) => l.op === 'remove').length
   if (added === 0 && removed === 0) return null
 
-  return { path: input.path, kind: 'modify', hunks: buildHunks(lines), added, removed }
+  return {
+    path: input.path,
+    kind: 'modify',
+    hunks: buildHunks(lines),
+    added,
+    removed,
+  }
 }
 
 /** Render a `git apply`-compatible unified diff. */
@@ -229,10 +267,14 @@ export function renderUnifiedDiff(diffs: readonly FileDiff[]): string {
       }
     }
   }
-  return out.length === 0 ? '' : out.join('\n') + '\n'
+  return out.length === 0 ? '' : `${out.join('\n')}\n`
 }
 
-export function summarize(diffs: readonly FileDiff[]): { files: number; added: number; removed: number } {
+export function summarize(diffs: readonly FileDiff[]): {
+  files: number
+  added: number
+  removed: number
+} {
   return {
     files: diffs.length,
     added: diffs.reduce((n, d) => n + d.added, 0),

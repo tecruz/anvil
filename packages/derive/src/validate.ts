@@ -108,7 +108,12 @@ export function parseFrontmatter(text: string): ParsedFrontmatter {
     data[key] = value
   }
 
-  return { data, body: lines.slice(i).join('\n'), bodyStart: i + 1, unterminated: !closed }
+  return {
+    data,
+    body: lines.slice(i).join('\n'),
+    bodyStart: i + 1,
+    unterminated: !closed,
+  }
 }
 
 function result(path: string, kind: ArtifactKind, errors: string[], warnings: string[]): ArtifactValidation {
@@ -156,11 +161,24 @@ function validateAgentsFile(path: string, content: string): ArtifactValidation {
   }
   // opencode does not parse @file references itself, so an AGENTS.md leaning on them has
   // to say so explicitly or the agent never loads them.
-  if (/@[\w./-]+/.test(content) && !/use your (read|Read) tool|read the file|load the file/i.test(content)) {
+  //
+  // The reference has to look like a *file*: a path with an extension. Without that
+  // requirement the check fires on every scoped npm package name in the document
+  // (`@anvil/core`), which is a warning about the tool's own generated layout section --
+  // and a false warning here blocks `init --apply`, which refuses to apply while any
+  // warning stands.
+  if (AT_FILE_REFERENCE.test(content) && !/use your (read|Read) tool|read the file|load the file/i.test(content)) {
     warnings.push('Contains @file references but does not instruct the agent to read them, so they will not be loaded.')
   }
   return result(path, 'agents-file', errors, warnings)
 }
+
+/**
+ * An `@file` reference: an `@`, a path, and a file extension.
+ *
+ * The extension is what separates `@src/config.ts` from `@scope/package`.
+ */
+const AT_FILE_REFERENCE = /@[\w./-]*[\w-]+\.[A-Za-z0-9]{1,8}\b/
 
 function validateAgent(path: string, content: string): ArtifactValidation {
   const errors: string[] = []
@@ -188,7 +206,9 @@ function validateAgent(path: string, content: string): ArtifactValidation {
 
   if (body.trim() === '') errors.push('Agent has no system prompt body')
   if (!/permission\s*:/.test(content) && /\b(bash|edit|write)\b/.test(body)) {
-    warnings.push('Body suggests running commands or editing files but no `permission` block is declared, so the agent inherits every tool.')
+    warnings.push(
+      'Body suggests running commands or editing files but no `permission` block is declared, so the agent inherits every tool.',
+    )
   }
   return result(path, 'agent', errors, warnings)
 }
@@ -215,7 +235,9 @@ function validateCommand(path: string, content: string): ArtifactValidation {
   // A command whose description promises a parameter but whose body never interpolates
   // one is a latent bug: the user types `/add-component Button` and it is ignored.
   if (/\$\{?\w/.test(content) && !/\$ARGUMENTS|\$\d/.test(body)) {
-    warnings.push('Frontmatter references a variable but the body never interpolates it, so it will not reach the prompt')
+    warnings.push(
+      'Frontmatter references a variable but the body never interpolates it, so it will not reach the prompt',
+    )
   }
   return result(path, 'command', errors, warnings)
 }

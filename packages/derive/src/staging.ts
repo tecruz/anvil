@@ -19,7 +19,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 
@@ -35,6 +35,19 @@ export interface StagedFile {
   stagedPath: string
   sha256: string
   bytes: number
+  /**
+   * Hash of the repository's copy of this file at the moment it was staged, or null if
+   * the file did not exist then.
+   *
+   * This is what makes the staleness check meaningful. Comparing the repository against
+   * the *staged* content cannot tell "the repo changed since staging" apart from "the repo
+   * always differed from what anvil generates", and conflating them refuses `--apply`
+   * forever on any repo that already has an AGENTS.md -- with a message claiming the file
+   * changed when it never did. Recording the repo side at staging time is what lets apply
+   * distinguish: repo-unchanged-since-staging may proceed (the user reviewed the diff);
+   * repo-changed-since-staging is refused.
+   */
+  repoSha256: string | null
 }
 
 export interface StagingManifest {
@@ -60,7 +73,10 @@ export function sha256(text: string): string {
  */
 export function hashInputs(input: {
   profile: unknown
-  report: { score: number; findings: Array<{ id: string; status: string; severity: string }> }
+  report: {
+    score: number
+    findings: Array<{ id: string; status: string; severity: string }>
+  }
   playbookIds: readonly string[]
 }): string {
   const canonical = JSON.stringify({
@@ -97,11 +113,15 @@ export function writeStaging(
     const stagedAbs = join(root, stagedRel)
     mkdirSync(join(stagedAbs, '..'), { recursive: true })
     writeFileSync(stagedAbs, content, 'utf8')
+    // Capture the repository's current content for this path, so `--apply` can tell a
+    // file that changed after staging from one that merely always differed.
+    const existing = readRepoFile(repoRoot, path)
     files.push({
       path,
       stagedPath: stagedRel.split('\\').join('/'),
       sha256: sha256(content),
       bytes: Buffer.byteLength(content),
+      repoSha256: existing === null ? null : sha256(existing),
     })
   }
 
@@ -112,7 +132,7 @@ export function writeStaging(
     generator: manifest.generator,
     files,
   }
-  writeFileSync(join(root, MANIFEST_NAME), JSON.stringify(full, null, 2) + '\n', 'utf8')
+  writeFileSync(join(root, MANIFEST_NAME), `${JSON.stringify(full, null, 2)}\n`, 'utf8')
   return full
 }
 
@@ -122,10 +142,36 @@ export function readManifest(repoRoot: string): StagingManifest | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
     if (typeof parsed !== 'object' || parsed === null) return null
-    return parsed as StagingManifest
+    const manifest = parsed as StagingManifest
+    if (!Array.isArray(manifest.files)) return null
+    // A manifest is a file inside the repository, and `anvil` is explicitly run in
+    // repositories it does not own. A committed `.anvil/staging/manifest.json` whose
+    // `path` entries are `../../.ssh/authorized_keys` or an absolute path would make
+    // `--apply` write attacker-chosen content outside the repository -- `mkdirSync` of the
+    // parent included. So every target is checked to be a plain relative path inside the
+    // repo before it is ever read or written. (The local ticket provider guards the same
+    // class of input for the same reason.)
+    for (const file of manifest.files) {
+      if (typeof file?.path !== 'string' || typeof file?.stagedPath !== 'string') return null
+      if (!isSafeRepoRelativePath(file.path) || !isSafeRepoRelativePath(file.stagedPath)) return null
+    }
+    return manifest
   } catch {
     return null
   }
+}
+
+/**
+ * True when a manifest path is a plain relative path with no traversal.
+ *
+ * Rejects absolute paths, drive letters, `..` segments and backslashes, on every
+ * platform, not just Windows: a manifest is data, and the value of a data file is
+ * exactly what a hostile repository can control.
+ */
+function isSafeRepoRelativePath(p: string): boolean {
+  if (p === '' || p.startsWith('/') || p.startsWith('\\') || /^[A-Za-z]:/.test(p)) return false
+  if (p.includes('\\') || p.includes('\0')) return false
+  return !p.split('/').some((seg) => seg === '..' || seg === '')
 }
 
 /** Read the staged content for a manifest entry. */
@@ -207,14 +253,38 @@ export function checkApplyPreconditions(
     }
   }
 
+  // Second check: the repository must not have changed under the bundle. This is
+  // compared against the repo-side hash recorded at staging time, so "the file was edited
+  // after init ran" is refused, while a file that already existed (and that the user
+  // reviewed as a diff) is allowed to be replaced. Refusing on "content differs from
+  // generated" would make every pre-existing AGENTS.md permanently un-applyable.
   for (const file of manifest.files) {
+    // A bundle produced before repoSha256 existed cannot make this distinction; treat
+    // the repo side as unknown and refuse when it differs, which is the old (safe)
+    // behaviour. The cast is because the field is absent from old manifests, not because
+    // the field is optional in the current type.
+    const repoSha256 = (file as { repoSha256?: string | null }).repoSha256
     const onDisk = readRepoFile(repoRoot, file.path)
-    if (onDisk === null) continue
-    if (sha256(onDisk) === file.sha256) continue
+    // Content identical to what would be written makes the apply a no-op, so it is always
+    // safe -- this is what makes a second `--apply` after a first one a no-op rather than
+    // a refusal, even though the file now exists and did not at staging time.
+    if (onDisk !== null && sha256(onDisk) === file.sha256) continue
+    if (repoSha256 === undefined) {
+      if (onDisk !== null) {
+        return {
+          ok: false,
+          reason: `${file.path} differs from the bundle and the bundle predates repo-side tracking`,
+          hint: 'Re-run `anvil init` to rebuild the bundle against the current state.',
+        }
+      }
+      continue
+    }
+    const current = onDisk === null ? null : sha256(onDisk)
+    if (current === repoSha256) continue // repo unchanged since staging
     return {
       ok: false,
-      reason: `${file.path} has changed in the repository since the bundle was staged`,
-      hint: 'Inspect the diff above. Re-run `anvil init` if the repository version is the one you want to keep.',
+      reason: `${file.path} changed in the repository since the bundle was staged`,
+      hint: 'Inspect the diff above. Re-run `anvil init` to rebuild the bundle against the current state.',
     }
   }
 

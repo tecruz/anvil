@@ -14,15 +14,23 @@
  * never seen and are not allowed to modify.
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode } from './errors.ts'
 
 export const CONFIG_FILE_NAME = 'anvil.config.json'
 export const CONFIG_DIR_NAME = '.anvil'
 
-export const SCHEMA_URL = 'https://opencode.ai/config.json'
+/**
+ * The JSON-schema URL written as `$schema` in a starter config.
+ *
+ * Deliberately absent: anvil does not publish a JSON schema, and pointing editors at
+ * another tool's schema (as this used to, with `https://opencode.ai/config.json`) makes
+ * a valid file look invalid and an invalid one look valid. An honest, absent `$schema` is
+ * better than a wrong one. If a schema is published later, this is where it goes.
+ */
+export const SCHEMA_URL: string | undefined = undefined
 
 export interface AnvilConfig {
   schemaVersion: 1
@@ -95,11 +103,7 @@ function expectObject(value: unknown, path: string, issues: ValidationIssue[]): 
   return {}
 }
 
-function expectStringOrNull(
-  value: unknown,
-  path: string,
-  issues: ValidationIssue[],
-): string | null | undefined {
+function expectStringOrNull(value: unknown, path: string, issues: ValidationIssue[]): string | null | undefined {
   if (value === null) return null
   if (typeof value === 'string') return value
   issues.push({ path, message: 'expected a string or null' })
@@ -127,20 +131,24 @@ function expectEnum<T extends string>(
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
  */
-export function mergeConfig(
-  base: AnvilConfig,
-  layer: Record<string, unknown>,
-  sourcePath: string,
-): AnvilConfig {
+export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, sourcePath: string): AnvilConfig {
   const issues: ValidationIssue[] = []
 
-  const known = new Set(['schemaVersion', 'git', 'provider', 'output', 'features'])
+  // `$schema` is a standard JSON key that an editor adds by hand; accept and ignore it
+  // rather than failing a config that is otherwise valid.
+  const known = new Set(['$schema', 'schemaVersion', 'git', 'provider', 'output', 'features'])
   for (const key of Object.keys(layer)) {
     if (!known.has(key)) issues.push({ path: key, message: 'unknown configuration key' })
   }
+  if (layer.$schema !== undefined && typeof layer.$schema !== 'string') {
+    issues.push({ path: '$schema', message: 'expected a string URL' })
+  }
 
   if (layer.schemaVersion !== undefined && layer.schemaVersion !== 1) {
-    issues.push({ path: 'schemaVersion', message: 'unsupported schemaVersion (expected 1)' })
+    issues.push({
+      path: 'schemaVersion',
+      message: 'unsupported schemaVersion (expected 1)',
+    })
   }
 
   const next: AnvilConfig = structuredClone(base)
@@ -149,7 +157,11 @@ export function mergeConfig(
     const git = expectObject(layer.git, 'git', issues)
     const knownGit = new Set(['defaultBaseBranch', 'worktreeRoot'])
     for (const key of Object.keys(git)) {
-      if (!knownGit.has(key)) issues.push({ path: `git.${key}`, message: 'unknown configuration key' })
+      if (!knownGit.has(key))
+        issues.push({
+          path: `git.${key}`,
+          message: 'unknown configuration key',
+        })
     }
     // Only validate keys the layer actually sets. A layer that sets one key must not be
     // required to set its siblings.
@@ -166,7 +178,11 @@ export function mergeConfig(
   if (layer.provider !== undefined) {
     const provider = expectObject(layer.provider, 'provider', issues)
     for (const key of Object.keys(provider)) {
-      if (key !== 'default') issues.push({ path: `provider.${key}`, message: 'unknown configuration key' })
+      if (key !== 'default')
+        issues.push({
+          path: `provider.${key}`,
+          message: 'unknown configuration key',
+        })
     }
     if (provider.default !== undefined) {
       if (typeof provider.default === 'string') next.provider.default = provider.default
@@ -177,7 +193,11 @@ export function mergeConfig(
   if (layer.output !== undefined) {
     const output = expectObject(layer.output, 'output', issues)
     for (const key of Object.keys(output)) {
-      if (key !== 'color') issues.push({ path: `output.${key}`, message: 'unknown configuration key' })
+      if (key !== 'color')
+        issues.push({
+          path: `output.${key}`,
+          message: 'unknown configuration key',
+        })
     }
     if (output.color !== undefined) {
       const color = expectEnum(output.color, 'output.color', ['auto', 'always', 'never'] as const, issues)
@@ -188,7 +208,11 @@ export function mergeConfig(
   if (layer.features !== undefined) {
     const features = expectObject(layer.features, 'features', issues)
     for (const key of Object.keys(features)) {
-      if (key !== 'probeCommands') issues.push({ path: `features.${key}`, message: 'unknown configuration key' })
+      if (key !== 'probeCommands')
+        issues.push({
+          path: `features.${key}`,
+          message: 'unknown configuration key',
+        })
     }
     if (features.probeCommands !== undefined) {
       const probe = expectBoolean(features.probeCommands, 'features.probeCommands', issues)
@@ -198,13 +222,9 @@ export function mergeConfig(
 
   if (issues.length > 0) {
     const detail = issues.map((i) => `  ${i.path}: ${i.message}`).join('\n')
-    throw new AnvilError(
-      ErrorCode.ConfigInvalid,
-      `Invalid configuration in ${sourcePath}:\n${detail}`,
-      {
-        hint: 'Run `anvil config show` to see the resolved config, or delete the file to fall back to defaults.',
-      },
-    )
+    throw new AnvilError(ErrorCode.ConfigInvalid, `Invalid configuration in ${sourcePath}:\n${detail}`, {
+      hint: 'Run `anvil config show` to see the resolved config, or delete the file to fall back to defaults.',
+    })
   }
 
   return next
@@ -271,23 +291,21 @@ export function loadConfig(options: LoadConfigOptions = {}): ResolvedConfig {
 
 /** Write a starter repo-local config. Used by `anvil config init`. */
 export function starterConfigJson(): string {
-  return (
-    JSON.stringify(
-      {
-        $schema: SCHEMA_URL,
-        schemaVersion: 1,
-        git: {
-          defaultBaseBranch: null,
-          worktreeRoot: null,
-        },
-        provider: { default: 'local' },
-        output: { color: 'auto' },
-        features: { probeCommands: false },
-      },
-      null,
-      2,
-    ) + '\n'
-  )
+  // `$schema` is included only when a real schema URL exists. The starter file must pass
+  // `mergeConfig` unchanged -- a scaffold that its own validator rejects is a trap, and it
+  // is what `config init` used to write.
+  const body: Record<string, unknown> = {
+    schemaVersion: 1,
+    git: {
+      defaultBaseBranch: null,
+      worktreeRoot: null,
+    },
+    provider: { default: 'local' },
+    output: { color: 'auto' },
+    features: { probeCommands: false },
+  }
+  if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
+  return `${JSON.stringify(body, null, 2)}\n`
 }
 
 /** Directory used for anvil's own per-repo state (staging, tickets). */

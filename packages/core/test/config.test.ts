@@ -1,17 +1,19 @@
-import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { describe, test } from 'node:test'
 
 import {
   AnvilError,
-  ErrorCode,
   defaultConfig,
+  ErrorCode,
   globalConfigPath,
   loadConfig,
   mergeConfig,
   repoConfigPath,
+  starterConfigJson,
+  tokenizeCommand,
 } from '@anvil/core'
 
 function tempDir(prefix = 'anvil-config-'): string {
@@ -150,7 +152,10 @@ describe('mergeConfig', () => {
 describe('loadConfig', () => {
   test('returns defaults with no files present', () => {
     const dir = tempDir()
-    const resolved = loadConfig({ repoRoot: dir, env: { ANVIL_CONFIG_HOME: join(dir, 'absent') } })
+    const resolved = loadConfig({
+      repoRoot: dir,
+      env: { ANVIL_CONFIG_HOME: join(dir, 'absent') },
+    })
     assert.deepEqual(resolved.config, defaultConfig())
     assert.deepEqual(
       resolved.sources.map((s) => s.kind),
@@ -167,11 +172,17 @@ describe('loadConfig', () => {
 
     writeFileSync(
       join(home, 'anvil.config.json'),
-      JSON.stringify({ provider: { default: 'github' }, output: { color: 'always' } }),
+      JSON.stringify({
+        provider: { default: 'github' },
+        output: { color: 'always' },
+      }),
     )
     writeFileSync(join(repo, 'anvil.config.json'), JSON.stringify({ provider: { default: 'local' } }))
 
-    const resolved = loadConfig({ repoRoot: repo, env: { ANVIL_CONFIG_HOME: home } })
+    const resolved = loadConfig({
+      repoRoot: repo,
+      env: { ANVIL_CONFIG_HOME: home },
+    })
     assert.equal(resolved.config.provider.default, 'local', 'repo should win')
     assert.equal(resolved.config.output.color, 'always', 'global should survive where repo is silent')
   })
@@ -181,7 +192,10 @@ describe('loadConfig', () => {
     const repo = tempDir()
     writeFileSync(join(home, 'anvil.config.json'), JSON.stringify({ provider: { default: 'github' } }))
 
-    const resolved = loadConfig({ repoRoot: repo, env: { ANVIL_CONFIG_HOME: home } })
+    const resolved = loadConfig({
+      repoRoot: repo,
+      env: { ANVIL_CONFIG_HOME: home },
+    })
     assert.equal(resolved.sources[0]?.present, true)
     assert.equal(resolved.sources[1]?.present, false)
   })
@@ -221,7 +235,67 @@ describe('loadConfig', () => {
   test('works with no files and no repo at all', () => {
     const home = tempDir()
     mkdirSync(join(home, 'nested'), { recursive: true })
-    const resolved = loadConfig({ env: { ANVIL_CONFIG_HOME: join(home, 'nested') } })
+    const resolved = loadConfig({
+      env: { ANVIL_CONFIG_HOME: join(home, 'nested') },
+    })
     assert.deepEqual(resolved.config, defaultConfig())
+  })
+})
+
+describe('the starter config is a config anvil accepts', () => {
+  // The bug this pins: `config init` wrote a `$schema` key that `mergeConfig` rejected as
+  // an unknown key, so the file the command produced made every later anvil run in that
+  // repository fail with CONFIG_INVALID -- and the error's own hint ("run `anvil config
+  // show`") was itself broken. A scaffold that its own validator rejects is a trap.
+  test('the starter file validates', () => {
+    const parsed = JSON.parse(starterConfigJson()) as Record<string, unknown>
+    assert.doesNotThrow(() => mergeConfig(defaultConfig(), parsed, 'starter'))
+  })
+
+  test('a hand-added $schema is tolerated, because editors add it', () => {
+    const layer = {
+      $schema: 'https://example.test/schema.json',
+      schemaVersion: 1,
+    }
+    const merged = mergeConfig(defaultConfig(), layer, 'handwritten')
+    assert.equal(merged.schemaVersion, 1)
+  })
+
+  test('a non-string $schema is still a config error', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { $schema: 7 } as Record<string, unknown>, 'handwritten'),
+      AnvilError,
+    )
+  })
+})
+
+describe('tokenizeCommand', () => {
+  // Verify commands are stored and printed as one string but have to reach a process as
+  // argv. A whitespace split hands `--tests` the literal `"*Changed*"` including quotes,
+  // which turns a filtered Gradle run into an empty one that still reports success.
+  test('splits on whitespace', () => {
+    assert.deepEqual(tokenizeCommand('npm run test'), ['npm', 'run', 'test'])
+  })
+
+  test('keeps a quoted argument as one token, without the quotes', () => {
+    assert.deepEqual(tokenizeCommand('./gradlew test --tests "*Changed*"'), [
+      './gradlew',
+      'test',
+      '--tests',
+      '*Changed*',
+    ])
+  })
+
+  test('handles single quotes and an empty quoted argument', () => {
+    assert.deepEqual(tokenizeCommand(`cargo test -- --exact 'a b'`), ['cargo', 'test', '--', '--exact', 'a b'])
+    assert.deepEqual(tokenizeCommand('echo ""'), ['echo', ''])
+  })
+
+  test('collapses runs of whitespace and ignores leading and trailing space', () => {
+    assert.deepEqual(tokenizeCommand('  npm   run  test  '), ['npm', 'run', 'test'])
+  })
+
+  test('an unterminated quote yields what it has, rather than throwing', () => {
+    assert.deepEqual(tokenizeCommand('echo "unterminated'), ['echo', 'unterminated'])
   })
 })

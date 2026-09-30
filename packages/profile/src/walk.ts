@@ -11,7 +11,7 @@
  * determination confidently wrong.
  */
 
-import { readdirSync, readFileSync, statSync, existsSync, type Dirent } from 'node:fs'
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { normalizeRelPath, toPosix } from './types.ts'
 
@@ -51,6 +51,32 @@ export const SKIP_DIRS: ReadonlySet<string> = new Set([
   'DerivedData',
   'bin',
   'obj',
+])
+
+/**
+ * Directories that hold *test data* rather than the product.
+ *
+ * Distinct from {@link SKIP_DIRS}, which is all about build output. A `fixtures/` tree is
+ * a set of miniature repositories that exist to be detected, so walking one makes the
+ * parent repo claim stacks it does not have: anvil pointed at itself reported `vue`,
+ * `dotnet` and `terraform`, and offered `dotnet test` as a verify command, purely from
+ * its own fixtures. Confident-and-wrong is the outcome this tool exists to prevent, and
+ * this is the one place it produced exactly that.
+ *
+ * These names are the conventional spelling of "sample data" across ecosystems, and they
+ * are skipped on the same reasoning as `node_modules`: contents there are not the code an
+ * agent will be asked to change. A repository whose real source lives under one of these
+ * names is rare, and the direction of the error is the safe one -- a missing stack is
+ * recoverable, a fabricated one is not.
+ */
+export const SKIP_TEST_DATA_DIRS: ReadonlySet<string> = new Set([
+  'fixtures',
+  'fixture',
+  '__fixtures__',
+  'test-fixtures',
+  'testdata',
+  'test-data',
+  'test_data',
 ])
 
 export interface WalkOptions {
@@ -104,6 +130,7 @@ export function walkFiles(root: string, options: WalkOptions = {}): WalkResult {
   const skipDir = (name: string): boolean => {
     if (follow?.has(name)) return false
     if (SKIP_DIRS.has(name)) return true
+    if (SKIP_TEST_DATA_DIRS.has(name)) return true
     if (extraSkip?.has(name)) return true
     if (name.startsWith('.') && !HIDDEN_DIR_ALLOW.has(name)) return true
     return false

@@ -1,29 +1,38 @@
-import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, copyFileSync, readFileSync, readdirSync, statSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
-import { audit, type ReadinessReport } from '@anvil/audit'
-import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
+import { audit } from '@anvil/audit'
 import {
+  applyStaging,
   buildBrief,
+  checkApplyPreconditions,
+  type GeneratedArtifact,
   generateAgentsFile,
   generateReviewCommand,
   generateVerifySkill,
-  validateArtifact,
-  validateAll,
-  checkApplyPreconditions,
   hashInputs,
-  readRepoFile,
-  writeStaging,
-  applyStaging,
   inspectStaging,
+  readManifest,
+  readRepoFile,
   sha256,
-  type GeneratedArtifact,
+  validateAll,
+  validateArtifact,
+  writeStaging,
 } from '@anvil/derive'
+import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(here, '..', '..', '..')
@@ -52,7 +61,12 @@ function materialize(fixture: string): string {
 }
 
 function profileIn(root: string): ProjectProfile {
-  return buildProfile(root, { root, host: null, remote: null, defaultBranch: null }).profile
+  return buildProfile(root, {
+    root,
+    host: null,
+    remote: null,
+    defaultBranch: null,
+  }).profile
 }
 
 function matchesFor(profile: ProjectProfile) {
@@ -146,7 +160,10 @@ describe('idempotence', () => {
     const profile = profileIn(dir)
     const matches = matchesFor(profile)
     const a = generateAgentsFile({ profile, matches })
-    const b = generateAgentsFile({ profile: profileIn(dir), matches: matchesFor(profileIn(dir)) })
+    const b = generateAgentsFile({
+      profile: profileIn(dir),
+      matches: matchesFor(profileIn(dir)),
+    })
     assert.equal(sha256(a.content), sha256(b.content))
   })
 
@@ -179,7 +196,10 @@ function hashInputsFrom(dir: string): string {
   })
 }
 
-function stageOnce(dir: string): { inputHash: string; artifact: GeneratedArtifact } {
+function stageOnce(dir: string): {
+  inputHash: string
+  artifact: GeneratedArtifact
+} {
   const profile = profileIn(dir)
   const matches = matchesFor(profile)
   const artifact = generateAgentsFile({ profile, matches })
@@ -221,13 +241,13 @@ describe('staging lifecycle', () => {
   test('applying is refused when a target file changed in the repository', () => {
     const dir = materialize('node-npm')
     const { inputHash } = stageOnce(dir)
-    // Someone edits AGENTS.md after staging.
+    // Someone edits AGENTS.md *after* it was staged: the repo moved under the bundle.
     writeFileSync(join(dir, 'AGENTS.md'), 'hand written by a human\n', 'utf8')
     const manifest = inspectStaging(dir).manifest
     assert.ok(manifest !== null)
     const check = checkApplyPreconditions(dir, manifest, inputHash)
     assert.equal(check.ok, false)
-    assert.match(check.reason ?? '', /AGENTS\.md has changed/)
+    assert.match(check.reason ?? '', /AGENTS\.md changed in the repository/)
   })
 
   test('applying is allowed when the target file does not exist yet', () => {
@@ -236,6 +256,67 @@ describe('staging lifecycle', () => {
     const manifest = inspectStaging(dir).manifest
     assert.ok(manifest !== null)
     assert.equal(checkApplyPreconditions(dir, manifest, inputHash).ok, true)
+  })
+
+  test('a file that already existed and was reviewed as a diff may be replaced', () => {
+    // The bug this pins: the precondition used to compare the repository against the
+    // *staged* content, so any repo that already had an AGENTS.md could never be
+    // applied to -- the tool refused forever, with a message claiming the file had
+    // changed when it never had. Recording the repo-side hash at staging time is what
+    // separates "the repo moved" from "the repo always differed".
+    const dir = materialize('node-npm')
+    writeFileSync(join(dir, 'AGENTS.md'), '# Pre-existing\n\nWeak notes.\n', 'utf8')
+    const { inputHash } = stageOnce(dir)
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    assert.equal(checkApplyPreconditions(dir, manifest, inputHash).ok, true)
+  })
+
+  test('a file that appears in the repository after staging is refused', () => {
+    // The mirror image of the case above: a file that did not exist when anvil staged,
+    // and now does, is the human (or a teammate) racing the apply.
+    const dir = materialize('node-npm')
+    const { inputHash } = stageOnce(dir)
+    writeFileSync(join(dir, 'AGENTS.md'), 'written after init ran\n', 'utf8')
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    assert.equal(checkApplyPreconditions(dir, manifest, inputHash).ok, false)
+  })
+
+  test('a manifest that points outside the repository is ignored entirely', () => {
+    // `.anvil/staging/` is a directory inside a repository anvil was told to run in, and
+    // the threat model is a repo anvil does not own: a committed manifest whose `path`
+    // entries are `../..` would make `--apply` write attacker-chosen bytes outside the
+    // repo, creating parent directories as it went. Reading such a manifest must yield
+    // nothing, not a bundle.
+    const dir = materialize('node-npm')
+    const staging = join(dir, '.anvil', 'staging')
+    mkdirSync(join(staging, 'files'), { recursive: true })
+    const payload = join(staging, 'files', 'payload.md')
+    writeFileSync(payload, 'attacker content\n', 'utf8')
+    const manifestPath = join(staging, 'manifest.json')
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        inputHash: 'whatever',
+        createdAt: new Date().toISOString(),
+        generator: 'attacker',
+        files: [
+          {
+            path: '../../escaped.md',
+            stagedPath: 'files/payload.md',
+            sha256: sha256('attacker content\n'),
+            bytes: 17,
+            repoSha256: null,
+          },
+        ],
+      }),
+      'utf8',
+    )
+
+    assert.equal(readManifest(dir), null, 'a traversing manifest must not be usable')
+    assert.equal(checkApplyPreconditions(dir, readManifest(dir), 'whatever').ok, false)
   })
 
   test('a missing bundle is a clear error, not a crash', () => {
@@ -405,9 +486,16 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
   test('never states a command the profile did not detect', () => {
     const dir = materialize('go-module')
     const profile = profileIn(dir)
-    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const artifact = generateAgentsFile({
+      profile,
+      matches: matchesFor(profile),
+    })
     const backticked = [...artifact.content.matchAll(/`([^`]+)`/g)].map((m) => m[1] as string)
-    const known = new Set(Object.values(profile.commands).flat().map((c) => c.cmd))
+    const known = new Set(
+      Object.values(profile.commands)
+        .flat()
+        .map((c) => c.cmd),
+    )
     const knownGlobish = /^[a-z][\w./-]*$/ // not a command: a path, glob, or identifier
     for (const token of backticked) {
       if (knownGlobish.test(token)) continue
@@ -422,7 +510,10 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
   test('labels inferred commands as inferred', () => {
     const dir = materialize('rust-crate')
     const profile = profileIn(dir)
-    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const artifact = generateAgentsFile({
+      profile,
+      matches: matchesFor(profile),
+    })
     assert.match(artifact.content, /\(inferred\)/)
     assert.match(artifact.content, /inferred from ecosystem convention/)
   })
@@ -430,7 +521,10 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
   test('includes the module map for a monorepo', () => {
     const dir = materialize('node-workspace')
     const profile = profileIn(dir)
-    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const artifact = generateAgentsFile({
+      profile,
+      matches: matchesFor(profile),
+    })
     assert.match(artifact.content, /## Layout/)
     assert.match(artifact.content, /@acme\/core/)
   })
@@ -438,7 +532,10 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
   test('lists high-risk paths when they exist', () => {
     const dir = materialize('python-django')
     const profile = profileIn(dir)
-    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const artifact = generateAgentsFile({
+      profile,
+      matches: matchesFor(profile),
+    })
     assert.match(artifact.content, /## High-risk paths/)
     assert.match(artifact.content, /migrations/)
   })
@@ -446,7 +543,10 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
   test('omits sections it has no evidence for', () => {
     const dir = materialize('cold-empty')
     const profile = profileIn(dir)
-    const artifact = generateAgentsFile({ profile, matches: matchesFor(profile) })
+    const artifact = generateAgentsFile({
+      profile,
+      matches: matchesFor(profile),
+    })
     assert.doesNotMatch(artifact.content, /## Commands/)
     assert.doesNotMatch(artifact.content, /## Layout/)
   })
@@ -513,4 +613,3 @@ describe('brief', () => {
     assert.ok(brief.playbooks[0]!.guidance.length > 0)
   })
 })
-

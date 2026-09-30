@@ -7,8 +7,7 @@
  * profile is far more useful than none.
  */
 
-import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
-import { addLanguage, type Detector, type DetectorContext, type ProfileDraft } from './detector.ts'
+import { addCommand, addLanguage, type Detector, type DetectorContext, type ProfileDraft } from './detector.ts'
 import { ecosystemDetectors } from './detectors/ecosystems.ts'
 import { additionalDetectors } from './detectors/more.ts'
 import {
@@ -18,9 +17,9 @@ import {
   detectGenericTooling,
   detectInstructionFiles,
 } from './general.ts'
-import { extensionOf, walkFiles } from './walk.ts'
-import { addCommand } from './detector.ts'
 import type { CommandKind } from './types.ts'
+import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
+import { extensionOf, walkFiles } from './walk.ts'
 
 /** Extension → language. The set that matters for agent context, not an exhaustive map. */
 const EXTENSION_LANGUAGES: ReadonlyArray<[ext: string, lang: string]> = [
@@ -64,13 +63,27 @@ const EXTENSION_LANGUAGES: ReadonlyArray<[ext: string, lang: string]> = [
 ]
 
 /** Extensions counted toward the language profile. Data/config formats are excluded. */
-const COUNTED = new Set(EXTENSION_LANGUAGES.map(([ext]) => ext).filter((ext) => !['.yaml', '.yml', '.json', '.md', '.sql', '.tf'].includes(ext)))
+const COUNTED = new Set(
+  EXTENSION_LANGUAGES.map(([ext]) => ext).filter(
+    (ext) => !['.yaml', '.yml', '.json', '.md', '.sql', '.tf'].includes(ext),
+  ),
+)
 
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 export interface BuildProfileOptions {
   /** Extra detectors, appended after the built-ins. */
   extraDetectors?: readonly Detector[]
+  /**
+   * Extra directory names to skip, on top of the build-output and test-data defaults.
+   * The escape hatch for a project whose sources sit somewhere the defaults skip.
+   */
+  skipDirs?: ReadonlySet<string>
+  /**
+   * Directory names to walk *anyway*, overriding the skip lists. For a project that
+   * genuinely keeps source in a directory the defaults treat as output.
+   */
+  followDirs?: ReadonlySet<string>
 }
 
 export interface BuildProfileResult {
@@ -82,10 +95,17 @@ export interface BuildProfileResult {
 }
 
 export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOptions = {}): BuildProfileResult {
-  const { files, truncated } = walkFiles(root)
+  const { files, truncated } = walkFiles(root, {
+    ...(options.skipDirs === undefined ? {} : { extraSkipDirs: options.skipDirs }),
+    ...(options.followDirs === undefined ? {} : { followDirs: options.followDirs }),
+  })
   const fileSet = new Set(files)
 
-  const ctx: DetectorContext = { root, files: fileSet, maxFileBytes: MAX_MANIFEST_BYTES }
+  const ctx: DetectorContext = {
+    root,
+    files: fileSet,
+    maxFileBytes: MAX_MANIFEST_BYTES,
+  }
 
   const draft: ProfileDraft = {
     root,
@@ -93,7 +113,16 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     stacks: [],
     modules: [],
     monorepo: null,
-    tooling: { ci: [], lint: [], formatter: [], typecheck: [], test: [], container: false, iac: [], hooks: [] },
+    tooling: {
+      ci: [],
+      lint: [],
+      formatter: [],
+      typecheck: [],
+      test: [],
+      container: false,
+      iac: [],
+      hooks: [],
+    },
     risk: [],
     commands: {},
     files: fileSet,
@@ -109,7 +138,10 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
       if (!detector.matches(ctx)) continue
       detector.detect(ctx, draft)
     } catch (err) {
-      failedDetectors.push({ id: detector.id, error: err instanceof Error ? err.message : String(err) })
+      failedDetectors.push({
+        id: detector.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -123,7 +155,11 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
   // Prose commands outrank script-name heuristics. This is the documented > detected
   // ordering, applied at the one place where both sources exist.
   for (const doc of detectDocumentedCommands(root, fileSet)) {
-    addCommand(draft, doc.kind as CommandKind, { cmd: doc.cmd, source: 'documented', evidence: doc.evidence })
+    addCommand(draft, doc.kind as CommandKind, {
+      cmd: doc.cmd,
+      source: 'documented',
+      evidence: doc.evidence,
+    })
   }
 
   const profile: ProjectProfile = {
@@ -143,7 +179,8 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
   return { profile, failedDetectors, truncated }
 }
 
-function applyLanguageCounts(draft: ProfileDraft, files: readonly string[]): void {  const counts = new Map<string, number>()
+function applyLanguageCounts(draft: ProfileDraft, files: readonly string[]): void {
+  const counts = new Map<string, number>()
   for (const f of files) {
     const ext = extensionOf(f)
     if (ext === null || !COUNTED.has(ext)) continue

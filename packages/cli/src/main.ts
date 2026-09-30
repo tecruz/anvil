@@ -11,31 +11,33 @@
  * behaviour, so scripts can rely on the exit-code table in `errors.ts`.
  */
 
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
   AnvilError,
+  type Envelope,
   ErrorCode,
   ExitCode,
-  VERSION,
   emitJson,
+  failure,
   makeStyle,
   shouldUseColor,
   success,
   toAnvilError,
-  type Envelope,
+  VERSION,
 } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
-import { realpathSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { renderCommandHelp, renderRootHelp } from './help.ts'
 import { configCommand } from './commands/config.ts'
-import { briefCommand, initCommand } from './commands/init.ts'
 import { crewCommand } from './commands/crew.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
+import { briefCommand, initCommand } from './commands/init.ts'
 import { planCommand } from './commands/plan.ts'
+import { playbookCommand } from './commands/playbook.ts'
 import { shipCommand } from './commands/ship.ts'
-import { authCommand, claimCommand, issueCommand, releaseCommand, statusCommand } from './commands/work.ts'
-import { versionCommand } from './commands/version.ts'
 import type { Command, CommandContext } from './commands/types.ts'
+import { versionCommand } from './commands/version.ts'
+import { authCommand, claimCommand, issueCommand, releaseCommand, statusCommand } from './commands/work.ts'
+import { renderCommandHelp, renderRootHelp } from './help.ts'
 
 const COMMANDS: Command[] = [
   authCommand,
@@ -47,6 +49,7 @@ const COMMANDS: Command[] = [
   initCommand,
   issueCommand,
   planCommand,
+  playbookCommand,
   profileCommand,
   releaseCommand,
   shipCommand,
@@ -71,11 +74,18 @@ export async function run(argv: string[]): Promise<number> {
   if (firstPositional === undefined) {
     if (json) {
       const style = makeStyle(false)
-      emitJson('anvil', success('anvil', {
-        version: VERSION,
-        help: renderRootHelp(COMMANDS, style),
-        commands: COMMANDS.map((c) => ({ name: c.name, summary: c.summary, usage: c.usage })),
-      }))
+      emitJson(
+        'anvil',
+        success('anvil', {
+          version: VERSION,
+          help: renderRootHelp(COMMANDS, style),
+          commands: COMMANDS.map((c) => ({
+            name: c.name,
+            summary: c.summary,
+            usage: c.usage,
+          })),
+        }),
+      )
       return ExitCode.Ok
     }
     const style = makeStyle(shouldUseColor({ noColor, stream: process.stdout, env: process.env }))
@@ -85,11 +95,9 @@ export async function run(argv: string[]): Promise<number> {
 
   const command = findCommand(firstPositional)
   if (command === undefined) {
-    const err = new AnvilError(
-      ErrorCode.UnknownCommand,
-      `Unknown command: ${firstPositional}`,
-      { hint: 'Run `anvil --help` to see available commands.' },
-    )
+    const err = new AnvilError(ErrorCode.UnknownCommand, `Unknown command: ${firstPositional}`, {
+      hint: 'Run `anvil --help` to see available commands.',
+    })
     if (json) {
       emitJson('anvil', {
         schemaVersion: 1,
@@ -99,7 +107,9 @@ export async function run(argv: string[]): Promise<number> {
       })
       return err.exitCode
     }
-    process.stderr.write(renderFailureText(err, makeStyle(shouldUseColor({ noColor, stream: process.stderr, env: process.env }))))
+    process.stderr.write(
+      renderFailureText(err, makeStyle(shouldUseColor({ noColor, stream: process.stderr, env: process.env }))),
+    )
     return err.exitCode
   }
 
@@ -119,7 +129,11 @@ export async function run(argv: string[]): Promise<number> {
   // Best-effort repo discovery. A missing repo is not an error until a command needs it.
   const repo = await discoverRepo(process.cwd())
 
-  const colorEnabled = shouldUseColor({ noColor, stream: process.stdout, env: process.env })
+  const colorEnabled = shouldUseColor({
+    noColor,
+    stream: process.stdout,
+    env: process.env,
+  })
   const style = makeStyle(colorEnabled)
 
   const ctx: CommandContext = {
@@ -129,13 +143,23 @@ export async function run(argv: string[]): Promise<number> {
     style,
     json,
     say(message) {
-      if (!json) process.stdout.write(message + '\n')
+      if (!json) process.stdout.write(`${message}\n`)
     },
     out(data, render) {
       if (json) {
         emitJson(command.name, success(command.name, data))
       } else {
-        process.stdout.write(render() + '\n')
+        process.stdout.write(`${render()}\n`)
+      }
+    },
+    outFailure(data, error, renderError) {
+      // A failure that still produced a payload. In JSON mode that payload rides on an
+      // `ok:false` envelope, because a success envelope with an error nested in `data`
+      // tells any consumer that branches on `ok` that the command worked.
+      if (json) {
+        emitJson(command.name, failure(command.name, error, data))
+      } else {
+        process.stderr.write(renderError())
       }
     },
     writeRaw(text) {
@@ -171,7 +195,7 @@ function renderFailureText(err: AnvilError, style: ReturnType<typeof makeStyle>)
   lines.push(`${style.red('error')} ${err.message}`)
   if (err.hint !== undefined) lines.push(`${style.dim('hint ')} ${err.hint}`)
   lines.push(style.dim(`code  ${err.code}`))
-  return lines.join('\n') + '\n'
+  return `${lines.join('\n')}\n`
 }
 
 /** Remove the command token (and its first occurrence) from argv. */

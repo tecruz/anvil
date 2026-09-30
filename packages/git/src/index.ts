@@ -16,8 +16,17 @@
  */
 
 import { execFile } from 'node:child_process'
-import { realpathSync, existsSync, mkdirSync, writeFileSync, openSync, closeSync, unlinkSync } from 'node:fs'
-import { join, resolve, dirname, basename } from 'node:path'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
 
@@ -46,15 +55,23 @@ export async function git(args: string[], options: RunOptions = {}): Promise<Run
     })
     return { stdout, stderr, exitCode: 0 }
   } catch (err) {
-    const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string }
-    if (e !== null && typeof e === 'object' && typeof e.code === 'number') {
-      return { stdout: e.stdout ?? '', stderr: e.stderr ?? e.message ?? '', exitCode: e.code }
+    const e = err as {
+      code?: number | string
+      stdout?: string
+      stderr?: string
+      message?: string
     }
-    throw new AnvilError(
-      ErrorCode.ToolMissing,
-      `Failed to run git: ${e?.message ?? String(err)}`,
-      { hint: 'Is git installed and on PATH? anvil needs it to create worktrees.', cause: err },
-    )
+    if (e !== null && typeof e === 'object' && typeof e.code === 'number') {
+      return {
+        stdout: e.stdout ?? '',
+        stderr: e.stderr ?? e.message ?? '',
+        exitCode: e.code,
+      }
+    }
+    throw new AnvilError(ErrorCode.ToolMissing, `Failed to run git: ${e?.message ?? String(err)}`, {
+      hint: 'Is git installed and on PATH? anvil needs it to create worktrees.',
+      cause: err,
+    })
   }
 }
 
@@ -114,9 +131,13 @@ export async function discoverRepo(cwd: string): Promise<GitRepoInfo | null> {
   const [branchRes, remoteRes, headRes, commonRes, gitDirRes] = await Promise.all([
     git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd }),
     git(['remote', 'get-url', 'origin'], { cwd }),
-    git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { cwd }),
+    git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], {
+      cwd,
+    }),
     git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }),
-    git(['rev-parse', '--path-format=absolute', '--absolute-git-dir'], { cwd }),
+    git(['rev-parse', '--path-format=absolute', '--absolute-git-dir'], {
+      cwd,
+    }),
   ])
 
   const branch = branchRes.exitCode === 0 ? branchRes.stdout.trim() : null
@@ -194,7 +215,10 @@ export async function hasRemote(cwd: string, name = 'origin'): Promise<boolean> 
  * Resolve a base ref for a new branch, preferring the remote tracking branch so a claim
  * is not created from a stale local default.
  */
-export async function resolveBaseRef(cwd: string, preferred: string | null): Promise<{ ref: string; resolved: string }> {
+export async function resolveBaseRef(
+  cwd: string,
+  preferred: string | null,
+): Promise<{ ref: string; resolved: string }> {
   const candidates: string[] = []
   if (preferred !== null) candidates.push(`origin/${preferred}`, preferred)
   const info = await discoverRepo(cwd)
@@ -205,7 +229,9 @@ export async function resolveBaseRef(cwd: string, preferred: string | null): Pro
   for (const ref of candidates) {
     if (await revExists(cwd, ref)) return { ref, resolved: ref }
   }
-  throw new AnvilError(ErrorCode.Internal, 'Cannot resolve a base branch to branch from', {
+  // A user-recoverable condition (no branch, no remote, nothing fetched), so it must not
+  // report as Internal -- that exit code means "bug in anvil, report it".
+  throw new AnvilError(ErrorCode.PreflightFailed, 'Cannot resolve a base branch to branch from', {
     hint: 'Fetch first (`git fetch --all`), or pass --base <branch>.',
   })
 }
@@ -217,11 +243,11 @@ export async function resolveBaseRef(cwd: string, preferred: string | null): Pro
 export interface WorktreeEntry {
   /** The worktree's absolute path, normalized. */
   path: string
-  /** HEAD ref name, e.g. refs/heads/feat/x. */
+  /** The `HEAD` line from porcelain output: the commit sha the worktree points at. */
   ref: string | null
   /** Short branch name, or null when detached. */
   branch: string | null
-  /** Opaque id assigned by git, unique per worktree. Needed for reliable removal. */
+  /** Porcelain's `HEAD` value (a commit sha), or the path when absent. */
   id: string
   /** True for the main worktree. */
   isMain: boolean
@@ -278,7 +304,9 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<RunResul
 }
 
 export async function removeWorktree(cwd: string, path: string, force = false): Promise<RunResult> {
-  return git(['worktree', 'remove', ...(force ? ['--force'] : []), path], { cwd })
+  return git(['worktree', 'remove', ...(force ? ['--force'] : []), path], {
+    cwd,
+  })
 }
 
 export async function pruneWorktrees(cwd: string): Promise<void> {
@@ -318,7 +346,9 @@ export async function worktreeStatus(cwd: string): Promise<WorktreeStatus> {
   const hasUpstream = upstreamRes.exitCode === 0
   let unpushed: number | null = null
   if (hasUpstream) {
-    const count = await git(['rev-list', '--count', '@{upstream}..HEAD'], { cwd })
+    const count = await git(['rev-list', '--count', '@{upstream}..HEAD'], {
+      cwd,
+    })
     if (count.exitCode === 0) {
       const n = Number.parseInt(count.stdout.trim(), 10)
       unpushed = Number.isFinite(n) ? n : null
@@ -369,6 +399,11 @@ export async function deleteBranch(cwd: string, branch: string, force = true): P
  *
  * The lock is advisory and per-repository, stored beside the common git dir so every
  * worktree of the same repo contends on the same file.
+ *
+ * A process killed between acquiring and releasing leaves the file behind, and without
+ * recovery every later fetch in that repository waits out the timeout and fails until
+ * someone deletes it by hand. The lock records the holder's pid, so a lock whose owner
+ * no longer exists is broken by the next waiter instead of blocking the repository.
  */
 export interface LockOptions {
   cwd: string
@@ -395,8 +430,9 @@ export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T
       handle = openSync(lockPath, 'wx')
       break
     } catch {
+      breakStaleLock(lockPath)
       if (Date.now() > deadline) {
-        throw new AnvilError(ErrorCode.Internal, 'Timed out waiting for the fetch lock', {
+        throw new AnvilError(ErrorCode.Usage, 'Timed out waiting for the fetch lock', {
           hint: `Another anvil or git process is fetching this repository. Lock: ${lockPath}`,
         })
       }
@@ -414,6 +450,42 @@ export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T
     } catch {
       // Already removed by a concurrent process: fine.
     }
+  }
+}
+
+/** True when a pid is running. Signal 0 tests existence without signalling. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM means it exists but is owned by someone else.
+    return (err as { code?: string }).code === 'EPERM'
+  }
+}
+
+/**
+ * Remove a lock whose owner is gone.
+ *
+ * The pid recorded in the lock is the holder, so this only frees a lock abandoned by a
+ * crashed or killed process. A live owner is left alone: breaking its lock is the exact
+ * race this mechanism exists to prevent.
+ */
+function breakStaleLock(lockPath: string): void {
+  let raw: string
+  try {
+    raw = readFileSync(lockPath, 'utf8').trim()
+  } catch {
+    return // vanished between the failed open and here
+  }
+  const pid = Number.parseInt(raw, 10)
+  if (!Number.isFinite(pid) || pid <= 0) return // unreadable: not ours to break
+  if (pid === process.pid) return
+  if (pidAlive(pid)) return
+  try {
+    unlinkSync(lockPath)
+  } catch {
+    // Someone else got there first.
   }
 }
 
@@ -483,7 +555,12 @@ export function preflightClaim(input: PreflightInput): PreflightResult {
       hint: 'anvil does not switch your main worktree, but commit or stash before working there.',
     })
   } else {
-    checks.push({ name: 'base-worktree-clean', ok: true, level: 'warn', detail: 'Main worktree is clean.' })
+    checks.push({
+      name: 'base-worktree-clean',
+      ok: true,
+      level: 'warn',
+      detail: 'Main worktree is clean.',
+    })
   }
 
   // 2. Path budget. Checked on both create and remove, because remove is where
@@ -516,7 +593,12 @@ export function preflightClaim(input: PreflightInput): PreflightResult {
       hint: 'Choose a different worktree root, or remove the directory.',
     })
   } else {
-    checks.push({ name: 'target-free', ok: true, level: 'block', detail: 'Target path is free.' })
+    checks.push({
+      name: 'target-free',
+      ok: true,
+      level: 'block',
+      detail: 'Target path is free.',
+    })
   }
 
   // 4. Branch name validity, checked before git so the error is ours and actionable.
@@ -529,7 +611,12 @@ export function preflightClaim(input: PreflightInput): PreflightResult {
       hint: 'Branch names cannot contain spaces, ~, ^, :, ?, *, [, \\, or start with - or end with .lock.',
     })
   } else {
-    checks.push({ name: 'branch-name', ok: true, level: 'block', detail: 'Branch name is valid.' })
+    checks.push({
+      name: 'branch-name',
+      ok: true,
+      level: 'block',
+      detail: 'Branch name is valid.',
+    })
   }
 
   return { ok: !checks.some((c) => c.level === 'block' && !c.ok), checks }
@@ -562,15 +649,23 @@ export async function environmentNotes(cwd: string): Promise<string[]> {
   const notes: string[] = []
   const submodules = await git(['config', '--file', '.gitmodules', '--get-regexp', 'path'], { cwd })
   if (submodules.exitCode === 0 && submodules.stdout.trim() !== '') {
-    notes.push('This repository has submodules. Each new worktree needs `git submodule update --init` before it builds.')
+    notes.push(
+      'This repository has submodules. Each new worktree needs `git submodule update --init` before it builds.',
+    )
   }
-  const lfs = await git(['config', '--get', 'lfs.repositoryformatversion'], { cwd })
+  const lfs = await git(['config', '--get', 'lfs.repositoryformatversion'], {
+    cwd,
+  })
   if (lfs.exitCode === 0) {
-    notes.push('Git LFS is configured. `git worktree add` shares the LFS object store, so parallel builds will contend on it.')
+    notes.push(
+      'Git LFS is configured. `git worktree add` shares the LFS object store, so parallel builds will contend on it.',
+    )
   }
   const sparse = await git(['config', '--get', 'core.sparseCheckout'], { cwd })
   if (sparse.exitCode === 0 && sparse.stdout.trim() === 'true') {
-    notes.push('Sparse checkout is enabled; a new worktree inherits the sparse settings but starts with an empty index.')
+    notes.push(
+      'Sparse checkout is enabled; a new worktree inherits the sparse settings but starts with an empty index.',
+    )
   }
   return notes
 }

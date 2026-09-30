@@ -9,14 +9,14 @@
  * walk, the manifest readers and the git-derived fields are all exercised for real.
  */
 
-import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { after, before, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { buildProfile, ecosystemDetectors, additionalDetectors, type ProjectProfile } from '@anvil/profile'
 import { audit, type ReadinessReport } from '@anvil/audit'
+import { additionalDetectors, buildProfile, ecosystemDetectors, type ProjectProfile } from '@anvil/profile'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const FIXTURES_DIR = resolve(here, '..', '..', '..', 'fixtures')
@@ -39,7 +39,12 @@ function copyTree(src: string, dest: string): void {
   }
 }
 
-const VCS = { root: '', host: 'github' as const, remote: 'git@github.com:acme/fixture.git', defaultBranch: 'main' }
+const VCS = {
+  root: '',
+  host: 'github' as const,
+  remote: 'git@github.com:acme/fixture.git',
+  defaultBranch: 'main',
+}
 
 /**
  * Materialize a fixture, run `fn` against it, then clean up.
@@ -70,18 +75,25 @@ function reportOf(fixture: string): ReadinessReport {
 function snapshot(profile: ProjectProfile): unknown {
   return {
     languages: profile.languages,
-    stacks: profile.stacks.map((s) => ({ id: s.id, version: s.version, evidence: s.evidence })),
+    stacks: profile.stacks.map((s) => ({
+      id: s.id,
+      version: s.version,
+      evidence: s.evidence,
+    })),
     monorepo: profile.monorepo,
     modules: profile.modules,
     commands: profile.commands,
     tooling: profile.tooling,
     docs: profile.docs,
     risk: profile.risk,
-    instructions: profile.instructions.map((i) => ({ path: i.path, category: i.category })),
+    instructions: profile.instructions.map((i) => ({
+      path: i.path,
+      category: i.category,
+    })),
   }
 }
 
-function findingIds(report: ReadinessReport, status?: string): string[] {
+function _findingIds(report: ReadinessReport, status?: string): string[] {
   return report.findings
     .filter((f) => status === undefined || f.status === status)
     .map((f) => f.id)
@@ -339,6 +351,41 @@ describe('CI_PARITY', () => {
     const r = reportOf('node-workspace')
     const f = findFinding(r, 'CI_PARITY')
     assert.equal(f.status, 'warn')
+    assert.match(f.detail, /lint/)
+  })
+
+  test('sees through a composite script', () => {
+    // The bug this pins: CI running `npm run check` is the most common setup there is, and
+    // a token search read that as "CI runs nothing", reporting a specific, confident gap
+    // that did not exist. Found by adding CI to this repository and being told it did not
+    // run the commands it demonstrably runs.
+    const dir = materialize('node-npm')
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'composite',
+        scripts: {
+          check: 'npm run lint && npm run typecheck && npm run test',
+          lint: 'eslint .',
+          typecheck: 'tsc --noEmit',
+          test: 'vitest run',
+        },
+      }),
+      'utf8',
+    )
+    writeFileSync(
+      join(dir, '.github', 'workflows', 'ci.yml'),
+      ['name: CI', 'jobs:', '  check:', '    steps:', '      - run: npm ci', '      - run: npm run check', ''].join(
+        '\n',
+      ),
+      'utf8',
+    )
+    const f = findFinding(
+      audit(buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile),
+      'CI_PARITY',
+    )
+    assert.equal(f.status, 'pass', f.detail)
+    // And the expansion is what satisfied it: the workflow itself never names eslint.
     assert.match(f.detail, /lint/)
   })
 })

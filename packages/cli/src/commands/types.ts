@@ -9,7 +9,7 @@
  * is discoverable without pretending unimplemented commands exist.
  */
 
-import type { FlagSpecs, Style } from '@anvil/core'
+import type { AnvilError, FlagSpecs, Style } from '@anvil/core'
 import type { GitRepoInfo } from '@anvil/git'
 
 /** Commands that exist today. */
@@ -44,16 +44,33 @@ export interface CommandContext {
   say(message: string): void
   /** Emit the payload: an envelope in --json mode, rendered text otherwise. */
   out(data: unknown, render: () => void): void
+  /**
+   * Emit a failure that still carries a full payload, then let the caller return an exit
+   * code. In --json mode this is a proper `ok:false` envelope (a success envelope with an
+   * `error` field nested in `data` misreports failure to any consumer that branches on
+   * `ok`); in text mode it writes the rendered block to stderr. A report plus a non-zero
+   * exit is the contract for `--fail-on`, stale staging and partial crew results.
+   */
+  outFailure(data: unknown, error: AnvilError, renderError: () => string): void
   /** Write a rendered block to stdout even in --json mode (for report + error combos). */
   writeRaw(text: string): void
   /** Write a rendered error block to stderr. */
   writeError(text: string): void
 }
 
-/** Planned commands, surfaced in help with their milestone. Shown, not runnable. */
-export const PLANNED_COMMANDS: Array<{ usage: string; summary: string; milestone: string }> = [
-  { usage: 'anvil playbook <sub>', summary: 'List/match/show/add/check tech playbooks', milestone: 'M2a' },
-]
+/**
+ * Planned commands, surfaced in help with their milestone. Shown, not runnable.
+ *
+ * `anvil playbook` graduated out of this list when `check` was built: the registry had
+ * been loadable and matchable since M2a, but there was no way to inspect it directly, and
+ * the rot mitigation the plan's risk table promised did not exist. Listing a command here
+ * that now works is the kind of drift this list exists to prevent.
+ */
+export const PLANNED_COMMANDS: Array<{
+  usage: string
+  summary: string
+  milestone: string
+}> = []
 
 /** Subcommands of `anvil config`. */
 export const CONFIG_SUBCOMMANDS = ['show', 'path', 'init'] as const

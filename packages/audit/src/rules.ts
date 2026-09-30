@@ -13,7 +13,7 @@
  */
 
 import type { ProjectProfile } from '@anvil/profile'
-import type { Finding, Fix, Layer, Severity, Status } from './types.ts'
+import type { Fix, Layer, Severity, Status } from './types.ts'
 
 export interface RuleContext {
   profile: ProjectProfile
@@ -30,6 +30,15 @@ export interface RuleContext {
    * opencode plugin consumes.
    */
   ciWorkflows: ReadonlyMap<string, string>
+  /**
+   * The repository's npm scripts, name to command body.
+   *
+   * Also read by the engine rather than the profile, for the same reason as
+   * `ciWorkflows`: it is only needed by CI_PARITY, and it would bloat the profile JSON.
+   * Its purpose is to let that rule see through a composite script -- a CI step that runs
+   * `npm run check` does run lint and test, because `check` does.
+   */
+  npmScripts: Readonly<Record<string, string>>
 }
 
 export interface Rule {
@@ -49,7 +58,11 @@ export interface RuleOutcome {
   fix?: Fix | null
 }
 
-const pass = (detail: string, evidence: string[] = []): RuleOutcome => ({ status: 'pass', detail, evidence })
+const pass = (detail: string, evidence: string[] = []): RuleOutcome => ({
+  status: 'pass',
+  detail,
+  evidence,
+})
 const fail = (detail: string, evidence: string[], fix: Fix | null = null): RuleOutcome => ({
   status: 'fail',
   detail,
@@ -65,11 +78,23 @@ const warn = (detail: string, evidence: string[], fix: Fix | null = null): RuleO
 const na = (detail: string): RuleOutcome => ({ status: 'na', detail })
 
 function derived(target: string, summary: string, confidence: number): Fix {
-  return { kind: 'create-file', origin: 'derived', target, summary, confidence }
+  return {
+    kind: 'create-file',
+    origin: 'derived',
+    target,
+    summary,
+    confidence,
+  }
 }
 
 function install(summary: string, label: string, url: string, confidence: number): Fix {
-  return { kind: 'install', origin: 'community', summary, source: { label, url }, confidence }
+  return {
+    kind: 'install',
+    origin: 'community',
+    summary,
+    source: { label, url },
+    confidence,
+  }
 }
 
 function hasCommand(ctx: RuleContext, kind: keyof ProjectProfile['commands']): boolean {
@@ -93,7 +118,9 @@ function commands(ctx: RuleContext, kind: keyof ProjectProfile['commands']): str
  * cannot see its own generated output is a rule that will never be satisfied.
  */
 function mentionsCommand(text: string): boolean {
-  return /(^|[\s`"'(])(npm |pnpm |yarn |bun |cargo |go |gradlew|mvnw|pytest|make |dotnet |tsc |ruff |mypy |eslint)/m.test(text)
+  return /(^|[\s`"'(])(npm |pnpm |yarn |bun |cargo |go |gradlew|mvnw|pytest|make |dotnet |tsc |ruff |mypy |eslint)/m.test(
+    text,
+  )
 }
 
 const AGENTS_FILE: Rule = {
@@ -144,11 +171,11 @@ const AGENTS_COMMANDS: Rule = {
     if (!ctx.hasCode) return na('No source files, so there are no runnable commands to document')
 
     if (ctx.instructionsText.trim() === '') {
-      return fail('No instructions to inspect, and no commands documented', [], derived(
-        'AGENTS.md',
-        'Create AGENTS.md documenting the build, test and lint commands',
-        0.95,
-      ))
+      return fail(
+        'No instructions to inspect, and no commands documented',
+        [],
+        derived('AGENTS.md', 'Create AGENTS.md documenting the build, test and lint commands', 0.95),
+      )
     }
     if (!mentionsCommand(ctx.instructionsText)) {
       return fail(
@@ -157,7 +184,10 @@ const AGENTS_COMMANDS: Rule = {
         derived('AGENTS.md', 'Add the build/test/lint commands to AGENTS.md', 0.95),
       )
     }
-    return pass('Instructions name runnable commands', ctx.profile.instructions.map((i) => i.path))
+    return pass(
+      'Instructions name runnable commands',
+      ctx.profile.instructions.map((i) => i.path),
+    )
   },
 }
 
@@ -217,9 +247,10 @@ const CONVENTIONS: Rule = {
     const hasLinter = ctx.profile.tooling.lint.length > 0
     if (hasFormatter && hasLinter) {
       // Tools enforce conventions; prose is a bonus, not a requirement.
-      return pass(`Conventions enforced by tooling: ${[...ctx.profile.tooling.lint, ...ctx.profile.tooling.formatter].join(', ')}`, [
-        'package.json',
-      ])
+      return pass(
+        `Conventions enforced by tooling: ${[...ctx.profile.tooling.lint, ...ctx.profile.tooling.formatter].join(', ')}`,
+        ['package.json'],
+      )
     }
     return warn(
       hasLinter || hasFormatter
@@ -247,11 +278,11 @@ const BUILD: Rule = {
     if (hasCommand(ctx, 'test')) {
       return warn('No separate build command, but a test command exists that implies compilation', ['package.json'])
     }
-    return fail('No build command. An agent cannot confirm its change compiles.', [], derived(
-      'AGENTS.md',
-      'Document the build command',
-      0.7,
-    ))
+    return fail(
+      'No build command. An agent cannot confirm its change compiles.',
+      [],
+      derived('AGENTS.md', 'Document the build command', 0.7),
+    )
   },
 }
 
@@ -265,9 +296,7 @@ const TEST: Rule = {
     if (!ctx.hasCode) return na('No source files detected')
     if (!hasCommand(ctx, 'test')) {
       return fail(
-        ctx.hasTests
-          ? 'Test files exist but no runnable test command was found.'
-          : 'No tests and no test command.',
+        ctx.hasTests ? 'Test files exist but no runnable test command was found.' : 'No tests and no test command.',
         [],
         derived('AGENTS.md', 'Add a test command to AGENTS.md', 0.9),
       )
@@ -299,10 +328,17 @@ const TEST_FAST: Rule = {
     if (!ctx.hasCode || !hasCommand(ctx, 'test')) return na('No test command to narrow')
 
     const entries = ctx.profile.commands.testFast ?? []
-    if (entries.length > 0) return pass(entries.map((c) => `${c.cmd} [${c.source}]`).join(', '), entries.map((c) => c.evidence ?? ''))
+    if (entries.length > 0)
+      return pass(
+        entries.map((c) => `${c.cmd} [${c.source}]`).join(', '),
+        entries.map((c) => c.evidence ?? ''),
+      )
 
     // Documented in prose but not detected as a command: report the prose, not the guess.
-    if (mentionsCommand(ctx.instructionsText) && /(--changed|-k\s|--onlyChanged|nextest|test:fast|test-changed)/i.test(ctx.instructionsText)) {
+    if (
+      mentionsCommand(ctx.instructionsText) &&
+      /(--changed|-k\s|--onlyChanged|nextest|test:fast|test-changed)/i.test(ctx.instructionsText)
+    ) {
       return pass('A changed-files test subset is described in the instructions', ['AGENTS.md'])
     }
 
@@ -314,11 +350,11 @@ const TEST_FAST: Rule = {
         derived('AGENTS.md', 'Document a changed-files test command', 0.8),
       )
     }
-    return fail('No changed-files test subset documented and no test runner detected.', [], derived(
-      'AGENTS.md',
-      'Document a changed-files test command',
-      0.8,
-    ))
+    return fail(
+      'No changed-files test subset documented and no test runner detected.',
+      [],
+      derived('AGENTS.md', 'Document a changed-files test command', 0.8),
+    )
   },
 }
 
@@ -331,11 +367,11 @@ const LINT: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
     if (ctx.profile.tooling.lint.length === 0) {
-      return fail('No linter configured. Nothing catches the mistakes an agent makes most often.', [], derived(
-        'AGENTS.md',
-        'Configure a linter and document the command',
-        0.7,
-      ))
+      return fail(
+        'No linter configured. Nothing catches the mistakes an agent makes most often.',
+        [],
+        derived('AGENTS.md', 'Configure a linter and document the command', 0.7),
+      )
     }
     return pass(ctx.profile.tooling.lint.join(', '), ['package.json'])
   },
@@ -350,11 +386,11 @@ const FORMAT: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
     if (ctx.profile.tooling.formatter.length === 0) {
-      return warn('No formatter configured; agents reformat by hand and produce noisy diffs', [], derived(
-        'AGENTS.md',
-        'Configure a formatter and document the command',
-        0.6,
-      ))
+      return warn(
+        'No formatter configured; agents reformat by hand and produce noisy diffs',
+        [],
+        derived('AGENTS.md', 'Configure a formatter and document the command', 0.6),
+      )
     }
     return pass(ctx.profile.tooling.formatter.join(', '), ['package.json'])
   },
@@ -388,12 +424,41 @@ const CI: Rule = {
         kind: 'link-doc',
         origin: 'derived',
         summary: 'Add a CI workflow that runs the documented verify commands',
-        source: { label: 'GitHub Actions docs', url: 'https://docs.github.com/actions' },
+        source: {
+          label: 'GitHub Actions docs',
+          url: 'https://docs.github.com/actions',
+        },
         confidence: 0.85,
       })
     }
     return pass(`${ctx.profile.tooling.ci.length} workflow file(s)`, ctx.profile.tooling.ci)
   },
+}
+
+/**
+ * Append the bodies of the npm scripts a piece of text invokes.
+ *
+ * `npm run check` and `npm check` are both recognised, and each expanded body is itself
+ * searched, so a script that chains resolves transitively. The depth and the visited set
+ * are both bounded: a script that (directly or indirectly) invokes itself must not spin.
+ */
+function expandNpmScripts(text: string, scripts: Readonly<Record<string, string>>, maxDepth = 3): string {
+  let out = text
+  const seen = new Set<string>()
+  for (let depth = 0; depth < maxDepth; depth++) {
+    let grew = false
+    for (const match of out.matchAll(/\bnpm\s+(?:run\s+|run-script\s+)?([a-z0-9:._-]+)/g)) {
+      const name = match[1] as string
+      if (seen.has(name)) continue
+      const body = scripts[name]
+      if (body === undefined) continue
+      seen.add(name)
+      out += `\n${body.toLowerCase()}`
+      grew = true
+    }
+    if (!grew) break
+  }
+  return out
 }
 
 /**
@@ -417,15 +482,78 @@ const CI_PARITY: Rule = {
     if (ctx.profile.tooling.ci.length === 0) return na('No CI to compare against')
 
     // Each documented command kind maps to the tokens that would satisfy it in CI.
-    const CHECKS: Array<{ kind: keyof ProjectProfile['commands']; label: string; tokens: string[] }> = [
-      { kind: 'test', label: 'test', tokens: ['npm test', 'npm run test', 'yarn test', 'pnpm test', 'pytest', 'go test', 'cargo test', 'dotnet test', 'gradlew test', './gradlew test', 'mvn test', './mvnw test', 'jest', 'vitest', 'nextest'] },
-      { kind: 'build', label: 'build', tokens: ['npm run build', 'npm run build', 'yarn build', 'pnpm build', 'cargo build', 'dotnet build', 'gradlew build', './gradlew build', 'go build', 'mvn package', 'tsc'] },
-      { kind: 'lint', label: 'lint', tokens: ['npm run lint', 'npm run lint', 'yarn lint', 'eslint', 'ruff check', 'golangci-lint', 'cargo clippy', 'dotnet format'] },
-      { kind: 'typecheck', label: 'typecheck', tokens: ['tsc --noEmit', 'npm run typecheck', 'mypy', 'pyright'] },
+    const CHECKS: Array<{
+      kind: keyof ProjectProfile['commands']
+      label: string
+      tokens: string[]
+    }> = [
+      {
+        kind: 'test',
+        label: 'test',
+        tokens: [
+          'npm test',
+          'npm run test',
+          'yarn test',
+          'pnpm test',
+          'pytest',
+          'go test',
+          'cargo test',
+          'dotnet test',
+          'gradlew test',
+          './gradlew test',
+          'mvn test',
+          './mvnw test',
+          'jest',
+          'vitest',
+          'nextest',
+        ],
+      },
+      {
+        kind: 'build',
+        label: 'build',
+        tokens: [
+          'npm run build',
+          'npm run build',
+          'yarn build',
+          'pnpm build',
+          'cargo build',
+          'dotnet build',
+          'gradlew build',
+          './gradlew build',
+          'go build',
+          'mvn package',
+          'tsc',
+        ],
+      },
+      {
+        kind: 'lint',
+        label: 'lint',
+        tokens: [
+          'npm run lint',
+          'npm run lint',
+          'yarn lint',
+          'eslint',
+          'ruff check',
+          'golangci-lint',
+          'cargo clippy',
+          'dotnet format',
+        ],
+      },
+      {
+        kind: 'typecheck',
+        label: 'typecheck',
+        tokens: ['tsc --noEmit', 'npm run typecheck', 'mypy', 'pyright'],
+      },
     ]
 
+    // A composite script hides what it runs from a token search. `npm run check` is the
+    // most common setup there is, and reading it as "CI runs nothing" produces a specific,
+    // confident, false gap -- the one kind of wrong output this tool exists to prevent.
+    // So the bodies of the scripts CI invokes are appended before searching, to a bounded
+    // depth, because a script may chain (`check` -> `verify` -> `test:unit`).
     const workflowText = [...ctx.ciWorkflows.values()].join('\n').toLowerCase()
     if (workflowText.trim() === '') return na('CI workflow files are empty or unreadable')
+    const searched = expandNpmScripts(workflowText, ctx.npmScripts)
 
     const satisfied: string[] = []
     const unsatisfied: Array<{ label: string; evidence: string[] }> = []
@@ -433,11 +561,14 @@ const CI_PARITY: Rule = {
     for (const check of CHECKS) {
       const entries = ctx.profile.commands[check.kind] ?? []
       if (entries.length === 0) continue
-      const hit = check.tokens.find((t) => workflowText.includes(t.toLowerCase()))
+      const hit = check.tokens.find((t) => searched.includes(t.toLowerCase()))
       if (hit !== undefined) {
         satisfied.push(`${check.label} (${hit})`)
       } else {
-        unsatisfied.push({ label: check.label, evidence: entries.map((e) => e.evidence ?? '') })
+        unsatisfied.push({
+          label: check.label,
+          evidence: entries.map((e) => e.evidence ?? ''),
+        })
       }
     }
 
@@ -469,14 +600,30 @@ const LOCKFILE: Rule = {
   title: 'Dependencies are locked',
   order: 28,
   evaluate(ctx) {
-    const lockfiles = ['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'Cargo.lock', 'poetry.lock', 'uv.lock', 'go.sum', 'Gemfile.lock', 'gradle.lockfile']
+    const lockfiles = [
+      'package-lock.json',
+      'pnpm-lock.yaml',
+      'yarn.lock',
+      'bun.lockb',
+      'Cargo.lock',
+      'poetry.lock',
+      'uv.lock',
+      'go.sum',
+      'Gemfile.lock',
+      'gradle.lockfile',
+    ]
     const found = lockfiles.filter((f) => ctx.profile.files.includes(f))
     if (found.length === 0) return na('No lockfile convention for this ecosystem detected')
     if (found.length > 1) {
       return fail(
         `${found.length} lockfiles present (${found.join(', ')}). Builds are not reproducible and a second lockfile usually means a second package manager.`,
         found,
-        { kind: 'manual', origin: 'derived', summary: `Remove the unused lockfile(s), keep one of: ${found.join(', ')}`, confidence: 0.8 },
+        {
+          kind: 'manual',
+          origin: 'derived',
+          summary: `Remove the unused lockfile(s), keep one of: ${found.join(', ')}`,
+          confidence: 0.8,
+        },
       )
     }
     return pass(found[0] as string, [found[0] as string])
@@ -513,11 +660,11 @@ const INSTALL_DOC: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
     if (hasCommand(ctx, 'install')) return pass(commands(ctx, 'install').join(', '))
-    return warn('No documented dependency-install command', [], derived(
-      'AGENTS.md',
-      'Document how to install dependencies',
-      0.7,
-    ))
+    return warn(
+      'No documented dependency-install command',
+      [],
+      derived('AGENTS.md', 'Document how to install dependencies', 0.7),
+    )
   },
 }
 
@@ -551,9 +698,16 @@ const MCP: Rule = {
   order: 41,
   evaluate(ctx) {
     const configured = ctx.profile.files.filter(
-      (f) => f === '.mcp.json' || f === 'opencode.json' || f === 'opencode.jsonc' || f === '.vscode/mcp.json' || f === '.cursor/mcp.json',
+      (f) =>
+        f === '.mcp.json' ||
+        f === 'opencode.json' ||
+        f === 'opencode.jsonc' ||
+        f === '.vscode/mcp.json' ||
+        f === '.cursor/mcp.json',
     )
-    const hasSkills = ctx.profile.files.some((f) => f.startsWith('.agents/skills/') || f.startsWith('.opencode/skills/') || f.startsWith('.claude/skills/'))
+    const hasSkills = ctx.profile.files.some(
+      (f) => f.startsWith('.agents/skills/') || f.startsWith('.opencode/skills/') || f.startsWith('.claude/skills/'),
+    )
     if (configured.length > 0 || hasSkills) {
       return pass([...configured, hasSkills ? 'project skills' : ''].filter(Boolean).join(', '), configured)
     }
@@ -665,15 +819,20 @@ const GITIGNORE_ENV: Rule = {
   title: '.env files are gitignored',
   order: 56,
   evaluate(ctx) {
-    if (!ctx.profile.files.includes('.gitignore')) return na('No .gitignore (repo is not Git-managed, or ignores nothing)')
+    if (!ctx.profile.files.includes('.gitignore'))
+      return na('No .gitignore (repo is not Git-managed, or ignores nothing)')
     const hasEnv = ctx.profile.files.some((f) => /(^|\/)\.env(\..+)?$/.test(f))
     if (!hasEnv) return pass('No .env files present', ['.gitignore'])
-    return warn('.env-like files are tracked by git', ctx.profile.files.filter((f) => /(^|\/)\.env/.test(f)).slice(0, 3), {
-      kind: 'manual',
-      origin: 'derived',
-      summary: 'Remove .env from git and add it to .gitignore',
-      confidence: 0.95,
-    })
+    return warn(
+      '.env-like files are tracked by git',
+      ctx.profile.files.filter((f) => /(^|\/)\.env/.test(f)).slice(0, 3),
+      {
+        kind: 'manual',
+        origin: 'derived',
+        summary: 'Remove .env from git and add it to .gitignore',
+        confidence: 0.95,
+      },
+    )
   },
 }
 
@@ -685,14 +844,20 @@ const ENV_EXAMPLE: Rule = {
   order: 57,
   evaluate(ctx) {
     const hasExample = ctx.profile.files.some((f) => /\.env\.example$|\.env\.sample$|\.env\.template$/.test(f))
-    const referencesEnv = ctx.instructionsText.includes('.env') || ctx.profile.files.some((f) => /process\.env|os\.environ|System\.getenv/.test(f))
+    const referencesEnv =
+      ctx.instructionsText.includes('.env') ||
+      ctx.profile.files.some((f) => /process\.env|os\.environ|System\.getenv/.test(f))
     if (!referencesEnv) return na('No environment variable usage detected')
-    if (hasExample) return pass('Environment variables documented', ctx.profile.files.filter((f) => /\.env\.example$/.test(f)))
-    return warn('Environment variables are used but no .env.example documents them', [], derived(
-      '.env.example',
-      'Add .env.example listing required variables with no real values',
-      0.8,
-    ))
+    if (hasExample)
+      return pass(
+        'Environment variables documented',
+        ctx.profile.files.filter((f) => /\.env\.example$/.test(f)),
+      )
+    return warn(
+      'Environment variables are used but no .env.example documents them',
+      [],
+      derived('.env.example', 'Add .env.example listing required variables with no real values', 0.8),
+    )
   },
 }
 
@@ -705,13 +870,20 @@ const SECRET_SCAN: Rule = {
   order: 58,
   evaluate(ctx) {
     const suspicious = ctx.profile.files.filter((f) =>
-      /(^|\/)\.env(\.(local|production|prod|secret))?$|\.(pem|p12|pfx|key|keystore)$|(^|\/)id_(rsa|dsa|ecdsa|ed25519)$|(^|\/)\.npmrc$|(^|\/)\.pypirc$|(^|\/)\.netrc$/.test(f),
+      /(^|\/)\.env(\.(local|production|prod|secret))?$|\.(pem|p12|pfx|key|keystore)$|(^|\/)id_(rsa|dsa|ecdsa|ed25519)$|(^|\/)\.npmrc$|(^|\/)\.pypirc$|(^|\/)\.netrc$/.test(
+        f,
+      ),
     )
     if (suspicious.length === 0) return pass('No secret-shaped files tracked', ['.gitignore'])
     return fail(
       `${suspicious.length} secret-shaped file(s) tracked in git: ${suspicious.slice(0, 4).join(', ')}`,
       suspicious.slice(0, 6),
-      { kind: 'manual', origin: 'derived', summary: 'Remove these from git, rotate any real credentials, and gitignore them', confidence: 0.9 },
+      {
+        kind: 'manual',
+        origin: 'derived',
+        summary: 'Remove these from git, rotate any real credentials, and gitignore them',
+        confidence: 0.9,
+      },
     )
   },
 }
@@ -740,7 +912,10 @@ const RISK_MAP: Rule = {
         derived('AGENTS.md', 'Document which paths are high-risk and need extra review', 0.75),
       )
     }
-    return pass(`${high.length} high-risk patterns, ${mentioned} acknowledged in instructions`, high.map((r) => r.glob))
+    return pass(
+      `${high.length} high-risk patterns, ${mentioned} acknowledged in instructions`,
+      high.map((r) => r.glob),
+    )
   },
 }
 

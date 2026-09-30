@@ -7,11 +7,11 @@
  * ship.
  */
 
-import { build } from 'esbuild'
-import { mkdirSync, chmodSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { build } from 'esbuild'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -21,15 +21,15 @@ const outfile = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
  * The version to inject.
  *
  * `npm_package_version` is only set for the package npm is running a script *in*, and this
- * script runs from the workspace root, whose package.json is private and has no version. So
+ * script runs from the workspace root, whose package.json is private and versionless. So
  * relying on it means every published binary reports `0.1.0-dev` -- a bug nobody notices
- * until someone files it against the wrong version.
- *
- * `packages/cli` is the package the bundle ships as, so its version is the one that matters.
- * Read here rather than injected from the environment so the two can never disagree.
+ * until someone files it against the wrong version. `packages/cli` is the package the
+ * bundle ships as, so its version is the one that matters, and it is read directly (never
+ * taken from the environment, which can only reintroduce the bug the comment above
+ * describes -- e.g. once the root gains a version field).
  */
 const cliPackage = JSON.parse(readFileSync(join(repoRoot, 'packages', 'cli', 'package.json'), 'utf8'))
-const version = process.env.npm_package_version ?? cliPackage.version
+const version = cliPackage.version
 
 mkdirSync(dirname(outfile), { recursive: true })
 
@@ -41,7 +41,7 @@ mkdirSync(dirname(outfile), { recursive: true })
  * fails the moment it is installed -- and only for users, never for us.
  */
 const pluginOut = join(repoRoot, 'packages', 'plugin-opencode', 'dist')
-const pluginResult = await build({
+const _pluginResult = await build({
   entryPoints: [join(repoRoot, 'packages', 'plugin-opencode', 'src', 'index.ts')],
   outfile: join(pluginOut, 'index.js'),
   bundle: true,
@@ -63,21 +63,25 @@ const pluginResult = await build({
  * agent calls with the wrong argument fails at runtime instead of being caught while typing.
  */
 const tsc = join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc')
-execFileSync(process.execPath, [
-  tsc,
-  'packages/plugin-opencode/src/index.ts',
-  '--declaration',
-  '--emitDeclarationOnly',
-  '--outDir',
-  'packages/plugin-opencode/dist',
-  '--target',
-  'ES2023',
-  '--module',
-  'NodeNext',
-  '--moduleResolution',
-  'NodeNext',
-  '--skipLibCheck',
-], { cwd: repoRoot, stdio: 'inherit' })
+execFileSync(
+  process.execPath,
+  [
+    tsc,
+    'packages/plugin-opencode/src/index.ts',
+    '--declaration',
+    '--emitDeclarationOnly',
+    '--outDir',
+    'packages/plugin-opencode/dist',
+    '--target',
+    'ES2023',
+    '--module',
+    'NodeNext',
+    '--moduleResolution',
+    'NodeNext',
+    '--skipLibCheck',
+  ],
+  { cwd: repoRoot, stdio: 'inherit' },
+)
 
 const result = await build({
   entryPoints: [join(repoRoot, 'packages', 'cli', 'src', 'main.ts')],

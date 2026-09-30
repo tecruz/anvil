@@ -57,9 +57,39 @@ function runner(options: GhOptions | undefined): (args: string[], cwd: string) =
   const run = options?.run
   return run === undefined ? (args, cwd) => gh(args, cwd) : (args, cwd) => run(args, cwd)
 }
-/** `gh` prefix needed to target a specific host. */
-function hostArgs(host: string | undefined): string[] {
+/**
+ * How to target a specific host, per gh subcommand.
+ *
+ * `--hostname` is **only** valid on the `auth` family. The repo-scoped commands
+ * (`issue`, `pr`, `repo`) do not have that flag -- passing it makes them exit 1 with
+ * "unknown flag: --hostname" -- and they already resolve the host from the repository's
+ * own remote, which is the same host we detected. So for those we pass nothing and let
+ * gh read the remote, and only `authStatus` needs the explicit flag.
+ *
+ * This distinction is invisible to the injected-runner tests (a fake accepts any argv),
+ * and getting it wrong means every provider call fails against real gh for a GitHub
+ * remote while `auth github` still passes -- the most confusing possible combination.
+ */
+function authHostArgs(host: string | undefined): string[] {
   return host === undefined || host === '' ? [] : ['--hostname', host]
+}
+
+/**
+ * Flags that narrow `gh issue list` to a normalized state.
+ *
+ * `done`/`wontfix` are the only real issue states on GitHub (open/closed); the rest are
+ * label-emulated, so a query for them has to filter by label or the caller silently gets
+ * the wrong set back.
+ */
+function stateFilterArgs(state: NormalizedState | undefined, label: string | undefined): string[] {
+  const out: string[] = []
+  if (state === 'done' || state === 'wontfix') out.push('--state', 'closed')
+  else if (state === 'todo' || state === 'in_progress' || state === 'in_review') out.push('--state', 'open')
+  if (state === 'in_progress' && label === undefined) out.push('--label', 'in-progress')
+  if (state === 'in_review' && label === undefined) out.push('--label', 'in-review')
+  if (state === 'wontfix' && label === undefined) out.push('--label', 'wontfix')
+  if (label !== undefined) out.push('--label', label)
+  return out
 }
 
 export class GitHubProvider implements TicketProvider {
@@ -94,7 +124,7 @@ export class GitHubProvider implements TicketProvider {
     // that cannot be tested, and a test that "checks auth" silently reads whatever
     // credentials the developer actually has.
     const run = runner(this.options)
-    const probe = await run(['auth', 'status', ...hostArgs(host)], '.')
+    const probe = await run(['auth', 'status', ...authHostArgs(host)], '.')
     const output = `${probe.stdout}\n${probe.stderr}`
 
     if (probe.exitCode === 0) {
@@ -106,10 +136,7 @@ export class GitHubProvider implements TicketProvider {
       return {
         ok: false,
         detail: host === undefined ? 'gh is not logged in to any GitHub host' : `gh is not logged in to ${host}`,
-        remediation:
-          host === undefined
-            ? 'gh auth login'
-            : `gh auth login --hostname ${host}`,
+        remediation: host === undefined ? 'gh auth login' : `gh auth login --hostname ${host}`,
       }
     }
 
@@ -122,7 +149,7 @@ export class GitHubProvider implements TicketProvider {
 
   async fetch(ref: TicketRef): Promise<Ticket> {
     const run = runner(this.options)
-    const args = ['issue', 'view', ref.id, '--json', 'number,title,body,state,labels,assignees,url,milestone,comments', ...hostArgs(this.options.host)]
+    const args = ['issue', 'view', ref.id, '--json', 'number,title,body,state,labels,assignees,url,milestone,comments']
     const res = await run(args, '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Usage, `gh issue view ${ref.id} failed: ${res.stderr.trim()}`, {
@@ -135,12 +162,13 @@ export class GitHubProvider implements TicketProvider {
   async list(query: TicketQuery = {}): Promise<TicketRef[]> {
     const run = runner(this.options)
     const args = [
-      'issue', 'list',
-      '--json', 'number,title,state,labels',
-      '--limit', String(query.limit ?? 30),
-      ...(query.state === 'done' ? ['--state', 'closed'] : query.state === 'todo' ? ['--state', 'open'] : []),
-      ...(query.label === undefined ? [] : ['--label', query.label]),
-      ...hostArgs(this.options.host),
+      'issue',
+      'list',
+      '--json',
+      'number,title,state,labels',
+      '--limit',
+      String(query.limit ?? 30),
+      ...stateFilterArgs(query.state, query.label),
     ]
     const res = await run(args, '.')
     if (res.exitCode !== 0) return []
@@ -157,26 +185,37 @@ export class GitHubProvider implements TicketProvider {
     const run = runner(this.options)
     const res = await run(
       [
-        'issue', 'create',
-        '--title', draft.title,
-        '--body', draft.body ?? '',
+        'issue',
+        'create',
+        '--title',
+        draft.title,
+        '--body',
+        draft.body ?? '',
         ...(draft.labels === undefined || draft.labels.length === 0 ? [] : ['--label', draft.labels.join(',')]),
-        ...hostArgs(this.options.host),
-        '--json', 'number,url',
       ],
       '.',
     )
     if (res.exitCode !== 0) {
-      throw new AnvilError(ErrorCode.Internal, `gh issue create failed: ${res.stderr.trim()}`, { hint: 'Check that gh is authenticated and the repository has a remote.' })
+      throw new AnvilError(ErrorCode.Internal, `gh issue create failed: ${res.stderr.trim()}`, {
+        hint: 'Check that gh is authenticated and the repository has a remote.',
+      })
     }
-    const parsed = JSON.parse(res.stdout || '{}') as { number?: number; url?: string }
-    const id = String(parsed.number ?? '')
-    return { provider: this.id, id, key: `gh-${id}`, ...(parsed.url === undefined ? {} : { url: parsed.url }) }
+    // `gh issue create` has no `--json` output: it prints the new issue's URL on stdout, so
+    // that is where the number comes from. Asking for `--json` is an "unknown flag" error
+    // against real gh, and the mocked runner cannot see the difference.
+    const url = lastIssueUrl(res.stdout)
+    const id = /\/issues\/(\d+)/.exec(url)?.[1] ?? ''
+    if (id === '') {
+      throw new AnvilError(ErrorCode.Internal, 'gh issue create succeeded but printed no issue URL', {
+        hint: `Expected a URL like https://github.com/owner/repo/issues/123, got: ${res.stdout.trim().slice(0, 200)}`,
+      })
+    }
+    return { provider: this.id, id, key: `gh-${id}`, url }
   }
 
   async comment(ref: TicketRef, body: string): Promise<void> {
     const run = runner(this.options)
-    const res = await run(['issue', 'comment', ref.id, '--body', body, ...hostArgs(this.options.host)], '.')
+    const res = await run(['issue', 'comment', ref.id, '--body', body], '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Internal, `gh issue comment failed: ${res.stderr.trim()}`)
     }
@@ -200,13 +239,21 @@ export class GitHubProvider implements TicketProvider {
   async transition(ref: TicketRef, to: NormalizedState): Promise<void> {
     const run = runner(this.options)
     if (to === 'done' || to === 'wontfix') {
-      const res = await run(['issue', 'close', ref.id, ...hostArgs(this.options.host)], '.')
+      const res = await run(['issue', 'close', ref.id], '.')
       if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue close failed: ${res.stderr.trim()}`)
       return
     }
     if (to === 'todo' || to === 'in_progress') {
-      const res = await run(['issue', 'reopen', ref.id, ...hostArgs(this.options.host)], '.')
-      if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue reopen failed: ${res.stderr.trim()}`)
+      // Reopening is what actually moves the issue out of `done`, so it is only needed --
+      // and only correct -- when the issue is currently closed. Running `gh issue reopen`
+      // on an open issue is an error ("issue is already open"), so gating on the current
+      // state is what keeps `transition(in_progress)` working on the common case of an
+      // open issue.
+      const current = await this.fetch(ref).catch(() => null)
+      if (current !== null && current.normalizedState === 'done') {
+        const res = await run(['issue', 'reopen', ref.id], '.')
+        if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue reopen failed: ${res.stderr.trim()}`)
+      }
       if (to === 'in_progress') {
         await this.addLabel(ref, 'in-progress')
       }
@@ -223,7 +270,7 @@ export class GitHubProvider implements TicketProvider {
 
   private async addLabel(ref: TicketRef, label: string): Promise<void> {
     const run = runner(this.options)
-    const res = await run(['issue', 'edit', ref.id, '--add-label', label, ...hostArgs(this.options.host)], '.')
+    const res = await run(['issue', 'edit', ref.id, '--add-label', label], '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Internal, `gh issue edit --add-label ${label} failed: ${res.stderr.trim()}`, {
         hint: `The label "${label}" may not exist in this repository. Create it, or pick a state that needs no label.`,
@@ -243,6 +290,17 @@ export class GitHubProvider implements TicketProvider {
   }
 }
 
+/** The last http line in gh's output, which for `issue create` is the new issue's URL. */
+function lastIssueUrl(stdout: string): string {
+  return (
+    stdout
+      .trim()
+      .split('\n')
+      .filter((l) => l.startsWith('http'))
+      .pop() ?? ''
+  )
+}
+
 /** Map a `gh issue view --json` payload onto the canonical ticket. */
 export function parseGhIssue(json: string, ref: TicketRef): Ticket {
   const raw = JSON.parse(json) as {
@@ -254,7 +312,12 @@ export function parseGhIssue(json: string, ref: TicketRef): Ticket {
     assignees?: Array<{ login?: string }>
     url?: string
     milestone?: { title?: string } | null
-    comments?: Array<{ author?: { login?: string }; body?: string; createdAt?: string; url?: string }>
+    comments?: Array<{
+      author?: { login?: string }
+      body?: string
+      createdAt?: string
+      url?: string
+    }>
   }
 
   const id = String(raw.number ?? ref.id)
@@ -277,7 +340,12 @@ export function parseGhIssue(json: string, ref: TicketRef): Ticket {
   }
 
   return {
-    ref: { provider: 'github', id, key: `gh-${id}`, ...(raw.url === undefined ? {} : { url: raw.url }) },
+    ref: {
+      provider: 'github',
+      id,
+      key: `gh-${id}`,
+      ...(raw.url === undefined ? {} : { url: raw.url }),
+    },
     title: raw.title ?? '',
     ...(raw.body === undefined ? {} : { body: raw.body }),
     ...(raw.state === undefined ? {} : { state: raw.state }),
@@ -336,9 +404,14 @@ export class GhForgeTransport implements ForgeTransport {
    * the shared runner, with an argument array and never a shell.
    */
   async pushBranch({ cwd, branch }: { cwd: string; branch: string }): Promise<{ ok: boolean; detail: string }> {
-    const res = await runProcess('git', ['push', '-u', 'origin', branch], { cwd })
+    const res = await runProcess('git', ['push', '-u', 'origin', branch], {
+      cwd,
+    })
     if (res.exitCode === 0) {
-      return { ok: true, detail: `pushed ${branch}${res.stderr.trim() === '' ? '' : ` (${res.stderr.trim()})`}` }
+      return {
+        ok: true,
+        detail: `pushed ${branch}${res.stderr.trim() === '' ? '' : ` (${res.stderr.trim()})`}`,
+      }
     }
     const detail = (res.stderr || res.stdout || `exit ${res.exitCode}`).trim()
     return { ok: false, detail }
@@ -354,11 +427,14 @@ export class GhForgeTransport implements ForgeTransport {
     reviewers: string[]
   }): Promise<{ number: number; url: string; created: boolean }> {
     const run = runner(this.options)
-    const existing = await this.findPullRequest({ cwd: options.cwd, branch: options.branch })
+    const existing = await this.findPullRequest({
+      cwd: options.cwd,
+      branch: options.branch,
+    })
 
     if (existing !== null) {
       const edited = await run(
-        ['pr', 'edit', String(existing.number), '--title', options.title, '--body', options.body, ...hostArgs(this.options.host)],
+        ['pr', 'edit', String(existing.number), '--title', options.title, '--body', options.body],
         options.cwd,
       )
       if (edited.exitCode !== 0) {
@@ -371,14 +447,30 @@ export class GhForgeTransport implements ForgeTransport {
 
     const created = await run(
       [
-        'pr', 'create',
-        '--title', options.title,
-        '--body', options.body,
-        '--base', options.base,
-        '--head', options.branch,
+        'pr',
+        'create',
+        '--title',
+        options.title,
+        '--body',
+        options.body,
+        '--base',
+        options.base,
+        '--head',
+        options.branch,
         ...(options.draft ? ['--draft'] : []),
-        ...(options.reviewers.length === 0 ? [] : ['--reviewer', options.reviewers.map((r) => `@${r}`).join(',')]),
-        ...hostArgs(this.options.host),
+        // `gh pr create --reviewer` takes a bare handle or `org/team-name` -- no leading
+        // `@`. CODEOWNERS entries are written `@name`, so the leading `@` is stripped here;
+        // passing it through produced `--reviewer @@name`, which gh cannot resolve, and the
+        // failure lands after the branch is already pushed.
+        ...(options.reviewers.length === 0
+          ? []
+          : [
+              '--reviewer',
+              options.reviewers
+                .map((r) => r.replace(/^@+/, ''))
+                .filter((r) => r !== '')
+                .join(','),
+            ]),
       ],
       options.cwd,
     )
@@ -387,19 +479,38 @@ export class GhForgeTransport implements ForgeTransport {
         hint: 'A common cause is an uncommitted or unpushed branch; check `git status` and `git log origin/HEAD..HEAD`.',
       })
     }
-    const url = created.stdout.trim().split('\n').filter((l) => l.startsWith('http')).pop() ?? ''
+    const url =
+      created.stdout
+        .trim()
+        .split('\n')
+        .filter((l) => l.startsWith('http'))
+        .pop() ?? ''
     const number = Number.parseInt(/\/pull\/(\d+)/.exec(url)?.[1] ?? '0', 10)
     return { number: Number.isFinite(number) ? number : 0, url, created: true }
   }
 
-  async findPullRequest({ cwd, branch }: { cwd: string; branch: string }): Promise<{ number: number; url: string; state: string } | null> {
+  async findPullRequest({
+    cwd,
+    branch,
+  }: {
+    cwd: string
+    branch: string
+  }): Promise<{ number: number; url: string; state: string } | null> {
     const run = runner(this.options)
-    const res = await run(['pr', 'view', branch, '--json', 'number,url,state', ...hostArgs(this.options.host)], cwd)
+    const res = await run(['pr', 'view', branch, '--json', 'number,url,state'], cwd)
     if (res.exitCode !== 0) return null
     try {
-      const parsed = JSON.parse(res.stdout) as { number?: number; url?: string; state?: string }
+      const parsed = JSON.parse(res.stdout) as {
+        number?: number
+        url?: string
+        state?: string
+      }
       if (parsed.number === undefined) return null
-      return { number: parsed.number, url: parsed.url ?? '', state: parsed.state ?? 'OPEN' }
+      return {
+        number: parsed.number,
+        url: parsed.url ?? '',
+        state: parsed.state ?? 'OPEN',
+      }
     } catch {
       return null
     }
@@ -407,7 +518,7 @@ export class GhForgeTransport implements ForgeTransport {
 
   async sourceLink({ cwd, branch }: { cwd: string; branch: string }): Promise<string | null> {
     const run = runner(this.options)
-    const res = await run(['repo', 'view', '--json', 'url', ...hostArgs(this.options.host)], cwd)
+    const res = await run(['repo', 'view', '--json', 'url'], cwd)
     if (res.exitCode !== 0) return null
     try {
       const url = (JSON.parse(res.stdout) as { url?: string }).url

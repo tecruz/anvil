@@ -12,8 +12,8 @@
  * will trust it.
  */
 
-import type { ProjectProfile, CommandEntry } from '@anvil/profile'
 import type { MatchResult } from '@anvil/playbooks'
+import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 
 export interface GeneratedArtifact {
   path: string
@@ -33,7 +33,8 @@ export function bestCommand(profile: ProjectProfile, kind: keyof ProjectProfile[
 }
 
 function bullet(label: string, entry: CommandEntry | null, fallback: string | null): string | null {
-  if (entry === null) return fallback === null ? null : `- **${label}:** _not yet defined_ -- add this so the agent can verify its work`
+  if (entry === null)
+    return fallback === null ? null : `- **${label}:** _not yet defined_ -- add this so the agent can verify its work`
   const source = entry.source === 'documented' ? '' : ` _(${entry.source})_`
   const evidence = entry.evidence === undefined ? '' : ` \`${entry.evidence}\``
   return `- **${label}:** \`${entry.cmd}\`${source}${evidence}`
@@ -93,7 +94,7 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
     if (inferred > 0) {
       lines.push('')
       lines.push(
-        `> ${inferred} of these are inferred from ecosystem convention rather than defined in this repo. Verify them before relying on them.`,
+        `> Some of these are inferred from ecosystem convention rather than defined in this repo. Verify them before relying on them.`,
       )
     }
     lines.push('')
@@ -145,9 +146,12 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   lines.push('## Conventions')
   lines.push('')
   const conventions: string[] = []
-  if (profile.tooling.lint.length > 0) conventions.push(`- Linting is enforced by ${profile.tooling.lint.join(', ')}; run it before proposing a change.`)
-  if (profile.tooling.formatter.length > 0) conventions.push(`- Formatting is handled by ${profile.tooling.formatter.join(', ')}.`)
-  if (profile.tooling.hooks.length > 0) conventions.push(`- Pre-commit hooks (${profile.tooling.hooks.join(', ')}) run on every commit.`)
+  if (profile.tooling.lint.length > 0)
+    conventions.push(`- Linting is enforced by ${profile.tooling.lint.join(', ')}; run it before proposing a change.`)
+  if (profile.tooling.formatter.length > 0)
+    conventions.push(`- Formatting is handled by ${profile.tooling.formatter.join(', ')}.`)
+  if (profile.tooling.hooks.length > 0)
+    conventions.push(`- Pre-commit hooks (${profile.tooling.hooks.join(', ')}) run on every commit.`)
   if (profile.tooling.ci.length > 0) conventions.push(`- CI runs on ${profile.tooling.ci.length} workflow file(s).`)
   if (conventions.length === 0) {
     lines.push('- _No linter, formatter or CI detected. Conventions are unenforced here._')
@@ -158,7 +162,9 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
 
   lines.push('## For agents')
   lines.push('')
-  lines.push('- Run the test and lint commands above before proposing a change. An unverified change is not a proposal.')
+  lines.push(
+    '- Run the test and lint commands above before proposing a change. An unverified change is not a proposal.',
+  )
   lines.push('- Do not edit a high-risk path without flagging it in your summary.')
   lines.push('- If a command above is marked inferred, treat it as a guess and confirm it first.')
   lines.push('')
@@ -170,12 +176,12 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   }
 }
 
+/** How many of the *displayed* command rows are inferred rather than found written down. */
 function countInferred(profile: ProjectProfile): number {
   let n = 0
-  for (const entries of Object.values(profile.commands)) {
-    for (const entry of entries ?? []) {
-      if (entry.source === 'inferred') n++
-    }
+  for (const kind of ['install', 'build', 'test', 'testFast', 'lint', 'format', 'typecheck'] as const) {
+    const entry = bestCommand(profile, kind)
+    if (entry !== null && entry.source === 'inferred') n++
   }
   return n
 }
@@ -230,9 +236,10 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
   return {
     path: '.agents/skills/verify-change/SKILL.md',
     content,
-    reason: fast === null
-      ? 'Verify loop skill (no changed-files subset detected, so it uses the full suite)'
-      : 'Verify loop skill using the detected changed-files test subset',
+    reason:
+      fast === null
+        ? 'Verify loop skill (no changed-files subset detected, so it uses the full suite)'
+        : 'Verify loop skill using the detected changed-files test subset',
   }
 }
 
@@ -276,5 +283,9 @@ export function generateReviewCommand(options: GenerateOptions): GeneratedArtifa
     '',
   ].join('\n')
 
-  return { path: '.opencode/commands/review-change.md', content, reason: 'Diff review command wired to the detected test and lint commands' }
+  return {
+    path: '.opencode/commands/review-change.md',
+    content,
+    reason: 'Diff review command wired to the detected test and lint commands',
+  }
 }

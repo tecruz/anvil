@@ -1,9 +1,9 @@
-import { test, describe, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { after, describe, test } from 'node:test'
 
 import {
   analyzeRisk,
@@ -14,26 +14,46 @@ import {
   resolveReviewers,
 } from '@anvil/pr'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { GhForgeTransport, GitHubProvider, hostFromRemote, parseGhIssue } from '@anvil/providers'
 import type { Ticket } from '@anvil/tickets'
 import {
-  ship,
+  type ForgeTransport,
   inferredVerifyCommands,
+  type ShipOptions,
+  ship,
   verifyCommandEntries,
   verifyCommands,
-  type ForgeTransport,
-  type ShipOptions,
 } from '@anvil/worktrees/ship'
-import { GitHubProvider, hostFromRemote, parseGhIssue } from '@anvil/providers'
 
 // ===========================================================================
 // Risk analysis
 // ===========================================================================
 
 const RISK = [
-  { glob: '**/migrations/**', level: 'high' as const, reason: 'schema or data migration', origin: 'heuristic' as const },
-  { glob: '.github/workflows/**', level: 'high' as const, reason: 'CI definition', origin: 'heuristic' as const },
-  { glob: '**/package.json', level: 'medium' as const, reason: 'dependency manifest', origin: 'heuristic' as const },
-  { glob: '**/Dockerfile*', level: 'medium' as const, reason: 'image definition', origin: 'heuristic' as const },
+  {
+    glob: '**/migrations/**',
+    level: 'high' as const,
+    reason: 'schema or data migration',
+    origin: 'heuristic' as const,
+  },
+  {
+    glob: '.github/workflows/**',
+    level: 'high' as const,
+    reason: 'CI definition',
+    origin: 'heuristic' as const,
+  },
+  {
+    glob: '**/package.json',
+    level: 'medium' as const,
+    reason: 'dependency manifest',
+    origin: 'heuristic' as const,
+  },
+  {
+    glob: '**/Dockerfile*',
+    level: 'medium' as const,
+    reason: 'image definition',
+    origin: 'heuristic' as const,
+  },
 ]
 
 describe('risk analysis', () => {
@@ -134,6 +154,23 @@ describe('CODEOWNERS', () => {
     assert.deepEqual(resolveReviewers(['a.ts'], ''), [])
   })
 
+  test('a pattern containing a slash is anchored to the repository root', () => {
+    // Rule 2: a pattern with a slash is relative to the CODEOWNERS file's directory,
+    // which for a repo-root file is the repo root -- so `docs/*` does NOT claim
+    // `packages/docs/x`. Getting this backwards over-assigns reviews to a team that
+    // never asked for them, and the mistake is invisible in the resulting PR.
+    assert.equal(codeownersMatches('docs/a.md', 'docs/*'), true)
+    assert.equal(codeownersMatches('packages/docs/a.md', 'docs/*'), false)
+    assert.equal(codeownersMatches('docs/nested/a.md', 'docs/*'), false)
+  })
+
+  test('a pattern without a slash still matches at any depth', () => {
+    // The counterpart to the rule above: `*.md` is a filename pattern, so it claims
+    // nested files wherever they are.
+    assert.equal(codeownersMatches('a/b/c.md', '*.md'), true)
+    assert.equal(codeownersMatches('c.md', '*.md'), true)
+  })
+
   test('pattern matching handles ** across segments', () => {
     assert.equal(codeownersMatches('a/b/c/d.ts', 'a/**/d.ts'), true)
     assert.equal(codeownersMatches('a/d.ts', 'a/**/d.ts'), true)
@@ -146,7 +183,12 @@ describe('CODEOWNERS', () => {
 // ===========================================================================
 
 const ticket = (over: Partial<Ticket> = {}): Ticket => ({
-  ref: { provider: 'github', id: '42', key: 'gh-42', url: 'https://github.com/acme/app/issues/42' },
+  ref: {
+    provider: 'github',
+    id: '42',
+    key: 'gh-42',
+    url: 'https://github.com/acme/app/issues/42',
+  },
   title: 'Add login redirect',
   body: 'Users should land on /dashboard after login.',
   acceptance: ['Redirects to /dashboard', 'Preserves returnTo'],
@@ -155,7 +197,11 @@ const ticket = (over: Partial<Ticket> = {}): Ticket => ({
 })
 
 describe('PR body', () => {
-  const base = { risk: analyzeRisk([], RISK), reviewers: [] as string[], verifyCommands: ['npm test'] }
+  const base = {
+    risk: analyzeRisk([], RISK),
+    reviewers: [] as string[],
+    verifyCommands: ['npm test'],
+  }
 
   test('leads with the ticket description, not boilerplate', () => {
     const body = renderPrBody({ ...base, ticket: ticket() })
@@ -169,11 +215,16 @@ describe('PR body', () => {
   })
 
   test('includes the GitHub closing keyword so the ticket closes on merge', () => {
-    assert.match(renderPrBody({ ...base, ticket: ticket() }), /Closes gh-42/)
+    // `Closes #42`, not `Closes gh-42`: GitHub only auto-closes on a reference it can
+    // resolve (#n, owner/repo#n, or a URL). The human key renders as prose and the ticket
+    // stays open after merge, silently.
+    assert.match(renderPrBody({ ...base, ticket: ticket() }), /Closes #42/)
   })
 
   test('a local ticket gets no closing keyword, because there is nothing to close', () => {
-    const local = ticket({ ref: { provider: 'local', id: '1', key: 'local-1' } })
+    const local = ticket({
+      ref: { provider: 'local', id: '1', key: 'local-1' },
+    })
     const body = renderPrBody({ ...base, ticket: local })
     assert.doesNotMatch(body, /Closes local-1/)
     assert.match(body, /Ticket: local-1 \(local\)/)
@@ -211,7 +262,11 @@ describe('PR body', () => {
   })
 
   test('names CODEOWNERS reviewers', () => {
-    const body = renderPrBody({ ...base, ticket: ticket(), reviewers: ['backend-team'] })
+    const body = renderPrBody({
+      ...base,
+      ticket: ticket(),
+      reviewers: ['backend-team'],
+    })
     assert.match(body, /@backend-team/)
   })
 
@@ -248,14 +303,29 @@ function fakeForge(options: { existingPr?: number } = {}): FakeForge {
     async findPullRequest() {
       calls.push('findPr')
       const found = prs.find((p) => p.branch === 'feat/x')
-      return found === undefined ? null : { number: found.number, url: `https://github.com/acme/app/pull/${found.number}`, state: 'OPEN' }
+      return found === undefined
+        ? null
+        : {
+            number: found.number,
+            url: `https://github.com/acme/app/pull/${found.number}`,
+            state: 'OPEN',
+          }
     },
     async upsertPullRequest(o) {
       calls.push('upsertPr')
       const existing = prs.find((p) => p.branch === o.branch)
-      if (existing !== undefined) return { number: existing.number, url: `https://github.com/acme/app/pull/${existing.number}`, created: false }
+      if (existing !== undefined)
+        return {
+          number: existing.number,
+          url: `https://github.com/acme/app/pull/${existing.number}`,
+          created: false,
+        }
       prs.push({ branch: o.branch, number: 7 })
-      return { number: 7, url: 'https://github.com/acme/app/pull/7', created: true }
+      return {
+        number: 7,
+        url: 'https://github.com/acme/app/pull/7',
+        created: true,
+      }
     },
     async sourceLink() {
       return 'https://github.com/acme/app/tree/feat/x'
@@ -311,7 +381,12 @@ function workOnBranch(dir: string, name: string, message: string): void {
 }
 
 function shipOptions(dir: string, over: Partial<ShipOptions> = {}): ShipOptions {
-  const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+  const profile = buildProfile(dir, {
+    root: dir,
+    host: null,
+    remote: null,
+    defaultBranch: null,
+  }).profile
   return {
     repoRoot: dir,
     worktreePath: dir,
@@ -325,9 +400,13 @@ function shipOptions(dir: string, over: Partial<ShipOptions> = {}): ShipOptions 
       // Read through Node rather than a shell, so a filename with a space in it works
       // and nothing here can be interpreted as a command.
       try {
-        return execFileSync('node', ['-e', `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(dir, rel))},'utf8'))`], {
-          encoding: 'utf8',
-        })
+        return execFileSync(
+          'node',
+          ['-e', `process.stdout.write(require('fs').readFileSync(${JSON.stringify(join(dir, rel))},'utf8'))`],
+          {
+            encoding: 'utf8',
+          },
+        )
       } catch {
         return null
       }
@@ -361,7 +440,12 @@ describe('verify command selection', () => {
   })
 
   test('no duplicates when two kinds share a command', () => {
-    const dup = { commands: { test: [{ cmd: 'make check', source: 'detected' as const }], lint: [{ cmd: 'make check', source: 'detected' as const }] } } as unknown as ProjectProfile
+    const dup = {
+      commands: {
+        test: [{ cmd: 'make check', source: 'detected' as const }],
+        lint: [{ cmd: 'make check', source: 'detected' as const }],
+      },
+    } as unknown as ProjectProfile
     assert.deepEqual(verifyCommands(dup), ['make check'])
   })
 
@@ -385,7 +469,6 @@ describe('verify command selection', () => {
   test('a fully documented project has nothing to caveat', () => {
     assert.deepEqual(inferredVerifyCommands(profile), [])
   })
-
 })
 
 describe('ship pipeline', () => {
@@ -427,7 +510,10 @@ describe('ship pipeline', () => {
       }),
     )
     assert.equal(result.ok, true)
-    assert.deepEqual(result.stages.map((s) => s.name), ['refuse', 'verify', 'push', 'pr', 'ticket'])
+    assert.deepEqual(
+      result.stages.map((s) => s.name),
+      ['refuse', 'verify', 'push', 'pr', 'ticket'],
+    )
     assert.equal(result.pr?.number, 7)
     assert.equal(commented.length, 1)
     assert.match(commented[0] ?? '', /#7/)
@@ -441,7 +527,12 @@ describe('ship pipeline', () => {
       shipOptions(dir, {
         transport: forge,
         probe: true,
-        run: async () => ({ ok: false, code: 1, stdout: '', stderr: 'tests failed' }),
+        run: async () => ({
+          ok: false,
+          code: 1,
+          stdout: '',
+          stderr: 'tests failed',
+        }),
       }),
     )
     assert.equal(result.ok, false)
@@ -487,7 +578,9 @@ describe('ship pipeline', () => {
     workOnBranch(dir, 'a.txt', 'work')
     const documented = {
       ...shipOptions(dir).profile,
-      commands: { test: [{ cmd: 'make check', source: 'documented' as const }] },
+      commands: {
+        test: [{ cmd: 'make check', source: 'documented' as const }],
+      },
     } as unknown as ProjectProfile
     const result = await ship(shipOptions(dir, { profile: documented, probe: true }))
     const verify = result.stages.find((s) => s.name === 'verify')
@@ -524,7 +617,12 @@ describe('ship pipeline', () => {
     const result = await ship(
       shipOptions(dir, {
         transport: forge,
-        ticketOps: { comment: async (_r, b) => { commented.push(b) }, transition: async () => {} },
+        ticketOps: {
+          comment: async (_r, b) => {
+            commented.push(b)
+          },
+          transition: async () => {},
+        },
       }),
     )
     assert.equal(result.risk.level, 'high')
@@ -573,8 +671,9 @@ describe('ship pipeline', () => {
     }
     await ship(shipOptions(dir, { transport: wrapped, extraReviewers: ['@extra'] }))
     // The diff touches app/, so `@backend` wins over the `*` catch-all by last-match-wins,
-    // and the command-line reviewer is added on top. CODEOWNERS owners keep their `@`;
-    // gh accepts it, and the PR body strips it for display.
+    // and the command-line reviewer is added on top. CODEOWNERS owners keep their `@`
+    // here; the gh transport strips it, because `gh pr create --reviewer` takes a bare
+    // handle and rejects `@@backend`.
     assert.deepEqual(requested, ['@backend', 'extra'])
   })
 })
@@ -596,7 +695,11 @@ describe('GitHub transport', () => {
     // to name the host or the user authenticates to the wrong one.
     const provider = new GitHubProvider({
       host: 'ghe.acme-corp.com',
-      run: async () => ({ stdout: '', stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login', exitCode: 1 }),
+      run: async () => ({
+        stdout: '',
+        stderr: 'You are not logged into any GitHub hosts. To log in, run: gh auth login',
+        exitCode: 1,
+      }),
     })
     const status = await provider.authStatus()
     assert.equal(status.ok, false)
@@ -606,7 +709,11 @@ describe('GitHub transport', () => {
   test('a successful status reports who is logged in', async () => {
     const provider = new GitHubProvider({
       host: 'github.com',
-      run: async () => ({ stdout: 'github.com\n  ✓ Logged in to github.com account octocat (keyring)', stderr: '', exitCode: 0 }),
+      run: async () => ({
+        stdout: 'github.com\n  ✓ Logged in to github.com account octocat (keyring)',
+        stderr: '',
+        exitCode: 0,
+      }),
     })
     const status = await provider.authStatus()
     assert.equal(status.ok, true)
@@ -615,7 +722,11 @@ describe('GitHub transport', () => {
 
   test('an unexpected failure still returns a runnable command', async () => {
     const provider = new GitHubProvider({
-      run: async () => ({ stdout: '', stderr: 'something odd happened', exitCode: 2 }),
+      run: async () => ({
+        stdout: '',
+        stderr: 'something odd happened',
+        exitCode: 2,
+      }),
     })
     const status = await provider.authStatus()
     assert.equal(status.ok, false)
@@ -636,19 +747,162 @@ describe('GitHub transport', () => {
     assert.ok(seen.includes('hello; rm -rf / #$(whoami)'), 'the body is one argv element')
   })
 
+  test('repo-scoped gh calls never receive --hostname, which they do not accept', async () => {
+    // `--hostname` exists on the `auth` family only. `gh issue`, `gh pr` and `gh repo`
+    // reject it with "unknown flag" -- and they already resolve the host from the
+    // repository's remote. Passing it meant every provider call failed against real gh
+    // for any GitHub remote while `auth github` still passed, which is the most
+    // confusing possible combination.
+    const seen: string[][] = []
+    const record =
+      () =>
+      async (args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+        seen.push(args)
+        return {
+          stdout: '{"number":1,"url":"https://example.test/pull/1","state":"OPEN"}',
+          stderr: '',
+          exitCode: 0,
+        }
+      }
+    const provider = new GitHubProvider({
+      host: 'ghe.acme-corp.com',
+      run: record(),
+    })
+    const transport = new GhForgeTransport({
+      host: 'ghe.acme-corp.com',
+      run: record(),
+    })
+    const ref = { provider: 'github', id: '1', key: 'gh-1' }
+
+    await provider.fetch(ref)
+    await provider.list()
+    await provider.comment(ref, 'hi')
+    await transport.findPullRequest({ cwd: '.', branch: 'feat/x' })
+    await transport.upsertPullRequest({
+      cwd: '.',
+      branch: 'feat/x',
+      base: 'main',
+      title: 't',
+      body: 'b',
+      draft: false,
+      reviewers: [],
+    })
+
+    assert.ok(seen.length >= 5, `expected several calls, saw ${seen.length}`)
+    for (const args of seen) {
+      assert.ok(!args.includes('--hostname'), `--hostname must not reach ${args[0]}: ${args.join(' ')}`)
+    }
+  })
+
+  test('the auth probe is the one call that does carry --hostname', async () => {
+    // `gh auth status --hostname <host>` is valid, and it is the call that has to name
+    // the Enterprise host so the user logs into the right one.
+    let seen: string[] = []
+    const provider = new GitHubProvider({
+      host: 'ghe.acme-corp.com',
+      run: async (args) => {
+        seen = args
+        return {
+          stdout: 'ghe.acme-corp.com\n  x Logged in to ghe.acme-corp.com account octocat (keyring)',
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+    await provider.authStatus()
+    assert.deepEqual(seen, ['auth', 'status', '--hostname', 'ghe.acme-corp.com'])
+  })
+
+  test('reviewers reach gh as bare handles, not @@name', async () => {
+    // `gh pr create --reviewer` takes a login or `org/team-name`. CODEOWNERS entries are
+    // written `@name`, and prepending another `@` produced `@@name`, which gh cannot
+    // resolve -- and the failure lands after the branch is already pushed.
+    let seen: string[] = []
+    const transport = new GhForgeTransport({
+      run: async (args) => {
+        if (args[0] === 'pr' && args[1] === 'view') return { stdout: '', stderr: 'no PR', exitCode: 1 }
+        seen = args
+        return {
+          stdout: 'https://github.com/acme/app/pull/7',
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+    await transport.upsertPullRequest({
+      cwd: '.',
+      branch: 'feat/x',
+      base: 'main',
+      title: 't',
+      body: 'b',
+      draft: false,
+      reviewers: ['@backend', 'extra', '@org/team'],
+    })
+    const flag = seen.indexOf('--reviewer')
+    assert.notEqual(flag, -1, 'the reviewer flag must be present')
+    assert.equal(seen[flag + 1], 'backend,extra,org/team')
+  })
+
+  test('create reads the issue number from the URL gh prints', async () => {
+    // `gh issue create` has no `--json` flag -- asking for it is an "unknown flag" error
+    // against real gh, found by the live suite in packages/providers/test/gh-live.test.ts.
+    // It answers by printing the new issue's URL, so that is where the number comes from.
+    let seen: string[] = []
+    const provider = new GitHubProvider({
+      run: async (args) => {
+        seen = args
+        return {
+          stdout: 'https://github.com/acme/app/issues/123\n',
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+    const ref = await provider.create({ title: 'a task' })
+    assert.equal(ref.id, '123')
+    assert.equal(ref.key, 'gh-123')
+    assert.equal(ref.url, 'https://github.com/acme/app/issues/123')
+    assert.ok(!seen.includes('--json'), 'gh issue create does not accept --json')
+  })
+
+  test('create refuses a success that printed no URL, rather than inventing an id', async () => {
+    const provider = new GitHubProvider({
+      run: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+    })
+    await assert.rejects(() => provider.create({ title: 'a task' }), /printed no issue URL/)
+  })
+
   test('maps a closed issue to done', () => {
-    const t = parseGhIssue(JSON.stringify({ number: 5, title: 'x', state: 'CLOSED', body: '' }), { provider: 'github', id: '5', key: 'gh-5' })
+    const t = parseGhIssue(JSON.stringify({ number: 5, title: 'x', state: 'CLOSED', body: '' }), {
+      provider: 'github',
+      id: '5',
+      key: 'gh-5',
+    })
     assert.equal(t.normalizedState, 'done')
   })
 
   test('infers in_review from a label, because GitHub has no such state', () => {
-    const t = parseGhIssue(JSON.stringify({ number: 5, title: 'x', state: 'OPEN', labels: [{ name: 'in-review' }], body: '' }), { provider: 'github', id: '5', key: 'gh-5' })
+    const t = parseGhIssue(
+      JSON.stringify({
+        number: 5,
+        title: 'x',
+        state: 'OPEN',
+        labels: [{ name: 'in-review' }],
+        body: '',
+      }),
+      { provider: 'github', id: '5', key: 'gh-5' },
+    )
     assert.equal(t.normalizedState, 'in_review')
   })
 
   test('infers wontfix before in_review, so the more specific label wins', () => {
     const t = parseGhIssue(
-      JSON.stringify({ number: 5, state: 'OPEN', labels: [{ name: 'in-review' }, { name: 'wontfix' }], body: '' }),
+      JSON.stringify({
+        number: 5,
+        state: 'OPEN',
+        labels: [{ name: 'in-review' }, { name: 'wontfix' }],
+        body: '',
+      }),
       { provider: 'github', id: '5', key: 'gh-5' },
     )
     assert.equal(t.normalizedState, 'wontfix')
@@ -656,25 +910,41 @@ describe('GitHub transport', () => {
 
   test('extracts acceptance criteria from a checklist', () => {
     const body = 'Do the thing.\n\n- [ ] one\n- [x] two\n'
-    const t = parseGhIssue(JSON.stringify({ number: 5, state: 'OPEN', body }), { provider: 'github', id: '5', key: 'gh-5' })
+    const t = parseGhIssue(JSON.stringify({ number: 5, state: 'OPEN', body }), {
+      provider: 'github',
+      id: '5',
+      key: 'gh-5',
+    })
     assert.deepEqual(t.acceptance, ['one', 'two'])
   })
 
   test('extracts acceptance criteria from a headed section', () => {
     const body = '## Acceptance Criteria\n- first\n- second\n\n## Notes\nnot this\n'
-    const t = parseGhIssue(JSON.stringify({ number: 5, state: 'OPEN', body }), { provider: 'github', id: '5', key: 'gh-5' })
+    const t = parseGhIssue(JSON.stringify({ number: 5, state: 'OPEN', body }), {
+      provider: 'github',
+      id: '5',
+      key: 'gh-5',
+    })
     assert.deepEqual(t.acceptance, ['first', 'second'])
   })
 
   test('preserves the raw payload', () => {
     const raw = { number: 5, state: 'OPEN', body: 'x' }
-    const t = parseGhIssue(JSON.stringify(raw), { provider: 'github', id: '5', key: 'gh-5' })
+    const t = parseGhIssue(JSON.stringify(raw), {
+      provider: 'github',
+      id: '5',
+      key: 'gh-5',
+    })
     assert.deepEqual(t.raw, raw)
   })
 
   test('an unsupported transition names the ones that work', async () => {
     const provider = new GitHubProvider({
-      run: async () => ({ stdout: JSON.stringify({ number: 5, state: 'OPEN' }), stderr: '', exitCode: 0 }),
+      run: async () => ({
+        stdout: JSON.stringify({ number: 5, state: 'OPEN' }),
+        stderr: '',
+        exitCode: 0,
+      }),
     })
     // The list of supported states lives in the hint, not the message -- which is the
     // point of having a hint, so assert on both.
@@ -690,4 +960,3 @@ describe('GitHub transport', () => {
     )
   })
 })
-

@@ -6,14 +6,27 @@
  */
 
 import { join } from 'node:path'
-import { AnvilError, ErrorCode, ExitCode, loadConfig, parseCliArgs, renderTable, runProcess } from '@anvil/core'
-import { parseRef, type Ticket } from '@anvil/tickets'
+import {
+  AnvilError,
+  ErrorCode,
+  ExitCode,
+  loadConfig,
+  parseCliArgs,
+  renderTable,
+  runProcess,
+  tokenizeCommand,
+} from '@anvil/core'
 import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
+import { parseRef, type Ticket } from '@anvil/tickets'
 import { claimStatuses, readClaims } from '@anvil/worktrees'
-import { crewUp, crewVerify, isProcessAlive, mapWithConcurrency, type CrewVerifyResult } from '@anvil/worktrees/crew'
+import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import type { Command, CommandContext } from './types.ts'
 
-const GLOBAL_ONLY = { json: { type: 'boolean', short: 'j' }, noColor: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } as const
+const GLOBAL_ONLY = {
+  json: { type: 'boolean', short: 'j' },
+  noColor: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
+} as const
 
 const CREW_SUBCOMMANDS = ['up', 'status', 'verify'] as const
 
@@ -24,7 +37,7 @@ export const crewCommand: Command = {
   details: [
     'up       claim N tickets in one command, optionally starting an agent in each',
     'status   every claim, whether its agent is still alive, and what would be lost',
-    'verify   run every worktree\'s verify commands under a concurrency policy',
+    "verify   run every worktree's verify commands under a concurrency policy",
     '',
     'Claims are created one at a time, because `git worktree add` mutates the',
     "repository's shared administrative area. Agents then start in parallel, because each",
@@ -63,7 +76,9 @@ export const crewCommand: Command = {
     }
 
     const repoRoot = await mainRootFor(ctx)
-    const provider = new LocalTicketProvider({ dir: join(repoRoot, process.env.ANVIL_TICKETS_DIR ?? DEFAULT_TICKETS_DIR) })
+    const provider = new LocalTicketProvider({
+      dir: join(repoRoot, process.env.ANVIL_TICKETS_DIR ?? DEFAULT_TICKETS_DIR),
+    })
 
     if (sub === 'up') return crewUpFlow(ctx, repoRoot, provider, args)
     if (sub === 'verify') return crewVerifyFlow(ctx, repoRoot, args)
@@ -86,8 +101,7 @@ async function crewUpFlow(
     // No explicit list: take the ready work. A crew is most useful when you do not have to
     // enumerate the tickets yourself.
     const all = await provider.list({ state: 'todo' })
-    const limit =
-      (typeof args.values.limit === 'string' ? parsePositiveInt(args.values.limit) : null) ?? all.length
+    const limit = (typeof args.values.limit === 'string' ? parsePositiveInt(args.values.limit) : null) ?? all.length
     if (all.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'No tickets in state `todo`', {
         hint: 'Name them explicitly with --tickets 1,2,3, or create one with `anvil issue create`.',
@@ -101,9 +115,13 @@ async function crewUpFlow(
     try {
       tickets.push(await provider.fetch(parseRef(ref, 'local')))
     } catch (err) {
-      throw new AnvilError(ErrorCode.Usage, `Cannot read ticket "${ref}": ${err instanceof Error ? err.message : String(err)}`, {
-        hint: 'Run `anvil issue list` to see what is available.',
-      })
+      throw new AnvilError(
+        ErrorCode.Usage,
+        `Cannot read ticket "${ref}": ${err instanceof Error ? err.message : String(err)}`,
+        {
+          hint: 'Run `anvil issue list` to see what is available.',
+        },
+      )
     }
   }
 
@@ -121,7 +139,11 @@ async function crewUpFlow(
 
   const data = {
     schemaVersion: 1,
-    claims: result.claims.map((c) => ({ key: c.key, branch: c.branch, worktree: c.worktreePath })),
+    claims: result.claims.map((c) => ({
+      key: c.key,
+      branch: c.branch,
+      worktree: c.worktreePath,
+    })),
     launches: result.launches,
     failures: result.failures,
   }
@@ -164,10 +186,11 @@ async function crewVerifyFlow(
   repoRoot: string,
   args: ReturnType<typeof parseCliArgs>,
 ): Promise<number | undefined> {
-  const jobs =
-    typeof args.values.jobs === 'string' ? parsePositiveInt(args.values.jobs) : null
+  const jobs = typeof args.values.jobs === 'string' ? parsePositiveInt(args.values.jobs) : null
   if (typeof args.values.jobs === 'string' && jobs === null) {
-    throw new AnvilError(ErrorCode.Usage, `Invalid --jobs: ${args.values.jobs}`, { hint: 'Expected a positive integer.' })
+    throw new AnvilError(ErrorCode.Usage, `Invalid --jobs: ${args.values.jobs}`, {
+      hint: 'Expected a positive integer.',
+    })
   }
 
   const keys = Array.isArray(args.values.key) ? (args.values.key as string[]) : undefined
@@ -188,9 +211,10 @@ async function crewVerifyFlow(
     skipped: result.skipped,
   }
 
+  // A green aggregate must never hide a red member, so the exit code is the verdict and
+  // the report is still emitted in full -- on a failure envelope, so a JSON consumer can
+  // tell a partial failure from a success without reading stderr.
   if (!result.ok) {
-    // A green aggregate must never hide a red member, so the exit code is the verdict and
-    // the report is still emitted in full.
     const failed = result.results.filter((r) => !r.ok)
     const err = new AnvilError(
       ErrorCode.ThresholdNotMet,
@@ -200,9 +224,13 @@ async function crewVerifyFlow(
         details: { results: result.results },
       },
     )
-    if (args.values.json === true) ctx.out(data, () => '')
-    ctx.writeError(`\nerror ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}\n`)
-    ctx.writeRaw(renderVerify(ctx, result))
+    ctx.outFailure(data, err, () => {
+      const out = [
+        `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}\n`,
+      ]
+      out.push(renderVerify(ctx, result))
+      return out.join('\n')
+    })
     return ExitCode.Threshold
   }
 
@@ -293,7 +321,11 @@ async function crewStatusFlow(ctx: CommandContext, repoRoot: string): Promise<nu
           r.status.claim.key,
           r.status.present ? s.green('ok') : s.red('gone'),
           r.status.uncommitted === 0 ? s.dim('0') : s.yellow(String(r.status.uncommitted)),
-          r.status.unpushed === null ? s.dim('-') : r.status.unpushed === 0 ? s.dim('0') : s.yellow(String(r.status.unpushed)),
+          r.status.unpushed === null
+            ? s.dim('-')
+            : r.status.unpushed === 0
+              ? s.dim('0')
+              : s.yellow(String(r.status.unpushed)),
           age(r.status.lastCommitAgeSeconds),
           r.alive === null ? s.dim('-') : r.alive ? s.green(`pid ${r.pid}`) : s.red('dead'),
           r.status.orphaned ? s.red('orphaned') : r.status.claim.state,
@@ -323,26 +355,45 @@ function age(seconds: number | null): string {
  *
  * Delegates to `runProcess`, the only place that knows about Windows shims. A naive
  * `execFile(bin, args)` fails with ENOENT on Windows for npm, pnpm, yarn, bun and
- * friends, because they are `.cmd` files and Node does not resolve PATHEXT.
+ * friends, because they are `.cmd` files and Node does not resolve PATHEXT. The command
+ * is tokenized with quote awareness so a filtered invocation keeps its quotes.
  */
 async function runCommand(
   command: string,
   cwd: string,
 ): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
-  const parts = command.split(/\s+/).filter((p) => p !== '')
+  const parts = tokenizeCommand(command)
   const [bin, ...args] = parts as [string, ...string[]]
   if (bin === undefined) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
   try {
     const result = await runProcess(bin, args, { cwd, timeoutMs: 10 * 60_000 })
-    return { ok: result.exitCode === 0, code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+    return {
+      ok: result.exitCode === 0,
+      code: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    }
   } catch (err) {
-    return { ok: false, code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: err instanceof Error ? err.message : String(err),
+    }
   }
 }
 
 function splitRefs(value: unknown): string[] {
-  if (Array.isArray(value)) return value.flatMap((v) => String(v).split(',')).map((v) => v.trim()).filter((v) => v !== '')
-  if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter((v) => v !== '')
+  if (Array.isArray(value))
+    return value
+      .flatMap((v) => String(v).split(','))
+      .map((v) => v.trim())
+      .filter((v) => v !== '')
+  if (typeof value === 'string')
+    return value
+      .split(',')
+      .map((v) => v.trim())
+      .filter((v) => v !== '')
   return []
 }
 

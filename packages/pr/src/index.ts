@@ -127,15 +127,22 @@ export function resolveReviewers(changedPaths: readonly string[], codeownersText
  * segments), a leading `/` anchoring to the file's directory, and a trailing `/`
  * meaning a directory. Deliberately not a general glob: a wrong match here sends a review
  * to the wrong person, and the failure is invisible.
+ *
+ * **A pattern containing a slash is anchored to the repository root**, whether or not it
+ * leads with one. This is GitHub's rule (CODEOWNERS follows gitignore anchoring), and it
+ * is easy to get backwards: treating `docs/*` as "any `docs/` at any depth" also matches
+ * `packages/docs/x`, which assigns a review the file's owner never asked for. Only
+ * slash-free patterns (`*.ts`, `README.md`) match at any depth.
  */
 export function codeownersMatches(path: string, pattern: string): boolean {
-  const anchored = pattern.startsWith('/')
-  const body = anchored ? pattern.slice(1) : pattern
+  const anchored = pattern.startsWith('/') || pattern.includes('/')
+  const body = pattern.startsWith('/') ? pattern.slice(1) : pattern
   const isDir = body.endsWith('/')
   const clean = isDir ? body.slice(0, -1) : body
 
-  // Unanchored `docs/` matches at any depth, which is CODEOWNERS' documented behaviour
-  // and a common source of surprise if you assume otherwise.
+  // A slash-free pattern is unanchored, so `docs/` matches at any depth -- which is
+  // CODEOWNERS' documented behaviour and a common source of surprise if you assume
+  // otherwise.
   const re = new RegExp(`^${globToBody(clean, anchored, isDir)}$`)
   return re.test(path)
 }
@@ -159,7 +166,7 @@ function globToBody(pattern: string, anchored: boolean, isDir: boolean): string 
         i += 2
         // `**/` should also match zero directories, so swallow the separator.
         if (pattern[i] === '/') {
-          out = out.slice(0, -2) + '(?:.*/)?'
+          out = `${out.slice(0, -2)}(?:.*/)?`
           i += 1
         }
         continue
@@ -238,7 +245,7 @@ export function renderPrBody(input: PrBodyInput): string {
   } else if (input.verifyCommands.length > 0) {
     out.push('### Verification')
     out.push('')
-    out.push('Not run by anvil. These are the project\'s own commands:')
+    out.push("Not run by anvil. These are the project's own commands:")
     out.push('')
     for (const cmd of input.verifyCommands) out.push(`- \`${cmd}\``)
     out.push('')
@@ -255,7 +262,12 @@ export function renderPrBody(input: PrBodyInput): string {
         out.push(`- [ ] \`${r.glob}\` — ${r.reason}`)
       }
       out.push('')
-      out.push(`Files: ${risk.highPaths.slice(0, 10).map((p) => `\`${p}\``).join(', ')}${risk.highPaths.length > 10 ? ` (+${risk.highPaths.length - 10} more)` : ''}`)
+      out.push(
+        `Files: ${risk.highPaths
+          .slice(0, 10)
+          .map((p) => `\`${p}\``)
+          .join(', ')}${risk.highPaths.length > 10 ? ` (+${risk.highPaths.length - 10} more)` : ''}`,
+      )
       out.push('')
     } else if (risk.mediumPaths.length > 0) {
       out.push('This change touches paths the project marks as needing care:')
@@ -277,21 +289,25 @@ export function renderPrBody(input: PrBodyInput): string {
   // The closing keyword is what transitions the ticket on merge.
   out.push(closingKeyword(ticket))
   out.push('')
-  out.push(
-    input.isUpdate === true
-      ? '_Updated by `anvil ship`._'
-      : '_Opened by `anvil ship`._',
-  )
+  out.push(input.isUpdate === true ? '_Updated by `anvil ship`._' : '_Opened by `anvil ship`._')
   out.push('')
   return out.join('\n')
 }
 
-/** The merge-closing keyword for a ticket, per provider syntax. */
+/**
+ * The merge-closing keyword for a ticket, per provider syntax.
+ *
+ * GitHub and GitLab only auto-close an issue when the reference resolves: `#42`,
+ * `owner/repo#42`, or a full issue URL. The human key anvil mints (`gh-42`, `gl-42`) is
+ * *not* one of those forms -- `Closes gh-42` renders as ordinary prose and the ticket
+ * stays open after merge, silently. So the provider-native id is used, with the `#` the
+ * forges require.
+ */
 export function closingKeyword(ticket: Ticket): string {
   switch (ticket.ref.provider) {
     case 'github':
     case 'gitlab':
-      return `Closes ${ticket.ref.key}`
+      return `Closes #${ticket.ref.id}`
     case 'local':
       // A local ticket is not on a forge, so there is nothing to close. Say where the
       // ticket is instead of emitting a keyword that would do nothing.

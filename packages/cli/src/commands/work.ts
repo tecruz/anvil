@@ -6,14 +6,14 @@
  * would be lost if it were released now.
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs, renderTable } from '@anvil/core'
-import { buildProfile } from '@anvil/profile'
 import { currentBranch, mainWorktreeRoot } from '@anvil/git'
-import { parseRef, type NormalizedState, type Ticket, type TicketRef } from '@anvil/tickets'
-import { renderContextBundle, renderAgentsOverlay, CONTEXT_FILE, AGENTS_OVERLAY } from '@anvil/tickets/context'
+import { buildProfile } from '@anvil/profile'
 import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
+import { type NormalizedState, parseRef, type Ticket } from '@anvil/tickets'
+import { AGENTS_OVERLAY, CONTEXT_FILE, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
 import { claimStatuses, claimTicket, findOrphanWorktrees, releaseClaim } from '@anvil/worktrees'
 import type { Command, CommandContext } from './types.ts'
 
@@ -37,7 +37,7 @@ async function mainRootFor(ctx: CommandContext): Promise<string> {
 }
 
 /** Resolve the tickets directory, always against the main worktree. */
-function ticketsDirFor(ctx: CommandContext, mainRoot: string): string {
+function ticketsDirFor(_ctx: CommandContext, mainRoot: string): string {
   const configured = process.env.ANVIL_TICKETS_DIR
   if (configured !== undefined && configured !== '') return resolve(configured)
   return join(mainRoot, DEFAULT_TICKETS_DIR)
@@ -68,7 +68,11 @@ async function loadTicket(ctx: CommandContext, input: string, mainRoot: string):
   return provider.fetch(ref)
 }
 
-const GLOBAL_ONLY = { json: { type: 'boolean', short: 'j' }, noColor: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } as const
+const GLOBAL_ONLY = {
+  json: { type: 'boolean', short: 'j' },
+  noColor: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
+} as const
 
 // ---------------------------------------------------------------------------
 // anvil claim
@@ -80,7 +84,7 @@ export const claimCommand: Command = {
   usage: 'anvil claim <ticket-ref> [--prefix feat] [--base <branch>] [--runner <name>]',
   details: [
     'Creates a worktree outside the repository (a short sibling directory, to stay under',
-    "the Windows path limit) and makes it warm: the ticket, the acceptance criteria, the",
+    'the Windows path limit) and makes it warm: the ticket, the acceptance criteria, the',
     "repository's real verify commands and the high-risk paths are written into the",
     'worktree as a context bundle the agent reads first.',
     '',
@@ -118,9 +122,12 @@ export const claimCommand: Command = {
       ticket,
       ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
       ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
-      ...(typeof args.values['worktree-root'] === 'string' ? { worktreeRoot: args.values['worktree-root'] } : {}),
-      worktreeRoot: config.git.worktreeRoot,
       ...(typeof args.values.runner === 'string' ? { runner: args.values.runner } : {}),
+      // An explicit --worktree-root wins over the config; the config is the fallback.
+      // (This was previously a duplicated object key, so the config value silently
+      // overwrote the flag and the flag did nothing.)
+      worktreeRoot:
+        typeof args.values['worktree-root'] === 'string' ? args.values['worktree-root'] : config.git.worktreeRoot,
     })
 
     const data = {
@@ -183,7 +190,9 @@ export const releaseCommand: Command = {
     const args = parseCliArgs(rawArgs, releaseCommand.flags)
     const key = args.positionals[0]
     if (key === undefined) {
-      throw new AnvilError(ErrorCode.Usage, 'release needs a claim key', { hint: 'Run `anvil status` to list them.' })
+      throw new AnvilError(ErrorCode.Usage, 'release needs a claim key', {
+        hint: 'Run `anvil status` to list them.',
+      })
     }
 
     const repoRoot = await mainRootFor(ctx)
@@ -206,12 +215,11 @@ export const releaseCommand: Command = {
       const err = new AnvilError(ErrorCode.Usage, `Kept ${result.claim.worktreePath}: ${result.retainedBecause}`, {
         hint: 'Commit or push the work, or re-run with --force to discard it.',
       })
-      if (args.values.json === true) {
-        ctx.out(data, () => '')
-        ctx.writeError(`\nerror ${err.message}\nhint  ${err.hint}\n`)
-      } else {
-        ctx.writeError(`\nerror ${err.message}\nhint  ${err.hint}\n`)
-      }
+      ctx.outFailure(
+        data,
+        err,
+        () => `\n${ctx.style.red('error')} ${err.message}\n${ctx.style.dim('hint ')} ${err.hint}\n`,
+      )
       return err.exitCode
     }
 
@@ -359,18 +367,26 @@ export const issueCommand: Command = {
     }
 
     const mainRoot = await mainRootFor(ctx)
-    const dir =
-      typeof args.values.dir === 'string' ? resolve(args.values.dir) : ticketsDirFor(ctx, mainRoot)
+    const dir = typeof args.values.dir === 'string' ? resolve(args.values.dir) : ticketsDirFor(ctx, mainRoot)
     const provider = new LocalTicketProvider({ dir })
 
     if (sub === 'create') {
       const title = args.positionals.slice(1).join(' ').trim()
       if (title === '') {
-        throw new AnvilError(ErrorCode.Usage, 'create needs a title', { hint: 'e.g. `anvil issue create Fix login redirect`.' })
+        throw new AnvilError(ErrorCode.Usage, 'create needs a title', {
+          hint: 'e.g. `anvil issue create Fix login redirect`.',
+        })
       }
       const body = typeof args.values.body === 'string' ? args.values.body : ''
-      const ref = await provider.create({ title, body, labels: toList(args.values.label) })
-      ctx.out({ schemaVersion: 1, created: ref }, () => `${ctx.style.green('created')} ${ref.key}  ${join(dir, `${ref.id}.md`)}`)
+      const ref = await provider.create({
+        title,
+        body,
+        labels: toList(args.values.label),
+      })
+      ctx.out(
+        { schemaVersion: 1, created: ref },
+        () => `${ctx.style.green('created')} ${ref.key}  ${join(dir, `${ref.id}.md`)}`,
+      )
       return undefined
     }
 
@@ -384,10 +400,15 @@ export const issueCommand: Command = {
         const t = await provider.fetch(ref)
         rows.push([ref.key, t.state ?? t.normalizedState, t.title])
       }
-      ctx.out({ schemaVersion: 1, tickets: rows.map((r) => ({ key: r[0], state: r[1], title: r[2] })) }, () =>
-        rows.length === 0
-          ? ctx.style.dim(`(no tickets in ${dir})`)
-          : renderTable(['key', 'state', 'title'], rows, ctx.style),
+      ctx.out(
+        {
+          schemaVersion: 1,
+          tickets: rows.map((r) => ({ key: r[0], state: r[1], title: r[2] })),
+        },
+        () =>
+          rows.length === 0
+            ? ctx.style.dim(`(no tickets in ${dir})`)
+            : renderTable(['key', 'state', 'title'], rows, ctx.style),
       )
       return undefined
     }
@@ -409,7 +430,9 @@ export const issueCommand: Command = {
     if (sub === 'comment') {
       const body = typeof args.values.body === 'string' ? args.values.body : ''
       if (body.trim() === '') {
-        throw new AnvilError(ErrorCode.Usage, 'comment needs a body', { hint: 'Use --body "...".' })
+        throw new AnvilError(ErrorCode.Usage, 'comment needs a body', {
+          hint: 'Use --body "...".',
+        })
       }
       await provider.comment(ref, body)
       ctx.out({ schemaVersion: 1, commented: ref }, () => `${ctx.style.green('commented on')} ${ref.key}`)
@@ -432,7 +455,7 @@ export const issueCommand: Command = {
       // PR -> ticket. The other direction is `ship`, which updates the ticket as it opens
       // the PR; `sync` is for when that update was skipped, or when the PR moved on.
       const { GitHubProvider, hostFromRemote } = await import('@anvil/providers')
-      const { git, mainWorktreeRoot: mainOf } = await import('@anvil/git')
+      const { git } = await import('@anvil/git')
       const { readClaims: readClaimsOf } = await import('@anvil/worktrees')
       const claim = readClaimsOf(mainRoot).claims.find((c) => c.key === ref.key)
       if (claim === undefined) {
@@ -440,14 +463,32 @@ export const issueCommand: Command = {
           hint: 'Run `anvil status` to see claims, or `anvil ship <key>` to open the pull request first.',
         })
       }
+      // Sync is the GitHub side of the bridge. A claim made against a *local* ticket on a
+      // repo that happens to have a GitHub remote would otherwise comment on the
+      // same-numbered GitHub issue -- a different ticket, on a different system.
+      if (claim.ticket.provider !== 'github') {
+        throw new AnvilError(
+          ErrorCode.Usage,
+          `Ticket ${ref.key} is a ${claim.ticket.provider} ticket, not a GitHub issue`,
+          {
+            hint: '`anvil issue sync` links a GitHub pull request to a GitHub issue. A local ticket is updated by `anvil ship` itself.',
+          },
+        )
+      }
 
-      const remote = await git(['remote', 'get-url', 'origin'], { cwd: mainRoot })
+      const remote = await git(['remote', 'get-url', 'origin'], {
+        cwd: mainRoot,
+      })
       const host = hostFromRemote(remote.exitCode === 0 ? remote.stdout.trim() : null)
-      const ghProvider = new GitHubProvider({ ...(host === null ? {} : { host }) })
+      const ghProvider = new GitHubProvider({
+        ...(host === null ? {} : { host }),
+      })
 
       const branch = await currentBranch(claim.worktreePath)
       if (branch === null) {
-        throw new AnvilError(ErrorCode.Usage, `The worktree for ${ref.key} has no branch`, { hint: 'Inspect the worktree, or release and re-claim.' })
+        throw new AnvilError(ErrorCode.Usage, `The worktree for ${ref.key} has no branch`, {
+          hint: 'Inspect the worktree, or release and re-claim.',
+        })
       }
       const pr = await ghProvider.transport().findPullRequest({ cwd: claim.worktreePath, branch })
       if (pr === null) {
@@ -456,7 +497,10 @@ export const issueCommand: Command = {
         })
       }
 
-      const state = pr.state.toUpperCase() === 'MERGED' ? 'done' : 'in_review'
+      // A merged PR means done. A closed-unmerged PR means the work was not shipped, so
+      // calling it `in_review` would claim otherwise. An open PR is in review.
+      const prUpper = pr.state.toUpperCase()
+      const state: NormalizedState = prUpper === 'MERGED' ? 'done' : prUpper === 'CLOSED' ? 'in_progress' : 'in_review'
       const note = `Pull request #${pr.number} is ${pr.state.toLowerCase()}: ${pr.url}`
       await ghProvider.comment(claim.ticket, note)
       await ghProvider.transition(claim.ticket, state)
@@ -474,9 +518,18 @@ export const issueCommand: Command = {
     // pull / refresh: write the context bundle for the current directory.
     const target = requireRepo(ctx)
     const ticket = await provider.fetch(ref)
-    const profile = buildProfile(target, { root: target, host: null, remote: null, defaultBranch: null }).profile
+    const profile = buildProfile(target, {
+      root: target,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
     const branch = await currentBranch(target)
-    const context = renderContextBundle({ ticket, profile, branch: branch ?? 'HEAD' })
+    const context = renderContextBundle({
+      ticket,
+      profile,
+      branch: branch ?? 'HEAD',
+    })
     const overlay = renderAgentsOverlay({ ticket, profile })
     mkdirSync(join(target, '.anvil'), { recursive: true })
     writeFileSync(join(target, context.path), context.content, 'utf8')
@@ -496,7 +549,11 @@ export const issueCommand: Command = {
 
 function toList(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string')
-  if (typeof value === 'string') return value.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  if (typeof value === 'string')
+    return value
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== '')
   return []
 }
 
@@ -565,19 +622,30 @@ export const authCommand: Command = {
       const remote = await git(['remote', 'get-url', 'origin'], { cwd })
       const remoteUrl = remote.exitCode === 0 ? remote.stdout.trim() : null
       const host = hostFromRemote(remoteUrl)
-      const provider = new GitHubProvider({ ...(host === null ? {} : { host }) })
+      const provider = new GitHubProvider({
+        ...(host === null ? {} : { host }),
+      })
       const status = await provider.authStatus()
 
       if (!status.ok) {
         const err = new AnvilError(ErrorCode.AuthFailed, `github provider: ${status.detail ?? 'unavailable'}`, {
           ...(status.remediation === undefined ? {} : { hint: status.remediation }),
         })
-        if (args.values.json === true) ctx.out({ schemaVersion: 1, provider: 'github', ok: false, host }, () => '')
-        ctx.writeError(`\nerror ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`)
+        ctx.outFailure(
+          { schemaVersion: 1, provider: 'github', ok: false, host },
+          err,
+          () => `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`,
+        )
         return err.exitCode
       }
       ctx.out(
-        { schemaVersion: 1, provider: 'github', ok: true, host, identity: status.identity },
+        {
+          schemaVersion: 1,
+          provider: 'github',
+          ok: true,
+          host,
+          identity: status.identity,
+        },
         () =>
           `${ctx.style.green('ok')} github${host === null ? '' : ` (${host})`}: ${status.identity ?? 'authenticated'}`,
       )
@@ -599,13 +667,23 @@ export const authCommand: Command = {
       const err = new AnvilError(ErrorCode.AuthFailed, `local provider: ${status.detail ?? 'unavailable'}`, {
         ...(status.remediation === undefined ? {} : { hint: status.remediation }),
       })
-      if (args.values.json === true) ctx.out({ schemaVersion: 1, provider: 'local', ok: false }, () => '')
-      ctx.writeError(`\nerror ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`)
+      ctx.outFailure(
+        { schemaVersion: 1, provider: 'local', ok: false },
+        err,
+        () => `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`,
+      )
       return err.exitCode
     }
 
-    ctx.out({ schemaVersion: 1, provider: 'local', ok: true, identity: status.identity, dir }, () =>
-      `${ctx.style.green('ok')} local provider: ${status.identity ?? dir}`,
+    ctx.out(
+      {
+        schemaVersion: 1,
+        provider: 'local',
+        ok: true,
+        identity: status.identity,
+        dir,
+      },
+      () => `${ctx.style.green('ok')} local provider: ${status.identity ?? dir}`,
     )
     return undefined
   },

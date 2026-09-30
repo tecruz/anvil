@@ -19,14 +19,14 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync, existsSync, openSync, writeSync, closeSync } from 'node:fs'
-import { join } from 'node:path'
+import { closeSync, existsSync, mkdirSync, openSync, writeFileSync, writeSync } from 'node:fs'
 import { availableParallelism, cpus } from 'node:os'
+import { join } from 'node:path'
 import { spawnArgv } from '@anvil/core'
 import { mainWorktreeRoot } from '@anvil/git'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
-import { claimTicket, readClaims, writeClaims, type Claim } from './index.ts'
+import { type Claim, claimTicket, readClaims, writeClaims } from './index.ts'
 
 // ---------------------------------------------------------------------------
 // Concurrency policy
@@ -50,20 +50,68 @@ interface IsolationRule {
  * content-addressed (Go) or the tool takes its own file locks (Cargo).
  */
 const ISOLATION_RULES: readonly IsolationRule[] = [
-  { match: 'gradle', isolation: 'serialized', reason: 'Gradle shares a mutable cache in the user home directory (~/.gradle)' },
-  { match: 'jvm', isolation: 'serialized', reason: 'Gradle shares a mutable cache in the user home directory (~/.gradle)' },
-  { match: 'maven', isolation: 'serialized', reason: 'Maven shares a local repository at ~/.m2/repository' },
+  {
+    match: 'gradle',
+    isolation: 'serialized',
+    reason: 'Gradle shares a mutable cache in the user home directory (~/.gradle)',
+  },
+  {
+    match: 'jvm',
+    isolation: 'serialized',
+    reason: 'Gradle shares a mutable cache in the user home directory (~/.gradle)',
+  },
+  {
+    match: 'maven',
+    isolation: 'serialized',
+    reason: 'Maven shares a local repository at ~/.m2/repository',
+  },
   // A Node project emits the stack id `node`, not `npm`, so that is what has to be
   // matched. The registry installer and the build both write to ~/.npm.
-  { match: 'node', isolation: 'serialized', reason: 'npm shares a content cache and install tree in ~/.npm' },
-  { match: 'bun', isolation: 'serialized', reason: 'Bun shares an install cache in the user home directory' },
-  { match: 'pnpm', isolation: 'serialized', reason: 'pnpm shares a content-addressable store, but installs still serialize' },
-  { match: 'yarn', isolation: 'serialized', reason: 'Yarn shares a cache in the user home directory' },
-  { match: 'bazel', isolation: 'serialized', reason: 'Bazel shares an output base unless the worktree sets its own' },
-  { match: 'go', isolation: 'safe', reason: 'the Go build cache is content-addressed and concurrency-safe' },
-  { match: 'rust', isolation: 'safe', reason: 'Cargo takes its own file locks on the shared home, and each worktree has its own target/' },
-  { match: 'python', isolation: 'safe', reason: 'Python has no shared build cache' },
-  { match: 'ruby', isolation: 'safe', reason: 'Ruby has no shared build cache' },
+  {
+    match: 'node',
+    isolation: 'serialized',
+    reason: 'npm shares a content cache and install tree in ~/.npm',
+  },
+  {
+    match: 'bun',
+    isolation: 'serialized',
+    reason: 'Bun shares an install cache in the user home directory',
+  },
+  {
+    match: 'pnpm',
+    isolation: 'serialized',
+    reason: 'pnpm shares a content-addressable store, but installs still serialize',
+  },
+  {
+    match: 'yarn',
+    isolation: 'serialized',
+    reason: 'Yarn shares a cache in the user home directory',
+  },
+  {
+    match: 'bazel',
+    isolation: 'serialized',
+    reason: 'Bazel shares an output base unless the worktree sets its own',
+  },
+  {
+    match: 'go',
+    isolation: 'safe',
+    reason: 'the Go build cache is content-addressed and concurrency-safe',
+  },
+  {
+    match: 'rust',
+    isolation: 'safe',
+    reason: 'Cargo takes its own file locks on the shared home, and each worktree has its own target/',
+  },
+  {
+    match: 'python',
+    isolation: 'safe',
+    reason: 'Python has no shared build cache',
+  },
+  {
+    match: 'ruby',
+    isolation: 'safe',
+    reason: 'Ruby has no shared build cache',
+  },
 ]
 
 export interface ConcurrencyDecision {
@@ -111,7 +159,10 @@ export function concurrencyFor(profile: ProjectProfile, requested: number | null
   const jobs = requested ?? defaultJobs()
   return {
     jobs,
-    reason: requested === null ? `${jobs} concurrent runs (half of ${availableParallelism()} reported cores)` : `${jobs} concurrent runs (--jobs)`,
+    reason:
+      requested === null
+        ? `${jobs} concurrent runs (half of ${availableParallelism()} reported cores)`
+        : `${jobs} concurrent runs (--jobs)`,
     forcedByCaches: false,
     rules: [],
   }
@@ -175,7 +226,13 @@ export interface AgentLaunch {
   detail: string
 }
 
-export type AgentLauncher = (options: { worktree: string; key: string; prompt: string; logPath: string; runner: string }) => Promise<{ pid: number | null; detail: string }>
+export type AgentLauncher = (options: {
+  worktree: string
+  key: string
+  prompt: string
+  logPath: string
+  runner: string
+}) => Promise<{ pid: number | null; detail: string }>
 
 export interface CrewUpResult {
   claims: Claim[]
@@ -212,7 +269,10 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
       })
       claims.push(result.claim)
     } catch (err) {
-      failures.push({ key: ticket.ref.key, reason: err instanceof Error ? err.message : String(err) })
+      failures.push({
+        key: ticket.ref.key,
+        reason: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -265,11 +325,21 @@ function recordLaunch(repoRoot: string, key: string, pid: number | null): void {
   const registry = readClaims(repoRoot)
   registry.claims = registry.claims.map((c) =>
     c.key === key
-      ? { ...c, agent: { ...(c.agent ?? { runner: 'opencode' }), launchedAt: new Date().toISOString(), ...(pid === null ? {} : { sessionId: String(pid) }) } }
+      ? {
+          ...c,
+          agent: {
+            ...(c.agent ?? { runner: 'opencode' }),
+            launchedAt: new Date().toISOString(),
+            ...(pid === null ? {} : { sessionId: String(pid) }),
+          },
+        }
       : c,
   )
   writeClaims(repoRoot, registry)
 }
+
+/** Where the launch prompt is written inside the worktree, so argv stays single-line. */
+export const PROMPT_FILE = '.anvil/agent-prompt.md'
 
 /**
  * The prompt an agent starts with.
@@ -283,7 +353,7 @@ export function agentPrompt(claim: Claim, repoRoot: string): string {
     `You are working in a dedicated git worktree for ticket ${claim.key}, on branch ${claim.branch}.`,
     '',
     'Start here:',
-    '1. Read .anvil/ticket.md. It has the task, the acceptance criteria and this repository\'s verify commands.',
+    "1. Read .anvil/ticket.md. It has the task, the acceptance criteria and this repository's verify commands.",
     '2. Read the repository AGENTS.md if there is one; it still applies.',
     `3. If anything is unclear, the original tickets are in ${join(repoRoot, '.anvil', 'tickets')}.`,
     '',
@@ -317,7 +387,20 @@ export async function launchOpencodeAgent(options: {
   const binary = options.runner === 'opencode' ? 'opencode' : options.runner
   const platform = options.platform ?? process.platform
   const env = options.env ?? process.env
-  const args = ['run', '--dir', options.worktree, '--print-logs', options.prompt]
+
+  // The prompt is a multi-line document (see `agentPrompt`), and a newline is one of the
+  // characters the Windows shim path refuses in an argv entry: through `cmd.exe` a
+  // newline is a command separator, and "refuse, do not escape" is this module's whole
+  // policy. So the full prompt is written to a file inside the worktree and argv carries a
+  // single-line instruction to read it. That keeps the shim-safety invariant intact while
+  // still handing the agent the complete brief.
+  const promptFile = PROMPT_FILE
+  const promptPath = join(options.worktree, promptFile)
+  mkdirSync(join(options.worktree, '.anvil'), { recursive: true })
+  writeFileSync(promptPath, options.prompt, 'utf8')
+  const launchArg = `Read ${promptFile} and follow every instruction in it exactly.`
+
+  const args = ['run', '--dir', options.worktree, '--print-logs', launchArg]
 
   // `spawnArgv` rather than `spawn(binary, ...)`: the npm-installed `opencode` is a `.CMD`
   // shim on Windows, and Node's spawn does not resolve PATHEXT, so the bare form fails
@@ -390,7 +473,12 @@ export interface VerifyResult {
   worktree: string
   ok: boolean
   /** Per-command outcomes. */
-  commands: Array<{ command: string; ok: boolean; code: number; detail: string }>
+  commands: Array<{
+    command: string
+    ok: boolean
+    code: number
+    detail: string
+  }>
   error?: string
 }
 
@@ -432,7 +520,10 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
   const runnable: Claim[] = []
   for (const claim of targets) {
     if (!existsSync(claim.worktreePath)) {
-      skipped.push({ key: claim.key, reason: `worktree is gone: ${claim.worktreePath}` })
+      skipped.push({
+        key: claim.key,
+        reason: `worktree is gone: ${claim.worktreePath}`,
+      })
       continue
     }
     runnable.push(claim)
@@ -455,7 +546,13 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
   const results = await mapWithConcurrency(runnable, decision.jobs, async (claim) => {
     const commands = verifyCommandsFor(claim, profile)
     if (commands.length === 0) {
-      return { key: claim.key, worktree: claim.worktreePath, ok: false, commands: [], error: 'no verify command detected' }
+      return {
+        key: claim.key,
+        worktree: claim.worktreePath,
+        ok: false,
+        commands: [],
+        error: 'no verify command detected',
+      }
     }
     const perCommand: VerifyResult['commands'] = []
     for (const command of commands) {
@@ -478,7 +575,12 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
     }
   })
 
-  return { results, ok: results.every((r) => r.ok), concurrency: decision, skipped }
+  return {
+    results,
+    ok: results.every((r) => r.ok),
+    concurrency: decision,
+    skipped,
+  }
 }
 
 function verifyCommandsFor(claim: Claim, profile: ProjectProfile): string[] {
@@ -495,5 +597,10 @@ function verifyCommandsFor(claim: Claim, profile: ProjectProfile): string[] {
 }
 
 function buildProfileFor(dir: string): ProjectProfile {
-  return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+  return buildProfile(dir, {
+    root: dir,
+    host: null,
+    remote: null,
+    defaultBranch: null,
+  }).profile
 }

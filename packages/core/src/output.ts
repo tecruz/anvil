@@ -10,8 +10,8 @@
  * and must stay stable. Additive fields are fine; renaming or retyping is not.
  */
 
+import { type AnvilError, type ExitCodeValue, toAnvilError } from './errors.ts'
 import { SCHEMA_VERSION } from './version.ts'
-import { AnvilError, ExitCode, toAnvilError, type ExitCodeValue } from './errors.ts'
 
 export interface SuccessEnvelope<T = unknown> {
   schemaVersion: typeof SCHEMA_VERSION
@@ -30,6 +30,15 @@ export interface FailureEnvelope {
     hint?: string
     details?: Record<string, unknown>
   }
+  /**
+   * The full result payload, for failures that still produced one.
+   *
+   * `crew verify` runs everything, reports every worktree, and exits non-zero if any
+   * failed; `init --apply` prints the staged report and then refuses. The report is the
+   * answer in both cases, so it travels with the failure rather than inside a success
+   * envelope. Additive, so existing consumers are unaffected.
+   */
+  data?: unknown
 }
 
 export type Envelope<T = unknown> = SuccessEnvelope<T> | FailureEnvelope
@@ -38,8 +47,14 @@ export function success<T>(command: string, data: T): SuccessEnvelope<T> {
   return { schemaVersion: SCHEMA_VERSION, ok: true, command, data }
 }
 
-export function failure(command: string, error: AnvilError): FailureEnvelope {
-  return { schemaVersion: SCHEMA_VERSION, ok: false, command, error: error.toJSON() }
+export function failure(command: string, error: AnvilError, data?: unknown): FailureEnvelope {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    ok: false,
+    command,
+    error: error.toJSON(),
+    ...(data === undefined ? {} : { data }),
+  }
 }
 
 export interface WriteOptions {
@@ -48,9 +63,9 @@ export interface WriteOptions {
   stderr?: (chunk: string) => void
 }
 
-export function emitJson<T>(command: string, envelope: Envelope<T>, opts: WriteOptions = {}): void {
+export function emitJson<T>(_command: string, envelope: Envelope<T>, opts: WriteOptions = {}): void {
   const write = opts.stdout ?? ((chunk: string) => process.stdout.write(chunk))
-  write(JSON.stringify(envelope, null, 2) + '\n')
+  write(`${JSON.stringify(envelope, null, 2)}\n`)
 }
 
 export function emitFailure(command: string, err: unknown, opts: WriteOptions = {}): ExitCodeValue {
@@ -100,18 +115,11 @@ export function shouldUseColor(opts: {
  * from content, and `maxWidth` truncates the widest columns from the right so long
  * paths do not wrap a terminal into unreadability.
  */
-export function renderTable(
-  headers: string[],
-  rows: string[][],
-  style: Style,
-  maxWidth = 120,
-): string {
+export function renderTable(headers: string[], rows: string[][], style: Style, maxWidth = 120): string {
   if (rows.length === 0) return style.dim('(none)')
 
   const columns = headers.length
-  const widths: number[] = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)),
-  )
+  const widths: number[] = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)))
 
   // Shrink from the widest column until the table fits.
   let total = widths.reduce((a, b) => a + b, columns * 3 - 1)
@@ -126,13 +134,22 @@ export function renderTable(
     total -= 1
   }
 
-  const truncate = (s: string, w: number): string => (s.length <= w ? s : s.slice(0, w - 1) + '…')
+  const truncate = (s: string, w: number): string => (s.length <= w ? s : `${s.slice(0, w - 1)}…`)
   const pad = (s: string, w: number): string => s + ' '.repeat(Math.max(0, w - s.length))
 
   const line = (cells: string[], styler: (s: string) => string = (s) => s): string =>
-    cells.map((c, i) => styler(pad(truncate(c, widths[i] ?? 0), widths[i] ?? 0))).join('  ').trimEnd()
+    cells
+      .map((c, i) => styler(pad(truncate(c, widths[i] ?? 0), widths[i] ?? 0)))
+      .join('  ')
+      .trimEnd()
 
-  const out: string[] = [line(headers, style.bold), line(widths.map((w) => '─'.repeat(w)), style.dim)]
+  const out: string[] = [
+    line(headers, style.bold),
+    line(
+      widths.map((w) => '─'.repeat(w)),
+      style.dim,
+    ),
+  ]
   for (const row of rows) {
     out.push(line(headers.map((_, i) => row[i] ?? '')))
   }
@@ -140,15 +157,9 @@ export function renderTable(
 }
 
 /** Key/value block used by `config show` and similar. */
-export function renderKeyValues(
-  entries: Array<[string, string]>,
-  style: Style,
-  indent = '  ',
-): string {
+export function renderKeyValues(entries: Array<[string, string]>, style: Style, indent = '  '): string {
   const width = Math.max(0, ...entries.map(([k]) => k.length))
-  return entries
-    .map(([k, v]) => `${indent}${style.dim(pad(k, width))}  ${v}`)
-    .join('\n')
+  return entries.map(([k, v]) => `${indent}${style.dim(pad(k, width))}  ${v}`).join('\n')
 }
 
 function pad(s: string, w: number): string {

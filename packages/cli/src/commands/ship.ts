@@ -6,36 +6,59 @@
  * lives in `ship()` itself, where it can be tested without git, gh or a network.
  */
 
-import { join, resolve } from 'node:path'
-import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess } from '@anvil/core'
-import { buildProfile } from '@anvil/profile'
-import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
-import { parseRef, type Ticket } from '@anvil/tickets'
-import { ship, type ShipResult } from '@anvil/worktrees/ship'
-import { readClaims } from '@anvil/worktrees'
-import { DEFAULT_TICKETS_DIR, GitHubProvider, GhForgeTransport, LocalTicketProvider, hostFromRemote } from '@anvil/providers'
-import { execFile } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { promisify } from 'node:util'
+import { join } from 'node:path'
+import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
+import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
+import { buildProfile } from '@anvil/profile'
+import {
+  DEFAULT_TICKETS_DIR,
+  GhForgeTransport,
+  GitHubProvider,
+  hostFromRemote,
+  LocalTicketProvider,
+} from '@anvil/providers'
+import { parseRef, type Ticket } from '@anvil/tickets'
+import { readClaims } from '@anvil/worktrees'
+import { type ShipResult, ship } from '@anvil/worktrees/ship'
 import type { Command, CommandContext } from './types.ts'
 
-
-const GLOBAL_ONLY = { json: { type: 'boolean', short: 'j' }, noColor: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } as const
+const GLOBAL_ONLY = {
+  json: { type: 'boolean', short: 'j' },
+  noColor: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
+} as const
 
 /**
  * Run a verify command in the worktree.
  *
- * Delegates to `runProcess`, the only place that knows about Windows shims.
+ * Delegates to `runProcess`, the only place that knows about Windows shims. The command
+ * is tokenized with quote awareness first: verify commands are stored as one string
+ * (`./gradlew test --tests "*Changed*"`), and a whitespace split would pass the quotes
+ * through as part of the argument, quietly turning a filtered run into an empty one.
  */
-async function runCommand(command: string, cwd: string): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
-  const parts = command.split(/\s+/).filter((p) => p !== '')
+async function runCommand(
+  command: string,
+  cwd: string,
+): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+  const parts = tokenizeCommand(command)
   const [bin, ...args] = parts as [string, ...string[]]
   if (bin === undefined) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
   try {
     const result = await runProcess(bin, args, { cwd, timeoutMs: 10 * 60_000 })
-    return { ok: result.exitCode === 0, code: result.exitCode, stdout: result.stdout, stderr: result.stderr }
+    return {
+      ok: result.exitCode === 0,
+      code: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    }
   } catch (err) {
-    return { ok: false, code: 1, stdout: '', stderr: err instanceof Error ? err.message : String(err) }
+    return {
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: err instanceof Error ? err.message : String(err),
+    }
   }
 }
 
@@ -55,7 +78,7 @@ export const shipCommand: Command = {
     'Refuses before pushing when the worktree has uncommitted changes (ship ships',
     'commits, not a working tree) or when the branch has no commits beyond its base.',
     '',
-    '--probe          actually run the project\'s verify commands (slow; off by default)',
+    "--probe          actually run the project's verify commands (slow; off by default)",
     '--skip-verify    acknowledge them and proceed',
     '--draft          open the pull request as a draft',
     '--reviewers a,b  add reviewers on top of those resolved from CODEOWNERS',
@@ -74,7 +97,9 @@ export const shipCommand: Command = {
     const args = parseCliArgs(rawArgs, shipCommand.flags)
     const key = args.positionals[0]
     if (key === undefined) {
-      throw new AnvilError(ErrorCode.Usage, 'ship needs a claim key', { hint: 'Run `anvil status` to list claims.' })
+      throw new AnvilError(ErrorCode.Usage, 'ship needs a claim key', {
+        hint: 'Run `anvil status` to list claims.',
+      })
     }
     if (ctx.repoRoot === null) {
       throw new AnvilError(ErrorCode.NotAGitRepo, 'Not inside a git repository')
@@ -83,7 +108,9 @@ export const shipCommand: Command = {
 
     const claim = readClaims(repoRoot).claims.find((c) => c.key === key)
     if (claim === undefined) {
-      throw new AnvilError(ErrorCode.Usage, `No claim for "${key}"`, { hint: 'Run `anvil status` to list claims.' })
+      throw new AnvilError(ErrorCode.Usage, `No claim for "${key}"`, {
+        hint: 'Run `anvil status` to list claims.',
+      })
     }
 
     const branch = await currentBranch(claim.worktreePath)
@@ -104,7 +131,9 @@ export const shipCommand: Command = {
 
     // GitHub is the only forge in M4, so the transport is chosen by whether the repo's
     // remote is GitHub at all. Anything else is a clear error rather than a guess.
-    const remote = await git(['remote', 'get-url', 'origin'], { cwd: repoRoot })
+    const remote = await git(['remote', 'get-url', 'origin'], {
+      cwd: repoRoot,
+    })
     const remoteUrl = remote.exitCode === 0 ? remote.stdout.trim() : null
     const host = hostFromRemote(remoteUrl)
     const gh = new GitHubProvider({ ...(host === null ? {} : { host }) })
@@ -116,7 +145,9 @@ export const shipCommand: Command = {
     }
 
     const provider = new GitHubProvider({ ...(host === null ? {} : { host }) })
-    const transport = new GhForgeTransport({ ...(host === null ? {} : { host }) })
+    const transport = new GhForgeTransport({
+      ...(host === null ? {} : { host }),
+    })
 
     const result: ShipResult = await ship({
       repoRoot,
@@ -158,8 +189,15 @@ export const shipCommand: Command = {
         ...(hintForStage(failed?.name) === undefined ? {} : { hint: hintForStage(failed?.name) as string }),
         details: { stages: result.stages },
       })
-      if (args.values.json === true) ctx.out(data, () => '')
-      ctx.writeError(`\nerror ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`)
+      // The stage report is the answer even when a stage failed (the plan says a failed
+      // verify means nothing was pushed), so it rides on the failure envelope. Emitting it
+      // as a success envelope with the error nested in `data` would tell a JSON consumer
+      // the ship worked.
+      ctx.outFailure(
+        data,
+        err,
+        () => `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`,
+      )
       return err.exitCode
     }
 
@@ -180,7 +218,9 @@ export const shipCommand: Command = {
         out.push(`  pull request  ${result.pr.url} ${s.dim(result.pr.created ? '(new)' : '(updated)')}`)
       }
       if (result.risk.level !== null) {
-        out.push(`  risk          ${result.risk.level === 'high' ? s.red('HIGH') : s.yellow('medium')} ${s.dim(`${result.risk.highPaths.length} high, ${result.risk.mediumPaths.length} medium`)}`)
+        out.push(
+          `  risk          ${result.risk.level === 'high' ? s.red('HIGH') : s.yellow('medium')} ${s.dim(`${result.risk.highPaths.length} high, ${result.risk.mediumPaths.length} medium`)}`,
+        )
       }
       if (result.reviewers.length > 0) out.push(`  reviewers     ${result.reviewers.map((r) => `@${r}`).join(', ')}`)
       return out.join('\n')
@@ -208,7 +248,10 @@ function hintForStage(stage: string | undefined): string | undefined {
 
 function splitList(value: unknown): string[] {
   if (typeof value !== 'string' || value === '') return []
-  return value.split(',').map((v) => v.trim().replace(/^@/, '')).filter((v) => v !== '')
+  return value
+    .split(',')
+    .map((v) => v.trim().replace(/^@/, ''))
+    .filter((v) => v !== '')
 }
 
 function readTextFile(path: string): string | null {
@@ -229,10 +272,16 @@ async function mainRootFor(ctx: CommandContext): Promise<string> {
   return (await mainWorktreeRoot(cwd)) ?? cwd
 }
 
-async function loadTicketFor(ctx: CommandContext, repoRoot: string, ref: { provider: string; id: string; key: string }): Promise<Ticket> {
+async function loadTicketFor(
+  _ctx: CommandContext,
+  repoRoot: string,
+  ref: { provider: string; id: string; key: string },
+): Promise<Ticket> {
   if (ref.provider === 'github') {
     const host = hostFromRemote((await git(['remote', 'get-url', 'origin'], { cwd: repoRoot })).stdout.trim() ?? null)
     return new GitHubProvider({ ...(host === null ? {} : { host }) }).fetch(parseRef(ref.id, 'github'))
   }
-  return new LocalTicketProvider({ dir: join(repoRoot, DEFAULT_TICKETS_DIR) }).fetch(parseRef(ref.id, 'local'))
+  return new LocalTicketProvider({
+    dir: join(repoRoot, DEFAULT_TICKETS_DIR),
+  }).fetch(parseRef(ref.id, 'local'))
 }
