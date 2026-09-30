@@ -35,6 +35,30 @@ all. Tests and typechecking are CI's job, and `npm run check` before you push.
 It also refuses to run when `node_modules` is missing, and says so, rather than failing with
 "command not found" or -- worse -- passing without checking anything.
 
+## What ships, and where from
+
+There is no npm release. The distribution is the repository itself
+(`npm install -g github:tecruz/anvil`), and that decides the manifest layout: **npm packs the
+repository root for a git dependency**, and there is no subdirectory install — the fragment
+after `#` is parsed as a git ref, not a path. So the root `package.json` is the package, with
+`bin` pointing down into `packages/cli/dist/cli.js`. [ADR-0007](docs/adr/0007-distribution-git-install.md)
+records the reasoning and supersedes the publish target in ADR-0006.
+
+Two consequences for you as a contributor:
+
+- **`npm ci` builds the bundle.** `prepare` runs `npm run build` on install, because
+  `packages/*/dist/` is gitignored and a clone otherwise has no CLI. That is deliberate: the
+  thing you test is the thing a user installs.
+- **Two version fields exist and a test keeps them equal.** The root's version is the one that
+  ships; `packages/cli` has one because npm expects it. If you bump a version, bump both —
+  the test will tell you.
+
+`npm pack` from the root produces exactly what a user receives, and the packaging test does
+that, installs the tarball and runs the installed binary.
+
+If you would rather not install anything globally, the equivalent is
+`node packages/cli/dist/cli.js <command>` after `npm run build`.
+
 ## Things that will be asked
 
 - **An unverified change is not a proposal.** State the command you ran and what it printed.

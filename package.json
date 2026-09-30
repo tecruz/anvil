@@ -1,17 +1,46 @@
 {
-  "name": "anvil-workspace",
-  "private": true,
+  "name": "anvil",
+  "version": "0.1.0",
   "type": "module",
   "description": "AI-ready dev harness: audit repos, derive agent context, work tickets in parallel worktrees.",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "agent",
+    "agents",
+    "cli",
+    "code-review",
+    "developer-tools",
+    "git",
+    "opencode",
+    "worktree"
+  ],
+  "bin": {
+    "anvil": "./packages/cli/dist/cli.js"
+  },
   "engines": {
     "node": ">=22.6.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tecruz/anvil.git"
+  },
+  "homepage": "https://github.com/tecruz/anvil#readme",
+  "bugs": {
+    "url": "https://github.com/tecruz/anvil/issues"
+  },
+  "files": [
+    "packages/cli/dist/cli.js",
+    "README.md",
+    "LICENSE"
+  ],
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "build": "npm run gen:playbooks && node scripts/build.mjs",
     "gen:playbooks": "node scripts/gen-playbooks.ts",
+    "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",

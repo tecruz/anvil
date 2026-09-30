@@ -35,21 +35,101 @@ function tempDir(prefix: string): string {
   return d
 }
 
-describe('publishable package', () => {
-  test('the CLI package is the one that publishes', () => {
-    // ADR-0006 settled this: the bundle lives in packages/cli, so packages/cli is the
-    // publishable unit. A root-level `bin` would be unpublishable.
-    assert.equal(CLI_PKG.private, undefined, 'a private package cannot be published')
-    assert.equal(ROOT_PKG.private, true, 'the workspace root stays private')
-    assert.notEqual(CLI_PKG.name, ROOT_PKG.name, 'they must not share a name')
+describe('the distribution is installable from a git URL', () => {
+  // ADR-0007. The channel is `npm i github:owner/repo`, not the registry, and that choice
+  // dictates the manifest layout: npm packs the **repository root** for a git dependency, so
+  // a root that is `private: true` with no `bin` installs something that cannot run.
+  //
+  // These were established by experiment rather than assumption, because both are the sort of
+  // thing that is easy to believe and expensive to discover:
+  //
+  //   npm i git+file:///repo#packages/cli   ->  git checkout packages/cli: pathspec did not match
+  //
+  // npm parses the fragment as a *ref*, not a path, so there is no subdirectory install. The
+  // root is the only candidate, which is why this reverses the publish target ADR-0006 chose.
+
+  test('the root manifest is a real package, not a private workspace holder', () => {
+    assert.equal(ROOT_PKG.private, undefined, 'a private root cannot be installed from a git URL')
+    assert.equal(ROOT_PKG.name, 'anvil', 'the installed package should be named for the command')
+    assert.equal(ROOT_PKG.version, CLI_PKG.version, 'two version fields must not be able to drift')
   })
 
-  test('the name is the unscoped one, so `anvil` is what a user types', () => {
-    // A scoped `@anvil/cli` would install as `anvil` via the bin key but show up in
-    // `npm ls` as a scope the user never chose. The bin is what people type, so the
-    // package name should match it.
-    assert.equal(CLI_PKG.name, 'anvil')
+  test('the root exposes the binary', () => {
+    assert.deepEqual(ROOT_PKG.bin, { anvil: './packages/cli/dist/cli.js' })
+    // The path stays *inside* the package. ADR-0006 rejected a root bin because it had to
+    // point outside its own root; pointing down into a workspace directory is not that, and
+    // it is the only layout where the bundle can live where the build puts it.
+    const bin = String((ROOT_PKG.bin as Record<string, string>).anvil)
+    assert.ok(!bin.includes('..'), 'a bin escaping the package root breaks on install')
+  })
+
+  test('the bin path exists after a build', () => {
+    // The failure this catches is the one a source checkout never sees: the manifest is
+    // correct, the file is not there, and only a user finds out.
+    const bin = resolve(REPO_ROOT, String((ROOT_PKG.bin as Record<string, string>).anvil))
+    if (!existsSync(join(REPO_ROOT, 'packages', 'cli', 'dist'))) return // nothing built yet
+    assert.ok(existsSync(bin), `${bin} is missing; the bin points at a file the build does not emit`)
+  })
+
+  test('a git install builds the bundle, so there is a prepare script', () => {
+    // npm runs `prepare` after installing a git dependency's devDependencies, which is the
+    // only reason a git install of a TypeScript monorepo produces a working binary at all.
+    // Without it, `dist/` is gitignored and the install ships no CLI.
+    assert.equal(
+      (ROOT_PKG.scripts as Record<string, string>).prepare,
+      'npm run build',
+      'the prepare script is what makes a git install work',
+    )
+  })
+
+  test('the tarball ships the bundle and the licence, and nothing incidental', () => {
+    const files = ROOT_PKG.files as string[]
+    assert.ok(Array.isArray(files), 'files must be an allowlist, or the whole repo is installed')
+    assert.ok(files.includes('packages/cli/dist/cli.js'), 'the bundle is the whole product')
+    assert.ok(files.includes('LICENSE'), 'a redistributed binary should carry its licence')
+    assert.ok(!files.some((f) => f.startsWith('packages/') && f.includes('/src/')), 'no source')
+    assert.ok(!files.some((f) => f.includes('test')), 'tests are not part of the distribution')
+  })
+
+  test('the README the install instructions live in is actually shipped', () => {
+    // `files` listing a README that does not exist is a silent packaging bug: npm skips it
+    // and the installed package has no documentation at all.
+    const files = ROOT_PKG.files as string[]
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue
+      assert.ok(existsSync(join(REPO_ROOT, ...f.split('/'))), `${f} is listed in files but does not exist`)
+    }
+  })
+
+  test('the root declares the engine, because the root is what gets installed', () => {
+    const engines = ROOT_PKG.engines as { node: string }
+    assert.match(engines.node, />=22/)
+  })
+
+  test('the repository URLs point at the owner who publishes it', () => {
+    // They said `anomalyco/anvil`, which is not this repository's owner. A `repository` URL
+    // is what a bug report's "view source" link resolves to, so a wrong one sends a reader
+    // to somebody else's code.
+    const repo = ROOT_PKG.repository as { url: string }
+    assert.match(repo.url, /github\.com\/tecruz\//, 'the repository URL must match the account that owns it')
+  })
+})
+
+describe('publishable package', () => {
+  test('the CLI package keeps its own bin for a future registry release', () => {
+    // ADR-0006's layout decision stands -- the bundle lives in packages/cli/dist and the bin
+    // points at it -- even though the git channel ships from the root. Both can be true: the
+    // root is the install unit today, and `packages/cli` remains a coherent publish target if
+    // the registry is ever wanted.
+    assert.equal(CLI_PKG.private, undefined, 'a private package cannot be published')
+    assert.notEqual(CLI_PKG.name, ROOT_PKG.name, 'two manifests must not share a name')
     assert.deepEqual(CLI_PKG.bin, { anvil: './dist/cli.js' })
+  })
+
+  test('the bin is what people type, and it is unscoped', () => {
+    // A scoped `@anvil/cli` installs as `anvil` via the bin key but shows up in `npm ls` as
+    // a scope the user never chose. The bin is what people type, so it stays unscoped.
+    assert.equal((CLI_PKG.bin as Record<string, string>).anvil, './dist/cli.js')
   })
 
   test('the version in the bundle is the version in the published package.json', () => {
@@ -64,7 +144,7 @@ describe('publishable package', () => {
     const parsed = JSON.parse(out) as { data: { version: string } }
     assert.equal(
       parsed.data.version,
-      CLI_PKG.version,
+      ROOT_PKG.version,
       'a published binary reporting the wrong version is how a bug report lands on the wrong release',
     )
   })
@@ -167,10 +247,14 @@ describe('the packed tarball installs and runs', () => {
     // Windows-shim problem for the CLI, and its own test should not reintroduce it (or the
     // DEP0190 deprecation warning) by going through a shell. The arguments here are
     // controlled, so the shim path passes the safety check untouched.
-    const packed = await runProcess('npm', ['pack', '--pack-destination', packDir], { cwd: CLI_DIR })
+    //
+    // Packed from the **root**, because that is the manifest npm packs for a git dependency
+    // and therefore the tarball a user actually receives. Packing `packages/cli` would test
+    // an artifact nobody installs.
+    const packed = await runProcess('npm', ['pack', '--pack-destination', packDir], { cwd: REPO_ROOT })
     assert.equal(packed.exitCode, 0, `npm pack failed: ${packed.stderr}`)
 
-    const tarball = join(packDir, `${String(CLI_PKG.name)}-${String(CLI_PKG.version)}.tgz`)
+    const tarball = join(packDir, `${String(ROOT_PKG.name)}-${String(ROOT_PKG.version)}.tgz`)
     assert.ok(existsSync(tarball), `expected ${tarball} to exist`)
 
     // A consumer project, so the install resolves exactly as a user's would.
@@ -215,7 +299,7 @@ describe('the packed tarball installs and runs', () => {
     // 1. It reports its own version, which is what a user pastes into a bug report.
     const version = await run('version', '--json')
     assert.equal(version.status, 0, `version failed: ${version.stderr}`)
-    assert.equal((JSON.parse(version.stdout) as { data: { version: string } }).data.version, CLI_PKG.version)
+    assert.equal((JSON.parse(version.stdout) as { data: { version: string } }).data.version, ROOT_PKG.version)
 
     // 2. The JSON envelope survives bundling and minification.
     const doctor = await run('doctor', '--json')

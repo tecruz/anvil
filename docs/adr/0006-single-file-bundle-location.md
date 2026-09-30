@@ -1,8 +1,16 @@
 # ADR-0006: Single-file bundle lives in `packages/cli/dist`, not the workspace root
 
-- Status: accepted
+- Status: accepted — the layout stands; the *publish target* it chose is superseded by
+  [ADR-0007](0007-distribution-git-install.md)
 - Date: 2026-09-28
 - Milestone: M0
+
+> **Superseded in part.** This ADR decided that the bundle lives in `packages/cli/dist` and
+> that `packages/cli` is the publishable unit, because the registry was the assumed channel.
+> The distribution is now a git install, and npm packs the repository root for a git
+> dependency — there is no subdirectory install, which was tested rather than assumed. So the
+> root is now the package users receive, while everything below about *where the bundle is
+> built* still holds. See ADR-0007.
 
 ## Context
 

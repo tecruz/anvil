@@ -1152,8 +1152,17 @@ pre-commit hook are all done.** What is left, in the order it should be done:
    rewrites itself cannot also keep stable line references into itself -- and it is recorded
    here rather than hand-corrected, because hand-correcting would make the committed file
    disagree with the generator, and the next regeneration would put it back.
-4. **Publishing** to the npm registry needs credentials and a decision about the package
-   name, so it is prepared but not performed.
+4. **The distribution is a git install, not a registry.** `npm install -g
+   github:tecruz/anvil` is the supported path, and the repository has to be pushed for it to
+   resolve. That decided the manifest layout rather than the other way round — npm packs the
+   repository root for a git dependency, and there is no subdirectory install, so the root had
+   to become the package. ADR-0007 records it and supersedes the publish target in ADR-0006.
+   Publishing to a registry is deferred, not cancelled: it needs a name decision and
+   credentials, and the git channel needs neither.
+
+   What the git channel costs, stated plainly: a ref-less install tracks the default branch, so
+   a breaking change can reach a user with no version bump. The README tells users to pin a
+   tag, and that is the same reasoning that puts lockfiles in the detection rules above.
 
 ---
 

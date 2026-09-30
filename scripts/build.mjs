@@ -20,16 +20,19 @@ const outfile = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
 /**
  * The version to inject.
  *
- * `npm_package_version` is only set for the package npm is running a script *in*, and this
- * script runs from the workspace root, whose package.json is private and versionless. So
- * relying on it means every published binary reports `0.1.0-dev` -- a bug nobody notices
- * until someone files it against the wrong version. `packages/cli` is the package the
- * bundle ships as, so its version is the one that matters, and it is read directly (never
- * taken from the environment, which can only reintroduce the bug the comment above
- * describes -- e.g. once the root gains a version field).
+ * Read from the **root** manifest, never from `npm_package_version`. `npm_package_version`
+ * is only set for the package npm is running a script *in*, and this script runs from the
+ * workspace root, so relying on it means every installed binary reports whatever the
+ * environment happened to contain -- a bug nobody notices until someone files it against the
+ * wrong version.
+ *
+ * The root is also the right place to read it from as well as the right place to *ship* it
+ * from: since ADR-0007 the root manifest is the distribution, so its version is the one a
+ * user installs. `packages/cli` keeps a version field because npm expects one, and a test
+ * asserts the two agree -- two version fields that can drift is a release-day surprise.
  */
-const cliPackage = JSON.parse(readFileSync(join(repoRoot, 'packages', 'cli', 'package.json'), 'utf8'))
-const version = cliPackage.version
+const rootPackage = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+const version = rootPackage.version
 
 mkdirSync(dirname(outfile), { recursive: true })
 

@@ -1,19 +1,8 @@
 {
-  "name": "anvil",
+  "name": "@anvil/cli",
   "version": "0.1.0",
   "type": "module",
-  "description": "AI-ready dev harness: audit repos, derive agent context, work tickets in parallel worktrees.",
-  "keywords": [
-    "ai",
-    "agent",
-    "agents",
-    "cli",
-    "code-review",
-    "developer-tools",
-    "git",
-    "opencode",
-    "worktree"
-  ],
+  "description": "The anvil CLI. Published from the workspace root; see ADR-0007.",
   "license": "MIT",
   "bin": {
     "anvil": "./dist/cli.js"
@@ -22,19 +11,14 @@
     "node": ">=22.6.0"
   },
   "files": [
-    "dist/cli.js",
-    "README.md",
-    "LICENSE"
+    "dist/cli.js"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anomalyco/anvil.git"
+    "url": "git+https://github.com/tecruz/anvil.git"
   },
-  "homepage": "https://github.com/anomalyco/anvil#readme",
+  "homepage": "https://github.com/tecruz/anvil#readme",
   "bugs": {
-    "url": "https://github.com/anomalyco/anvil/issues"
-  },
-  "publishConfig": {
-    "access": "public"
+    "url": "https://github.com/tecruz/anvil/issues"
   }
 }
