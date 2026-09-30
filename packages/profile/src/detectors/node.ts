@@ -199,6 +199,7 @@ export const nodeDetector: Detector = {
         break
       }
     }
+    addWorkspaceScriptCommands(ctx, draft, manifest)
 
     for (const tool of TOOL_DEPS) {
       for (const [dep, range] of Object.entries(manifest.deps)) {
@@ -296,4 +297,99 @@ export const nodeDetector: Detector = {
 /** Node projects report their language from the script detector, not extensions. */
 export function nodeLanguage(draft: ProfileDraft, primary = true): void {
   addLanguage(draft, { id: 'javascript', files: 0, primary })
+}
+
+/**
+ * Commands for a monorepo whose *root* manifest has no scripts of its own.
+ *
+ * `services/api/package.json` declaring `"test": "vitest run"` is evidence, and the root
+ * `workspaces` field is what points at it -- so the member's script is not a guess. Without
+ * this, a workspace with tests only in its members reported no test command and failed
+ * `TEST` as a **blocker** on a repository whose tests run perfectly well.
+ *
+ * Two things are deliberately not done here:
+ *
+ * - The member's raw script body is never emitted. `vitest run` typed at the repository
+ *   root does not resolve, because the runner is hoisted into the root's `node_modules`
+ *   and is only on `PATH` inside a package-manager script. The command is emitted in the
+ *   manager's own workspace form, which sets that `PATH` for you.
+ * - Nothing is emitted when the package manager is unknown *and* the manifest gives no
+ *   hint. The workspace invocation syntax is the thing that varies, so guessing it in a
+ *   repository that might be yarn would be a confident command that fails.
+ *
+ * The one hint that is honoured is the `workspaces` field itself: it is npm's own
+ * declaration, and yarn and pnpm both *require* a lockfile that the lockfile check above
+ * would already have found. A manifest with `workspaces` and no lockfile is npm, so that
+ * case is emitted as `inferred` rather than dropped.
+ */
+function addWorkspaceScriptCommands(ctx: DetectorContext, draft: ProfileDraft, root: Manifest): void {
+  if (root.workspaces === null || root.workspaces.length === 0) return
+  // The root's own scripts win; a member never displaces a command that already exists.
+  const taken = new Set(Object.keys(root.scripts))
+  const manager = workspaceManager(ctx, root)
+  if (manager === null) return
+  const source = manager.detected ? ('detected' as const) : ('inferred' as const)
+
+  // One command per kind: several members with the same script name are the same command,
+  // and listing `services/api` and `services/web` separately would imply you must run both.
+  const emitted = new Set<CommandKind>()
+  for (const pattern of root.workspaces) {
+    for (const dir of expandWorkspaceGlobs(ctx, pattern)) {
+      const read = readManifest(ctx, `${dir}/package.json`)
+      if (read === null) continue
+      const name = read.manifest.name ?? dir
+      for (const [script, body] of Object.entries(read.manifest.scripts)) {
+        if (taken.has(script) || body.trim() === '') continue
+        for (const p of SCRIPT_PATTERNS) {
+          if (!p.re.test(script)) continue
+          if (emitted.has(p.kind)) break
+          emitted.add(p.kind)
+          addCommand(draft, p.kind, {
+            cmd: workspaceCommand(manager.name, name, script),
+            source,
+            evidence: evidence(`${dir}/package.json`, lineOfKey(read.text, script)),
+          })
+          break
+        }
+      }
+    }
+  }
+}
+
+type WorkspaceManager = 'npm' | 'pnpm' | 'yarn' | 'bun'
+
+/**
+ * The package manager, from the lockfile first and the `packageManager` field second.
+ *
+ * `detected: false` marks the one inference made here -- `workspaces` with no lockfile --
+ * so the caller can label the command `inferred` instead of `detected`.
+ */
+function workspaceManager(ctx: DetectorContext, root: Manifest): { name: WorkspaceManager; detected: boolean } | null {
+  if (hasFile(ctx, 'pnpm-lock.yaml')) return { name: 'pnpm', detected: true }
+  if (hasFile(ctx, 'yarn.lock')) return { name: 'yarn', detected: true }
+  if (hasFile(ctx, 'bun.lockb')) return { name: 'bun', detected: true }
+  if (hasFile(ctx, 'package-lock.json')) return { name: 'npm', detected: true }
+  const declared = root.packageManager?.split('@')[0]
+  if (declared === 'npm' || declared === 'pnpm' || declared === 'yarn' || declared === 'bun') {
+    return { name: declared, detected: true }
+  }
+  if (root.workspaces !== null && root.workspaces.length > 0) return { name: 'npm', detected: false }
+  return null
+}
+
+/**
+ * Each manager's own way to run one workspace package's script. All four run from the
+ * repository root, which is where an agent starts.
+ */
+function workspaceCommand(manager: WorkspaceManager, name: string, script: string): string {
+  switch (manager) {
+    case 'npm':
+      return `npm run ${script} --workspace ${name}`
+    case 'pnpm':
+      return `pnpm --filter ${name} run ${script}`
+    case 'yarn':
+      return `yarn workspace ${name} run ${script}`
+    case 'bun':
+      return `bun run --filter ${name} ${script}`
+  }
 }

@@ -3,7 +3,8 @@
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
 > Status: **M0–M6 complete**, plus a review pass, the ten-repository audit and the last
 > two items (see [Review pass](#review-pass--m6-hardening-2026-09-30)). M1's exit
-> criterion -- ten real repositories, no false blockers -- is met.
+> criterion -- ten real repositories, no false blockers -- is met, and extended to
+> five deliberately awkward shapes.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -1134,9 +1135,13 @@ is left, in the order it should be done:
 
 1. **Replace the placeholders**: real handles in `CODEOWNERS`, a monitored address in
    `SECURITY.md`. Until then `anvil doctor` will keep reporting both, which is correct.
-2. **More real repositories**, and the awkward shapes this set did not cover: a monorepo
-   whose tooling lives in a subdirectory, a Bazel tree without `WORKSPACE`, a polyglot
-   repository, and a repository whose lockfile lives somewhere unusual.
+2. **More real repositories.** Fifteen have now been audited -- ten mid-to-large
+   single-ecosystem projects, plus five deliberately awkward shapes. What is still missing
+   is a genuinely different *kind* of repository: a very large monorepo whose tooling is
+   centralised in a root `tools/` package, a project with two languages in one build and a
+   documented test matrix, and a repository whose lockfile lives somewhere the ten did not
+   put one. The subdirectory-manifest gap is the one open false negative, and closing it
+   properly means detectors reporting resolved paths rather than root-relative ones.
 3. **A pre-commit hook** (`PRECOMMIT` still warns -- deliberately, since a hook that runs
    formatting on every commit for every contributor is a choice, not a default).
 4. **Publishing** needs credentials and a decision about the package name, so it is prepared
@@ -1496,6 +1501,77 @@ The criterion is met. It is also met narrowly: ten repositories is ten, they are
 mid-to-large projects in five ecosystems, and none of them is the awkward case (a monorepo
 whose tooling lives in a subdirectory, a Bazel-without-WORKSPACE tree, a polyglot repo).
 The honest next step is more of the same, not a different kind of test.
+
+### The awkward shapes, and what they cost
+
+Ten repositories is ten, but they were all mid-to-large single-ecosystem projects with a
+manifest at the root. Five shapes that none of them covers were built and audited: a
+project whose code lives in a subdirectory, a monorepo with no root lockfile, a monorepo
+with a root lockfile *and* a nested one, a `MODULE.bazel` tree with no `WORKSPACE`, and a
+polyglot tree. **All five produced a false finding or a silent gap.** A criterion that only
+samples the shape you already handle is a criterion that has not been tested.
+
+**1. A false blocker, caused by anvil's own blindness.** A Rust crate under `engine/` --
+`engine/Cargo.toml`, `engine/src/lib.rs`, `engine/tests/it.rs`, nothing at the root but a
+README -- failed `TEST` as a **blocker**: "test files exist but no runnable test command was
+found." The repository runs `cargo test`. The sentence was about the repository; the truth
+was about anvil, which looks for manifests at the root and so had not worked out what the
+repository was. It had not earned that sentence, and a blocker an agent must act on cannot
+afford to be wrong about its cause. `TEST`, `BUILD` and `LINT` now return `na` when *no*
+stack was identified, naming the real reason. The guard is deliberately narrow, and a test
+pins that: for any repository where a stack *was* found, a missing test command is still a
+blocker, because otherwise this becomes a tidy way to lose a real finding.
+
+Fixing the *detection* here -- resolving manifests at any depth -- is deliberately not
+done, and the reason is worth recording. Every detector's evidence string is a hardcoded
+root-relative path, so a nested manifest would be reported as `Cargo.toml` when the file is
+`engine/Cargo.toml`. An audit tool whose evidence points at the wrong file is worse than one
+that admits it does not know, so the honest unknown was chosen over a confident wrong
+answer. This is the one gap left open on purpose.
+
+**2. A workspace's tests, invisible.** `services/api/package.json` declaring
+`"test": "vitest run"`, with the root `workspaces` field pointing at it, produced no test
+command and the same false blocker. The root manifest *names* its members, so a member's
+script is evidence rather than a guess, and it is now used -- as `npm run test --workspace
+@platform/api`, in the manager's own syntax, chosen from the lockfile. The member's raw
+script body is never emitted: `vitest run` typed at the repository root does not resolve,
+because the runner is hoisted into the root's `node_modules` and is only on `PATH` inside a
+package-manager script. The same rule that fixed sinatra applies here, in the other
+direction -- a command that is *nearly* right is still wrong.
+
+**3. Bazel did not exist.** A `MODULE.bazel` tree scored 22/100, the worst of the fifteen
+repositories audited, and failed `TEST` as a blocker: the second-largest build system by
+Java and TypeScript projects was simply not a stack anvil knew about. It is now the
+thirteenth detector, matching `MODULE.bazel` as well as `WORKSPACE` -- the latter is on its
+way out, and since Bazel 7 the `MODULE.bazel`-only tree is the normal shape, so a detector
+that knew only `WORKSPACE` would miss the current form entirely. It emits no install
+command, because Bazel fetches its own dependencies and there is nothing to install.
+
+**The scores, and what they mean:**
+
+| shape | before | after | what changed |
+|---|---|---|---|
+| `MODULE.bazel` tree | 22 (F) | **54 (D)** | Bazel detected; three commands; blockers gone |
+| workspace, no root lockfile | 28 (F) | **52 (D)** | member scripts used; TEST/BUILD blockers gone |
+| workspace, root + nested lockfile | 50 (D) | 50 (D) | already correct: the root lockfile wins |
+| polyglot Go/Python/TS | 48 (D) | 48 (D) | one test command of three; see below |
+| project in a subdirectory | 22 (F) | **33 (F)** | false blockers became honest unknowns |
+
+Two of the five are still not fully solved, and both are recorded rather than papered over.
+The polyglot tree reports `pytest` and not the Go and TypeScript suites beside it: the
+profile model holds one command per kind, and choosing between three real runners is a
+different problem from detecting one. The subdirectory project still has no detection at
+all -- see the deliberate decision above.
+
+A note on method, because it nearly produced a false conclusion. The first pass at these
+five repositories appeared to show that *none* of them had any commands at all -- which
+would have been a catastrophic detection failure. It was not: the audit script read
+`data.profile.commands` off `doctor --json`, and `doctor --json` returns a check report with
+no `profile` key. Every "no commands" line was an artifact of a field that does not exist,
+and the same script had been printing empty command lines for the ten real repositories for
+the whole session, hidden behind an output filter. The lesson is the one this project keeps
+teaching: a measurement that says "everything is broken" is more often a broken measurement
+than ten broken repositories.
 
 ### What is still open
 

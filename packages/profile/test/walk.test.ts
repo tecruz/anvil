@@ -129,6 +129,96 @@ describe('buildProfile does not detect stacks that only exist in fixtures', () =
   })
 })
 
+describe('a workspace member can supply the command the root has no script for', () => {
+  // Found by auditing shaped repositories: a workspace whose tests live only in its
+  // members reported no test command and failed TEST as a *blocker* on a repository whose
+  // tests run perfectly well.
+  const commandsOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile.commands
+  }
+
+  test('a member script becomes a runnable command from the repository root', () => {
+    const member = ['{', '  "name": "@platform/api",', '  "scripts": { "test": "vitest run" }', '}'].join('\n')
+    const c = commandsOf({
+      'package.json': '{ "name": "platform", "workspaces": ["services/*"] }',
+      'services/api/package.json': member,
+      'services/api/src/a.test.ts': "test('a', () => {})\n",
+    })
+    const test = c.test?.[0]
+    // Not `vitest run`: the runner is hoisted to the root's node_modules and is only on
+    // PATH inside a package-manager script, so the bare form does not resolve.
+    assert.equal(test?.cmd, 'npm run test --workspace @platform/api')
+    // The line matters: it is what makes the evidence checkable rather than decorative.
+    assert.equal(test?.evidence, 'services/api/package.json:3')
+  })
+
+  test('a lockfile picks the manager whose workspace syntax is correct', () => {
+    const pnpm = commandsOf({
+      'package.json': '{ "name": "platform", "workspaces": ["packages/*"] }',
+      'pnpm-lock.yaml': "lockfileVersion: '9.0'\n",
+      'packages/core/package.json': '{ "name": "@p/core", "scripts": { "test": "vitest run" } }',
+    })
+    assert.equal(pnpm.test?.[0]?.cmd, 'pnpm --filter @p/core run test')
+    assert.equal(pnpm.test?.[0]?.source, 'detected')
+
+    const yarn = commandsOf({
+      'package.json': '{ "name": "platform", "workspaces": ["packages/*"] }',
+      'yarn.lock': '\n',
+      'packages/core/package.json': '{ "name": "@p/core", "scripts": { "test": "vitest run" } }',
+    })
+    assert.equal(yarn.test?.[0]?.cmd, 'yarn workspace @p/core run test')
+  })
+
+  test('the root script wins, and the member form is not offered as well', () => {
+    // Two commands for `test` would read as "run both", which is not true.
+    const c = commandsOf({
+      'package.json': '{ "name": "platform", "scripts": { "test": "vitest run" }, "workspaces": ["services/*"] }',
+      'services/api/package.json': '{ "name": "@platform/api", "scripts": { "test": "jest" } }',
+    })
+    assert.deepEqual(
+      c.test?.map((e) => e.cmd),
+      ['npm run test'],
+    )
+  })
+
+  test('with no manager and no workspaces, no command is invented', () => {
+    const c = commandsOf({
+      'services/api/package.json': '{ "name": "@platform/api", "scripts": { "test": "vitest run" } }',
+      'services/api/src/a.test.ts': "test('a', () => {})\n",
+    })
+    assert.equal(c.test, undefined)
+  })
+})
+
+describe('a bzlmod Bazel tree is understood', () => {
+  // A MODULE.bazel tree with no WORKSPACE scored 22/100 and failed TEST as a blocker,
+  // because Bazel was simply not a stack anvil knew about.
+  const profileOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+  }
+
+  test('MODULE.bazel alone identifies Bazel', () => {
+    const p = profileOf({ 'MODULE.bazel': 'module(name = "rules", version = "1.0")\n', 'BUILD.bazel': '\n' })
+    assert.ok(p.stacks.some((s) => s.id === 'bazel'))
+    assert.equal(p.commands.build?.[0]?.cmd, 'bazel build //...')
+    assert.equal(p.commands.test?.[0]?.cmd, 'bazel test //...')
+    assert.equal(p.commands.build?.[0]?.evidence, 'MODULE.bazel')
+  })
+
+  test('a BUILD file in a subdirectory is still evidence of Bazel', () => {
+    const p = profileOf({ 'tests/BUILD.bazel': 'my_test(name = "smoke")\n' })
+    assert.ok(p.stacks.some((s) => s.id === 'bazel'))
+    assert.equal(p.commands.build?.[0]?.evidence, 'tests/BUILD.bazel')
+  })
+
+  test('no install command, because Bazel fetches its own dependencies', () => {
+    const p = profileOf({ 'MODULE.bazel': 'module(name = "rules")\n' })
+    assert.equal(p.commands.install, undefined)
+  })
+})
+
 describe('the install command is derived from the lockfile', () => {
   // Ten real repositories, every one of which reported "no documented dependency-install
   // command": nothing ever emitted an `install` command, even though the kind existed in

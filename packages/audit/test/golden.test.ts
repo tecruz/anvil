@@ -492,6 +492,63 @@ describe('TEST_FAST', () => {
   })
 })
 
+describe('a repository anvil could not identify is not reported as broken', () => {
+  // A Rust crate under `engine/` defeats root-level manifest detection entirely. The result
+  // was TEST failing as a *blocker* claiming "test files exist but no runnable test command
+  // was found" -- a sentence about the repository that was really a sentence about anvil.
+  // A blocker an agent must act on cannot afford to be wrong about its cause.
+  function unidentifiedRepo(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-unidentified-'))
+    mkdirSync(join(dir, 'engine', 'src'), { recursive: true })
+    mkdirSync(join(dir, 'engine', 'tests'), { recursive: true })
+    writeFileSync(join(dir, 'README.md'), '# host\nA thin host around the engine.\n')
+    writeFileSync(join(dir, 'engine', 'src', 'lib.rs'), 'pub fn go() {}\n')
+    writeFileSync(join(dir, 'engine', 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+    return dir
+  }
+
+  for (const id of ['TEST', 'BUILD', 'LINT']) {
+    test(`${id} reports unknown rather than failure`, () => {
+      const dir = unidentifiedRepo()
+      try {
+        const f = findFinding(auditDir(dir), id)
+        assert.equal(f.status, 'na', f.detail)
+        assert.match(f.detail, /No ecosystem identified/)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test('the guard is narrow: a missing test command is still a blocker when an stack was found', () => {
+    // Otherwise this becomes a way to lose a real finding, which is the worse error.
+    for (const fixture of ['go-module', 'rust-crate', 'node-npm', 'python-django']) {
+      const dir = materialize(fixture)
+      try {
+        const f = findFinding(auditDir(dir), 'TEST')
+        assert.notEqual(f.status, 'na', `${fixture}: ${f.detail}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  })
+})
+
+describe('a bzlmod Bazel tree is a known ecosystem, not an unknown one', () => {
+  test('a MODULE.bazel repository is offered Bazel commands', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-bazel-'))
+    try {
+      writeFileSync(join(dir, 'MODULE.bazel'), 'module(name = "rules", version = "1.0")\n')
+      writeFileSync(join(dir, 'BUILD.bazel'), '\n')
+      const p = buildProfile(dir, { ...VCS, root: dir }).profile
+      assert.ok(p.stacks.some((s) => s.id === 'bazel'))
+      assert.equal(p.commands.test?.[0]?.cmd, 'bazel test //...')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('the six additional detectors', () => {
   test('a Rails repo detects ruby, rails, rspec and rubocop', () => {
     const p = profileOf('ruby-rails')
@@ -566,9 +623,12 @@ describe('the six additional detectors', () => {
     assert.equal(p.commands.build?.[0]?.source, 'detected')
   })
 
-  test('detector count reaches twelve', () => {
+  test('detector count reaches thirteen', () => {
+    // Twelve plus Bazel, which was missing entirely until a MODULE.bazel tree was audited
+    // and scored 22/100 for it. The `Set` also asserts every id is unique: two detectors
+    // sharing an id would silently shadow one another.
     const ids = new Set([...ecosystemDetectors, ...additionalDetectors].map((d) => d.id))
-    assert.equal(ids.size, 12)
+    assert.equal(ids.size, 13)
   })
 })
 

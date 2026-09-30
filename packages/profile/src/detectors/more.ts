@@ -405,6 +405,80 @@ export const terraformDetector: Detector = {
   },
 }
 
+/**
+ * Bazel, including bzlmod-only trees.
+ *
+ * Found by auditing shaped repositories: a `MODULE.bazel` tree with no `WORKSPACE` scored
+ * 22/100 and failed `TEST` as a blocker, because anvil did not know Bazel existed. It is
+ * the second-largest build system by Java/TypeScript projects and it was simply absent --
+ * a gap that only shows up on a shape the ten-repository audit did not include.
+ *
+ * `MODULE.bazel` is checked as well as `WORKSPACE` because WORKSPACE is on its way out:
+ * since Bazel 7 a `MODULE.bazel` with no `WORKSPACE` is the normal shape, and a detector
+ * that only knew `WORKSPACE` would miss the newer form entirely.
+ *
+ * No install command is emitted, because Bazel fetches its own dependencies at build time
+ * and there is nothing for a newcomer to install. Saying so is better than inventing
+ * `bazel fetch` and hoping.
+ */
+export const bazelDetector: Detector = {
+  id: 'bazel',
+  title: 'Bazel',
+  priority: 60,
+  matches: (ctx) =>
+    hasFile(ctx, 'MODULE.bazel') ||
+    hasFile(ctx, 'WORKSPACE') ||
+    hasFile(ctx, 'WORKSPACE.bazel') ||
+    filesUnder(ctx, '').some((f) => f === 'BUILD.bazel' || f.endsWith('/BUILD.bazel')),
+  detect(ctx, draft) {
+    const build = bazelEvidence(ctx)
+    addStack(draft, { id: 'bazel', version: null, evidence: [build] })
+
+    // `//...` is the recursive target pattern, so one command covers every package. The
+    // evidence is the file that proves Bazel is in use, not a line in it: a BUILD file has
+    // no version to quote.
+    addCommand(draft, 'build', {
+      cmd: 'bazel build //...',
+      source: 'detected',
+      evidence: build,
+    })
+    addCommand(draft, 'test', {
+      cmd: 'bazel test //...',
+      source: 'detected',
+      evidence: build,
+    })
+
+    // Query is Bazel's own way to enumerate the test targets, and it is fast by
+    // construction: it resolves the graph without building it.
+    addCommand(draft, 'testFast', {
+      cmd: 'bazel query "kind(test, //...)"',
+      source: 'detected',
+      evidence: build,
+    })
+
+    addRisk(draft, {
+      glob: '**/BUILD.bazel',
+      level: 'medium',
+      reason: 'build graph definition; a change alters what compiles and what is tested',
+      origin: 'heuristic',
+    })
+  },
+}
+
+/**
+ * The file that proves Bazel is in use, preferring the root's own declaration.
+ *
+ * `MODULE.bazel` first: it is the current form, and a tree that has one may still carry a
+ * legacy `WORKSPACE` alongside it. A `BUILD.bazel` in a subdirectory is the last resort --
+ * it still proves Bazel, just less directly.
+ */
+function bazelEvidence(ctx: DetectorContext): string {
+  for (const f of ['MODULE.bazel', 'WORKSPACE.bazel', 'WORKSPACE']) {
+    if (hasFile(ctx, f)) return f
+  }
+  return filesUnder(ctx, '').find((f) => f === 'BUILD.bazel' || f.endsWith('/BUILD.bazel')) ?? 'BUILD.bazel'
+}
+
 export const additionalDetectors: readonly Detector[] = [
   terraformDetector,
   rubyDetector,
@@ -412,4 +486,5 @@ export const additionalDetectors: readonly Detector[] = [
   elixirDetector,
   swiftDetector,
   frontendDetector,
+  bazelDetector,
 ]

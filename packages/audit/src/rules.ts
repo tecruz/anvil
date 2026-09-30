@@ -108,6 +108,26 @@ function commands(ctx: RuleContext, kind: keyof ProjectProfile['commands']): str
   return (ctx.profile.commands[kind] ?? []).map((c) => `${c.cmd} [${c.source}]`)
 }
 
+/**
+ * True when detection identified no ecosystem at all.
+ *
+ * A repository whose project lives in a subdirectory -- a Rust crate under `engine/`, a
+ * service under `services/api/` -- defeats root-level manifest detection entirely. The
+ * result was `TEST` failing as a **blocker** on a perfectly good Rust project, claiming
+ * "test files exist but no runnable test command was found" when the truth was that anvil
+ * had not worked out what the repository was. It had not earned that sentence, and a
+ * blocker an agent must act on cannot afford to be wrong about its cause.
+ *
+ * So a code-shaped rule returns `na` here, naming the real reason. This is deliberately
+ * narrow: it fires only when *nothing* was identified. Every one of the ten real
+ * repositories in the audit has at least one stack, so this cannot soften a finding on a
+ * repository anvil actually understands -- and for those, a missing test command is still
+ * a blocker, which is correct.
+ */
+function unidentified(ctx: RuleContext): boolean {
+  return (ctx.profile.stacks ?? []).length === 0
+}
+
 // ---------------------------------------------------------------------------
 // Orientability
 // ---------------------------------------------------------------------------
@@ -276,6 +296,9 @@ const BUILD: Rule = {
   order: 20,
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
+    if (unidentified(ctx)) {
+      return na('No ecosystem identified: no manifest at the repository root, so no build command can be claimed')
+    }
     if (hasCommand(ctx, 'build')) return pass(commands(ctx, 'build').join(', '))
     if (hasCommand(ctx, 'test')) {
       return warn('No separate build command, but a test command exists that implies compilation', ['package.json'])
@@ -296,6 +319,11 @@ const TEST: Rule = {
   order: 21,
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
+    if (unidentified(ctx)) {
+      return na(
+        'No ecosystem identified: no manifest at the repository root, so whether these tests are runnable is unknown',
+      )
+    }
     if (!hasCommand(ctx, 'test')) {
       return fail(
         ctx.hasTests ? 'Test files exist but no runnable test command was found.' : 'No tests and no test command.',
@@ -391,6 +419,9 @@ const LINT: Rule = {
   order: 23,
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
+    if (unidentified(ctx)) {
+      return na('No ecosystem identified: linters are declared in ecosystem-specific config, which was not found')
+    }
     if (ctx.profile.tooling.lint.length === 0) {
       return fail(
         'No linter configured. Nothing catches the mistakes an agent makes most often.',
