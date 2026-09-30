@@ -305,8 +305,10 @@ describe('crew up', () => {
       tickets: [ticket(1)],
       launch: true,
       runner: 'opencode',
-      env: { PATH: stubRunnerDir('opencode') },
       worktreeRoot: wtRoot,
+      // No `env` here: this test injects a `launcher`, so no binary is ever resolved and the
+      // real PATH is never read. `crewUp` takes no env -- a blanket patch that added one was
+      // caught by the typechecker on Linux, which is the argument for having one.
       launcher: async () => ({ pid: 999, detail: 'ok' }),
     })
     const claim = readClaims(dir).claims.find((c) => c.key === 'local-1')
