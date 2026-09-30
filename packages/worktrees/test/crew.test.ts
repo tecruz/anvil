@@ -305,6 +305,7 @@ describe('crew up', () => {
       tickets: [ticket(1)],
       launch: true,
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       worktreeRoot: wtRoot,
       launcher: async () => ({ pid: 999, detail: 'ok' }),
     })
@@ -351,6 +352,7 @@ describe('launchOpencodeAgent', () => {
       prompt: 'hello',
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     assert.equal(calls.length, 1)
@@ -372,6 +374,7 @@ describe('launchOpencodeAgent', () => {
       prompt: 'do the thing\nand also the other thing',
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     const line = calls[0]?.args.join(' ') ?? ''
@@ -401,6 +404,7 @@ describe('launchOpencodeAgent', () => {
       prompt,
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     assert.equal(calls.length, 1, 'the real prompt must launch, not be refused')
@@ -421,6 +425,7 @@ describe('launchOpencodeAgent', () => {
       prompt: hostile,
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     assert.equal(calls.length, 1)
@@ -443,6 +448,7 @@ describe('launchOpencodeAgent', () => {
       prompt: 'hi',
       logPath,
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     const stdio = calls[0]?.opts.stdio
@@ -492,6 +498,7 @@ describe('launchOpencodeAgent', () => {
       prompt: 'hi',
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
+      env: { PATH: stubRunnerDir('opencode') },
       spawnFn: fn,
     })
     assert.equal(result.pid, null)
