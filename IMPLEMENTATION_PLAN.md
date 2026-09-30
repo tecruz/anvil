@@ -1133,8 +1133,10 @@ contributing guide repeats that `playbook check` runs in CI.
 **M6, the review pass, the repository audits, `playbook add`, the governance files and the
 pre-commit hook are all done.** What is left, in the order it should be done:
 
-1. **Replace the placeholders**: real handles in `CODEOWNERS`, a monitored address in
-   `SECURITY.md`. Until then `anvil doctor` will keep reporting both, which is correct.
+1. **Replace the placeholders**: a real owner handle in `CODEOWNERS`, a monitored address in
+   `SECURITY.md`. This is now the *only* thing standing between this repository and a clean
+   governance layer, and `anvil doctor` names both by name until it is done -- which is
+   correct, and is the first time that sentence was true of this tool.
 2. **More real repositories.** Fifteen have now been audited -- ten mid-to-large
    single-ecosystem projects, plus five deliberately awkward shapes. One shape is still
    unresolved by design: a repository with *two* projects in two subdirectories is reported
@@ -1647,6 +1649,48 @@ one of them ends up invisible to the other three. It is one list now, and it nam
 `OPERABILITY` is 100/100. `AGENTS.md` was regenerated to match, which incidentally fixed a
 real error in it: the typecheck command was documented as `npm run check`, which runs lint,
 the whole suite and the build, and is not a typecheck.
+
+### Two governance rules that only checked that a file existed
+
+`CODEOWNERS` and `SECURITY_MD` were both one line long: is the file present? Pass. Which
+means this repository was scoring **96/100** while shipping a `CODEOWNERS` whose only
+active rule pointed at `@TODO-OWNER-default` and a `SECURITY.md` addressed to
+`security@TODO-DOMAIN`. Both are placeholders I put there because the real values are not
+mine to invent -- and the tool, examining them, said everything was fine.
+
+That is the most reassuring kind of wrong, and it is worse than an outright failure, because
+a failure prompts a question and a pass does not. The deeper problem is GitHub's own
+behaviour: a CODEOWNERS rule naming a team that does not exist is not an error. GitHub falls
+back to whoever is eligible to review, so a file full of placeholders behaves *exactly* like
+no file at all while reading as though review routing is configured. A rule that only counts
+files cannot see that.
+
+Both rules now read the file. `CODEOWNERS` extracts the owner handles and reports:
+
+- every handle a placeholder -- a warning that names them, and says why GitHub will not
+  complain;
+- some handles placeholders -- a warning naming only those, and never the real owners;
+- no handles at all -- "routes nothing", which is what a file of comments actually does;
+- real handles -- a pass that says who they are.
+
+And `SECURITY_MD` checks the contact address, because a security contact nobody monitors is
+worse than none: a researcher who reports a real vulnerability into a void concludes the
+project is not worth reporting to, and that conclusion is hard to undo.
+
+**The score went down, 96 to 94, and that is the point.** It was paying out full marks for
+two files that route and receive nothing. The number is lower because the tool stopped
+flattering itself.
+
+Two things the tests caught in my own first attempt, both in the direction of over-reaching:
+
+- Matching `owner-` and `-owner` as placeholder words flagged `@the-owner`, which is a
+  perfectly good handle. Catching `TODO-OWNER-default` only needs `todo`. The expensive error
+  here is flagging a real owner, because it teaches people to ignore the rule -- so a test
+  now asserts that `@acme/platform-team`, `@myorg/core`, `@the-owner` and `@nodejs` all pass.
+- `security@example.invalid` was passing, because `.invalid` contains none of the placeholder
+  words. RFC 2606 reserves `.invalid`, `.test`, `.example` and `.localhost` as permanently
+  unresolvable, which is far better evidence than string-matching: such an address is a
+  placeholder whether or not it admits it.
 
 ### What is still open
 

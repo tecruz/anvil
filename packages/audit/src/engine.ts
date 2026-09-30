@@ -63,6 +63,11 @@ export function buildRuleContext(profile: ProjectProfile, options: AuditOptions 
     }
   }
 
+  // The CODEOWNERS body, for the same reason as the workflows above: one rule needs the
+  // *contents* -- whether the handles are real or scaffolding -- and the profile should not
+  // carry the file to answer it.
+  const codeowners = readBody(root, profile.docs.codeowners)
+
   const hasCode = profile.languages.some((l) => l.primary && l.files > 0)
   const hasTests = profile.files.some(
     (f) =>
@@ -77,12 +82,24 @@ export function buildRuleContext(profile: ProjectProfile, options: AuditOptions 
     hasTests,
     instructionsText: instructionText,
     ciWorkflows,
+    codeowners,
+    security: readBody(root, profile.docs.security),
     npmScripts: readNpmScripts(root),
   }
 }
 
+/** A repository file's text, or null when it is absent or unreadable. */
+function readBody(root: string, path: string | null): string | null {
+  if (path === null) return null
+  try {
+    return readFileSync(join(root, path), 'utf8')
+  } catch {
+    return null
+  }
+}
+
 /**
- * The root package.json's `scripts` block, or `{}`.
+ * The root package.json's's `scripts` block, or `{}`.
  *
  * Only CI_PARITY uses it, and only to expand a composite script: a workflow step that runs
  * `npm run check` runs whatever `check` runs, and a rule that reports "CI does not appear

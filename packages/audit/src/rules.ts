@@ -31,6 +31,8 @@ export interface RuleContext {
    * and reading every workflow into the profile would bloat the `--json` output that the
    * opencode plugin consumes.
    */
+  security: string | null
+  codeowners: string | null
   ciWorkflows: ReadonlyMap<string, string>
   /**
    * The repository's npm scripts, name to command body.
@@ -792,6 +794,57 @@ const STYLE_GUIDE: Rule = {
 // Governance
 // ---------------------------------------------------------------------------
 
+/**
+ * Handle words that mean "this is scaffolding", not "this is a person".
+ *
+ * A CODEOWNERS rule naming a team that does not exist does not fail loudly. GitHub falls
+ * back to whoever is eligible to review, so a file full of placeholders behaves exactly like
+ * no file at all while reading as though review routing is configured. Presence was all this
+ * rule checked, which made a template of placeholders a *pass* -- the most reassuring kind
+ * of wrong.
+ *
+ * The list is deliberately narrow: only words that no real team names itself. A handle
+ * containing `team` or `core` is left alone, because flagging a real owner is the expensive
+ * error here -- it teaches people to ignore the rule.
+ */
+const PLACEHOLDER_HANDLE_WORDS: readonly string[] = [
+  'todo',
+  'fixme',
+  'changeme',
+  'change-me',
+  'placeholder',
+  'replace',
+  'replace-me',
+  'replaceme',
+  'your-org',
+  'your-team',
+  'yourhandle',
+  'your-name',
+  'yourname',
+  'xxx',
+]
+
+/**
+ * Top-level domains reserved by RFC 2606 as permanently unresolvable.
+ *
+ * Far better evidence than string-matching an address: `.invalid` cannot be delivered to by
+ * anyone, ever, so `security@example.invalid` is a placeholder whether or not it says so.
+ */
+const RESERVED_TLDS: readonly string[] = ['.invalid', '.test', '.example', '.localhost']
+
+/** The owner handles a CODEOWNERS file assigns, ignoring comments and blanks. */
+function codeownerHandles(body: string): string[] {
+  const out: string[] = []
+  for (const raw of body.split('\n')) {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#')) continue
+    for (const token of line.split(/\s+/)) {
+      if (token.startsWith('@') && token.length > 1) out.push(token)
+    }
+  }
+  return out
+}
+
 const CODEOWNERS: Rule = {
   id: 'CODEOWNERS',
   layer: 'governance',
@@ -799,12 +852,47 @@ const CODEOWNERS: Rule = {
   title: 'CODEOWNERS present',
   order: 50,
   evaluate(ctx) {
-    if (ctx.profile.docs.codeowners !== null) return pass('CODEOWNERS present', [ctx.profile.docs.codeowners])
-    return warn(
-      'No CODEOWNERS. Review routing (including the extra reviewers a risky PR needs) has to be manual.',
-      [],
-      derived('CODEOWNERS', 'Add CODEOWNERS so review routing is automatic', 0.7),
-    )
+    const path = ctx.profile.docs.codeowners
+    if (path === null) {
+      return warn(
+        'No CODEOWNERS. Review routing (including the extra reviewers a risky PR needs) has to be manual.',
+        [],
+        derived('CODEOWNERS', 'Add CODEOWNERS so review routing is automatic', 0.7),
+      )
+    }
+    const body = ctx.codeowners
+    if (body === null) return pass('CODEOWNERS present', [path])
+
+    const handles = codeownerHandles(body)
+    if (handles.length === 0) {
+      return warn(
+        'CODEOWNERS contains no owner handles, so it routes nothing. Every line is a comment or blank.',
+        [path],
+        derived('CODEOWNERS', 'Give each rule a real owner handle', 0.8),
+      )
+    }
+    const placeholders = handles.filter((h) => {
+      const bare = h.slice(1).toLowerCase()
+      return PLACEHOLDER_HANDLE_WORDS.some((w) => bare.includes(w))
+    })
+    if (placeholders.length === handles.length) {
+      // Every handle is scaffolding, so the file is a template. Reported as a warning rather
+      // than a pass, because it becomes correct the moment real handles replace them, and as
+      // a failure because *today* it routes nothing while looking configured.
+      return warn(
+        `CODEOWNERS is a template: every owner is a placeholder (${placeholders.join(', ')}). GitHub does not fail on an unknown owner -- it falls back to whoever can review, so this behaves like no CODEOWNERS at all.`,
+        [path],
+        derived('CODEOWNERS', 'Replace the placeholder handles with real users or teams', 0.9),
+      )
+    }
+    if (placeholders.length > 0) {
+      return warn(
+        `Some CODEOWNERS rules still point at placeholders (${placeholders.join(', ')}); those paths fall back to the default reviewer.`,
+        [path],
+        derived('CODEOWNERS', 'Replace the remaining placeholder handles', 0.7),
+      )
+    }
+    return pass(`${handles.length} owner handle(s): ${[...new Set(handles)].join(', ')}`, [path])
   },
 }
 
@@ -851,8 +939,36 @@ const SECURITY_MD: Rule = {
   title: 'SECURITY policy present',
   order: 54,
   evaluate(ctx) {
-    if (ctx.profile.docs.security !== null) return pass('SECURITY.md present', [ctx.profile.docs.security])
-    return warn('No SECURITY.md', [], null)
+    const path = ctx.profile.docs.security
+    if (path === null) return warn('No SECURITY.md', [], null)
+    const body = ctx.security
+    if (body === null) return pass('SECURITY.md present', [path])
+
+    // A security contact nobody monitors is worse than none: a researcher who reports a real
+    // vulnerability and gets silence concludes the project is not worth reporting to, and
+    // that conclusion is hard to undo. So a file whose address is still a placeholder is not
+    // a policy yet, however official it looks.
+    const addresses = [...body.matchAll(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g)].map((m) => m[0])
+    if (addresses.length === 0) {
+      return warn(
+        'SECURITY.md names no contact address, so there is nowhere to report a vulnerability.',
+        [path],
+        derived('SECURITY.md', 'Add a monitored security contact address', 0.8),
+      )
+    }
+    const placeholders = addresses.filter(
+      (a) =>
+        RESERVED_TLDS.some((tld) => a.toLowerCase().endsWith(tld)) ||
+        PLACEHOLDER_HANDLE_WORDS.some((w) => a.toLowerCase().includes(w)),
+    )
+    if (placeholders.length === addresses.length) {
+      return warn(
+        `SECURITY.md still points at a placeholder address (${placeholders.join(', ')}). Reports sent there are not read.`,
+        [path],
+        derived('SECURITY.md', 'Replace the placeholder with a monitored address', 0.9),
+      )
+    }
+    return pass(`Reports go to ${addresses.join(', ')}`, [path])
   },
 }
 

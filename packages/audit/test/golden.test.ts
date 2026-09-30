@@ -534,6 +534,84 @@ describe('a repository anvil could not identify is not reported as broken', () =
   })
 })
 
+describe('a governance file full of placeholders is not governance', () => {
+  // Both of these rules checked only that the file *existed*. So a template of placeholders
+  // scored as configured -- the most reassuring kind of wrong -- and this repository was
+  // congratulating itself for two files that route and receive nothing.
+  function repoWith(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-gov-'))
+    for (const [rel, content] of Object.entries(files)) {
+      const target = join(dir, ...rel.split('/'))
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, content, 'utf8')
+    }
+    return dir
+  }
+
+  function findingOf(files: Record<string, string>, id: string) {
+    const dir = repoWith(files)
+    try {
+      return findFinding(auditDir(dir), id)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('a CODEOWNERS of placeholders warns, and names them', () => {
+    const f = findingOf({ CODEOWNERS: '*  @TODO-OWNER-default\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /placeholder/)
+    assert.match(f.detail, /@TODO-OWNER-default/)
+  })
+
+  test('a CODEOWNERS of real handles passes, and says who they are', () => {
+    const f = findingOf({ CODEOWNERS: '*  @acme/owners\npackages/core/  @alice\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'pass')
+    assert.match(f.detail, /@acme\/owners/)
+  })
+
+  test('a partly-placeholder CODEOWNERS warns about only the placeholders', () => {
+    const f = findingOf({ CODEOWNERS: '*  @acme/owners\npackages/core/  @FIXME-core\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /@FIXME-core/)
+    assert.ok(!f.detail.includes('@acme/owners'), 'a real owner must not be named as a problem')
+  })
+
+  test('a CODEOWNERS with no handles at all says it routes nothing', () => {
+    const f = findingOf({ CODEOWNERS: '# owners go here\n\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /routes nothing/)
+  })
+
+  test('a real handle is not mistaken for a placeholder', () => {
+    // The expensive error here is flagging a real owner, because it teaches people to ignore
+    // the rule. Handles legitimately contain "team", "core" and "owner".
+    for (const handle of ['@acme/platform-team', '@myorg/core', '@the-owner', '@nodejs']) {
+      const f = findingOf({ CODEOWNERS: `*  ${handle}\n` }, 'CODEOWNERS')
+      assert.equal(f.status, 'pass', `${handle} was flagged: ${f.detail}`)
+    }
+  })
+
+  test('a SECURITY.md with a placeholder address warns', () => {
+    const f = findingOf({ 'SECURITY.md': 'Report to security@example.invalid\n' }, 'SECURITY_MD')
+    // `.invalid` is reserved by RFC 2606 precisely so it can never be a real mailbox.
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /example\.invalid/)
+  })
+
+  test('a SECURITY.md with no address at all warns', () => {
+    const f = findingOf({ 'SECURITY.md': '# Security policy\n\nOpen an issue.\n' }, 'SECURITY_MD')
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /no contact address/)
+  })
+
+  test('a SECURITY.md with a real address passes', () => {
+    const f = findingOf({ 'SECURITY.md': 'Email security@acme.io\n' }, 'SECURITY_MD')
+    assert.equal(f.status, 'pass')
+    assert.match(f.detail, /security@acme\.io/)
+  })
+})
+
 describe('a bzlmod Bazel tree is a known ecosystem, not an unknown one', () => {
   test('a MODULE.bazel repository is offered Bazel commands', () => {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-bazel-'))
