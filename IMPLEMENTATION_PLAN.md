@@ -1153,8 +1153,16 @@ pre-commit hook are all done.** What is left, in the order it should be done:
    here rather than hand-corrected, because hand-correcting would make the committed file
    disagree with the generator, and the next regeneration would put it back.
 4. **The distribution is a git install, not a registry.** `npm install -g
-   github:tecruz/anvil` is the supported path, and the repository has to be pushed for it to
-   resolve. That decided the manifest layout rather than the other way round — npm packs the
+   github:tecruz/anvil` is the supported path, and it works: the repository is at
+   github.com/tecruz/anvil, tagged `v0.1.0`, private, with all five CI jobs green on ubuntu,
+   macos and windows. Verified by installing from the real URL into a throwaway project and
+   running the installed binary, not by inspection.
+
+   The repository being private is a deliberate choice, not an oversight: the SECURITY.md
+   contact is still `TODO`, and a public project with no monitored reporting address is worse
+   than a private one. Making it public is one command once that address exists.
+
+   That choice decided the manifest layout rather than the other way round — npm packs the
    repository root for a git dependency, and there is no subdirectory install, so the root had
    to become the package. ADR-0007 records it and supersedes the publish target in ADR-0006.
    Publishing to a registry is deferred, not cancelled: it needs a name decision and
