@@ -22,8 +22,20 @@ function tempDir(prefix = 'anvil-config-'): string {
 
 describe('globalConfigPath', () => {
   test('uses ANVIL_CONFIG_HOME when set', () => {
-    const p = globalConfigPath({ ANVIL_CONFIG_HOME: 'C:/custom' })
-    assert.equal(p, join('C:/custom', 'anvil.config.json').replace(/\\/g, '\\'))
+    // An absolute path *on this platform*. The first version of this test hardcoded
+    // `C:/custom`, which is absolute on Windows and a relative path on Linux -- so CI
+    // resolved it against the checkout and failed there while passing here, which is the
+    // exact shape of bug a cross-platform CI matrix exists to find.
+    const home = process.platform === 'win32' ? 'C:/custom' : '/custom'
+    const p = globalConfigPath({ ANVIL_CONFIG_HOME: home })
+    assert.equal(p, join(home, 'anvil.config.json'))
+  })
+
+  test('a relative ANVIL_CONFIG_HOME resolves against the working directory', () => {
+    // Not a hypothetical: it is what the Windows-path test above accidentally asserted on
+    // Linux, and it is the behaviour worth pinning rather than leaving to chance.
+    const p = globalConfigPath({ ANVIL_CONFIG_HOME: 'custom' })
+    assert.equal(p, join(process.cwd(), 'custom', 'anvil.config.json'))
   })
 
   test('ignores an empty ANVIL_CONFIG_HOME', () => {

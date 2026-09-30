@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 
 import {
@@ -549,7 +549,11 @@ describe('claims', () => {
   })
 
   test('a configured worktree root wins', () => {
-    assert.equal(defaultWorktreeRoot('/repo', 'C:/wt'), join('C:', 'wt'))
+    // Absolute *on this platform*, and compared against `resolve` because that is what the
+    // function does with it: `C:/wt` is a relative path on Linux, so the original assertion
+    // passed on Windows and failed on the two other CI runners.
+    const configured = process.platform === 'win32' ? 'C:/wt' : '/wt'
+    assert.equal(defaultWorktreeRoot('/repo', configured), resolve(configured))
   })
 
   test('claim creates a warm worktree and records it', async () => {

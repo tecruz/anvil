@@ -146,6 +146,14 @@ describe('runProcess', () => {
   test('refuses an unsafe argument on a shim instead of running it', async () => {
     // Proves the refusal happens before execution, on the path that would otherwise be
     // injectable.
+    //
+    // Windows only, and the reason is structural rather than a shrug: the risk being tested
+    // is argument interpretation by `cmd.exe`, which only exists on the `.cmd` shim path.
+    // On POSIX there is no shim and no shell -- `runProcess` is `execFile` with an argument
+    // array -- so `&` and `>` in an argument are already inert and there is nothing to
+    // refuse. The first version of this test ran everywhere and failed on both Linux and
+    // macOS, where npm simply reports an unknown script.
+    if (process.platform !== 'win32') return
     const dir = mkdtempSync(join(tmpdir(), 'anvil-exec-unsafe-'))
     const created = join(dir, 'canary.txt')
     await assert.rejects(

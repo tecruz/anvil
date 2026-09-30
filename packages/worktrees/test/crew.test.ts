@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -27,6 +27,27 @@ after(() => {
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+}
+
+/**
+ * A PATH containing a stub for `name`, so a launch can be tested without the real binary.
+ *
+ * The point is hermeticity: a test that shells out to whatever the developer happens to have
+ * installed passes on their machine and fails in CI, which is a failure that teaches the
+ * wrong lesson. On Windows the stub is a `.cmd`, because that is the shim shape the
+ * resolution is looking for.
+ */
+function stubRunnerDir(name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'anvil-stub-path-'))
+  temps.push(dir)
+  if (process.platform === 'win32') {
+    writeFileSync(join(dir, `${name}.cmd`), '@echo off\r\nexit /b 0\r\n', 'utf8')
+  } else {
+    const stub = join(dir, name)
+    writeFileSync(stub, '#!/bin/sh\nexit 0\n', 'utf8')
+    chmodSync(stub, 0o755)
+  }
+  return dir
 }
 
 function makeRepo(opts: { npm?: boolean; gradle?: boolean; go?: boolean } = {}): string {
@@ -481,6 +502,11 @@ describe('launchOpencodeAgent', () => {
   test('a launcher that throws is contained, not fatal to the crew', async () => {
     // The other agents in the crew are already running when this happens; one bad launch
     // must not take the process down and orphan them.
+    //
+    // `env` points PATH at a directory holding a stub `opencode`, because the launch
+    // resolves the runner on PATH before spawning. Without it this test passed only on a
+    // machine that happened to have opencode installed: on CI the resolution failed first
+    // and the assertion saw `Command not found` instead of the error it was testing for.
     const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-throw-'))
     await assert.rejects(
       () =>
@@ -490,6 +516,7 @@ describe('launchOpencodeAgent', () => {
           prompt: 'hi',
           logPath: join(dir, 'k.log'),
           runner: 'opencode',
+          env: { PATH: stubRunnerDir('opencode') },
           spawnFn: (() => {
             throw new Error('catastrophic')
           }) as unknown as typeof import('node:child_process').spawn,

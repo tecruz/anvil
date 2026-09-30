@@ -12,7 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -75,7 +75,13 @@ function repoWithHook(): string {
   git(dir, 'commit', '-m', 'install hook')
   git(dir, 'config', 'core.hooksPath', '.githooks')
   mkdirSync(join(dir, 'node_modules', '.bin'), { recursive: true })
-  writeFileSync(join(dir, 'node_modules', '.bin', 'biome'), `#!/bin/sh\nexec "${BIOME}" "$@"\n`, 'utf8')
+  const shim = join(dir, 'node_modules', '.bin', 'biome')
+  writeFileSync(shim, `#!/bin/sh\nexec "${BIOME}" "$@"\n`, 'utf8')
+  // The executable bit, which npm sets on a real `.bin` shim and `writeFileSync` does not.
+  // Without it the hook's `"$biome" check` fails with "Permission denied" on Linux, and the
+  // commit is rejected for a reason that has nothing to do with formatting -- which is how
+  // this test failed on its first CI run while passing on Windows, where the bit is ignored.
+  chmodSync(shim, 0o755)
   // The project's own biome config, because the hook runs with it. Without this the temp
   // repository falls back to biome's defaults, which want semicolons -- so a file that is
   // perfectly formatted *here* is reported as unformatted, and the test ends up measuring
