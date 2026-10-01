@@ -25,14 +25,17 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/anomalyco/anvil.git"
+    "url": "git+https://github.com/tecruz/anvil.git"
   },
-  "homepage": "https://github.com/anomalyco/anvil#readme",
+  "homepage": "https://github.com/tecruz/anvil#readme",
   "bugs": {
-    "url": "https://github.com/anomalyco/anvil/issues"
+    "url": "https://github.com/tecruz/anvil/issues"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": "^1.18.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.18.33"

@@ -209,20 +209,33 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
   if (test === null) return null
 
   const steps: string[] = []
+  // A command like `cargo test` is written the way its ecosystem writes it: relative to the
+  // project, not to wherever the agent is standing. In a repository whose project lives in a
+  // subdirectory, the raw command is a trap, so every artifact that embeds one carries the
+  // directory -- the AGENTS.md template, this skill, and the review command alike. Getting it
+  // right in one of three and not the others leaves the two that are not the AGENTS.md
+  // actively misleading.
+  const cd = profile.projectDir === '' ? '' : `cd ${profile.projectDir} && `
+  const note =
+    profile.projectDir === ''
+      ? []
+      : [`> The project lives in \`${profile.projectDir}/\`. Run the commands below from that directory.`, '']
+  const run = (cmd: string): string => `${cd}${cmd}`
+
   steps.push('1. Run the changed-files subset first:')
   if (fast !== null) {
-    steps.push(`${CODE_FENCE}bash\n${fast.cmd}\n${CODE_FENCE}`)
+    steps.push(`${CODE_FENCE}bash\n${run(fast.cmd)}\n${CODE_FENCE}`)
     steps.push('')
   } else {
     steps.push('   _No changed-files subset is defined in this repo. Run the full suite._')
     steps.push('')
   }
   steps.push('2. Run the full suite before you claim the work is done:')
-  steps.push(`${CODE_FENCE}bash\n${test.cmd}\n${CODE_FENCE}`)
+  steps.push(`${CODE_FENCE}bash\n${run(test.cmd)}\n${CODE_FENCE}`)
   if (lint !== null) {
     steps.push('')
     steps.push('3. Lint:')
-    steps.push(`${CODE_FENCE}bash\n${lint.cmd}\n${CODE_FENCE}`)
+    steps.push(`${CODE_FENCE}bash\n${run(lint.cmd)}\n${CODE_FENCE}`)
   }
 
   const content = [
@@ -233,6 +246,7 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
     '',
     '# Verifying a change',
     '',
+    ...note,
     ...steps,
     '',
     'If a command fails, fix the cause rather than the assertion. If a command is wrong,',
@@ -262,20 +276,28 @@ export function generateReviewCommand(options: GenerateOptions): GeneratedArtifa
   const lint = bestCommand(profile, 'lint')
   if (test === null && lint === null) return null
 
+  // Same rule as the verify skill: the commands below are ecosystem-relative, so a project in
+  // a subdirectory needs the directory prefixed or the whole command is a trap.
+  const cd = profile.projectDir === '' ? '' : `cd ${profile.projectDir} && `
+
   const body: string[] = []
   body.push('Review the current diff for correctness before it is proposed.')
+  if (profile.projectDir !== '') {
+    body.push('')
+    body.push(`The project lives in \`${profile.projectDir}/\`, so the commands below run from there.`)
+  }
   body.push('')
   body.push('Recent commits:')
   body.push('!`git log --oneline -10`')
   body.push('')
   if (test !== null) {
     body.push('Test results:')
-    body.push(`!\`${test.cmd}\``)
+    body.push(`!\`${cd}${test.cmd}\``)
     body.push('')
   }
   if (lint !== null) {
     body.push('Lint results:')
-    body.push(`!\`${lint.cmd}\``)
+    body.push(`!\`${cd}${lint.cmd}\``)
     body.push('')
   }
   body.push('Report: correctness problems, missing edge cases, and anything that would be')

@@ -15,7 +15,6 @@ export const versionCommand: Command = {
   usage: 'anvil version [--json]',
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
   async run(ctx, rawArgs) {

@@ -116,3 +116,19 @@ anvil playbook check           # structural checks, plus every URL over the netw
 `check` runs in CI. If a link is dead, find the current URL and probe it before writing it
 down; if there is no honest replacement, delete the entry rather than pointing it at
 something plausible.
+
+## The one suite that needs `gh`
+
+```bash
+ANVIL_LIVE=1 npm run test:live
+```
+
+The unit suite mocks the `gh` argv shape, and every defect found in the first review pass
+lived inside that mock — `gh issue view --hostname` does not exist, `gh issue create` has no
+`--json`. The live suite records the argv the provider builds and asks the installed `gh`
+which flags it accepts, so it needs no credentials and no network. CI runs it in its own job
+with `ANVIL_LIVE=1` set; without that variable the suite skips itself and reports zero tests,
+which is why the workflow also fails a run where nothing passed.
+
+`anvil playbook check` and the live suite are the only two checks that touch the network. If
+you change a command anvil sends to `gh`, or edit a playbook URL, run both.

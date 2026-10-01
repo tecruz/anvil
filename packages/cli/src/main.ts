@@ -26,7 +26,7 @@ import {
   toAnvilError,
   VERSION,
 } from '@anvil/core'
-import { discoverRepo } from '@anvil/git'
+import { discoverRepo, type GitRepoInfo } from '@anvil/git'
 import { configCommand } from './commands/config.ts'
 import { crewCommand } from './commands/crew.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
@@ -56,8 +56,6 @@ const COMMANDS: Command[] = [
   statusCommand,
   versionCommand,
 ]
-
-const GLOBAL_FLAGS = new Set(['--json', '-j', '--no-color', '--help', '-h'])
 
 function findCommand(name: string): Command | undefined {
   return COMMANDS.find((c) => c.name === name)
@@ -126,8 +124,11 @@ export async function run(argv: string[]): Promise<number> {
     return ExitCode.Ok
   }
 
-  // Best-effort repo discovery. A missing repo is not an error until a command needs it.
-  const repo = await discoverRepo(process.cwd())
+  // Best-effort repo discovery. A missing repo is not an error until a command needs it,
+  // and neither is git itself being absent: `anvil version --json` must not require a git
+  // install. Commands that do need a repository discover it again inside their own `run`,
+  // where the failure is funnelled into an envelope with the real exit code.
+  const repo = await discoverRepoBestEffort()
 
   const colorEnabled = shouldUseColor({
     noColor,
@@ -198,11 +199,38 @@ function renderFailureText(err: AnvilError, style: ReturnType<typeof makeStyle>)
   return `${lines.join('\n')}\n`
 }
 
+/**
+ * Repo discovery that cannot take the process down.
+ *
+ * Best-effort, literally: any failure returns `null`, because every command that genuinely
+ * needs a repository either checks `ctx.repoRoot === null` or calls `discoverRepo` again
+ * inside its own `run`, where the failure is funnelled with the real exit code. Surfacing
+ * anything here is a duplicate of that error -- and for commands that need no repo
+ * (`version`, `playbook list`, `config path`), it is a crash where the tool could have
+ * answered. The original bug was letting this rejection escape `run` as an unhandled
+ * rejection: a raw stack trace and exit 1 on every command, contradicting this file's own
+ * claim that `--json` is the only mode that writes on failure.
+ */
+async function discoverRepoBestEffort(): Promise<GitRepoInfo | null> {
+  try {
+    return await discoverRepo(process.cwd())
+  } catch {
+    return null
+  }
+}
+
 /** Remove the command token (and its first occurrence) from argv. */
 function stripCommand(argv: string[], command: string): string[] {
   const index = argv.indexOf(command)
-  if (index === -1) return argv.filter((a) => !GLOBAL_FLAGS.has(a))
-  return [...argv.slice(0, index), ...argv.slice(index + 1)]
+  const rest = index === -1 ? argv : [...argv.slice(0, index), ...argv.slice(index + 1)]
+  // `--no-color` is consumed here, by `run`, to style every stream anvil writes to. It must
+  // therefore never reach a command's parser: each command used to declare a `noColor` flag,
+  // which parseArgs exposes as `--noColor`, so the documented `--no-color` was rejected as an
+  // unknown option on every command. The flag is global, and it is handled globally.
+  //
+  // `--json`, `-j`, `--help` and `-h` stay: commands declare those themselves, and `init`
+  // reads its own parsed `json` value.
+  return rest.filter((a) => a !== '--no-color')
 }
 
 /**

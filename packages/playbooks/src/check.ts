@@ -110,14 +110,20 @@ export function checkStructure(playbooks: readonly Playbook[]): Problem[] {
   const byId = new Map(playbooks.map((p) => [p.id, p]))
 
   for (const playbook of playbooks) {
-    // A duplicate id is silent data loss: the merge in `loadPlaybooksFromDirectory` is
-    // keyed by id, so two files claiming one id means one of them is never used.
-    if (playbooks.filter((p) => p.id === playbook.id).length > 1) {
+    // A duplicate id is silent data loss: the merge in the loader is keyed by id, so two
+    // files claiming one id means one of them is never used. The loader also reports this
+    // (it is the only place that sees two files before the merge), but `checkStructure` is
+    // exported and takes whatever list it is handed -- so it checks too, and names the files
+    // because the whole diagnosis is "which of these two do I open".
+    const claimants = playbooks.filter((p) => p.id === playbook.id)
+    if (claimants.length > 1) {
       problems.push({
         level: 'error',
         where: playbook.id,
         message: `duplicate playbook id: ${playbook.id}`,
-        fix: 'Playbook ids are the merge key. Two files claiming one id means one is silently unused.',
+        fix: `Playbook ids are the merge key, so one of these is silently unused: ${claimants
+          .map((p) => p.source ?? '<built-in>')
+          .join(', ')}. Rename one, or keep only one file.`,
       })
     }
 
@@ -196,43 +202,64 @@ export function checkStructure(playbooks: readonly Playbook[]): Problem[] {
   // Risk globs claimed by more than one playbook. This is not automatically wrong -- the
   // android/jvm overlap is intentional, resolved by priority at plan time -- so it is
   // reported so a human can confirm the winner is the specific one.
-  const globOwners = new Map<string, string[]>()
+  const globOwners = new Map<string, Set<string>>()
   for (const playbook of playbooks) {
     for (const glob of playbook.riskGlobs) {
-      if (!globOwners.has(glob)) globOwners.set(glob, [])
-      ;(globOwners.get(glob) as string[]).push(playbook.id)
+      // A Set, because one playbook listing the same glob twice is not two claimants, and
+      // counting it as one produces a "claimed by 2 playbooks" line naming a single id.
+      if (!globOwners.has(glob)) globOwners.set(glob, new Set())
+      ;(globOwners.get(glob) as Set<string>).add(playbook.id)
     }
   }
-  for (const [glob, owners] of [...globOwners.entries()].sort()) {
-    if (owners.length < 2) continue
-    const ids = [...owners].sort()
-    const highest = ids
+  for (const [glob, ownerSet] of [...globOwners.entries()].sort()) {
+    if (ownerSet.size < 2) continue
+    const ids = [...ownerSet].sort()
+    const ranked = ids
       .map((id) => byId.get(id))
       .filter((p): p is Playbook => p !== undefined)
-      .sort((a, b) => b.priority - a.priority)[0]
+      .sort((a, b) => b.priority - a.priority)
+    const top = ranked[0]
+    const tied = ranked.filter((p) => top !== undefined && p.priority === top.priority)
+    // A tie has no winner to recommend, and naming one alphabetically is advice nobody should
+    // act on. Demoted to a note so a monkey-see-monkey-do gate reading "0 warnings" on this
+    // project's own registry is not training its reader to ignore arbitrary verdicts.
+    const level: ProblemLevel = tied.length > 1 ? 'info' : 'warn'
+    const resolution =
+      tied.length > 1
+        ? `${tied.length} playbooks tie at priority ${top?.priority ?? '?'}, so nothing here is more specific than the rest. It is resolved at plan time by a stable order; confirm that is acceptable.`
+        : `Resolved at plan time by priority; ${top?.id ?? 'unknown'} wins. Confirm that is the more specific playbook.`
     problems.push({
-      level: 'warn',
+      level,
       where: ids.join(', '),
-      message: `risk glob ${JSON.stringify(glob)} is claimed by ${owners.length} playbooks (${ids.join(', ')})`,
-      fix: `Resolved at plan time by priority; ${highest?.id ?? 'unknown'} wins. Confirm that is the more specific playbook.`,
+      message: `risk glob ${JSON.stringify(glob)} is claimed by ${ownerSet.size} playbooks (${ids.join(', ')})`,
+      fix: resolution,
     })
   }
 
   // The same URL in two playbooks prints twice for a reader who matches both. The plan
-  // calls this out for the android Compose docs, so it is worth surfacing.
-  const urlOwners = new Map<string, string[]>()
-  for (const { url, where } of collectUrls(playbooks)) {
+  // calls this out for the android Compose docs, so it is worth surfacing. Counting is by
+  // citation rather than by playbook, because one playbook citing the same URL twice also
+  // prints twice -- and a line saying "2 playbooks" over a single id is its own small lie.
+  const urlCitations = collectUrls(playbooks)
+  const urlOwners = new Map<string, { owners: Set<string>; where: string[] }>()
+  for (const { url, where } of urlCitations) {
     const owner = where.split('.')[0] as string
-    if (!urlOwners.has(url)) urlOwners.set(url, [])
-    ;(urlOwners.get(url) as string[]).push(owner)
+    if (!urlOwners.has(url)) urlOwners.set(url, { owners: new Set(), where: [] })
+    const entry = urlOwners.get(url) as { owners: Set<string>; where: string[] }
+    entry.owners.add(owner)
+    entry.where.push(where)
   }
-  for (const [url, owners] of [...urlOwners.entries()].sort()) {
-    if (owners.length < 2) continue
+  for (const [url, { owners, where }] of [...urlOwners.entries()].sort()) {
+    const ids = [...owners].sort()
+    if (where.length < 2) continue
+    const onePlaybook = ids.length === 1
     problems.push({
       level: 'warn',
-      where: [...new Set(owners)].sort().join(', '),
-      message: `${url} is cited by ${owners.length} playbooks (${[...new Set(owners)].sort().join(', ')})`,
-      fix: 'A reader matching both sees it twice. Keep it in the more specific playbook.',
+      where: ids.join(', '),
+      message: onePlaybook
+        ? `${url} is cited ${where.length} times by the same playbook (${ids[0]})`
+        : `${url} is cited ${where.length} times across ${ids.length} playbooks (${ids.join(', ')})`,
+      fix: 'A reader matching this sees it more than once. Keep it in the more specific playbook, and cite it once there.',
     })
   }
 

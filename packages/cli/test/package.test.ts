@@ -35,6 +35,20 @@ function tempDir(prefix: string): string {
   return d
 }
 
+/**
+ * True when a build artefact is present, and says so out loud when it is not.
+ *
+ * These assertions are about the *built* bundle, which `npm ci` produces through `prepare` --
+ * so in CI and after any install they always run. From a checkout where `dist/` has been
+ * removed, they used to `return` silently: the test reported as passed while testing nothing,
+ * which is the failure mode a green suite exists to prevent. A one-line note is the honest
+ * middle ground between failing a contributor who has not built yet and pretending.
+ */
+function haveBuild(what: string): boolean {
+  if (existsSync(what)) return true
+  process.stderr.write(`note: ${what} is absent, so the assertions about it did not run (run 'npm run build')\n`)
+  return false
+}
 describe('the distribution is installable from a git URL', () => {
   // ADR-0007. The channel is `npm i github:owner/repo`, not the registry, and that choice
   // dictates the manifest layout: npm packs the **repository root** for a git dependency, so
@@ -67,7 +81,7 @@ describe('the distribution is installable from a git URL', () => {
     // The failure this catches is the one a source checkout never sees: the manifest is
     // correct, the file is not there, and only a user finds out.
     const bin = resolve(REPO_ROOT, String((ROOT_PKG.bin as Record<string, string>).anvil))
-    if (!existsSync(join(REPO_ROOT, 'packages', 'cli', 'dist'))) return // nothing built yet
+    if (!haveBuild(join(REPO_ROOT, 'packages', 'cli', 'dist'))) return
     assert.ok(existsSync(bin), `${bin} is missing; the bin points at a file the build does not emit`)
   })
 
@@ -106,12 +120,48 @@ describe('the distribution is installable from a git URL', () => {
     assert.match(engines.node, />=22/)
   })
 
-  test('the repository URLs point at the owner who publishes it', () => {
-    // They said `anomalyco/anvil`, which is not this repository's owner. A `repository` URL
-    // is what a bug report's "view source" link resolves to, so a wrong one sends a reader
-    // to somebody else's code.
-    const repo = ROOT_PKG.repository as { url: string }
-    assert.match(repo.url, /github\.com\/tecruz\//, 'the repository URL must match the account that owns it')
+  test('the repository URLs point at the owner who publishes it, in every manifest', () => {
+    // They said `anomalyco/anvil`, which is not this repository's owner. A `repository` URL is
+    // what a bug report's "view source" link resolves to, so a wrong one sends a reader to
+    // somebody else's code.
+    //
+    // All three manifests, not just the root: the plugin manifest kept the wrong account for a
+    // while this test read only the root, which is the shape a test has when it cannot fail.
+    for (const [name, pkg] of [
+      ['package.json', ROOT_PKG],
+      ['packages/cli/package.json', CLI_PKG],
+      ['packages/plugin-opencode/package.json', PLUGIN_PKG],
+    ] as const) {
+      const repo = pkg.repository as { url: string } | undefined
+      assert.ok(repo !== undefined, `${name} should declare a repository`)
+      assert.match(repo.url, /github\.com\/tecruz\//, `${name} points at the wrong account`)
+      assert.match(pkg.homepage as string, /github\.com\/tecruz\//, `${name} homepage`)
+      assert.match((pkg.bugs as { url: string }).url, /github\.com\/tecruz\//, `${name} bugs url`)
+    }
+  })
+
+  test('every published manifest agrees on the version', () => {
+    // Three version fields is two chances to ship a binary that reports the wrong release.
+    for (const [name, pkg] of [
+      ['packages/cli', CLI_PKG],
+      ['packages/plugin-opencode', PLUGIN_PKG],
+    ] as const) {
+      assert.equal(pkg.version, ROOT_PKG.version, `${name} version drifted from the root`)
+    }
+  })
+
+  test('the engine floor is where running TypeScript directly became unflagged', () => {
+    // `node scripts/gen-playbooks.ts` runs at install time via `prepare`, and the whole test
+    // suite runs `.ts` files through `node --test`. Type stripping stopped needing
+    // `--experimental-strip-types` in 22.18, so a floor of 22.6 promised a git install that
+    // fails on the user's first command.
+    for (const [name, pkg] of [
+      ['root', ROOT_PKG],
+      ['packages/cli', CLI_PKG],
+    ] as const) {
+      const engines = pkg.engines as { node: string }
+      assert.match(engines.node, /22\.(1[89]|[2-9]\d)/, `${name} engines floor is below the type-stripping floor`)
+    }
   })
 })
 
@@ -137,7 +187,7 @@ describe('publishable package', () => {
     // the build runs from the root, which is private and versionless. So a build that
     // trusted it alone shipped a binary reporting 0.1.0-dev forever.
     const bundle = join(CLI_DIR, 'dist', 'cli.js')
-    if (!existsSync(bundle)) return // covered by the build step; nothing to assert yet
+    if (!haveBuild(bundle)) return
     const out = execFileSync(process.execPath, [bundle, 'version', '--json'], {
       encoding: 'utf8',
     })
@@ -175,7 +225,7 @@ describe('publishable package', () => {
     // The strongest available check that the bundle really is self-contained: anything
     // non-relative and not a node: builtin would have to be installed.
     const bundle = join(CLI_DIR, 'dist', 'cli.js')
-    if (!existsSync(bundle)) return
+    if (!haveBuild(bundle)) return
     const source = readFileSync(bundle, 'utf8')
     // Only real import statements. A bare `from "<something>"` also appears inside string
     // literals anvil itself emits -- error hints, for one -- so the shape is anchored to
@@ -199,7 +249,7 @@ describe('the opencode plugin package', () => {
   test('the entry point it declares actually exists after a build', () => {
     const exports = PLUGIN_PKG.exports as Record<string, string>
     const entry = resolve(PLUGIN_DIR, exports['.'] ?? '')
-    if (!existsSync(join(PLUGIN_DIR, 'dist'))) return // nothing built yet; not a failure
+    if (!haveBuild(join(PLUGIN_DIR, 'dist'))) return
     assert.ok(existsSync(entry), `${entry} is missing; the build did not emit the entry point`)
   })
 
@@ -213,7 +263,7 @@ describe('the opencode plugin package', () => {
 
   test('the bundle leaves the SDK external rather than inlining it', () => {
     const bundle = join(PLUGIN_DIR, 'dist', 'index.js')
-    if (!existsSync(bundle)) return
+    if (!haveBuild(bundle)) return
     const source = readFileSync(bundle, 'utf8')
     assert.match(
       source,
@@ -226,7 +276,7 @@ describe('the opencode plugin package', () => {
     // A plugin that compiles and exports nothing useful is a packaging success and a
     // product failure, and neither the bundle nor the typecheck can tell.
     const bundle = join(PLUGIN_DIR, 'dist', 'index.js')
-    if (!existsSync(bundle)) return
+    if (!haveBuild(bundle)) return
     const source = readFileSync(bundle, 'utf8')
     for (const tool of ['anvil_doctor', 'anvil_plan', 'anvil_ticket', 'anvil_status']) {
       assert.ok(source.includes(tool), `${tool} is missing from the built plugin`)

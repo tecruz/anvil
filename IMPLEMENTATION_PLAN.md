@@ -1,10 +1,11 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M6 complete**, plus a review pass, the ten-repository audit and the last
-> two items (see [Review pass](#review-pass--m6-hardening-2026-09-30)). M1's exit
-> criterion -- ten real repositories, no false blockers -- is met, and extended to
-> five deliberately awkward shapes and a subdirectory project.
+> Status: **M0–M6 complete**, plus two review passes, the ten-repository audit and the last
+> two items (see [Review pass](#review-pass--m6-hardening-and-dogfooding-2026-09-30) and
+> [The second review](#the-second-review-2026-09-30)). M1's exit criterion -- ten real
+> repositories, no false blockers -- is met, and extended to five deliberately awkward shapes
+> and a subdirectory project.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -372,7 +373,8 @@ anvil doctor  [--json] [--layer <l>] [--fail-on <severity>] [--profile <dir>]
 anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>]
 anvil brief   --for agents|commands|skills|all    # verified facts for the LLM step
 anvil init    [--apply] [--only <artifact>] [--allow-warnings]
-anvil playbook list | show <id> | check [--offline] [--concurrency n] [--timeout ms] [--warnings]
+anvil playbook list | show <id> | check [--offline] [--probe] [--concurrency n] [--timeout ms] [--warnings]
+anvil playbook add <path|url> [--force]
 anvil auth github | local
 
 anvil issue show|list|create|comment|set-state <ref>
@@ -391,8 +393,8 @@ anvil version
 
 ### Not built
 
-- `anvil playbook add <path|url>`, for a company playbook without a fork. `list`, `show` and
-  `check` exist; `match` is deliberately absent because `plan` already reports what matched.
+- `anvil playbook match` as a standalone view. `plan` already reports what matched, so a
+  separate command would answer the same question in a second format.
 - `anvil auth --check` as a distinct mode. `auth github` is already an offline probe, so
   `--check` is accepted and ignored rather than being a different code path.
 - `crew up --from <query>`. Tickets are selected with `--tickets`, or by taking everything
@@ -1716,25 +1718,109 @@ Two things the tests caught in my own first attempt, both in the direction of ov
 
 ### What is still open
 
-- **`anvil playbook add`** (`<path|url>`), the other half of the extensibility claim, and
-  `playbook match` as a standalone view. `plan` already reports what matched, so `match` is
-  redundant; `add` is not implemented.
-- **The ten real repositories.** M1's exit criterion is still unmet; this repository is
-  one, and it was enough to find nine defects, which is either an argument for doing the
-  other nine or an argument that this one was badly served.
-- Governance findings that need a human decision rather than a tool: no CODEOWNERS, no PR
-  or issue template, no LICENSE, no SECURITY.md, no CONTRIBUTING.
+- **A monitored address in `SECURITY.md`.** The one governance value that cannot be
+  invented. `CODEOWNERS` was resolved by asking GitHub rather than guessing the account from
+  a directory path; a security address needs a mailbox somebody actually reads, and until
+  one exists the project stays private, because a public project with no reporting address
+  is worse than a private one.
+- **More real repositories.** Fifteen have been audited — ten mid-to-large projects in five
+  ecosystems, plus five deliberately awkward shapes. The honest next step is more of the same,
+  not a different kind of test. The shape still unresolved by design: a tree with *two*
+  projects in two subdirectories is reported as unknown rather than guessed at.
+- **A generated `AGENTS.md` cannot cite itself accurately.** Regenerating the file shifts the
+  line numbers in its own evidence (`npm run build` is documented at `AGENTS.md:7`, which after
+  applying is the install line). Structural, and recorded rather than hand-corrected: a
+  hand-corrected file would disagree with the generator and the next regeneration would put it
+  back.
 
 ### What the review says about the testing strategy
 
 The suite is strong at sequencing and behaviour, and the pack→install→run test is the best
 test in the repository. But it mocks two boundaries — the `gh` argv shape and the agent
-launch prompt — and **all four critical defects lived inside those two mocks**. A mock
-proves the pipeline calls what you told it to call; it cannot prove the thing you called is
-a real command with real flags. The remaining high-value additions are a live suite behind
-`ANVIL_LIVE=1` (as the testing strategy already promised) and a smoke test that runs the
-real `agentPrompt` through the real shim path.
+launch prompt — and **all four critical defects lived inside those two mocks**. A mock proves
+the pipeline calls what you told it to call; it cannot prove the thing you called is a real
+command with real flags. Both are now closed: the live suite exists and runs in CI, and the
+real `agentPrompt` goes through the real shim path in the launcher tests.
 
-`anvil doctor` on anvil itself still fails `AGENTS_COMMANDS` — there is no `AGENTS.md` in
-this repository. The tool has not yet been pointed at its own repo, which is the cheapest
-possible version of the ten-real-repositories exit criterion.
+The second review pass added a third category, and it is the one worth generalising: **a
+check that cannot fail is a check that reads as coverage.** The live `gh` suite was wired into
+CI and ran *zero tests* because nothing set `ANVIL_LIVE`, and the job was green. The fix was
+not "remember to set the variable" — it was a guard that fails a run where nothing passed.
+The same shape appeared in `package.test.ts`, where six assertions returned silently when
+`dist/` was absent, and in a duplicate-id check that could never fire because the merge had
+already collapsed the duplicates it was looking for. A test that reports success without
+having run is the most expensive kind of quiet, and each of those now either runs or says
+out loud that it did not.
+
+## The second review (2026-09-30)
+
+A line-by-line review of the thirteen commits since the first pass, run against the built
+bundle rather than by reading alone. The suite was green at 566/566 throughout; every defect
+below was invisible to it, and the reasons are the same three as last time — a mocked
+boundary, a check that could not fail, or a rule whose narrowing went one step too far.
+
+### The rules, again
+
+Four of the five blockers were rules making claims they had not earned.
+
+- **`SECRET_SCAN` said "no committed secrets" about a file it never opened.** The fix for six
+  false positives on real repositories put the test-path exemption *before* the content
+  check, so a live `_authToken` in `examples/app/.npmrc` was dismissed as a fixture and the
+  rule then reported a clean bill of health for a file nobody read. A high-severity security
+  rule asserting an absence after not looking is the worst output this tool can produce, and
+  it was worse than the false positive it replaced. The content check runs first now, and the
+  pass detail distinguishes files that were read from files that were only path-matched.
+  `always-auth=true` also stopped counting as a credential, because it is a boolean.
+- **`unidentified()` silenced three rules on every ecosystem anvil has no detector for.** A
+  `Makefile` tree reported `TEST`/`BUILD`/`LINT` as `na` — true sentences about anvil's own
+  blindness presented as facts about the repository. The case the guard was written for (a
+  crate under `engine/`) is now fixed at the source by project-directory resolution, so what
+  remained was the over-reach. It now requires both halves: nothing detected *and* nothing
+  recognisable on disk.
+- **`TEST_FAST` put tool names and empty strings in `Finding.evidence`.** The contract is
+  `file:line` or a path; a name is not evidence and `""` is not evidence. It also guessed a
+  runner from the first token of a command, so `npm run test` was reported as "a test runner
+  is configured (npm)". The detail now quotes the command.
+- **`CODEOWNERS` called a file of bare owners "every line is a comment or blank."** Bare
+  `org/team` and email owners are not comments; GitHub resolves the email form and rejects
+  the bare one, and the rule now says which is which. Placeholder detection moved from a
+  substring test to a per-segment one, because the substring test flagged `@todoist-team` and
+  `@XXXcorp` — real owners, which is the expensive error.
+- **`SECURITY_MD` claimed "there is nowhere to report a vulnerability"** about a policy that
+  routes reports through GitHub's private advisories. A reporting channel is a channel, and
+  the rule no longer asserts a negative about the world.
+
+### The checks that could not fail
+
+Three, and they are the finding this section is really about.
+
+- **The `gh` live suite ran zero tests in CI.** The suite skips itself without `ANVIL_LIVE=1`;
+  the workflow ran `npm run test:live` without it. Eight defects had been found with this
+  suite, and the job built to keep finding them was a no-op that read as coverage. Fixed by
+  setting the variable *and* by grepping the output for a passing test, so an empty or
+  renamed file fails the job instead of reporting a reassuring zero.
+- **The duplicate-playbook-id check could never fire.** The merge is keyed by id, so the list
+  the check received had already been deduplicated. The check now lives in the loader, where
+  two files claiming one id are still visible, and a broken playbook file fails the rot gate —
+  an unparseable file is a fact on the developer's machine, not a network wobble.
+- **`playbook add` installed what `playbook check` immediately rejected**, and probing is on
+  by default, so an installed playbook became a source of outbound requests from CI to
+  whatever host it named. `add` now runs the same structural checks `check` does, enforces the
+  cap while streaming rather than after buffering, refuses a redirect off https, and refuses
+  an id owned by a higher layer — where the file it wrote would never be read.
+
+### One defect from the first pass, half-fixed
+
+The M6 pass fixed the failure envelope saying success, in five commands. `doctor --fail-on`
+was missed: exit 6 with `ok: true` and the report as the payload, which is the exact shape
+the plugin branches on. It now uses `ctx.outFailure`, and the exit code, the envelope and the
+payload are all asserted — nothing tested `--fail-on` at all, which is how it survived.
+
+### What the second pass cost in score
+
+Nothing, deliberately. Every fix moved a status from *wrong* to *right* — `na` to `fail` for a
+C repo, `pass` to `fail` for a committed token — and the score on this repository is
+unchanged, because none of the fixtures exercise those paths. Two fixes are not attached to a
+rule at all: `isExecutableFile` (a directory named `npm.exe` on PATH resolved as a binary, so
+a spawn failed with `EISDIR` reported as exit 70, "Bug in anvil") and the engines floor
+(22.18, where running TypeScript directly stopped needing a flag).

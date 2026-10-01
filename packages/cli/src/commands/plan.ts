@@ -62,7 +62,6 @@ export const planCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     tier: { type: 'string', multiple: true },

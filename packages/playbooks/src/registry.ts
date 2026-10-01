@@ -123,6 +123,22 @@ function mergeWithBuiltins(dirs: readonly string[], warnAbout: ReadonlySet<strin
       continue
     }
     const loaded = parsePlaybookFiles(files)
+    // A duplicate id *inside one directory* is silent data loss, and it is invisible from
+    // here on: the merge below is keyed by id, so of two files claiming `node`, one is never
+    // used and the registry is narrower than the directory looks. Reported, because a
+    // consumer cannot see it any other way -- the surviving playbook looks perfectly fine.
+    //
+    // A later layer replacing an *earlier* one is the documented override behaviour, so that
+    // case is not a warning. Only two files in the same directory are.
+    const seenHere = new Set<string>()
+    for (const playbook of loaded.playbooks) {
+      if (seenHere.has(playbook.id)) {
+        warnings.push(
+          `duplicate playbook id "${playbook.id}" in ${dir}: more than one file claims it, and the merge is keyed by id, so one of them is never used`,
+        )
+      }
+      seenHere.add(playbook.id)
+    }
     for (const playbook of loaded.playbooks) byId.set(playbook.id, playbook)
     warnings.push(...loaded.warnings)
   }

@@ -9,12 +9,22 @@
 # catch the case where they diverge: an agent is told "verified" on the strength of a
 # command CI never executes. One command, run in both places, is the only version of that
 # rule that holds.
+#
+# Actions are pinned by commit SHA, with the tag in a comment. A tag can move under you, and
+# a moved tag in a workflow is code you did not review running with this repository's token.
+# Bump deliberately: `gh api repos/actions/checkout/git/refs/tags/v4 --jq .object.sha`.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# Nothing here writes to the repository, comments on a PR, or needs an API token beyond
+# reading the source. The default `GITHUB_TOKEN` permissions are broader than that, so they
+# are narrowed here rather than inherited.
+permissions:
+  contents: read
 
 # A superseded run for the same ref is not interesting, and cancelling it frees a runner.
 concurrency:
@@ -30,9 +40,9 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           # The engines field, not a pinned patch: the test suite runs TypeScript through
           # `node --test`, so a too-old node fails in a way that looks like a test bug.
@@ -51,9 +61,9 @@ jobs:
     name: playbook registry (rot check)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: package.json
           cache: npm
@@ -70,15 +80,23 @@ jobs:
 
   # The live `gh` contract suite is deliberately not in the matrix above: it needs the gh
   # binary, and on some runners it would authenticate as nobody. It is the check that
-  # catches "the flag we pass is not a flag gh has", so it runs where gh is available and
-  # fails loudly rather than silently skipping.
+  # catches "the flag we pass is not a flag gh has" -- eight defects in one family, none of
+  # which the mocked suite could see -- so it runs where gh is available.
+  #
+  # Two things make it a gate rather than a report nobody reads:
+  #
+  #   1. `ANVIL_LIVE=1` is set here. The suite skips itself without it, and the first version
+  #      of this job ran `npm run test:live` with no such variable: zero tests, green build,
+  #      and a comment claiming the suite could not skip silently. It skipped silently.
+  #   2. The output is grepped for a passing test, so a future rename that empties the file
+  #      fails the job instead of reporting a reassuring zero.
   gh-contract:
     name: gh contract (live)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: package.json
           cache: npm
@@ -90,8 +108,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gh
 
-      - name: gh is present, so the contract suite really runs
+      - name: gh is present, so the contract suite can really run
         run: gh --version
 
       - name: every flag anvil sends is a flag gh accepts
-        run: npm run test:live
+        env:
+          ANVIL_LIVE: '1'
+        run: |
+          out=$(node --test --test-reporter=spec packages/providers/test/gh-live.test.ts 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          # The summary prints `pass <n>`. Zero tests is how a skipped suite reports success,
+          # so the count is checked rather than assumed: an empty or renamed file must fail.
+          echo "$out" | grep -Eq 'pass [1-9][0-9]*' || { echo "::error::the live gh contract suite ran zero tests"; exit 1; }

@@ -18,11 +18,13 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { AnvilError, ErrorCode, ExitCode, type FlagSpecs, parseCliArgs, renderTable } from '@anvil/core'
 import {
+  BUILTIN_PLAYBOOK_SOURCE,
   type CheckReport,
   checkPlaybooks,
+  checkStructure,
   loadPlaybooks,
   type Playbook,
   type Problem,
@@ -79,10 +81,14 @@ function parseCount(value: unknown, name: string): number | undefined {
 
 const FLAGS: FlagSpecs = {
   json: { type: 'boolean', short: 'j' },
-  noColor: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   id: { type: 'string' },
   offline: { type: 'boolean' },
+  // Declared because the help text and the plan both document it, and an option the tool
+  // advertises but does not accept is a usage error the reader hits on their first try.
+  // Probing is on by default when online; `--probe` states that explicitly, and wins over
+  // `--offline` because it is the more specific request.
+  probe: { type: 'boolean' },
   concurrency: { type: 'string' },
   timeout: { type: 'string' },
   warnings: { type: 'boolean' },
@@ -92,7 +98,7 @@ const FLAGS: FlagSpecs = {
 export const playbookCommand: Command = {
   name: 'playbook',
   summary: 'Inspect the playbook registry and check it for rot.',
-  usage: 'anvil playbook <list|show|check> [flags]',
+  usage: 'anvil playbook <list|show|check|add> [flags]',
   details: [
     'list     every playbook, where it came from, and what it matches',
     'show     one playbook in full, with every resource and its url',
@@ -108,6 +114,7 @@ export const playbookCommand: Command = {
     "committed to someone else's project.",
     '',
     '--offline            skip the network; run only the structural checks',
+    '--probe              force the url probes (the default unless --offline)',
     '--concurrency <n>    parallel url probes (default 6)',
     '--timeout <ms>       per-request timeout (default 15000)',
     '--warnings           exit non-zero on warnings as well as errors',
@@ -140,7 +147,7 @@ export const playbookCommand: Command = {
           hint: 'e.g. `anvil playbook add ./acme.yaml` or `anvil playbook add https://example.com/acme.yaml`',
         })
       }
-      return runAdd(ctx, playbooks, source, args.values.force === true)
+      return runAdd(ctx, playbooks, source, args.values.force === true, process.env)
     }
     return runCheck(ctx, playbooks, warnings, args.values)
   },
@@ -167,6 +174,7 @@ async function runAdd(
   existing: readonly Playbook[],
   source: string,
   force: boolean,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<undefined> {
   const isUrl = /^https?:\/\//i.test(source)
   let text: string
@@ -186,7 +194,10 @@ async function runAdd(
         hint: 'Pass a path to a .yaml playbook, or an https URL.',
       })
     }
-    text = readFileSync(path, 'utf8')
+    // `existsSync` passes for a directory, and a user typo is a usage error rather than a
+    // bug in anvil: the raw EISDIR used to escape as INTERNAL/70, which tells a newcomer the
+    // tool is broken when they passed a folder to a command that wants a file.
+    text = readFileOrFail(path, 'read')
     if (Buffer.byteLength(text) > MAX_PLAYBOOK_BYTES) {
       throw new AnvilError(ErrorCode.Usage, `Playbook is larger than ${MAX_PLAYBOOK_BYTES} bytes: ${path}`)
     }
@@ -197,21 +208,53 @@ async function runAdd(
   // YAML subset, so this is the gate: nothing is written until the document is a playbook.
   const playbook = parsePlaybook(text, origin)
 
-  const clash = existing.find((p) => p.id === playbook.id)
-  if (clash !== undefined && !force) {
-    throw new AnvilError(ErrorCode.Usage, `A playbook with id "${playbook.id}" is already installed`, {
-      hint: `It came from ${clash.source ?? 'the built-in registry'}. Re-run with --force to replace it, or edit that file.`,
-      details: { id: playbook.id, existingSource: clash.source ?? 'built-in' },
-    })
+  // The structural half of `playbook check` is the same gate, and running it here is what
+  // stops `add` from installing a registry that `check` immediately calls broken -- a
+  // resource URL over http, a `file://` path, an empty title. It is offline and
+  // deterministic, so it cannot cry wolf about the network, and the URLs it rejects would
+  // otherwise be *probed by default* on the next `playbook check`, which turns installing a
+  // company playbook into an outbound request to whatever host it names.
+  const structural = checkStructure([playbook]).filter((p) => p.level === 'error')
+  if (structural.length > 0) {
+    throw new AnvilError(
+      ErrorCode.Usage,
+      `That playbook is not installable: ${structural.map((p) => `${p.where} ${p.message}`).join('; ')}`,
+      {
+        hint: `Fix it, or install with --force if you are deliberately shipping it anyway. ${structural[0]?.fix ?? ''}`.trim(),
+        details: { problems: structural },
+      },
+    )
   }
 
-  const dir = userPlaybookDir()
-  mkdirSync(dir, { recursive: true })
+  const clash = existing.find((p) => p.id === playbook.id)
+  const dir = userPlaybookDir(env)
+  if (clash !== undefined) {
+    // Precedence is built-ins -> user directory -> `$ANVIL_PLAYBOOKS`, later winning. Writing
+    // to the user directory while a *higher* layer owns the id installs a file the loader
+    // will never read, so there is no version of this that succeeds -- refused even with
+    // --force, because the whole point of `add` is a playbook that is active afterwards.
+    if (clash.source !== undefined && !isInside(dir, clash.source) && clash.source !== BUILTIN_PLAYBOOK_SOURCE) {
+      throw new AnvilError(ErrorCode.Usage, `"${playbook.id}" is already provided by ${clash.source}`, {
+        hint: `$ANVIL_PLAYBOOKS takes precedence over your own directory, so installing this there would write a file that is never read. Edit ${clash.source}, or install this one under a different id.`,
+        details: { id: playbook.id, existingSource: clash.source },
+      })
+    }
+    if (!force) {
+      throw new AnvilError(ErrorCode.Usage, `A playbook with id "${playbook.id}" is already installed`, {
+        hint: `It came from ${
+          clash.source ?? 'the built-in registry'
+        }. Re-run with --force to replace it, or edit that file.`,
+        details: { id: playbook.id, existingSource: clash.source ?? 'built-in' },
+      })
+    }
+  }
+
+  mkdirOrFail(dir, 'create')
   // The filename is the id, which the schema already constrains to lowercase
   // alphanumerics and hyphens -- so it cannot escape the directory or collide on a
   // case-insensitive filesystem in a way the id check would miss.
   const target = join(dir, `${playbook.id}.yaml`)
-  writeFileSync(target, text, 'utf8')
+  writeFileOrFail(target, text)
 
   const result: AddResult = {
     id: playbook.id,
@@ -233,7 +276,72 @@ async function runAdd(
   return undefined
 }
 
-/** Fetch a playbook over https, with a timeout and a size cap. */
+/**
+ * Filesystem failures as usage errors.
+ *
+ * Every one of these is something a user did -- a path that is a directory, a home directory
+ * that is read-only, a name the filesystem refuses -- so reporting them as `INTERNAL` exit
+ * 70 ("Bug in anvil. Report it") is both wrong and the fastest way to train a reader to
+ * ignore the error class that matters.
+ */
+function readFileOrFail(path: string, verb: string): string {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch (err) {
+    throw new AnvilError(
+      ErrorCode.Usage,
+      `Cannot ${verb} ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      {
+        hint: 'Check the path is a readable .yaml file, and that it is a file rather than a directory.',
+      },
+    )
+  }
+}
+
+function mkdirOrFail(path: string, verb: string): void {
+  try {
+    mkdirSync(path, { recursive: true })
+  } catch (err) {
+    throw new AnvilError(
+      ErrorCode.Usage,
+      `Cannot ${verb} ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      { hint: 'Check your home directory is writable.' },
+    )
+  }
+}
+
+function writeFileOrFail(path: string, text: string): void {
+  try {
+    writeFileSync(path, text, 'utf8')
+  } catch (err) {
+    throw new AnvilError(ErrorCode.Usage, `Cannot write ${path}: ${err instanceof Error ? err.message : String(err)}`, {
+      hint: 'Check the path is writable and within any length limit your filesystem has.',
+    })
+  }
+}
+
+/** True when `file` resolves inside `dir`. Both are expected to be absolute. */
+function isInside(dir: string, file: string): boolean {
+  const rel = relative(resolve(dir), resolve(file))
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/**
+ * Fetch a playbook over https, with a timeout and a cap enforced *while streaming*.
+ *
+ * Three things the obvious implementation gets wrong, all of them found by reading what the
+ * code actually did rather than what it meant to do:
+ *
+ *  1. `content-length` is advisory. A chunked response, or any server that omits the header,
+ *     reaches the body unread -- so the cap is enforced by counting bytes as they arrive and
+ *     aborting, not by measuring a buffer that is already in memory. The 15s timeout bounds
+ *     the *time*, not the size, and a fast connection fills gigabytes in that window.
+ *  2. The scheme check has to happen on the *final* URL. `https://…` answering `302` to
+ *     `http://…` is followed by default, and the content that comes back is installed as
+ *     trusted configuration. Checking the string the user typed is not the same check.
+ *  3. A `200` with a body that is not YAML fails in `parsePlaybook`, which is the right place
+ *     for that error, so nothing here tries to be clever about content types.
+ */
 async function fetchPlaybook(url: string): Promise<{ text: string; origin: string }> {
   let response: Response
   try {
@@ -256,17 +364,44 @@ async function fetchPlaybook(url: string): Promise<{ text: string; origin: strin
       hint: 'The URL must resolve to the playbook YAML itself, not to a page linking to it.',
     })
   }
+  const finalUrl = response.url === '' ? url : response.url
+  if (!/^https:\/\//i.test(finalUrl)) {
+    throw new AnvilError(ErrorCode.Usage, `Refusing to accept a playbook redirected off https: ${url} -> ${finalUrl}`, {
+      hint: 'A playbook becomes trusted configuration; fetch it over https all the way.',
+    })
+  }
+
   const declared = Number(response.headers.get('content-length') ?? '0')
   if (Number.isFinite(declared) && declared > MAX_PLAYBOOK_BYTES) {
     throw new AnvilError(ErrorCode.Usage, `Refusing a ${declared}-byte playbook: ${url}`, {
       hint: `A playbook is a few kB. The cap is ${MAX_PLAYBOOK_BYTES} bytes.`,
     })
   }
-  const text = await response.text()
-  if (Buffer.byteLength(text) > MAX_PLAYBOOK_BYTES) {
-    throw new AnvilError(ErrorCode.Usage, `Refusing a playbook larger than ${MAX_PLAYBOOK_BYTES} bytes: ${url}`)
+
+  const body = response.body
+  if (body === null) {
+    // No streaming body to read (an injected or stubbed fetch). Buffer it, then measure.
+    const text = await response.text()
+    if (Buffer.byteLength(text) > MAX_PLAYBOOK_BYTES) {
+      throw new AnvilError(ErrorCode.Usage, `Refusing a playbook larger than ${MAX_PLAYBOOK_BYTES} bytes: ${url}`)
+    }
+    return { text, origin: finalUrl }
   }
-  return { text, origin: url }
+
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of body as AsyncIterable<Uint8Array>) {
+    const buf = Buffer.from(chunk)
+    total += buf.length
+    if (total > MAX_PLAYBOOK_BYTES) {
+      await body.cancel().catch(() => {})
+      throw new AnvilError(ErrorCode.Usage, `Refusing a playbook larger than ${MAX_PLAYBOOK_BYTES} bytes: ${url}`, {
+        hint: `Stopped reading at the cap. A playbook is a few kB; a ${declared || 'large'}-byte response is not one.`,
+      })
+    }
+    chunks.push(buf)
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), origin: finalUrl }
 }
 
 function runList(ctx: CommandContext, playbooks: readonly Playbook[], warnings: readonly string[]): undefined {
@@ -373,25 +508,29 @@ async function runCheck(
   warnings: readonly string[],
   values: Record<string, string | boolean | string[] | undefined>,
 ): Promise<number | void> {
-  // Offline unless told otherwise: a rot check that needs the network to be useful is a rot
-  // check that cannot run in a locked-down environment, which is the environment this tool
-  // is built for. `--offline` makes the structural half explicit; `--probe` forces the rest.
+  // Probing is on by default when online, because a rot check that quietly skips the network
+  // is a rot check nobody runs; `--offline` is how a locked-down environment opts out, and
+  // `--probe` states the default explicitly (and wins over `--offline`, being the more
+  // specific request).
   const offline = values.offline === true
+  const probe = values.probe === true ? true : !offline
+  const concurrency = parseCount(values.concurrency, 'concurrency')
+  const timeout = parseCount(values.timeout, 'timeout')
   const report: CheckReport = await checkPlaybooks(playbooks, {
-    probe: !offline,
-    ...(parseCount(values.concurrency, 'concurrency') === undefined
-      ? {}
-      : { concurrency: parseCount(values.concurrency, 'concurrency') as number }),
-    ...(parseCount(values.timeout, 'timeout') === undefined
-      ? {}
-      : { timeoutMs: parseCount(values.timeout, 'timeout') as number }),
+    probe,
+    ...(concurrency === undefined ? {} : { concurrency }),
+    ...(timeout === undefined ? {} : { timeoutMs: timeout }),
   })
 
-  const failed = report.counts.error > 0 || (values.warnings === true && report.counts.warn > 0)
+  // A load warning is a broken playbook file, and unlike a 403 or a timeout it has a right
+  // answer on this machine: a typo'd company playbook that fails to parse silently removes
+  // its guidance from every plan while the rot gate stays green. So it fails, and the
+  // "don't cry wolf" bias that governs the network half does not apply to it.
+  const failed = report.counts.error > 0 || warnings.length > 0 || (values.warnings === true && report.counts.warn > 0)
   const data = {
     schemaVersion: 1,
     ok: !failed,
-    probed: !offline,
+    probed: probe,
     playbooks: playbooks.length,
     urls: report.urls,
     problems: report.problems,
@@ -404,10 +543,10 @@ async function runCheck(
     // travels on the failure envelope rather than being printed to stderr and lost.
     const err = new AnvilError(
       ErrorCode.ThresholdNotMet,
-      `${report.counts.error} error(s), ${report.counts.warn} warning(s) in the playbook registry`,
+      `${report.counts.error} error(s), ${report.counts.warn} warning(s), ${warnings.length} load problem(s) in the playbook registry`,
       {
         hint: 'Fix the dead links and structural errors. `anvil playbook show <id>` for detail, `--warnings` to fail on warnings too.',
-        details: { problems: report.problems },
+        details: { problems: report.problems, loadWarnings: warnings },
       },
     )
     ctx.outFailure(data, err, () => renderCheck(ctx, report, warnings, true, values.warnings === true))
@@ -484,7 +623,11 @@ function renderCheck(
     out.push(s.yellow('--warnings was passed and there are warnings'))
   }
   out.push('')
-  out.push(s.dim('A dead link is a 404 or 410. Everything else is reported, not failed.'))
+  out.push(
+    s.dim(
+      'A dead link is a 404 or 410. Everything else is reported, not failed. A playbook that failed to load is failed: an unparseable file is a fact on this machine, not a network wobble.',
+    ),
+  )
   return out.join('\n')
 }
 

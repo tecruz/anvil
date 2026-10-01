@@ -108,7 +108,6 @@ export const briefCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     for: { type: 'string' },
@@ -201,7 +200,6 @@ export const initCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     only: { type: 'string' },

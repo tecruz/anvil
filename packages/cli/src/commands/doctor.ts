@@ -76,7 +76,6 @@ export const profileCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     'no-files': { type: 'boolean' },
@@ -216,7 +215,6 @@ export const doctorCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     layer: { type: 'string', multiple: true },
@@ -239,10 +237,6 @@ export const doctorCommand: Command = {
         : (report.findings.find((f) => f.status === 'fail' && SEVERITY_RANK[f.severity] <= SEVERITY_RANK[failOn]) ??
           null)
 
-    // The report is the answer; the exit code is the verdict. Emit the report first so a
-    // caller parsing stdout gets the full payload either way.
-    ctx.out(report, () => renderReport(ctx, report))
-
     if (breach !== null) {
       const err = new AnvilError(
         ErrorCode.ThresholdNotMet,
@@ -257,12 +251,16 @@ export const doctorCommand: Command = {
           },
         },
       )
-      if (!ctx.json) {
-        ctx.writeError(`\n${renderErrorText(err, ctx.style)}`)
-      }
+      // On the failure envelope, not a success one with the error nested in `data`: a caller
+      // branching on `ok` is the documented contract, and this is the only payload-bearing
+      // failure that was still reporting success. The report travels as the failure's payload,
+      // so a consumer parsing the envelope still gets the full findings either way.
+      ctx.outFailure(report, err, () => `${renderReport(ctx, report)}\n\n${renderErrorText(err, ctx.style)}`)
       return err.exitCode
     }
 
+    // The report is the answer; the exit code is the verdict.
+    ctx.out(report, () => renderReport(ctx, report))
     return undefined
   },
 }

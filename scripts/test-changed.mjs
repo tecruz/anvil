@@ -41,7 +41,9 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const color = process.env.NO_COLOR === '1' ? (s) => s : (s) => `[36m${s}[0m`
+// NO_COLOR is spec'd as "set to any non-empty value", not to the single value `1`.
+const noColor = process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== ''
+const color = noColor ? (s) => s : (s) => `[36m${s}[0m`
 
 /** Run git, returning trimmed stdout, or null when git declines (missing ref, no repo). */
 function git(args) {
@@ -87,13 +89,17 @@ function changedFiles(base) {
     }
   }
   // Uncommitted work is the common case inside a worktree, and the case a crew hits.
-  // A porcelain record is two status columns and a space, then the path; a rename also
-  // emits the old path as a second NUL-separated record, which the next record's own
-  // status columns identify, so taking the tail of each record is enough.
+  // A porcelain record is two status columns and a space, then the path.
+  //
+  // A **rename** is the one record that is not self-delimiting. With `-z`, git emits
+  // `XY <new-path>\0<old-path>\0`: the second path has *no* status columns of its own, so
+  // slicing three characters off it (as the old comment claimed it should) produced a
+  // truncated phantom path. Both paths are wanted -- a rename touches a file that may be
+  // deleted -- so a record that does not look like `XY ` is taken whole.
   for (const record of (gitRaw(['status', '--porcelain', '-z']) ?? '').split('\0')) {
-    if (record.length <= 3) continue
-    const path = record.slice(3).trim()
-    if (path !== '') out.add(path.split(' -> ').pop() ?? path)
+    if (record === '') continue
+    const path = /^[ MADRCU?!]{2} /.test(record) ? record.slice(3) : record
+    if (path.trim() !== '') out.add(path.trim())
   }
   return [...out]
 }
@@ -126,12 +132,14 @@ function readGraph() {
 }
 
 /**
- * A change outside `packages/` may or may not affect any package.
+ * A change outside `packages/` that genuinely widens the run to every package.
  *
- * A root config, a workflow or the registry genuinely can, so those widen the run to
- * everything. A change confined to `scripts/`, `docs/` or the fixtures does not touch a
- * package's source at all, and treating it as a reason to run the whole suite would make
- * the command slow exactly when a contributor is iterating on something unrelated.
+ * `fixtures/` and the two build scripts are here for a specific reason, both found by asking
+ * "which test reads this file?": the audit's golden tests read `fixtures/` directly, and the
+ * packaging test in `packages/cli` runs the *built* bundle that `scripts/build.mjs` and
+ * `scripts/gen-playbooks.ts` produce. Treating either as documentation-only would mean editing
+ * a fixture and running no tests that care, or changing the bundler and running none of the
+ * tests that install the tarball.
  */
 const ROOT_CHANGES_WIDEN = new Set([
   'package.json',
@@ -139,15 +147,17 @@ const ROOT_CHANGES_WIDEN = new Set([
   'tsconfig.json',
   'tsconfig.base.json',
   'biome.jsonc',
+  '.gitattributes',
   '.github',
   'registry',
+  'fixtures',
+  'scripts/build.mjs',
+  'scripts/gen-playbooks.ts',
 ])
 
 function affectsEveryPackage(file) {
   const top = file.split(/[/\\]/)[0]
-  if (ROOT_CHANGES_WIDEN.has(file) || ROOT_CHANGES_WIDEN.has(top)) return true
-  // An untracked or renamed path in porcelain form can carry quotes; strip them first.
-  return false
+  return ROOT_CHANGES_WIDEN.has(file) || ROOT_CHANGES_WIDEN.has(top)
 }
 
 /** Packages a change set touches, widened to everything that depends on them. */
@@ -156,8 +166,17 @@ function affectedPackages(files, graph) {
   for (const file of files) {
     if (affectsEveryPackage(file)) return graph.packages.map((p) => p)
     const parts = file.split(/[/\\]/)
-    if (parts[0] === 'packages' && parts[1] !== undefined) direct.add(parts[1])
-    // Anything else (scripts, docs, fixtures, README) is not package source: ignored.
+    if (parts[0] === 'packages' && parts[1] !== undefined) {
+      // A deleted or renamed manifest removes the package from the graph, so the change would
+      // silently run *nothing* -- and a package whose manifest just vanished is exactly the
+      // structural change `npm ci` fails on. Treat it as every package needing a run.
+      if (parts[2] === 'package.json' && !existsSync(join(repoRoot, ...parts))) {
+        return graph.packages.map((p) => p)
+      }
+      direct.add(parts[1])
+    }
+    // Anything else that is not in ROOT_CHANGES_WIDEN (docs, scripts, README) is not package
+    // source, and nothing in the suite reads it: ignored.
   }
 
   // Reverse the dependency edges, keyed by *directory* name rather than manifest name:

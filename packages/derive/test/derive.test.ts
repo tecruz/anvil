@@ -180,6 +180,41 @@ describe('self-referential: init must improve the readiness score', () => {
     const content = generateAgentsFile({ profile, matches: matchesFor(profile) }).content
     assert.doesNotMatch(content, /The project lives in/)
   })
+
+  test('the skill and the review command carry the directory too, not just AGENTS.md', () => {
+    // The subdirectory fix landed in the AGENTS.md template only, so the two artifacts that
+    // *execute* the same commands -- the verify skill's bash fences and the review command's
+    // `!` injection -- still emitted a bare `cargo test`, which fails at the repository root.
+    // Getting it right in one of three templates leaves the other two actively misleading.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-subdir-'))
+    try {
+      mkdirSync(join(dir, 'engine', 'src'), { recursive: true })
+      mkdirSync(join(dir, 'engine', 'tests'), { recursive: true })
+      writeFileSync(join(dir, 'engine', 'Cargo.toml'), '[package]\nname = "engine"\nversion = "0.1.0"\n')
+      writeFileSync(join(dir, 'engine', 'src', 'lib.rs'), 'pub fn go() {}\n')
+      writeFileSync(join(dir, 'engine', 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+      const profile = profileIn(dir)
+      assert.equal(profile.projectDir, 'engine')
+
+      const skill = generateVerifySkill({ profile, matches: matchesFor(profile) })
+      assert.ok(skill !== null, 'a verify skill is generated when there is a test command')
+      assert.match(skill.content, /cd engine && cargo test/, 'the skill must run from the project dir')
+      assert.match(skill.content, /The project lives in `engine\/`/)
+
+      const review = generateReviewCommand({ profile, matches: matchesFor(profile) })
+      assert.ok(review !== null, 'a review command is generated when there is a test command')
+      assert.match(review.content, /!`cd engine && cargo test`/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a root project emits plain commands, with no cd prefix', () => {
+    const profile = profileIn(materialize('rust-crate'))
+    const skill = generateVerifySkill({ profile, matches: matchesFor(profile) })
+    if (skill === null) return
+    assert.ok(!/cd /.test(skill.content), skill.content)
+  })
 })
 
 describe('idempotence', () => {

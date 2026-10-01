@@ -33,8 +33,9 @@ npm install -g github:tecruz/anvil#v0.1.0
 Three things worth knowing before you install:
 
 - **It builds from source.** `dist/` is not committed, so npm runs the build during install.
-  You need Node **22.6 or newer**, and the first install takes a minute while it fetches the
-  build toolchain.
+  You need Node **22.18 or newer** — that is where running TypeScript directly (`node
+  scripts/gen-playbooks.ts`, and the whole test suite) stopped needing a flag — and the first
+  install takes a minute while it fetches the build toolchain.
 - **No registry means no version resolution.** `anvil version` reports the version from the
   manifest, but there is no `anvil@0.2.0` to upgrade to. A tag is the closest thing to a
   release.

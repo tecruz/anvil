@@ -224,7 +224,7 @@ export function detectGenericTooling(
     if (!f.endsWith('.tf')) continue
     addTool(draft, 'iac', f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '.')
   }
-  detectInstallCommand(draft, files, resolve)
+  detectInstallCommand(draft, root, files, resolve)
 }
 
 /**
@@ -241,19 +241,45 @@ export function detectGenericTooling(
  * the install needs arguments we cannot know, the plain form is still the honest answer --
  * and the risk of a wrong one is an install that prints a warning, not a lost afternoon.
  */
-function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>, resolve: (rel: string) => string): void {
+function detectInstallCommand(
+  draft: ProfileDraft,
+  root: string,
+  files: ReadonlySet<string>,
+  resolve: (rel: string) => string,
+): void {
+  // Yarn first, and separately, because the *flag* differs between the two Yarn lineages:
+  // Berry (2+) replaced `--frozen-lockfile` with `--immutable` and rejects the old one
+  // instead of ignoring it, so a Berry repository given the Yarn 1 command gets an error on
+  // its first install. A Berry lockfile carries a `__metadata` block, which is how the two are
+  // told apart -- a version guess would be exactly the confident-and-wrong output this file
+  // exists to avoid.
+  const yarnLock = resolve('yarn.lock')
+  if (files.has(yarnLock)) {
+    const berry = isYarnBerry(root, yarnLock)
+    addCommand(draft, 'install', {
+      cmd: berry ? 'yarn install --immutable' : 'yarn install --frozen-lockfile',
+      source: 'detected',
+      evidence: yarnLock,
+    })
+    return
+  }
+
   // A lockfile is the strongest evidence: it names the manager *and* proves the install is
   // meant to be reproducible, so these are `detected`.
+  //
+  // Two ecosystems are deliberately absent, for the same reason Go and Bazel are: there is no
+  // install step, because the build resolves dependencies itself. Emitting one anyway invites
+  // the command that looks closest -- `./gradlew dependencies --write-locks`, which *rewrites*
+  // `gradle.lockfile` -- and that would tell a new contributor to mutate a pinned dependency
+  // graph as their first step, labelled `detected` so it reads as authoritative.
   const byLockfile: ReadonlyArray<readonly [string, string]> = [
     ['pnpm-lock.yaml', 'pnpm install --frozen-lockfile'],
-    ['yarn.lock', 'yarn install --frozen-lockfile'],
     ['bun.lockb', 'bun install --frozen-lockfile'],
     ['package-lock.json', 'npm ci'],
     ['uv.lock', 'uv sync --frozen'],
     ['poetry.lock', 'poetry install'],
     ['Cargo.lock', 'cargo fetch --locked'],
     ['Gemfile.lock', 'bundle install'],
-    ['gradle.lockfile', './gradlew dependencies --write-locks'],
   ]
   for (const [lockfile, cmd] of byLockfile) {
     if (!files.has(resolve(lockfile))) continue
@@ -281,6 +307,12 @@ function detectInstallCommand(draft: ProfileDraft, files: ReadonlySet<string>, r
     addCommand(draft, 'install', { cmd, source: 'inferred', evidence: manifest })
     return
   }
+}
+
+/** True for a Yarn Berry lockfile, which starts with a `__metadata` block. */
+function isYarnBerry(root: string, relPath: string): boolean {
+  const { text } = readText(join(root, ...relPath.split('/')))
+  return text !== null && /^\s*__metadata:/m.test(text)
 }
 
 function hasAny(files: ReadonlySet<string>, candidates: readonly string[]): boolean {

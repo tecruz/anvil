@@ -450,13 +450,13 @@ export const bazelDetector: Detector = {
       evidence: build,
     })
 
-    // Query is Bazel's own way to enumerate the test targets, and it is fast by
-    // construction: it resolves the graph without building it.
-    addCommand(draft, 'testFast', {
-      cmd: 'bazel query "kind(test, //...)"',
-      source: 'detected',
-      evidence: build,
-    })
+    // No changed-files subset is emitted, and that is a deliberate absence rather than a
+    // gap. Bazel's answer would be `bazel query "kind(test, //...)"`, which *lists* the test
+    // targets and runs none of them -- and a verify command that cannot fail on broken code is
+    // worse than none, because `crew verify` would report a green run it never performed.
+    // Bazel makes the full suite cheap instead: its own action and test cache means
+    // `bazel test //...` on a small change is already incremental, which is what
+    // `TEST_FAST` is asking for. The rule warns, and the warning is the true statement.
 
     addRisk(draft, {
       glob: '**/BUILD.bazel',

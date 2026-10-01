@@ -153,8 +153,48 @@ describe('checkStructure', () => {
       playbook({ id: 'a', official: { ...playbook().official, docs: [{ label: 'x', url, why: 'y' }] } }),
       playbook({ id: 'b', official: { ...playbook().official, docs: [{ label: 'x', url, why: 'y' }] } }),
     ])
-    const dupe = problems.find((p) => p.message.includes('cited by 2'))
+    const dupe = problems.find((p) => /cited .* times across 2 playbooks/.test(p.message))
     assert.ok(dupe !== undefined, messages(problems))
+  })
+
+  test('one playbook citing a url twice is not reported as two playbooks', () => {
+    // The count was per citation while the id list was deduplicated, so a single owner
+    // produced "cited by 2 playbooks (solo)" -- two numbers describing different things.
+    const url = 'https://example.test/twice'
+    const docs = [
+      { label: 'x', url, why: 'y' },
+      { label: 'z', url, why: 'y' },
+    ]
+    const problems = checkStructure([playbook({ id: 'solo', official: { ...playbook().official, docs } })])
+    const dupe = problems.find((p) => p.message.includes(url))
+    assert.ok(dupe !== undefined, messages(problems))
+    assert.match(dupe.message, /same playbook \(solo\)/)
+    assert.ok(!/2 playbooks/.test(dupe.message), dupe.message)
+  })
+
+  test('a risk glob two equal-priority playbooks claim is a note, not a warning', () => {
+    // Naming a winner alphabetically is advice nobody should act on, and a warning here made
+    // `--warnings` fail on the registry this project ships. A tie is reported as a tie.
+    const problems = checkStructure([
+      playbook({ id: 'one', priority: 60, riskGlobs: ['**/Dockerfile*'] }),
+      playbook({ id: 'two', priority: 60, riskGlobs: ['**/Dockerfile*'] }),
+    ])
+    const glob = problems.find((p) => p.message.includes('claimed by 2'))
+    assert.ok(glob !== undefined, messages(problems))
+    assert.equal(glob.level, 'info')
+    assert.match(glob.fix ?? '', /tie at priority/)
+  })
+
+  test('a duplicate id names the files, because the diagnosis is which one to open', () => {
+    const problems = checkStructure([
+      playbook({ id: 'same', source: '/one/same.yaml' }),
+      playbook({ id: 'same', source: '/two/same.yaml' }),
+    ])
+    const dupe = problems.find((p) => p.message.includes('duplicate playbook id'))
+    assert.ok(dupe !== undefined, messages(problems))
+    assert.equal(dupe.level, 'error')
+    assert.match(dupe.fix ?? '', /one\/same\.yaml/)
+    assert.match(dupe.fix ?? '', /two\/same\.yaml/)
   })
 
   test('a verify command that assumes a committed wrapper is a note', () => {

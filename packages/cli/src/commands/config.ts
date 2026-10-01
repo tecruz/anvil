@@ -42,7 +42,6 @@ export const configCommand: Command = {
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
-    noColor: { type: 'boolean' },
     help: { type: 'boolean', short: 'h' },
   },
   async run(ctx: CommandContext, rawArgs) {

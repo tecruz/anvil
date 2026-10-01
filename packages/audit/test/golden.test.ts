@@ -427,13 +427,14 @@ describe('SECRET_SCAN', () => {
     // human can confirm they really are fixtures. The path deliberately has no
     // `fixtures` segment, because the walker skips those directories outright -- so this
     // covers the case that actually reaches the rule, like `tests/certs/expired/server.key`
-    // in requests.
+    // in requests. The detail says these were *not* content-inspected, because they were not.
     const dir = materialize('cold-empty')
     mkdirSync(join(dir, 'tests', 'certs'), { recursive: true })
     writeFileSync(join(dir, 'tests', 'certs', 'expired.key'), '-----BEGIN PRIVATE KEY-----\n')
     const f = findFinding(auditDir(dir), 'SECRET_SCAN')
     assert.equal(f.status, 'pass', f.detail)
-    assert.match(f.detail, /test fixtures/)
+    assert.match(f.detail, /test\/sample path/)
+    assert.match(f.detail, /not content-inspected/)
     assert.match(f.detail, /expired\.key/)
   })
 
@@ -454,6 +455,37 @@ describe('SECRET_SCAN', () => {
     assert.match(f.detail, /\.npmrc/)
   })
 
+  test('always-auth alone is not a credential', () => {
+    // `always-auth` is a boolean. Older CI configurations set it with no token in sight, and
+    // treating it as a secret failed a file that contained nothing sensitive.
+    const dir = materialize('cold-empty')
+    writeFileSync(join(dir, '.npmrc'), 'registry=https://registry.npmjs.org/\nalways-auth=true\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /no auth token/)
+  })
+
+  test('a live token in a test path is a leak, because the file is read first', () => {
+    // The bug this pins: the path exemption ran *before* the content check, so a real
+    // `_authToken` in `examples/app/.npmrc` was dismissed as a fixture and the rule reported
+    // "no committed secrets" about a file nobody opened. Deciding by path first is only safe
+    // for files whose content cannot change the answer -- and `.npmrc`'s does.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'examples', 'app'), { recursive: true })
+    writeFileSync(join(dir, 'examples', 'app', '.npmrc'), '//registry.npmjs.org/:_authToken=npm_live\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'fail', f.detail)
+    assert.match(f.detail, /examples\/app\/\.npmrc/)
+  })
+
+  test('a token-free .npmrc under a test path is still only a fixture', () => {
+    // The mirror of the case above, so the fix cannot be "read nothing under a test path".
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'examples'), { recursive: true })
+    writeFileSync(join(dir, 'examples', '.npmrc'), 'registry=https://registry.npmjs.org/\n')
+    assert.equal(findFinding(auditDir(dir), 'SECRET_SCAN').status, 'pass')
+  })
+
   test('an .env under tests/ or playground/ is a fixture, not a leak', () => {
     // The real repositories that triggered this: `tests/test_apps/.env` in a Python web
     // framework, and one `.env` per playground in a bundler's fixture tree.
@@ -465,25 +497,99 @@ describe('SECRET_SCAN', () => {
     const f = findFinding(auditDir(dir), 'SECRET_SCAN')
     assert.equal(f.status, 'pass', f.detail)
   })
+
+  test('evidence names the files the claim is about', () => {
+    // `Finding.evidence` is a published contract of paths. A pass that says "no committed
+    // secrets" while its evidence is empty is a claim with nothing behind it.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'tests', 'certs'), { recursive: true })
+    writeFileSync(join(dir, 'tests', 'certs', 'expired.key'), '-----BEGIN PRIVATE KEY-----\n')
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.deepEqual(f.evidence, ['tests/certs/expired.key'])
+  })
 })
 
 describe('TEST_FAST', () => {
-  test('a documented test command proves a runner exists, so the rule warns rather than fails', () => {
-    // The bug: "is there a test runner" was answered from the tooling list alone, which is
-    // silent about plenty of runners. A Rust project documenting `cargo test` was reported
-    // as having no test runner and failed a high-severity rule -- the exact false failure
-    // the plan's "no false blockers" criterion forbids.
-    const dir = materialize('rust-crate')
-    const f = findFinding(auditDir(dir), 'TEST_FAST')
-    assert.notEqual(f.status, 'fail', f.detail)
+  // The bug: "is there a test runner" was answered from the tooling list alone, which is
+  // silent about plenty of runners. A project whose runner the detectors do not name was
+  // reported as having none and failed a high-severity rule -- the exact false failure the
+  // plan's "no false blockers" criterion forbids.
+  test('a detected runner is named by the command it was detected from', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tf-'))
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'x', version: '1.0.0', scripts: { test: 'node --test' } }, null, 2),
+      )
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'index.js'), 'export const x = 1\n')
+      writeFileSync(join(dir, 'src', 'index.test.js'), "import { test } from 'node:test'\n")
+      const f = findFinding(auditDir(dir), 'TEST_FAST')
+      assert.equal(f.status, 'warn', f.detail)
+      assert.match(f.detail, /npm run test/, f.detail)
+      // `npm` is a package manager. Reading a runner name off the first token of a command
+      // produced "A test runner is configured (npm)", which is a confidently-wrong claim in a
+      // high-severity finding.
+      assert.ok(!/runner is configured \(npm\)/.test(f.detail), f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an inferred-only test command warns without claiming a runner', () => {
+    // Built inline rather than from the `rust-crate` fixture, because that fixture mentions
+    // `cargo-nextest` in its Cargo.toml and therefore reaches `pass` long before the code this
+    // test is about -- a test that passes with the feature reverted is a test that proves
+    // nothing. Here `cargo test` is inferred, so no runner can honestly be named.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tf-'))
+    try {
+      writeFileSync(
+        join(dir, 'Cargo.toml'),
+        '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n\n[dev-dependencies]\n',
+      )
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      mkdirSync(join(dir, 'tests'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'lib.rs'), 'pub fn go() {}\n')
+      writeFileSync(join(dir, 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+      const f = findFinding(auditDir(dir), 'TEST_FAST')
+      assert.equal(f.status, 'warn', f.detail)
+      assert.match(f.detail, /nothing here is proven missing/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('evidence names a file, never a tool name and never an empty string', () => {
+    // `Finding.evidence` is a published contract: file:line or a path. An inferred command
+    // carries no evidence by design, so this is where a naive implementation emits "".
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tf-'))
+    try {
+      writeFileSync(
+        join(dir, 'Cargo.toml'),
+        '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n\n[dev-dependencies]\n',
+      )
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      mkdirSync(join(dir, 'tests'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'lib.rs'), 'pub fn go() {}\n')
+      writeFileSync(join(dir, 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+      const f = findFinding(auditDir(dir), 'TEST_FAST')
+      assert.ok(f.evidence.length > 0, 'a finding with no evidence is a to-do, not a finding')
+      for (const e of f.evidence) {
+        assert.notEqual(e, '', 'empty evidence is not evidence')
+        assert.ok(e.includes('.'), `expected a path with an extension, got ${JSON.stringify(e)}`)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('a capable toolchain with no documented subset is never a failure', () => {
     // Per the plan's detection spec, verbatim: "a repo with pytest but no documented subset
-    // must not fail TEST_FAST".
+    // must not fail TEST_FAST". Asserted against the exact status rather than `notEqual`,
+    // which `na` and `pass` would both satisfy.
     for (const fixture of ['python-django', 'go-module', 'rust-crate', 'node-npm']) {
       const f = findFinding(reportOf(fixture), 'TEST_FAST')
-      assert.notEqual(f.status, 'fail', `${fixture}: ${f.detail}`)
+      assert.ok(f.status === 'warn' || f.status === 'pass', `${fixture}: ${f.status} -- ${f.detail}`)
     }
   })
 
@@ -492,35 +598,91 @@ describe('TEST_FAST', () => {
   })
 })
 
-describe('a repository anvil could not identify is not reported as broken', () => {
-  // A Rust crate under `engine/` defeats root-level manifest detection entirely. The result
-  // was TEST failing as a *blocker* claiming "test files exist but no runnable test command
-  // was found" -- a sentence about the repository that was really a sentence about anvil.
-  // A blocker an agent must act on cannot afford to be wrong about its cause.
-  function unidentifiedRepo(): string {
+describe('a repository anvil cannot read at all is not reported as broken', () => {
+  // The motivating case was a Rust crate under `engine/`, which failed `TEST` as a *blocker*
+  // claiming "test files exist but no runnable test command was found" -- a sentence about
+  // the repository that was really a sentence about anvil. That case is now fixed at the
+  // source, by resolving the project directory before any detector runs, so it is pinned
+  // here as a *detected* project rather than as an `na`.
+  test('a crate in a subdirectory is detected, not excused', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-subdir-crate-'))
+    try {
+      mkdirSync(join(dir, 'engine', 'src'), { recursive: true })
+      mkdirSync(join(dir, 'engine', 'tests'), { recursive: true })
+      writeFileSync(join(dir, 'README.md'), '# host\nA thin host around the engine.\n')
+      writeFileSync(
+        join(dir, 'engine', 'Cargo.toml'),
+        '[package]\nname = "engine"\nversion = "0.1.0"\nedition = "2021"\n',
+      )
+      writeFileSync(join(dir, 'engine', 'src', 'lib.rs'), 'pub fn go() {}\n')
+      writeFileSync(join(dir, 'engine', 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+      const f = findFinding(auditDir(dir), 'TEST')
+      assert.notEqual(f.status, 'na', f.detail)
+      assert.notEqual(f.status, 'fail', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Source files, no manifest, and nothing on disk that names a build system. There is
+  // nothing true anvil can say about how to build or test this, so `na` is the honest answer
+  // -- and it says so plainly. C source files are used because the language table knows them
+  // while no detector claims the ecosystem, which is precisely the situation.
+  function shapelessRepo(): string {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-unidentified-'))
-    mkdirSync(join(dir, 'engine', 'src'), { recursive: true })
-    mkdirSync(join(dir, 'engine', 'tests'), { recursive: true })
-    writeFileSync(join(dir, 'README.md'), '# host\nA thin host around the engine.\n')
-    writeFileSync(join(dir, 'engine', 'src', 'lib.rs'), 'pub fn go() {}\n')
-    writeFileSync(join(dir, 'engine', 'tests', 'it.rs'), '#[test]\nfn t() {}\n')
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    mkdirSync(join(dir, 'tests'), { recursive: true })
+    writeFileSync(join(dir, 'README.md'), '# notes\nSource with no build system anywhere.\n')
+    writeFileSync(join(dir, 'src', 'main.c'), 'int main(void) { return 0; }\n')
+    writeFileSync(join(dir, 'tests', 'main_test.c'), 'int main(void) { return 0; }\n')
     return dir
   }
 
   for (const id of ['TEST', 'BUILD', 'LINT']) {
-    test(`${id} reports unknown rather than failure`, () => {
-      const dir = unidentifiedRepo()
+    test(`${id} reports unknown rather than failure on a tree with no build system`, () => {
+      const dir = shapelessRepo()
       try {
         const f = findFinding(auditDir(dir), id)
         assert.equal(f.status, 'na', f.detail)
-        assert.match(f.detail, /No ecosystem identified/)
+        assert.match(f.detail, /No ecosystem or build system identified/)
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
     })
   }
 
-  test('the guard is narrow: a missing test command is still a blocker when an stack was found', () => {
+  // The over-reach this guard was guilty of: `Makefile` and `CMakeLists.txt` trees have no
+  // detector, so `stacks` is empty -- but anvil plainly understands them at the file level, it
+  // found the sources, the build file and the tests. Silencing three rules on every C, C++
+  // and shell repository is a lost finding, which is the direction this project has been
+  // fixing everywhere else.
+  test('a Makefile tree is still judged, because a build file is not the same as no build system', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-makefile-'))
+    try {
+      writeFileSync(join(dir, 'Makefile'), 'all:\n\tcc -o app main.c\ntest:\n\t./test.sh\n')
+      writeFileSync(join(dir, 'main.c'), 'int main(void) { return 0; }\n')
+      writeFileSync(join(dir, 'test.c'), '#include <assert.h>\nint main(void) { assert(1); return 0; }\n')
+      const f = findFinding(auditDir(dir), 'TEST')
+      assert.notEqual(f.status, 'na', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a CMakeLists tree is still judged, for the same reason', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-cmake-'))
+    try {
+      writeFileSync(join(dir, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.20)\nproject(x)\n')
+      writeFileSync(join(dir, 'main.cpp'), 'int main() { return 0; }\n')
+      writeFileSync(join(dir, 'test.cpp'), 'int main() { return 0; }\n')
+      const f = findFinding(auditDir(dir), 'BUILD')
+      assert.notEqual(f.status, 'na', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the guard stays narrow: a missing test command is still a blocker when a stack was found', () => {
     // Otherwise this becomes a way to lose a real finding, which is the worse error.
     for (const fixture of ['go-module', 'rust-crate', 'node-npm', 'python-django']) {
       const dir = materialize(fixture)
@@ -583,10 +745,44 @@ describe('a governance file full of placeholders is not governance', () => {
     assert.match(f.detail, /routes nothing/)
   })
 
+  test('a bare owner is reported as unresolvable, not as a comment', () => {
+    // GitHub accepts @user, @org/team-name or an email. A bare `org/team` routes nothing --
+    // but it is a line with an owner on it, so "every line is a comment or blank" was a false
+    // sentence about a real file.
+    const f = findingOf({ CODEOWNERS: '*  acme/platform-team\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'warn')
+    assert.match(f.detail, /cannot resolve/)
+    assert.match(f.detail, /acme\/platform-team/)
+    assert.ok(!/comment or blank/.test(f.detail))
+  })
+
+  test('an email address is a real owner, not an invisible one', () => {
+    const f = findingOf({ CODEOWNERS: '*  security@acme.io\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /security@acme\.io/)
+  })
+
+  test('the pass detail counts distinct owners, not assignments', () => {
+    // Five rules naming the same team is one owner, and "5 owner handle(s): @acme/owners" is
+    // two numbers describing different things.
+    const f = findingOf({ CODEOWNERS: '*.ts  @acme/owners\n*.js  @acme/owners\n*.md  @acme/owners\n' }, 'CODEOWNERS')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /1 distinct owner\(s\) across 3 rule\(s\)/)
+  })
+
   test('a real handle is not mistaken for a placeholder', () => {
     // The expensive error here is flagging a real owner, because it teaches people to ignore
-    // the rule. Handles legitimately contain "team", "core" and "owner".
-    for (const handle of ['@acme/platform-team', '@myorg/core', '@the-owner', '@nodejs']) {
+    // the rule. Matching is per hyphen/slash segment for exactly this reason: a substring test
+    // flagged `@todoist-team` and `@XXXcorp`, which are real handles.
+    for (const handle of [
+      '@acme/platform-team',
+      '@myorg/core',
+      '@the-owner',
+      '@nodejs',
+      '@todoist-team',
+      '@XXXcorp',
+      '@acme/replace-service',
+    ]) {
       const f = findingOf({ CODEOWNERS: `*  ${handle}\n` }, 'CODEOWNERS')
       assert.equal(f.status, 'pass', `${handle} was flagged: ${f.detail}`)
     }
@@ -610,10 +806,32 @@ describe('a governance file full of placeholders is not governance', () => {
     assert.equal(f.status, 'pass')
     assert.match(f.detail, /security@acme\.io/)
   })
+
+  test('a private reporting channel counts, because it is a monitored channel', () => {
+    // GitHub's own SECURITY.md template points at the private advisories page, and that page
+    // is monitored by construction. Calling that "nowhere to report a vulnerability" is a
+    // claim about the world that no regex can support.
+    const f = findingOf(
+      {
+        'SECURITY.md':
+          '# Security policy\n\nReport a vulnerability privately through the repository Security Advisories page:\nhttps://github.com/acme/x/security/advisories/new\n',
+      },
+      'SECURITY_MD',
+    )
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /private reporting channel/)
+  })
+
+  test('a placeholder word in a real address domain is not a finding', () => {
+    // Placeholder matching is on the local part only; a company that happens to be called
+    // "Replace Me Inc" is not a placeholder contact.
+    const f = findingOf({ 'SECURITY.md': 'Report to security@replace-me.example.com\n' }, 'SECURITY_MD')
+    assert.equal(f.status, 'pass', f.detail)
+  })
 })
 
 describe('a bzlmod Bazel tree is a known ecosystem, not an unknown one', () => {
-  test('a MODULE.bazel repository is offered Bazel commands', () => {
+  test('a MODULE.bazel repository is offered Bazel commands, and no fake fast subset', () => {
     const dir = mkdtempSync(join(tmpdir(), 'anvil-bazel-'))
     try {
       writeFileSync(join(dir, 'MODULE.bazel'), 'module(name = "rules", version = "1.0")\n')
@@ -621,9 +839,125 @@ describe('a bzlmod Bazel tree is a known ecosystem, not an unknown one', () => {
       const p = buildProfile(dir, { ...VCS, root: dir }).profile
       assert.ok(p.stacks.some((s) => s.id === 'bazel'))
       assert.equal(p.commands.test?.[0]?.cmd, 'bazel test //...')
+      // `bazel query` lists test targets without running one, so a verify command that cannot
+      // fail on broken code must not be offered as the fast path. Bazel's own test cache is
+      // what makes the full suite cheap, and `TEST_FAST` warns about the absence.
+      assert.equal(p.commands.testFast, undefined)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('a declared dependency is detected wherever it is declared', () => {
+  // Two bugs in one place, both invisible until a dependency was not on line 1.
+  //
+  // The framework table was anchored with `^` and no `m` flag, which means "the file begins
+  // with django" -- so `dependencies = ["django>=4.2.7"]` on line 4 of a pyproject.toml
+  // detected no framework at all. And the version regex was written with single backslashes
+  // inside a template literal, where `\s` cooks to the letter `s` and `\]` cooks to `]`, so
+  // the character class excluded `s` and then demanded a literal `]`: every real version
+  // failed to capture, and `looseVersion` then discarded the truncated remainder.
+  function profileOfFiles(files: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-deps-'))
+    try {
+      for (const [rel, content] of Object.entries(files)) {
+        const target = join(dir, ...rel.split('/'))
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, content, 'utf8')
+      }
+      return buildProfile(dir, { ...VCS, root: dir }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('a PEP 621 dependency array is read, with its version', () => {
+    const p = profileOfFiles({
+      'pyproject.toml': '[project]\nname = "x"\ndependencies = ["django>=4.2.7", "requests"]\n',
+      'app/main.py': 'x = 1\n',
+      'tests/test_x.py': 'def test_x():\n    pass\n',
+    })
+    const django = p.stacks.find((s) => s.id === 'django')
+    assert.ok(django !== undefined, `expected a django stack, got ${p.stacks.map((s) => s.id).join(', ')}`)
+    assert.equal(django.version, '4.2.7')
+  })
+
+  test('a requirements file is read, with its version', () => {
+    const p = profileOfFiles({
+      'requirements.txt': 'flask==3.0.2\nrequests>=2.31.0\n',
+      'app.py': 'x = 1\n',
+      'test_app.py': 'def test_x():\n    pass\n',
+    })
+    assert.equal(p.stacks.find((s) => s.id === 'flask')?.version, '3.0.2')
+  })
+
+  test('the evidence names the line the dependency is on', () => {
+    const p = profileOfFiles({
+      'pyproject.toml': '[project]\nname = "x"\ndependencies = ["django>=4.2.7"]\n',
+      'app/main.py': 'x = 1\n',
+    })
+    assert.deepEqual(p.stacks.find((s) => s.id === 'django')?.evidence, ['pyproject.toml:3'])
+  })
+})
+
+describe('an install command is one that can be run', () => {
+  function profileOfFiles(files: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-install-'))
+    try {
+      for (const [rel, content] of Object.entries(files)) {
+        const target = join(dir, ...rel.split('/'))
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, content, 'utf8')
+      }
+      return buildProfile(dir, { ...VCS, root: dir }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('Gradle gets no install command, because there is no install step', () => {
+    // The one command that looks like an install rewrites `gradle.lockfile`, and it was being
+    // emitted as the install step of a real repository, labelled `detected`.
+    const p = profileOfFiles({
+      'build.gradle.kts': 'plugins { kotlin("jvm") version "2.0.0" }\n',
+      'gradle.lockfile': 'x=1\n',
+      'src/main/kotlin/A.kt': 'class A\n',
+    })
+    assert.equal(p.commands.install, undefined)
+  })
+
+  test('Yarn Berry gets --immutable, not the Yarn 1 flag it rejects', () => {
+    const berry = profileOfFiles({
+      'package.json': '{"name":"x","version":"1.0.0","packageManager":"yarn@4.1.0"}\n',
+      'yarn.lock': '__metadata:\n  version: 8\n  cacheKey: 10\n',
+      'index.js': 'export const x = 1\n',
+    })
+    assert.equal(berry.commands.install?.[0]?.cmd, 'yarn install --immutable')
+
+    const classic = profileOfFiles({
+      'package.json': '{"name":"x","version":"1.0.0"}\n',
+      'yarn.lock': '# yarn lockfile v1\n',
+      'index.js': 'export const x = 1\n',
+    })
+    assert.equal(classic.commands.install?.[0]?.cmd, 'yarn install --frozen-lockfile')
+  })
+
+  test('npm ci is only claimed where a lockfile exists', () => {
+    const withLock = profileOfFiles({
+      'package.json': '{"name":"x","version":"1.0.0"}\n',
+      'package-lock.json': '{"lockfileVersion":3}\n',
+      'index.js': 'export const x = 1\n',
+    })
+    assert.equal(withLock.commands.install?.[0]?.cmd, 'npm ci')
+    assert.equal(withLock.commands.install?.[0]?.source, 'detected')
+
+    const without = profileOfFiles({
+      'package.json': '{"name":"x","version":"1.0.0"}\n',
+      'index.js': 'export const x = 1\n',
+    })
+    assert.equal(without.commands.install?.[0]?.cmd, 'npm install')
+    assert.equal(without.commands.install?.[0]?.source, 'inferred')
   })
 })
 

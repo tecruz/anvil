@@ -17,7 +17,7 @@ import { parseYamlSubset, YamlError, type YamlValue } from './yaml.ts'
  * `anvil playbook check` would have flagged as a dead link if the constant had been on its
  * list. It now points at the section of the plan that actually specifies the format.
  */
-export const SCHEMA_URL = 'https://github.com/anomalyco/anvil/blob/main/IMPLEMENTATION_PLAN.md#playbook-registry'
+export const SCHEMA_URL = 'https://github.com/tecruz/anvil/blob/main/IMPLEMENTATION_PLAN.md#playbook-registry'
 
 export interface Resource {
   label: string

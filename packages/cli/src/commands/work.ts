@@ -70,7 +70,6 @@ async function loadTicket(ctx: CommandContext, input: string, mainRoot: string):
 
 const GLOBAL_ONLY = {
   json: { type: 'boolean', short: 'j' },
-  noColor: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 

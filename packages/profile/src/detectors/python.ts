@@ -31,8 +31,15 @@ function readTomlish(ctx: DetectorContext, relPath: string): string | null {
 
 function depVersion(text: string, dep: string): string | null {
   // Match both PEP 621 `[project] dependencies = ["fastapi>=0.1"]` and requirement lines.
+  //
+  // The character class is written with **doubled** backslashes, and that is load-bearing.
+  // In a template literal `\s` cooks to the letter `s` and `\]` cooks to `]`, so the
+  // single-backslash spelling produced the regex `[^"'s,]]` -- which excludes the letter `s`
+  // from the version and then requires a literal `]` after it. Every real version therefore
+  // failed to capture (`4.2` gave `4.`, which `looseVersion` then rejected), so Python stack
+  // versions were silently always null. The doubled spelling is what the regex engine needs.
   const escaped = dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const re = new RegExp(`["'\\[]?${escaped}\\s*(?:[<>=!~]=?\\s*([0-9][^"'s,]]*))?`)
+  const re = new RegExp(`["'\\[]?${escaped}\\s*(?:[<>=!~]=?\\s*([0-9][^"'\\s,\\]]*))?`)
   const m = re.exec(text)
   return looseVersion(m?.[1] ?? null)
 }
@@ -136,15 +143,22 @@ export const pythonDetector: Detector = {
       const t = readTomlish(ctx, f)
       if (t !== null) sources.push({ text: t, file: f })
     }
+    // Match the dependency wherever it is *declared*, which is mid-line in a PEP 621
+    // `dependencies = ["django>=4.2"]` array and at the line start in a `requirements.txt`.
+    // The old `^django` with no `m` flag meant "the file begins with django", so a framework
+    // declared anywhere but the first line was never detected at all.
+    //
+    // Each pattern is the same shape `depVersion` parses, so the detection and the version
+    // cannot disagree about whether the dependency is there.
     const KNOWN: Array<[string, RegExp]> = [
-      ['django', /^django\b/i],
-      ['flask', /^flask\b/i],
-      ['fastapi', /^fastapi\b/i],
-      ['pytest', /^pytest\b/i],
-      ['ruff', /^ruff\b/i],
-      ['mypy', /^mypy\b/i],
-      ['black', /^black\b/i],
-      ['poetry', /^poetry\b/i],
+      ['django', /["']?django\b/i],
+      ['flask', /["']?flask\b/i],
+      ['fastapi', /["']?fastapi\b/i],
+      ['pytest', /["']?pytest\b/i],
+      ['ruff', /["']?ruff\b/i],
+      ['mypy', /["']?mypy\b/i],
+      ['black', /["']?black\b/i],
+      ['poetry', /["']?poetry\b/i],
     ]
     for (const [id, re] of KNOWN) {
       for (const { text, file } of sources) {

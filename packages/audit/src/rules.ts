@@ -14,7 +14,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ProjectProfile } from '@anvil/profile'
+import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 import type { Fix, Layer, Severity, Status } from './types.ts'
 
 export interface RuleContext {
@@ -25,15 +25,16 @@ export interface RuleContext {
   /** Agent instruction text, concatenated, for content checks. */
   instructionsText: string
   /**
-   * Contents of each CI workflow file, keyed by repo-relative path.
+   * CI workflow bodies, path to text.
    *
-   * Read by the engine rather than the profile because it is only needed by one rule,
-   * and reading every workflow into the profile would bloat the `--json` output that the
-   * opencode plugin consumes.
+   * Read by the engine rather than carried in the profile: only `CI_PARITY` needs them, and
+   * the plugin does not want every workflow in its JSON payload.
    */
-  security: string | null
-  codeowners: string | null
   ciWorkflows: ReadonlyMap<string, string>
+  /** The `CODEOWNERS` body, for the rule that checks whether its owners are real. */
+  codeowners: string | null
+  /** The `SECURITY.md` body, for the rule that checks the contact is monitored. */
+  security: string | null
   /**
    * The repository's npm scripts, name to command body.
    *
@@ -111,23 +112,55 @@ function commands(ctx: RuleContext, kind: keyof ProjectProfile['commands']): str
 }
 
 /**
- * True when detection identified no ecosystem at all.
+ * True when anvil cannot say anything true about how this repository is built.
  *
  * A repository whose project lives in a subdirectory -- a Rust crate under `engine/`, a
- * service under `services/api/` -- defeats root-level manifest detection entirely. The
- * result was `TEST` failing as a **blocker** on a perfectly good Rust project, claiming
+ * service under `services/api/` -- used to defeat root-level manifest detection entirely.
+ * The result was `TEST` failing as a **blocker** on a perfectly good Rust project, claiming
  * "test files exist but no runnable test command was found" when the truth was that anvil
  * had not worked out what the repository was. It had not earned that sentence, and a
  * blocker an agent must act on cannot afford to be wrong about its cause.
  *
- * So a code-shaped rule returns `na` here, naming the real reason. This is deliberately
- * narrow: it fires only when *nothing* was identified. Every one of the ten real
- * repositories in the audit has at least one stack, so this cannot soften a finding on a
- * repository anvil actually understands -- and for those, a missing test command is still
- * a blocker, which is correct.
+ * The subdirectory case is fixed at the source instead: `projectDirOf` resolves the project
+ * and `makeResolver` routes every probe through it, so a crate under `engine/` is now a
+ * detected Rust project. What is left for this guard is a repository with source files, no
+ * detected stack, *and* no build system anvil recognises even by name -- and there "no
+ * runnable test command was found" is a sentence about anvil's own blindness, not about the
+ * repository.
+ *
+ * **A build system anvil has no detector for is not that.** A `Makefile` tree or a
+ * `CMakeLists.txt` tree is a repository anvil understands perfectly well at the file level:
+ * it found the sources, the build file and the tests. Reporting `na` there silently discards
+ * a true and actionable finding on every C, C++ and shell project, which is the direction
+ * this project has been fixing in every other rule. So the guard requires *both* halves:
+ * nothing detected, and nothing recognisable on disk.
  */
+const BUILD_SYSTEM_FILES: readonly RegExp[] = [
+  /^makefile$/i,
+  /^gnumakefile$/i,
+  /^justfile$/i,
+  /^cmakelists\.txt$/i,
+  /^meson\.build$/i,
+  /^configure(\.ac)?$/i,
+  /^premake5?\.lua$/i,
+  /^build\.zig$/i,
+  /^sconstruct$/i,
+  /^bazel\.bazel$/i,
+  /^.*\.(cs|fs|vb)proj$/i,
+  /^.*\.sln$/i,
+]
+
+/** True when a build system anvil can name exists in the tree, however well it knows it. */
+function hasBuildSystem(ctx: RuleContext): boolean {
+  return ctx.profile.files.some((f) => {
+    const name = f.slice(f.lastIndexOf('/') + 1)
+    return BUILD_SYSTEM_FILES.some((re) => re.test(name))
+  })
+}
+
 function unidentified(ctx: RuleContext): boolean {
-  return (ctx.profile.stacks ?? []).length === 0
+  if ((ctx.profile.stacks ?? []).length > 0) return false
+  return !hasBuildSystem(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +332,9 @@ const BUILD: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
     if (unidentified(ctx)) {
-      return na('No ecosystem identified: no manifest at the repository root, so no build command can be claimed')
+      return na(
+        'No ecosystem or build system identified: nothing in this tree names one, so no build command can be claimed',
+      )
     }
     if (hasCommand(ctx, 'build')) return pass(commands(ctx, 'build').join(', '))
     if (hasCommand(ctx, 'test')) {
@@ -323,7 +358,7 @@ const TEST: Rule = {
     if (!ctx.hasCode) return na('No source files detected')
     if (unidentified(ctx)) {
       return na(
-        'No ecosystem identified: no manifest at the repository root, so whether these tests are runnable is unknown',
+        'No ecosystem or build system identified: nothing in this tree names one, so whether these tests are runnable is unknown',
       )
     }
     if (!hasCommand(ctx, 'test')) {
@@ -361,10 +396,7 @@ const TEST_FAST: Rule = {
 
     const entries = ctx.profile.commands.testFast ?? []
     if (entries.length > 0)
-      return pass(
-        entries.map((c) => `${c.cmd} [${c.source}]`).join(', '),
-        entries.map((c) => c.evidence ?? ''),
-      )
+      return pass(entries.map((c) => `${c.cmd} [${c.source}]`).join(', '), commandEvidence(ctx, entries))
 
     // Documented in prose but not detected as a command: report the prose, not the guess.
     if (
@@ -379,18 +411,22 @@ const TEST_FAST: Rule = {
     // a Rust project whose documented command is `cargo test` was reported as having *no
     // test runner*, and the rule then failed a repository whose tests run fine. A documented
     // or detected test command is itself proof that a runner exists.
+    //
+    // What the detail says is the command, not a runner name guessed from its first token:
+    // `npm run test` proves npm is on the path, and calling npm a test runner is a
+    // confidently-wrong claim in a high-severity finding.
     const named = ctx.profile.tooling.test
     const testEntries = ctx.profile.commands.test ?? []
-    const fromCommands = testEntries
-      .filter((e) => e.source !== 'inferred')
-      .map((e) => e.cmd.split(/\s+/)[0] ?? e.cmd)
-      .filter((n) => n !== '')
-    const runners = [...new Set([...named, ...fromCommands])]
+    const detected = testEntries.filter((e) => e.source !== 'inferred')
+    const what = [...new Set([...named, ...detected.map((e) => e.cmd)])]
 
-    if (runners.length > 0) {
+    if (what.length > 0) {
       return warn(
-        `A test runner is configured (${runners.join(', ')}) but no changed-files subset is documented. Full-suite feedback on every iteration makes agents unusable.`,
-        [...named, ...testEntries.map((e) => e.evidence ?? '')],
+        `A test command is available (${what.join(', ')}) but no changed-files subset is documented. Full-suite feedback on every iteration makes agents unusable.`,
+        // Evidence is a file, or the file that declares the commands. Never a tool name and
+        // never an empty string: `Finding.evidence` is a published contract, and a claim
+        // that cannot be opened is not evidence.
+        commandEvidence(ctx, [...detected, ...testEntries]),
         derived('AGENTS.md', 'Document a changed-files test command', 0.8),
       )
     }
@@ -407,10 +443,28 @@ const TEST_FAST: Rule = {
     // instead -- and the requirement that actually matters, never failing, is met.
     return warn(
       'No changed-files test subset is documented. Adding one is the single highest-leverage change for agent usability; nothing here is proven missing.',
-      testEntries.map((e) => e.evidence ?? ''),
+      commandEvidence(ctx, testEntries),
       derived('AGENTS.md', 'Document a changed-files test command', 0.8),
     )
   },
+}
+
+/**
+ * Evidence for a command-shaped finding: the files the commands were read from.
+ *
+ * Falls back to the manifest that declares the project's commands, because a finding with
+ * no evidence at all is a to-do rather than a finding -- and an inferred command carries no
+ * evidence of its own by design.
+ */
+function commandEvidence(ctx: RuleContext, entries: readonly CommandEntry[]): string[] {
+  const own = entries.map((e) => e.evidence).filter((e): e is string => typeof e === 'string' && e !== '')
+  if (own.length > 0) return [...new Set(own)]
+  const manifest = ctx.profile.files.find((f) =>
+    /(^|\/)(package\.json|Cargo\.toml|go\.mod|pyproject\.toml|Gemfile|composer\.json|mix\.exs|Package\.swift|pom\.xml|build\.gradle(\.kts)?|MODULE\.bazel)$/.test(
+      f,
+    ),
+  )
+  return manifest === undefined ? [] : [manifest]
 }
 
 const LINT: Rule = {
@@ -422,7 +476,9 @@ const LINT: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode) return na('No source files detected')
     if (unidentified(ctx)) {
-      return na('No ecosystem identified: linters are declared in ecosystem-specific config, which was not found')
+      return na(
+        'No ecosystem or build system identified: linters are declared in ecosystem-specific config, and none was found',
+      )
     }
     if (ctx.profile.tooling.lint.length === 0) {
       return fail(
@@ -795,34 +851,37 @@ const STYLE_GUIDE: Rule = {
 // ---------------------------------------------------------------------------
 
 /**
- * Handle words that mean "this is scaffolding", not "this is a person".
+ * Words that mean "this is scaffolding", not "this is a person or a team".
  *
  * A CODEOWNERS rule naming a team that does not exist does not fail loudly. GitHub falls
  * back to whoever is eligible to review, so a file full of placeholders behaves exactly like
  * no file at all while reading as though review routing is configured. Presence was all this
- * rule checked, which made a template of placeholders a *pass* -- the most reassuring kind
- * of wrong.
+ * rule checked, which made a template of placeholders a *pass* -- the most reassuring kind of
+ * wrong.
  *
- * The list is deliberately narrow: only words that no real team names itself. A handle
- * containing `team` or `core` is left alone, because flagging a real owner is the expensive
- * error here -- it teaches people to ignore the rule.
+ * Matched **per hyphen/slash-separated segment, case-insensitively**, not as a substring. A
+ * substring test is how `@todoist-team`, `@XXXcorp` and `@acme/replace-service` all got
+ * flagged, and flagging a real owner is the expensive error here -- it teaches people to
+ * ignore the rule. The list is therefore restricted to words no team names itself: `replace`
+ * and `change` had to go, because "replace" and "change" are ordinary English words a real
+ * service might be named after, and a false positive on a real owner costs more than a
+ * missed placeholder. Segments keep every real handle in the plan's own test list passing
+ * (`@acme/platform-team`, `@myorg/core`, `@the-owner`, `@nodejs`) while still catching
+ * `@TODO-OWNER-default`, which is what the rule exists for.
  */
-const PLACEHOLDER_HANDLE_WORDS: readonly string[] = [
+const PLACEHOLDER_HANDLE_SEGMENTS: ReadonlySet<string> = new Set([
   'todo',
   'fixme',
   'changeme',
-  'change-me',
   'placeholder',
-  'replace',
-  'replace-me',
   'replaceme',
-  'your-org',
-  'your-team',
-  'yourhandle',
-  'your-name',
-  'yourname',
+  'your',
   'xxx',
-]
+  'tbd',
+  'dummy',
+  'nobody',
+  'unknown',
+])
 
 /**
  * Top-level domains reserved by RFC 2606 as permanently unresolvable.
@@ -832,17 +891,50 @@ const PLACEHOLDER_HANDLE_WORDS: readonly string[] = [
  */
 const RESERVED_TLDS: readonly string[] = ['.invalid', '.test', '.example', '.localhost']
 
-/** The owner handles a CODEOWNERS file assigns, ignoring comments and blanks. */
-function codeownerHandles(body: string): string[] {
-  const out: string[] = []
+/**
+ * Whether an owner token is one GitHub can resolve to a real person or team.
+ *
+ * GitHub accepts `@user`, `@org/team-name` and an email address. It does *not* accept a bare
+ * `org/team` or `username`, so those lines route nothing -- but they are not comments either,
+ * and saying "every line is a comment or blank" about a file full of them is exactly the
+ * confidently-wrong sentence this project refuses to print.
+ */
+function classifyCodeownerOwners(body: string): { owners: string[]; unresolved: string[]; rules: number } {
+  const owners: string[] = []
+  const unresolved: string[] = []
+  let rules = 0
   for (const raw of body.split('\n')) {
-    const line = raw.trim()
-    if (line === '' || line.startsWith('#')) continue
-    for (const token of line.split(/\s+/)) {
-      if (token.startsWith('@') && token.length > 1) out.push(token)
+    const line = raw.split('#')[0]?.trim() ?? ''
+    if (line === '') continue
+    rules++
+    // The first token is the path pattern; everything after it is an owner.
+    for (const token of line.split(/\s+/).slice(1)) {
+      if (token.startsWith('@') && token.length > 1) owners.push(token)
+      else if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(token)) owners.push(token)
+      else unresolved.push(token)
     }
   }
-  return out
+  return { owners, unresolved, rules }
+}
+
+/** A placeholder word in any hyphen/slash segment of a handle, lowercased. */
+function isPlaceholderHandle(handle: string): boolean {
+  const bare = handle.replace(/^@/, '').toLowerCase()
+  return bare.split(/[-_/.]+/).some((segment) => segment !== '' && PLACEHOLDER_HANDLE_SEGMENTS.has(segment))
+}
+
+/**
+ * A placeholder email address: a reserved TLD, or a placeholder word in the local part.
+ *
+ * The local part only, because the domain is where real organisations live -- matching
+ * placeholder words across the whole address flagged real addresses like
+ * `security@replaceme-corp.com`'s innocent cousins for no reason.
+ */
+function isPlaceholderAddress(address: string): boolean {
+  const lower = address.toLowerCase()
+  if (RESERVED_TLDS.some((tld) => lower.endsWith(tld))) return true
+  const local = lower.split('@')[0] ?? ''
+  return local.split(/[-_.]+/).some((segment) => segment !== '' && PLACEHOLDER_HANDLE_SEGMENTS.has(segment))
 }
 
 const CODEOWNERS: Rule = {
@@ -863,36 +955,54 @@ const CODEOWNERS: Rule = {
     const body = ctx.codeowners
     if (body === null) return pass('CODEOWNERS present', [path])
 
-    const handles = codeownerHandles(body)
-    if (handles.length === 0) {
+    const { owners, unresolved, rules } = classifyCodeownerOwners(body)
+    const handles = owners.filter((o) => o.startsWith('@'))
+    const emails = owners.filter((o) => !o.startsWith('@'))
+
+    if (handles.length === 0 && emails.length === 0) {
+      if (unresolved.length > 0) {
+        return warn(
+          `CODEOWNERS names ${unresolved.length} owner(s) GitHub cannot resolve (${[...new Set(unresolved)].slice(0, 3).join(', ')}). It requires @user, @org/team-name or an email address, so those rules route nothing.`,
+          [path],
+          derived('CODEOWNERS', 'Prefix each owner with @, or use an email address', 0.8),
+        )
+      }
       return warn(
-        'CODEOWNERS contains no owner handles, so it routes nothing. Every line is a comment or blank.',
+        'CODEOWNERS contains no owner, so it routes nothing. Every line is a comment, blank, or a path with no owner after it.',
         [path],
         derived('CODEOWNERS', 'Give each rule a real owner handle', 0.8),
       )
     }
-    const placeholders = handles.filter((h) => {
-      const bare = h.slice(1).toLowerCase()
-      return PLACEHOLDER_HANDLE_WORDS.some((w) => bare.includes(w))
-    })
-    if (placeholders.length === handles.length) {
-      // Every handle is scaffolding, so the file is a template. Reported as a warning rather
-      // than a pass, because it becomes correct the moment real handles replace them, and as
+    // A placeholder anywhere among the real owners is worth naming, but only those: printing
+    // the real owners next to a warning about placeholders teaches a reader to distrust the
+    // rule's evidence.
+    const placeholders = owners.filter((o) => isPlaceholderHandle(o) || isPlaceholderAddress(o))
+    if (placeholders.length === owners.length) {
+      // Every owner is scaffolding, so the file is a template. Reported as a warning rather
+      // than a pass, because it becomes correct the moment real owners replace them, and as
       // a failure because *today* it routes nothing while looking configured.
       return warn(
         `CODEOWNERS is a template: every owner is a placeholder (${placeholders.join(', ')}). GitHub does not fail on an unknown owner -- it falls back to whoever can review, so this behaves like no CODEOWNERS at all.`,
         [path],
-        derived('CODEOWNERS', 'Replace the placeholder handles with real users or teams', 0.9),
+        derived('CODEOWNERS', 'Replace the placeholder owners with real users or teams', 0.9),
       )
     }
     if (placeholders.length > 0) {
       return warn(
         `Some CODEOWNERS rules still point at placeholders (${placeholders.join(', ')}); those paths fall back to the default reviewer.`,
         [path],
-        derived('CODEOWNERS', 'Replace the remaining placeholder handles', 0.7),
+        derived('CODEOWNERS', 'Replace the remaining placeholder owners', 0.7),
       )
     }
-    return pass(`${handles.length} owner handle(s): ${[...new Set(handles)].join(', ')}`, [path])
+    if (unresolved.length > 0) {
+      return warn(
+        `${[...new Set(owners)].join(', ')} route(s) resolve, but ${unresolved.length} owner token(s) (${[...new Set(unresolved)].slice(0, 3).join(', ')}) do not: GitHub needs @user, @org/team-name or an email address.`,
+        [path],
+        derived('CODEOWNERS', 'Prefix every owner with @, or use an email address', 0.7),
+      )
+    }
+    const distinct = [...new Set(owners)]
+    return pass(`${distinct.length} distinct owner(s) across ${rules} rule(s): ${distinct.join(', ')}`, [path])
   },
 }
 
@@ -949,23 +1059,38 @@ const SECURITY_MD: Rule = {
     // that conclusion is hard to undo. So a file whose address is still a placeholder is not
     // a policy yet, however official it looks.
     const addresses = [...body.matchAll(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g)].map((m) => m[0])
+    // A reporting channel is not an address. GitHub's own SECURITY.md template points at the
+    // private advisories page and GitLab at confidential issues, and both are monitored by
+    // construction -- so a policy with no email address is often a *good* policy, and calling
+    // it "nowhere to report a vulnerability" is a confident claim about the world that no
+    // regex can support.
+    const channel =
+      /advisories\/new|security\/advisories|private vulnerabilit|confidential issue|security report|responsible disclosure/i.test(
+        body,
+      )
     if (addresses.length === 0) {
+      if (channel) {
+        return pass('SECURITY.md points reports at a private reporting channel, and names no address', [path])
+      }
       return warn(
-        'SECURITY.md names no contact address, so there is nowhere to report a vulnerability.',
+        'SECURITY.md names no contact address and no private reporting channel, so this report cannot say where a vulnerability would go.',
         [path],
-        derived('SECURITY.md', 'Add a monitored security contact address', 0.8),
+        derived('SECURITY.md', 'Add a monitored security contact address or a private reporting channel', 0.8),
       )
     }
-    const placeholders = addresses.filter(
-      (a) =>
-        RESERVED_TLDS.some((tld) => a.toLowerCase().endsWith(tld)) ||
-        PLACEHOLDER_HANDLE_WORDS.some((w) => a.toLowerCase().includes(w)),
-    )
+    const placeholders = addresses.filter(isPlaceholderAddress)
     if (placeholders.length === addresses.length) {
       return warn(
         `SECURITY.md still points at a placeholder address (${placeholders.join(', ')}). Reports sent there are not read.`,
         [path],
         derived('SECURITY.md', 'Replace the placeholder with a monitored address', 0.9),
+      )
+    }
+    if (placeholders.length > 0) {
+      return warn(
+        `SECURITY.md lists a placeholder address (${placeholders.join(', ')}) alongside a real one; verify which one is monitored.`,
+        [path],
+        derived('SECURITY.md', 'Remove the placeholder address', 0.7),
       )
     }
     return pass(`Reports go to ${addresses.join(', ')}`, [path])
@@ -1079,11 +1204,15 @@ function isTestDataPath(path: string): boolean {
  * becomes one the moment it contains an auth token, so this reads the file and decides
  * rather than guessing from the name. (`.netrc` and `.pypirc` are *meant* to hold
  * credentials, so those stay filename-based.)
+ *
+ * `always-auth` is deliberately absent: it is a boolean flag, not a credential, and older CI
+ * configurations set it with no token in sight. Treating it as one produced a false positive
+ * on a file that contained no secret at all.
  */
 function npmrcHasToken(root: string, path: string): boolean {
   try {
     const text = readFileSync(join(root, ...path.split('/')), 'utf8')
-    return /(_authToken|_auth\s*=|_password\s*=|always-auth\s*=\s*true)/i.test(text)
+    return /(_authToken|_auth\s*=|_password\s*=)/i.test(text)
   } catch {
     // Unreadable is not evidence of a token, and guessing "secret" on an unreadable file
     // is the same false positive by another route.
@@ -1106,27 +1235,48 @@ const SECRET_SCAN: Rule = {
 
     // Split what a credential file *looks like* from what it *is*: a fixture under a test
     // path, or a config file with no token in it, is not a committed secret.
+    //
+    // **The content check runs first, and the order is load-bearing.** Deciding by path
+    // first would let a real `_authToken` sitting in `examples/app/.npmrc` be dismissed as
+    // a fixture -- and then the pass detail would assert "no committed secrets" about a file
+    // nobody opened. A rule that says a credential is absent after not looking at it is the
+    // most dangerous output this tool can produce, so a file whose content decides whether
+    // it is a secret is always read.
     const fixtures: string[] = []
+    const uninspected: string[] = []
+    const tokenFree: string[] = []
     const real: string[] = []
     for (const file of shaped) {
-      if (isTestDataPath(file)) {
-        fixtures.push(file)
+      if (/(^|\/)\.npmrc$/.test(file)) {
+        if (npmrcHasToken(ctx.profile.root, file)) real.push(file)
+        else tokenFree.push(file)
         continue
       }
-      if (/(^|\/)\.npmrc$/.test(file) && !npmrcHasToken(ctx.profile.root, file)) {
-        fixtures.push(file)
+      if (isTestDataPath(file)) {
+        // A fixture's content is not inspected, so the finding must not claim it was.
+        uninspected.push(file)
         continue
       }
       real.push(file)
     }
+    fixtures.push(...tokenFree, ...uninspected)
 
     if (real.length === 0) {
-      return pass(
-        fixtures.length === 0
+      const noted = [...new Set(fixtures)].slice(0, 4)
+      const detail =
+        noted.length === 0
           ? 'No secret-shaped files tracked'
-          : `No committed secrets. ${fixtures.length} secret-shaped file(s) are test fixtures or token-free config: ${fixtures.slice(0, 3).join(', ')}${fixtures.length > 3 ? ', ...' : ''}`,
-        fixtures.slice(0, 4),
-      )
+          : [
+              'No committed secret found in the tracked secret-shaped files.',
+              tokenFree.length > 0 ? `${tokenFree.length} of them hold config with no auth token` : '',
+              uninspected.length > 0
+                ? `${uninspected.length} sit in a test/sample path and were not content-inspected`
+                : '',
+              `Files: ${noted.join(', ')}${fixtures.length > noted.length ? ', ...' : ''}`,
+            ]
+              .filter((part) => part !== '')
+              .join(' ')
+      return pass(detail, noted)
     }
     return fail(
       `${real.length} secret-shaped file(s) tracked in git: ${real.slice(0, 4).join(', ')}`,

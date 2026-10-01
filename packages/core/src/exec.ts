@@ -29,7 +29,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, statSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from './errors.ts'
@@ -136,9 +136,9 @@ export function resolveCommand(
   const env = opts.env ?? process.env
   const platform = opts.platform ?? process.platform
 
-  // An explicit path is used as given, if it exists.
+  // An explicit path is used as given, if it is a file.
   if (bin.includes('/') || bin.includes('\\') || isAbsolute(bin)) {
-    if (!existsSync(bin)) return null
+    if (!isExecutableFile(bin)) return null
     const isShim = platform === 'win32' && /\.(cmd|bat)$/i.test(bin)
     return { path: bin, isShim }
   }
@@ -149,7 +149,7 @@ export function resolveCommand(
   if (platform !== 'win32') {
     for (const dir of dirs) {
       const candidate = join(dir, bin)
-      if (existsSync(candidate)) return { path: candidate, isShim: false }
+      if (isExecutableFile(candidate)) return { path: candidate, isShim: false }
     }
     return null
   }
@@ -157,7 +157,7 @@ export function resolveCommand(
   for (const dir of dirs) {
     for (const ext of pathExtensions(env)) {
       const candidate = join(dir, `${bin}${ext}`)
-      if (existsSync(candidate)) return { path: candidate, isShim: /\.(cmd|bat)$/i.test(ext) }
+      if (isExecutableFile(candidate)) return { path: candidate, isShim: /\.(cmd|bat)$/i.test(ext) }
     }
   }
   return null
@@ -296,7 +296,14 @@ function hintFor(bin: string, platform: NodeJS.Platform): string {
   return `Is ${base} installed and on PATH? On Windows anvil resolves ${base}.exe, ${base}.cmd and ${base}.bat.`
 }
 
-/** True when a path looks like an executable rather than a directory. */
+/**
+ * True when a path is a file rather than a directory.
+ *
+ * Used by `resolveCommand` because `existsSync` is not enough: a directory named `npm.exe`
+ * on PATH satisfies `existsSync`, and the result is an `EISDIR` at spawn time reported as
+ * `INTERNAL` exit 70 ("Bug in anvil") instead of a clean "command not found" with exit 7 --
+ * or, on the agent-launch path, a directory handed to `spawn` as the program.
+ */
 export function isExecutableFile(path: string): boolean {
   try {
     return statSync(path).isFile()

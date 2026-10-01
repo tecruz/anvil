@@ -99,7 +99,7 @@ function readBody(root: string, path: string | null): string | null {
 }
 
 /**
- * The root package.json's's `scripts` block, or `{}`.
+ * The root package.json's `scripts` block, or `{}`.
  *
  * Only CI_PARITY uses it, and only to expand a composite script: a workflow step that runs
  * `npm run check` runs whatever `check` runs, and a rule that reports "CI does not appear

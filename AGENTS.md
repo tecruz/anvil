@@ -15,7 +15,7 @@ Typescript project, with javascript.
 ## Layout
 
 - `packages/audit` -- @anvil/audit (depends on @anvil/profile)
-- `packages/cli` -- anvil
+- `packages/cli` -- @anvil/cli
 - `packages/core` -- @anvil/core
 - `packages/derive` -- @anvil/derive (depends on @anvil/audit, @anvil/playbooks, @anvil/profile)
 - `packages/git` -- @anvil/git (depends on @anvil/core)

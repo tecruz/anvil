@@ -24,7 +24,6 @@ import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
   json: { type: 'boolean', short: 'j' },
-  noColor: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 

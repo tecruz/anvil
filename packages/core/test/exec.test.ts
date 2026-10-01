@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
@@ -83,6 +83,33 @@ describe('resolveCommand', () => {
     assert.ok(found !== null, 'npm should resolve')
     assert.equal(found?.isShim, true, 'npm on Windows is a .cmd shim and must go through cmd')
     assert.match(found?.path ?? '', /\.CMD$|\.cmd$/)
+  })
+
+  test('a directory is not a resolvable command', () => {
+    // `existsSync` is satisfied by a directory, so a directory named `npm.exe` on PATH used to
+    // resolve as the binary. The consequence was an `EISDIR` at spawn time, reported as
+    // INTERNAL exit 70 ("Bug in anvil") instead of a clean "command not found" with exit 7 --
+    // and on the agent-launch path, a directory handed to `spawn` as the program.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-dirbin-'))
+    // On Windows the resolver tries `acme` + each PATHEXT extension, so the decoy directory is
+    // named `acme.exe`; on POSIX the bare name is used.
+    const query = 'acme'
+    const decoy = process.platform === 'win32' ? 'acme.exe' : 'acme'
+    mkdirSync(join(dir, decoy))
+    assert.equal(resolveCommand(query, { env: { PATH: dir } as NodeJS.ProcessEnv }), null)
+    assert.equal(resolveCommand(join(dir, decoy)), null, 'an explicit directory path is not a binary either')
+  })
+
+  test('a real file of the resolvable name still resolves next to a decoy directory', () => {
+    // The check must reject only the directory, not skip past it to nothing.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-binfile-'))
+    const query = 'acme'
+    const file = process.platform === 'win32' ? 'acme.exe' : 'acme'
+    mkdirSync(join(dir, `${file}.d`))
+    writeFileSync(join(dir, file), 'binary')
+    const found = resolveCommand(query, { env: { PATH: dir } as NodeJS.ProcessEnv })
+    assert.ok(found !== null, 'the real file should resolve')
+    assert.equal(found?.isShim, false)
   })
 })
 

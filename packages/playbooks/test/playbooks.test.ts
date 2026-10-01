@@ -391,6 +391,52 @@ describe('user playbook directory', () => {
     const { warnings } = loadPlaybooksFromDirectory(tempDir())
     assert.ok(warnings.some((w) => w.includes('no .yaml playbooks')))
   })
+
+  test('two files claiming one id is reported, because the merge drops one of them', () => {
+    // The merge is keyed by id, so of two files claiming `acme` only one is ever used -- and
+    // the surviving playbook looks perfectly fine, so nothing downstream could see it. The
+    // structural check could not catch it either: it receives the list *after* the merge.
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'one.yaml'), 'id: acme\ntitle: One\nmatch:\n  files: ["a.txt"]\n')
+      writeFileSync(join(dir, 'two.yaml'), 'id: acme\ntitle: Two\nmatch:\n  files: ["a.txt"]\n')
+      const { playbooks, warnings } = loadPlaybooksFromDirectory(dir)
+      const acme = playbooks.filter((p) => p.id === 'acme')
+      assert.equal(acme.length, 1, 'the merge still collapses them; that is why this is reported')
+      assert.ok(
+        warnings.some((w) => /duplicate playbook id "acme"/.test(w)),
+        `expected a duplicate-id warning, got ${JSON.stringify(warnings)}`,
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a later layer replacing an earlier one is the documented override, not a warning', () => {
+    const company = tempDir()
+    const home = tempDir()
+    try {
+      writeFileSync(join(company, 'node.yaml'), 'id: node\ntitle: Company node\nmatch:\n  files: ["package.json"]\n')
+      mkdirSync(join(home, '.anvil', 'playbooks'), { recursive: true })
+      writeFileSync(
+        join(home, '.anvil', 'playbooks', 'mine.yaml'),
+        'id: mine\ntitle: Mine\nmatch:\n  files: ["x.txt"]\n',
+      )
+      const { playbooks, warnings } = loadPlaybooks({
+        ANVIL_CONFIG_HOME: home,
+        ANVIL_PLAYBOOKS: company,
+      } as NodeJS.ProcessEnv)
+      assert.equal(playbooks.find((p) => p.id === 'mine')?.title, 'Mine')
+      assert.equal(playbooks.find((p) => p.id === 'node')?.title, 'Company node')
+      assert.ok(
+        !warnings.some((w) => /duplicate/.test(w)),
+        `an override is not a duplicate: ${JSON.stringify(warnings)}`,
+      )
+    } finally {
+      rmSync(company, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
