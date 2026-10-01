@@ -377,6 +377,102 @@ describe('the install command is derived from the lockfile', () => {
   })
 })
 
+describe('a Makefile is read as the build system it is', () => {
+  // Found by auditing traefik/traefik-helm-chart: an AGENTS.md documenting `make test` and
+  // `make lint`, a Makefile defining both, and `*_test.yaml` files under `traefik/tests/`.
+  // anvil reported "test files exist but no runnable test command was found" as a *blocker*
+  // and failed `BUILD`, because a Makefile was not a build system it knew about. The
+  // sentence was about anvil, not about the chart.
+  //
+  // The Go detector's half of this was a guess in the other direction: any repo with a
+  // Makefile was given `make build`, labelled `detected`, whether or not a `build` target
+  // existed.
+  const commandsOf = (files: Record<string, string>) => {
+    const dir = repo(files)
+    return buildProfile(dir, { ...VCS, root: dir }).profile.commands
+  }
+
+  const MAKEFILE = ['.PHONY: lint test', 'lint:', '\tct lint', 'test:', '\tct install', ''].join('\n')
+
+  test('a target the Makefile defines is a detected command, cited by line', () => {
+    const commands = commandsOf({ Makefile: MAKEFILE, 'README.md': '# chart\n' })
+    assert.equal(commands.test?.[0]?.cmd, 'make test')
+    assert.equal(commands.test?.[0]?.source, 'detected')
+    // The line is what makes it checkable rather than asserted.
+    assert.match(String(commands.test?.[0]?.evidence), /^Makefile:\d+$/)
+    assert.equal(commands.lint?.[0]?.cmd, 'make lint')
+    assert.equal(commands.build, undefined, 'a Makefile with no `build` target has no build command')
+  })
+
+  test('a documented `make test` outranks the one read from the Makefile', () => {
+    const commands = commandsOf({
+      Makefile: MAKEFILE,
+      'AGENTS.md': '# AGENTS\n\n```bash\nmake test-unit\n```\n',
+    })
+    assert.equal(commands.test?.[0]?.source, 'documented')
+    assert.equal(commands.test?.[0]?.cmd, 'make test-unit')
+  })
+
+  test('a Makefile with no test target does not get one', () => {
+    const commands = commandsOf({
+      Makefile: ['.PHONY: deploy', 'deploy:', '\taws s3 sync . s3://bucket', ''].join('\n'),
+      'README.md': '# infra\n',
+    })
+    assert.equal(commands.test, undefined)
+    assert.equal(commands.build, undefined)
+  })
+
+  test('.PHONY is not a target, and a variable is not either', () => {
+    // `.PHONY: test` declares that `test` exists; it does not define it. Reading it as a
+    // definition would hand every Makefile a `make test` that fails with "No rule to make
+    // target" -- the precise near-miss this project keeps refusing to ship.
+    const commands = commandsOf({
+      Makefile: ['.PHONY: test', 'SOURCES := $(shell find . -name "*.go")', 'export CGO_ENABLED := 0', ''].join('\n'),
+      'README.md': '# lib\n',
+    })
+    assert.equal(commands.test, undefined)
+    assert.equal(commands.build, undefined)
+  })
+})
+
+describe('a documented command is the command that was extracted, not the line it sat on', () => {
+  // Found by pointing anvil at itself, which is the cheapest version of the ten-repository
+  // criterion and keeps paying for itself. Its own profile listed
+  // `node packages/cli/dist/cli.js <command>` as a *documented build command*: the line it
+  // came from named `npm run build` and a second command in the same sentence, and the
+  // classifier read the kind off the line while the extractor took the first code span. The
+  // command builds nothing, and it was in the list an agent is told to run.
+  const documented = (files: Record<string, string>) => {
+    const dir = repo(files)
+    const profile = buildProfile(dir, { ...VCS, root: dir }).profile
+    const out: string[] = []
+    for (const [kind, entries] of Object.entries(profile.commands)) {
+      for (const e of entries ?? []) if (e.source === 'documented') out.push(`${kind}: ${e.cmd}`)
+    }
+    return out
+  }
+
+  test('a second command on the line does not become the first one', () => {
+    const found = documented({
+      'README.md': ['# Tool', '', '```bash', 'npm run build && node dist/cli.js <command>', '```', ''].join('\n'),
+    })
+    assert.deepEqual(found, ['build: npm run build'])
+    assert.ok(
+      !found.some((c) => c.includes('dist/cli.js')),
+      `a command that builds nothing was recorded: ${found.join(', ')}`,
+    )
+  })
+
+  test('the ordinary case is unaffected', () => {
+    assert.deepEqual(
+      documented({
+        'AGENTS.md': ['# Repo', '', '- Build: `npm run build`', '- Test: `npm test`', ''].join('\n'),
+      }),
+      ['build: npm run build', 'test: npm test'],
+    )
+  })
+})
+
 describe('the skip lists do not overlap', () => {
   test('a name is either build output or test data, not both', () => {
     for (const name of SKIP_TEST_DATA_DIRS) {

@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { addCommand, addRisk, addTool, COMMIT_HOOK_FILES, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
-import type { Docs, InstructionFile } from './types.ts'
+import type { CommandKind, Docs, InstructionFile } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
 
 /**
@@ -225,6 +225,88 @@ export function detectGenericTooling(
     addTool(draft, 'iac', f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '.')
   }
   detectInstallCommand(draft, root, files, resolve)
+  detectMakefileCommands(draft, root, files, resolve)
+}
+
+/**
+ * The targets a Makefile actually defines, with the line each is declared on.
+ *
+ * A Makefile is a build system anvil had no support for at all, and the gap produced a
+ * false blocker: traefik's Helm chart documents `make test` and `make lint` in its AGENTS.md
+ * and defines both, and was still reported as having "test files but no runnable test
+ * command" while failing `BUILD`. Whatever the chart is built with, it is not a mystery.
+ *
+ * Only real targets are returned. The three shapes that look like targets and are not:
+ *
+ *   - `.PHONY: test`   a declaration of an existing target, not a definition of one
+ *   - `VAR = value` / `export FOO := x`   a variable, and `:` here is an assignment
+ *   - `target: VAR = value`   a target-specific variable, which does define `target`
+ *
+ * A recipe line is indented, so requiring the colon at column 0 is what separates a rule
+ * from the shell command underneath it.
+ */
+export function makefileTargets(root: string, relPath: string): Map<string, number> {
+  const out = new Map<string, number>()
+  const { text } = readText(join(root, relPath))
+  if (text === null) return out
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    // A recipe line, a comment, or a line-continuation of a previous rule.
+    if (line.length === 0 || /^\s/.test(line) || line.startsWith('#')) continue
+    // `name: deps` or `name:` or `name: VAR = value`. Anything with `=` before the colon is
+    // a variable assignment.
+    const m = /^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)/.exec(line)
+    if (m === null) continue
+    const name = m[1] as string
+    if (name.startsWith('.')) continue
+    if (!out.has(name)) out.set(name, i + 1)
+  }
+  return out
+}
+
+/** Command kinds a Makefile can supply, and the target names that mean each one. */
+const MAKE_TARGET_KINDS: ReadonlyArray<{ kind: CommandKind; targets: readonly string[] }> = [
+  { kind: 'build', targets: ['build', 'all'] },
+  { kind: 'test', targets: ['test', 'tests'] },
+  { kind: 'lint', targets: ['lint'] },
+  { kind: 'format', targets: ['format', 'fmt'] },
+]
+
+/**
+ * Commands from a Makefile, labelled `detected`.
+ *
+ * A target defined in the Makefile is a file on disk saying so, which is exactly what
+ * `detected` means in the documented/detected/inferred contract -- and it is the reason
+ * this is honest where the old guess was not. The Go detector emitted `make build` for any
+ * repository with a Makefile at all, with evidence `Makefile` and no claim that a `build`
+ * target existed, so a project with a Makefile containing only `deploy` was told to build
+ * with `make build`.
+ *
+ * `detected` also outranks nothing: a `documented` command still wins, because a human
+ * writing `make test-unit` down is more authoritative than the name this guesses.
+ */
+function detectMakefileCommands(
+  draft: ProfileDraft,
+  root: string,
+  files: ReadonlySet<string>,
+  resolve: (rel: string) => string,
+): void {
+  for (const candidate of ['Makefile', 'makefile', 'GNUmakefile']) {
+    if (!files.has(resolve(candidate))) continue
+    const targets = makefileTargets(root, resolve(candidate))
+    if (targets.size === 0) continue
+    for (const { kind, targets: names } of MAKE_TARGET_KINDS) {
+      const name = names.find((n) => targets.has(n))
+      if (name === undefined) continue
+      addCommand(draft, kind, {
+        cmd: `make ${name}`,
+        source: 'detected',
+        evidence: evidence(candidate, targets.get(name) as number),
+      })
+    }
+    return
+  }
 }
 
 /**
@@ -349,15 +431,15 @@ const DOC_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
   },
   {
     kind: 'test',
-    re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|jest\b|vitest\b)/,
+    re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|make (test|tests|check)|jest\b|vitest\b)/,
   },
   {
     kind: 'build',
-    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build)/,
+    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build|make (build|all))/,
   },
   {
     kind: 'lint',
-    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format)/,
+    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format|make lint)/,
   },
   { kind: 'typecheck', re: /(tsc --noEmit|typecheck|pyright|mypy)/ },
 ]
@@ -384,13 +466,26 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
     const { text } = readText(join(root, rel))
     if (text === null) continue
     const lines = text.split('\n')
+    let inFence = false
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? ''
-      if (!looksLikeCommandLine(line)) continue
+      // The fence markers themselves are not commands; the lines between them are.
+      if (/^\s{0,4}(?:```|~~~)/.test(line)) {
+        inFence = !inFence
+        continue
+      }
+      if (!looksLikeCommandLine(line, inFence)) continue
       const cmd = extractCommand(line)
       if (cmd === null) continue
       for (const pattern of DOC_PATTERNS) {
-        if (!pattern.re.test(line)) continue
+        // Against the extracted command, not the line. They were different strings, and a
+        // line could name one command while the first code span on it was another -- so
+        // `npm run build && node dist/cli.js <command>` was recorded as a documented *build*
+        // command of `node dist/cli.js <command>`, which builds nothing. Pointing anvil at
+        // itself surfaced it in its own profile: a confidently-wrong command in the list an
+        // agent is told to run. Losing the second command on a shared line is the cheaper
+        // error; a wrong command is the one this project refuses to ship.
+        if (!pattern.re.test(cmd)) continue
         const key = `${pattern.kind} ${cmd}`
         if (seen.has(key)) break
         seen.add(key)
@@ -402,12 +497,17 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
   return out
 }
 
-function looksLikeCommandLine(line: string): boolean {
+function looksLikeCommandLine(line: string, inFence = false): boolean {
   const hasRunner =
     /(^|\s|\$|`)(npm|pnpm|yarn|bun|cargo|go|dotnet|gradlew?|mvnw?|pytest|ruff|mypy|make|jest|vitest|nextest|tsc)\b/.test(
       line,
     )
-  const fenced = /^\s{0,4}(?:\$|#|>)\s/.test(line) || /```/.test(line)
+  // A command is recognisable inside a fenced block too, and humans write them there more
+  // often than not: traefik's chart documents `make test` and `make lint` in a ```bash block
+  // and nowinandroid documents `./gradlew testDemoDebug` the same way. Requiring the line to
+  // carry its own backticks missed every one of them, so a repo with an excellent AGENTS.md
+  // was reported as having no documented command at all.
+  const fenced = inFence || /^\s{0,4}(?:\$|#|>)\s/.test(line) || /```/.test(line)
   return hasRunner && (line.includes('`') || fenced)
 }
 
@@ -415,13 +515,26 @@ function looksLikeCommandLine(line: string): boolean {
 function extractCommand(line: string): string | null {
   const inline = /`([^`]{3,140})`/.exec(line)
   if (inline !== null) {
-    const candidate = (inline[1] as string).trim()
+    const candidate = firstCommand((inline[1] as string).trim())
     if (/^[a-z][\w.-]*\s+\S/.test(candidate)) return candidate
   }
   const plain = /^\s{0,4}(?:\$\s*)?([a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
   if (plain !== null) {
-    const candidate = (plain[1] as string).trim()
+    const candidate = firstCommand((plain[1] as string).trim())
     if (candidate.includes(' ')) return candidate
   }
   return null
+}
+
+/**
+ * The first command of a compound line.
+ *
+ * `npm run build && node dist/cli.js <command>` is two commands, and recording the pair as
+ * one hands an agent a string it will copy whole -- running whatever came after the `&&` as
+ * a side effect of wanting a build. Cutting at the operator keeps the half that matches the
+ * kind the line was classified as.
+ */
+function firstCommand(candidate: string): string {
+  const cut = candidate.search(/\s(?:&&|\|\||[|;])\s/)
+  return (cut === -1 ? candidate : candidate.slice(0, cut)).trim()
 }

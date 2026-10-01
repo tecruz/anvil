@@ -322,6 +322,66 @@ describe('cold-empty', () => {
       assert.ok(f.fix !== null, `${f.id} failed with no fix artifact`)
     }
   })
+
+  /**
+   * The bug, found by auditing android/nowinandroid: its AGENTS.md documents the build,
+   * the formatter and the test tasks, and every one of them is written `./gradlew ...`.
+   * `AGENTS_COMMANDS` failed as a *blocker* with "Instructions exist but name no runnable
+   * command" -- because the character before `gradlew` is a `/` that the leading class did
+   * not include. The sentence was about a punctuation detail, and it was raised against the
+   * best agent instructions in the batch.
+   */
+  test('a command invoked through a path counts as a command', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-agents-cmd-'))
+    try {
+      writeFileSync(
+        join(dir, 'AGENTS.md'),
+        [
+          '# Now In Android',
+          '',
+          'A third of the modules are Gradle modules and the rest are libraries.',
+          '',
+          '- Build: `./gradlew assemble{Variant}`. Typically `assembleDemoDebug`.',
+          '- Fix linting: `./gradlew spotlessApply`',
+          '- Run local tests: `./gradlew testDemoDebug`',
+          '',
+          'The architecture is described in docs/ArchitectureLearningJourney.md.',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(join(dir, 'build.gradle.kts'), 'plugins { id("com.android.application") }\n')
+      writeFileSync(join(dir, 'gradlew'), '#!/bin/sh\nexec gradle "$@"\n')
+      mkdirSync(join(dir, 'app', 'src', 'main', 'java'), { recursive: true })
+      writeFileSync(join(dir, 'app', 'src', 'main', 'java', 'Main.kt'), 'fun main() {}\n')
+      mkdirSync(join(dir, 'app', 'src', 'test', 'java'), { recursive: true })
+      writeFileSync(join(dir, 'app', 'src', 'test', 'java', 'MainTest.kt'), 'class MainTest\n')
+      const f = findFinding(auditDir(dir), 'AGENTS_COMMANDS')
+      assert.equal(f.status, 'pass', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a path that merely contains a runner name is not a command', () => {
+    // The other direction, and the reason every alternative requires a following space: the
+    // Gradle distribution lives at /opt/gradlew/bin/gradle, and a wrapper path in a doc must
+    // not satisfy a blocker.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-agents-cmd2-'))
+    try {
+      writeFileSync(
+        join(dir, 'AGENTS.md'),
+        '# Wrapper\n\nGradle was unpacked to /opt/gradlew/bin and added to the PATH.\n',
+      )
+      writeFileSync(join(dir, 'build.gradle.kts'), 'plugins { java }\n')
+      writeFileSync(join(dir, 'gradlew'), '#!/bin/sh\nexec gradle "$@"\n')
+      mkdirSync(join(dir, 'src', 'main', 'java'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'main', 'java', 'Main.java'), 'public class Main {}\n')
+      const f = findFinding(auditDir(dir), 'AGENTS_COMMANDS')
+      assert.equal(f.status, 'fail', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('documented-commands', () => {
@@ -416,10 +476,64 @@ describe('SECRET_SCAN', () => {
     // fix that quieted the rule entirely would be worse than the bug.
     const dir = materialize('cold-empty')
     mkdirSync(join(dir, 'config'), { recursive: true })
-    writeFileSync(join(dir, 'config', 'production.pem'), '-----BEGIN CERTIFICATE-----\n')
+    writeFileSync(
+      join(dir, 'config', 'production.pem'),
+      '-----BEGIN RSA PRIVATE KEY-----\nMIIEow...\n-----END RSA PRIVATE KEY-----\n',
+    )
     const f = findFinding(auditDir(dir), 'SECRET_SCAN')
     assert.equal(f.status, 'fail')
     assert.match(f.detail, /production\.pem/)
+  })
+
+  test('a committed public key is not a committed secret', () => {
+    // Found by auditing plausible/analytics, failed on `priv/paddle.pem` and
+    // `priv/paddle_sandbox.pem`. Both hold one `PUBLIC KEY` block and nothing else: they are
+    // Paddle's webhook signing keys, and a webhook receiver *verifies* with the sender's
+    // public key, so publishing it is the entire point of committing it. A rule that reports
+    // them teaches its reader to ignore it, and the real leak it might have caught is cheaper.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'priv'), { recursive: true })
+    writeFileSync(
+      join(dir, 'priv', 'paddle.pem'),
+      '-----BEGIN PUBLIC KEY-----\nMIICIjANBgkq...\n-----END PUBLIC KEY-----\n',
+    )
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'pass', f.detail)
+    // The exclusion is stated, not silent: a reader has to be able to check it.
+    assert.match(f.detail, /public key/)
+    assert.match(f.detail, /paddle\.pem/)
+  })
+
+  test('a certificate bundling a private key is still a secret', () => {
+    // The order inside the classifier is the point: a bundle is the normal way to ship a
+    // server cert, and it usually carries the key next to it.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'etc'), { recursive: true })
+    writeFileSync(
+      join(dir, 'etc', 'fullchain.pem'),
+      [
+        '-----BEGIN CERTIFICATE-----',
+        'MIIDdzCCAlOgAwIBAgIU...',
+        '-----END CERTIFICATE-----',
+        '-----BEGIN PRIVATE KEY-----',
+        'MIIEvQIBADANBgkqhkiG9w0...',
+        '-----END PRIVATE KEY-----',
+        '',
+      ].join('\n'),
+    )
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'fail', f.detail)
+    assert.match(f.detail, /fullchain\.pem/)
+  })
+
+  test('a .pem whose body proves nothing is still flagged', () => {
+    // DER-encoded, encrypted, or a format this tool does not recognise: nothing proved it
+    // publishable, so nothing clears it. Narrowing the false side only.
+    const dir = materialize('cold-empty')
+    mkdirSync(join(dir, 'certs'), { recursive: true })
+    writeFileSync(join(dir, 'certs', 'store.pem'), Buffer.from([0x30, 0x82, 0x01, 0x0a, 0x02]))
+    const f = findFinding(auditDir(dir), 'SECRET_SCAN')
+    assert.equal(f.status, 'fail', f.detail)
   })
 
   test('a real credential under a test path is still reported in the detail', () => {
@@ -595,6 +709,74 @@ describe('TEST_FAST', () => {
 
   test('a documented fast subset still passes', () => {
     assert.equal(findFinding(reportOf('go-module'), 'TEST_FAST').status, 'pass')
+  })
+
+  /**
+   * The bug, found by auditing three real Gradle repositories (okhttp, spring-petclinic,
+   * nowinandroid): all three were reported as having a documented changed-files test
+   * subset, and the command in the finding was `./gradlew test --tests '*Changed'`.
+   *
+   * None of the three defines a `*Changed` task, so the command selects zero tests and
+   * Gradle fails it. The rule was checking that *a* fast-subset command existed, not that
+   * the command was evidence -- and a command anvil invented from its own playbook is the
+   * weakest evidence there is. A fabricated `pass` on the rule the plan calls "the one that
+   * makes agents usable" is the most expensive output this tool can produce, because the
+   * reader stops looking for the fast path.
+   *
+   * The entry is injected rather than produced by a fixture on purpose: pinning this to a
+   * detector means the test goes quiet the moment the detector changes, and a test that
+   * passes with the rule reverted is a test that proves nothing.
+   */
+  test('an inferred fast-subset command is not a documented one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tf-inferred-'))
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'x', version: '1.0.0', scripts: { test: 'vitest run' } }, null, 2),
+      )
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'index.js'), 'export const x = 1\n')
+      writeFileSync(join(dir, 'src', 'index.test.js'), "import { test } from 'vitest'\n")
+      const profile = buildProfile(dir, { ...VCS, root: dir }).profile
+      profile.commands.testFast = [{ cmd: './gradlew test --tests "*Changed*"', source: 'inferred' }]
+      const f = findFinding(audit(profile), 'TEST_FAST')
+      assert.equal(f.status, 'warn', `expected a warning, got ${f.status}: ${f.detail}`)
+      assert.ok(!/Changed/.test(f.detail), `a fabricated subset reached the report: ${f.detail}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a documented fast subset the project defines is still reported', () => {
+    // The positive half of the same contract: dropping inferred commands must not lose a
+    // real one. A Gradle project that defines its own `testChanged` task has documented a
+    // fast subset, and naming that task is evidence rather than a guess.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tf-real-'))
+    try {
+      writeFileSync(join(dir, 'settings.gradle.kts'), 'rootProject.name = "x"\n')
+      writeFileSync(
+        join(dir, 'build.gradle.kts'),
+        [
+          'plugins { java }',
+          'tasks.register("testChanged", Test) {',
+          '  filter { includeTestsMatching("*Changed*") }',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(join(dir, 'gradlew'), '#!/bin/sh\nexec gradle "$@"\n')
+      mkdirSync(join(dir, 'src', 'main', 'java'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'main', 'java', 'Main.java'), 'public class Main {}\n')
+      mkdirSync(join(dir, 'src', 'test', 'java'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'test', 'java', 'MainTest.java'), 'class MainTest {}\n')
+      const profile = buildProfile(dir, { ...VCS, root: dir }).profile
+      const f = findFinding(audit(profile), 'TEST_FAST')
+      assert.equal(f.status, 'pass', f.detail)
+      assert.match(f.detail, /testChanged/, f.detail)
+      assert.match(f.detail, /\[detected\]/, f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
@@ -997,6 +1179,41 @@ describe('the six additional detectors', () => {
     assert.ok(p.stacks.length > 0)
     const terraform = p.stacks.find((s) => s.id === 'terraform')
     assert.ok(terraform)
+  })
+
+  /**
+   * The bug, found by auditing terraform-aws-modules/terraform-aws-vpc: a Terraform module
+   * reported *no commands at all*, so the generated AGENTS.md had nothing to verify a change
+   * with. There is no build and no test suite in Terraform, which is true, and it is also
+   * true that `terraform fmt -check` answers the question an agent actually has.
+   *
+   * `terraform validate` is deliberately absent from this assertion's neighbourhood: on a
+   * module that has not been `init`ed it fails with "Module not installed", and choosing
+   * providers and a backend belongs to whoever owns the account.
+   */
+  test('a Terraform repo gets the check that runs without an init', () => {
+    const p = profileOf('terraform-infra')
+    assert.equal(p.commands.format?.[0]?.cmd, 'terraform fmt -check -recursive')
+    assert.equal(p.commands.format?.[0]?.source, 'inferred')
+    // No invented suite: an agent must not be handed a `terraform test` that does not exist.
+    assert.equal(p.commands.test, undefined)
+    assert.equal(p.commands.build, undefined)
+  })
+
+  test('tflint is only offered where the repository configures it', () => {
+    const bare = profileOf('terraform-infra')
+    assert.equal(bare.commands.lint, undefined)
+
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-tflint-'))
+    try {
+      writeFileSync(join(dir, 'main.tf'), 'terraform {\n  required_version = ">= 1.7"\n}\n')
+      writeFileSync(join(dir, '.tflint.hcl'), 'config {\n  call_module_type = "local"\n}\n')
+      const p = buildProfile(dir, { ...VCS, root: dir }).profile
+      assert.equal(p.commands.lint?.[0]?.cmd, 'tflint')
+      assert.equal(p.commands.lint?.[0]?.source, 'detected')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('a php repo detects php and, with artisan, laravel', () => {

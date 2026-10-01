@@ -176,10 +176,17 @@ export const phpDetector: Detector = {
         source: 'detected',
         evidence: 'artisan',
       })
-      addCommand(draft, 'testFast', {
-        cmd: 'php artisan test --filter=<Changed>',
-        source: 'inferred',
-      })
+      // `--filter=<Changed>` selects tests whose *name* matches `Changed`, which presumes
+      // the project renames the ones it cares about. It is not a changed-files subset, and
+      // inventing one here is how a Laravel repository was reported as having a documented
+      // fast path it could not run. A real `--filter` in phpunit.xml or the test suite is
+      // picked up from the instructions; nothing is guessed.
+      if (phpunitChangedFilter(ctx)) {
+        addCommand(draft, 'testFast', {
+          cmd: 'php artisan test --filter=Changed',
+          source: 'inferred',
+        })
+      }
       if (hasFile(ctx, 'phpunit.xml') || hasFile(ctx, 'phpunit.xml.dist')) {
         addTool(draft, 'test', 'phpunit')
         addCommand(draft, 'test', {
@@ -216,6 +223,25 @@ export const phpDetector: Detector = {
       origin: 'heuristic',
     })
   },
+}
+
+/**
+ * Whether the project shows a changed-files test filter of its own.
+ *
+ * Looks for a `TestDox`/`phpunit` configuration that filters on a changed marker, or a
+ * suite whose name carries it. The literal placeholder form is what makes this worth a
+ * helper rather than a constant: a filter on a *name* is not a changed-files subset, and
+ * emitting one regardless of what the repository contains is how an unrunnable command got
+ * into a Laravel profile.
+ */
+function phpunitChangedFilter(ctx: DetectorContext): boolean {
+  for (const rel of ['phpunit.xml', 'phpunit.xml.dist', 'composer.json', 'artisan']) {
+    if (!hasFile(ctx, rel)) continue
+    const text = read(ctx, rel)
+    if (text === null) continue
+    if (/--filter[= ]\S*Changed|ChangedSuite|changedOnly|--only-changed/i.test(text)) return true
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +417,28 @@ export const terraformDetector: Detector = {
 
     const hook = hookFramework(ctx)
     if (hook !== null) addTool(draft, 'hooks', hook)
+
+    // Terraform has no build and no test suite, and pretending otherwise would be the
+    // confidently-wrong output this tool exists to avoid: a Terraform repo audited with no
+    // commands at all reports no way to check a change, which is what an agent needs most
+    // and what `terraform fmt -check` answers for free.
+    //
+    // `fmt -check` runs against the working tree with no `init`, no backend and no
+    // credentials, so it is safe to hand to an agent in a repo it does not own.
+    // `terraform validate` is deliberately *not* emitted: on a module that has not been
+    // initialised it fails with "Module not installed", and the init step is a decision
+    // (which providers, which backend) that belongs to whoever owns the account.
+    addCommand(draft, 'format', {
+      cmd: 'terraform fmt -check -recursive',
+      source: 'inferred',
+    })
+    // tflint is the community linter, and it is only offered where the repo has configured
+    // it: an unconfigured binary either is absent or runs with defaults nobody chose.
+    if (hasFile(ctx, '.tflint.hcl')) {
+      addTool(draft, 'lint', 'tflint')
+      addCommand(draft, 'lint', { cmd: 'tflint', source: 'detected', evidence: '.tflint.hcl' })
+    }
+
     // A plan/apply typo is the classic expensive IaC mistake.
     addRisk(draft, {
       glob: '**/*.tf',

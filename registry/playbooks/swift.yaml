@@ -48,7 +48,10 @@ community:
 verify:
   build: ['swift build']
   test: ['swift test']
-  testFast: ['swift test --filter Changed']
+  # not provide. Every form that looks like one -- a *Changed test task, a name filter, a
+  # --target stage -- selects zero tests unless the project first defines it, and anvil
+  # suggested them anyway. See TEST_FAST in packages/audit/src/rules.ts.
+  testFast: []
   lint: ['swiftlint']
   format: ['swift-format --in-place --recursive .']
   typecheck: ['swift build']

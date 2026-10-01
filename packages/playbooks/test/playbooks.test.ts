@@ -150,6 +150,41 @@ describe('built-in registry', () => {
     }
   })
 
+  test('no playbook suggests a changed-files subset that cannot run as given', () => {
+    // Found by auditing okhttp, spring-petclinic and nowinandroid: all three were told they
+    // had a documented fast test subset, with a command naming a task none of them
+    // defines. The registry carried the command (`./gradlew test --tests "*Changed*"`) and
+    // the JVM detector copied it in, so the defect survived the detector being fixed.
+    //
+    // A `testFast` suggestion is a command a reader may run verbatim, so its mechanism has
+    // to exist in the ecosystem. These three forms all need something the repository has to
+    // define first, and each of them selects zero tests when it does not:
+    //
+    //   - a `*Changed` test task / `*Changed*` name filter (Gradle, Maven, PHPUnit, xUnit,
+    //     Swift, pytest -k, go -run): filters on a test *name*.
+    //   - `--target <stage>` (docker): a build stage the Dockerfile has to declare.
+    //   - `npm run test:<x>`: a script the package has to declare.
+    const notRunnable = [
+      /--tests?\s+["']?\*Changed/i,
+      /-D(?:it\.)?test=\*?Changed/i,
+      /--filter[= ]=?["']?<?Changed/i,
+      /\s-k\s+changed\b/i,
+      /-run\s+Changed\b/,
+      /--target\s+\w+/,
+      /npm run test:\w+/,
+    ]
+    for (const p of playbooks) {
+      for (const cmd of p.verify.testFast) {
+        for (const re of notRunnable) {
+          assert.ok(
+            !re.test(cmd),
+            `${p.id} suggests \`${cmd}\`, which needs a task, stage or script the repository has to define first`,
+          )
+        }
+      }
+    }
+  })
+
   test('every playbook has at least one usable resource', () => {
     for (const p of playbooks) {
       const total =

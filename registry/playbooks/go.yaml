@@ -61,7 +61,9 @@ community:
 verify:
   build: ['go build ./...']
   test: ['go test ./...']
-  testFast: ['go test -run Changed ./...', 'go test -short ./...']
+  # `go test -run Changed` is not here: `-run` filters on a test *name*, so it matches
+  # nothing unless the project renames the tests it cares about. `-short` is a real flag.
+  testFast: ['go test -short ./...']
   lint: ['go vet ./...', 'golangci-lint run']
   format: ['gofmt -l -w .']
   typecheck: ['go vet ./...']

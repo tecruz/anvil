@@ -62,7 +62,9 @@ community:
 verify:
   build: ['python -m build', 'poetry build']
   test: ['pytest', 'python -m pytest']
-  testFast: ['pytest -k changed', 'pytest -m "not slow"']
+  # `pytest -k changed` is not here: `-k` filters on a test *name*, so it matches nothing
+  # unless the project names its changed tests that way. `-m "not slow"` is a real marker.
+  testFast: ['pytest -m "not slow"']
   lint: ['ruff check .', 'flake8 .']
   format: ['ruff format .', 'black .']
   typecheck: ['mypy .', 'pyright']

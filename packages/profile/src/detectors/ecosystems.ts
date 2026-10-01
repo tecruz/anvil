@@ -37,6 +37,41 @@ function gradlew(ctx: DetectorContext): { cmd: string; wrapper: boolean } {
   return { cmd: wrapper ? './gradlew' : 'gradle', wrapper }
 }
 
+/**
+ * A Gradle task the project defines that runs a changed-files subset of the tests.
+ *
+ * The two ways a build spells this are a task whose name says so (`testChanged`,
+ * `changedTests`, `testAffected`) and a `Test` task filtered on `*Changed*`. Both are read
+ * out of the build files, so the command names a task that exists rather than one invented
+ * from a convention -- which is the whole point: a command naming a task the build does not
+ * define selects nothing and fails.
+ */
+function gradleChangedTestTask(
+  ctx: DetectorContext,
+  gradleFiles: readonly string[],
+): { name: string; file: string; line: number | null } | null {
+  // `(register|create|task)("name"...)` and `task name(...)`, plus `name = tasks.register`.
+  const declared = /(?:tasks\s*\.\s*(?:register|create)|(?:register|create|task)\s*\(\s*|task\s+)["']?([A-Za-z][\w]*)/g
+  // A filter on `*Changed*`/`*Affected*` only means "changed files" in a `Test` task.
+  const filtersChanged =
+    /includeTestsMatching\s*\(\s*["'][^"']*(?:Changed|Affected)[^"']*["']|includeTestsMatching\s*\(\s*.*changedTests|--tests\s+["'][^"']*Changed/i
+
+  for (const file of gradleFiles) {
+    const text = read(ctx, file)
+    if (text === null) continue
+    for (const m of text.matchAll(declared)) {
+      const name = m[1] as string
+      if (!/(changed|affected)/i.test(name)) continue
+      return { name, file, line: findLine(text, new RegExp(`\\b${name}\\b`)) }
+    }
+    if (filtersChanged.test(text)) {
+      const line = findLine(text, /includeTestsMatching|--tests/)
+      return { name: 'test', file, line }
+    }
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Go
 // ---------------------------------------------------------------------------
@@ -96,11 +131,12 @@ export const goDetector: Detector = {
       })
     }
     if (hasFile(ctx, 'Makefile')) {
-      addCommand(draft, 'build', {
-        cmd: 'make build',
-        source: 'detected',
-        evidence: 'Makefile',
-      })
+      // No `make build` here any more. It was emitted for any repository with a Makefile,
+      // so a project whose Makefile defines only `deploy` was told to build with a target
+      // that does not exist -- labelled `detected`, with evidence `Makefile` and no claim
+      // that `build` was in it. The language-agnostic pass reads the real targets instead
+      // (`detectMakefileCommands`), so this is emitted when a `build` target is actually
+      // defined, with the line it is defined on.
     }
   },
 }
@@ -193,6 +229,7 @@ export const jvmDetector: Detector = {
       hasFile(ctx, f),
     )
     const maven = hasFile(ctx, 'pom.xml')
+    const pomText = maven ? read(ctx, 'pom.xml') : null
 
     if (gradleFiles.length > 0) {
       addStack(draft, {
@@ -217,10 +254,18 @@ export const jvmDetector: Detector = {
       })
       // A changed-files test subset needs a task the project actually defines; without one
       // this is a genuine readiness gap, which the TEST_FAST rule should report.
-      if (hasFile(ctx, 'gradlew')) {
+      //
+      // It used to emit `./gradlew test --tests '*Changed'` whenever the wrapper was
+      // committed, which is how okhttp, spring-petclinic and nowinandroid were all reported
+      // as having a documented fast subset. None of them defines a `*Changed` task: the
+      // command selects zero tests and Gradle fails it. A committed wrapper says the build
+      // is reproducible and nothing whatsoever about which tasks exist.
+      const changedTask = gradleChangedTestTask(ctx, gradleFiles)
+      if (changedTask !== null && hasFile(ctx, 'gradlew')) {
         addCommand(draft, 'testFast', {
-          cmd: `${cmd} test --tests '*Changed'`,
-          source: 'inferred',
+          cmd: `./gradlew ${changedTask.name}`,
+          source: 'detected',
+          evidence: evidence(changedTask.file, changedTask.line),
         })
       }
 
@@ -258,11 +303,18 @@ export const jvmDetector: Detector = {
         cmd: `${mvn} -q test`,
         source: hasFile(ctx, 'mvnw') ? 'detected' : 'inferred',
       })
-      if (hasFile(ctx, 'mvnw'))
+      // Maven has no changed-files filter of its own. Surefire's `-Dtest` takes a *name
+      // pattern*, so `-Dit.test=*Changed*` presumes this project renames the tests it cares
+      // about -- and `it.test` is failsafe's property, not surefire's, so it is the wrong
+      // flag for `mvn test` besides. Only a plugin that genuinely selects by changed file
+      // counts as evidence, because that is the thing the command would be invoking.
+      const mavenSubset = /buildmate|git-diff|changed-files|changedfiles/i.test(pomText ?? '') && hasFile(ctx, 'mvnw')
+      if (mavenSubset) {
         addCommand(draft, 'testFast', {
-          cmd: `${mvn} test -Dit.test=*Changed*`,
+          cmd: `${mvn} test -Dtest='*Changed*'`,
           source: 'inferred',
         })
+      }
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
     }
 

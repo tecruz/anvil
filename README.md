@@ -55,9 +55,9 @@ the context an agent needs), `anvil crew verify`, `anvil ship`. Run `anvil --hel
 rest, and add `--json` to anything for the versioned envelope the opencode plugin consumes.
 
 Start with `anvil doctor` on a repository you know. If its findings are wrong, that is a bug
-worth reporting — the tool was built by auditing fifteen real repositories, and the bugs it
-found in itself are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) because they are the
-interesting part.
+worth reporting - the tool was built by auditing twenty-seven real repositories, and the bugs
+it found in itself are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) because they are
+the interesting part.
 
 ## How it decides
 

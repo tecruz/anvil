@@ -51,7 +51,10 @@ community:
 verify:
   build: ['docker build -t anvil-check .']
   test: ['docker compose config -q']
-  testFast: ['docker build --target lint -t anvil-check .']
+  # not provide. Every form that looks like one -- a *Changed test task, a name filter, a
+  # --target stage -- selects zero tests unless the project first defines it, and anvil
+  # suggested them anyway. See TEST_FAST in packages/audit/src/rules.ts.
+  testFast: []
   lint: ['hadolint Dockerfile']
   format: ['docker buildx bake --print']
   typecheck: []

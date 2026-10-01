@@ -61,7 +61,10 @@ community:
 verify:
   build: ['composer install --no-dev --optimize-autoloader']
   test: ['php artisan test', './vendor/bin/phpunit']
-  testFast: ['php artisan test --filter=Changed', './vendor/bin/phpunit --filter Changed']
+  # not provide. Every form that looks like one -- a *Changed test task, a name filter, a
+  # --target stage -- selects zero tests unless the project first defines it, and anvil
+  # suggested them anyway. See TEST_FAST in packages/audit/src/rules.ts.
+  testFast: []
   lint: ['./vendor/bin/phpstan analyse', './vendor/bin/php-cs-fixer fix --dry-run']
   format: ['./vendor/bin/pint', './vendor/bin/php-cs-fixer fix']
   typecheck: ['./vendor/bin/phpstan analyse']

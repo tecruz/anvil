@@ -57,7 +57,11 @@ community:
 verify:
   build: ['./gradlew assembleDebug']
   test: ['./gradlew test']
-  testFast: ['./gradlew testDebugUnitTest --tests "*Changed*"']
+  # No testFast entry: an Android module's unit-test task is `test<Variant>UnitTest` and
+  # nothing narrows it by changed file. `./gradlew test --tests "*Changed*"` selects zero
+  # tests unless the project defines such a task, and anvil suggested it anyway.
+  # See TEST_FAST in packages/audit/src/rules.ts.
+  testFast: []
   lint: ['./gradlew lint']
   format: ['./gradlew spotlessApply']
   typecheck: ['./gradlew compileDebugKotlin']

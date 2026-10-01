@@ -1,11 +1,12 @@
 # `anvil` — AI-Ready Dev Harness
 
 > Implementation plan. Working name (`anvil`) is one field in `package.json` — rename freely.
-> Status: **M0–M6 complete**, plus two review passes, the ten-repository audit and the last
-> two items (see [Review pass](#review-pass--m6-hardening-and-dogfooding-2026-09-30) and
-> [The second review](#the-second-review-2026-09-30)). M1's exit criterion -- ten real
-> repositories, no false blockers -- is met, and extended to five deliberately awkward shapes
-> and a subdirectory project.
+> Status: **M0–M6 complete**, plus two review passes and three audits of real code —
+> ten repositories, five awkward shapes, and [twelve more](#the-third-audit-twelve-more-repositories-2026-10-01)
+> covering the ecosystems no real repository had exercised. M1's exit criterion -- ten real
+> repositories, no false blockers -- is met, extended to five deliberately awkward shapes,
+> a subdirectory project, and every ecosystem detector. Twenty-seven repositories, no false
+> blocker among them.
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -1144,10 +1145,12 @@ pre-commit hook are all done.** What is left, in the order it should be done:
 
    The security address is still `TODO`, deliberately, and `anvil doctor` says so on every
    run.
-2. **More real repositories.** Fifteen have now been audited -- ten mid-to-large
-   single-ecosystem projects, plus five deliberately awkward shapes. One shape is still
-   unresolved by design: a repository with *two* projects in two subdirectories is reported
-   as unknown rather than guessed at.
+2. **More real repositories.** Twenty-seven have now been audited — ten mid-to-large
+   single-ecosystem projects, plus five deliberately awkward shapes, plus
+   [twelve](#the-third-audit-twelve-more-repositories-2026-10-01) covering every ecosystem
+   detector that no real repository had exercised. One shape is still unresolved by design:
+   a repository with *two* projects in two subdirectories is reported as unknown rather than
+   guessed at.
 3. **A generated `AGENTS.md` cannot cite itself accurately.** Regenerating the file shifted
    the line numbers in its own evidence: `npm run build` is documented at `AGENTS.md:7`,
    which after applying is the install line. The cause is structural -- a document that
@@ -1723,10 +1726,14 @@ Two things the tests caught in my own first attempt, both in the direction of ov
   a directory path; a security address needs a mailbox somebody actually reads, and until
   one exists the project stays private, because a public project with no reporting address
   is worse than a private one.
-- **More real repositories.** Fifteen have been audited — ten mid-to-large projects in five
-  ecosystems, plus five deliberately awkward shapes. The honest next step is more of the same,
-  not a different kind of test. The shape still unresolved by design: a tree with *two*
-  projects in two subdirectories is reported as unknown rather than guessed at.
+- **More real repositories.** Twenty-seven have been audited — ten mid-to-large projects in
+  five ecosystems, five deliberately awkward shapes, and [twelve more](#the-third-audit-twelve-more-repositories-2026-10-01)
+  chosen to cover the detector ecosystems that fixtures alone had exercised. That batch found
+  seven defects, four of them false blockers or fabricated passes. The honest next step is
+  still more of the same, and the gaps it did not close are named in
+  [its own section](#what-this-batch-did-not-fix) rather than left implied. The shape still
+  unresolved by design: a tree with *two* projects in two subdirectories is reported as
+  unknown rather than guessed at.
 - **A generated `AGENTS.md` cannot cite itself accurately.** Regenerating the file shifts the
   line numbers in its own evidence (`npm run build` is documented at `AGENTS.md:7`, which after
   applying is the install line). Structural, and recorded rather than hand-corrected: a
@@ -1824,3 +1831,203 @@ unchanged, because none of the fixtures exercise those paths. Two fixes are not 
 rule at all: `isExecutableFile` (a directory named `npm.exe` on PATH resolved as a binary, so
 a spawn failed with `EISDIR` reported as exit 70, "Bug in anvil") and the engines floor
 (22.18, where running TypeScript directly stopped needing a flag).
+
+---
+
+## The third audit: twelve more repositories (2026-10-01)
+
+Twenty-seven repositories have now been audited: the first ten, five deliberately awkward
+shapes, and twelve more chosen to cover the detector ecosystems that had never been run
+against real code. The plan called the next step "more of the same, not a different kind of
+test", and that is what this was — with one change of emphasis. The first ten were all
+mid-to-large single-ecosystem projects with a manifest at the root, so every ecosystem
+detector after the sixth was exercised only by a fixture: a hand-built tree shaped to be
+recognisable. Fixtures are written by the same person who writes the detector, which is
+exactly the condition the first ten were cloned to avoid.
+
+The batch, one per uncovered surface: `spring-projects/spring-petclinic` (Gradle *and* Maven
+in one repo), `square/okhttp`, `android/nowinandroid`, `dotnet/eShop`, `plausible/analytics`
+(Elixir, with Terraform alongside), `vapor/vapor`, `vuejs/core` and `sveltejs/kit` (real pnpm
+workspaces), `terraform-aws-modules/terraform-aws-vpc`, `traefik/traefik-helm-chart` (a Helm
+chart, which is not an ecosystem anvil had a name for), `cli/cli` and `tokio-rs/tokio`.
+
+**It found seven defects, and four of the seven were false blockers or fabricated passes on
+the rule the plan calls load-bearing.** The suite was green at 614/614 throughout.
+
+### `TEST_FAST` passed on a Gradle task that does not exist
+
+okhttp, spring-petclinic and nowinandroid were all reported as having a documented
+changed-files test subset, and the finding named the command:
+
+```
+./gradlew test --tests '*Changed' [inferred]
+```
+
+**None of the three defines a `*Changed` task.** The command selects zero tests and Gradle
+fails it. The detector emitted it whenever a `gradlew` wrapper was committed — a fact about
+reproducibility that says nothing about which tasks exist — and the rule then passed on it,
+because the rule asked whether *a* fast-subset command existed rather than whether the
+command was evidence. The detector's own comment said the right thing two lines above the
+code: *"a changed-files test subset needs a task the project actually defines"*.
+
+Two halves, because either alone leaves the defect reachable. The detector now reads the
+build files for a task the project defines (`testChanged`, `changedTests`, a `Test` task
+filtered on `*Changed*`) and names that task with its file and line; the rule passes only on
+a `documented` or `detected` entry, and an `inferred` one can no longer be a pass. The same
+fabrication existed in the Maven and PHP detectors (`-Dit.test=*Changed*` is failsafe's
+property on surefire's command line, and `--filter=<Changed>` filters on a *test name*), and
+`swift test --filter Changed`, `dotnet test --filter Changed`, `pytest -k changed` and
+`go test -run Changed` were the same mistake in the registry.
+
+That last part is why this was fixed in the playbooks too: six of them carried a `testFast`
+entry whose only mechanism is a name filter or a task the reader must define first, so after
+the detector was fixed the advice simply arrived through the `plan` surface instead. They
+are removed, the ones that run as given are kept (`go test -short ./...`, `mix test --stale`,
+`npx vitest related --run`), and a new registry test fails on any `testFast` command that
+filters on a literal `Changed` name, references a `--target` stage, or names a script the
+package has to define.
+
+**The score went down on all three, and that is the point**: okhttp 62→59, petclinic 60→57,
+nowinandroid 73→70. Each had been getting credit for a fast path it did not have.
+
+### A Makefile was not a build system
+
+traefik/traefik-helm-chart failed `TEST` as a **blocker** — "test files exist but no runnable
+test command was found" — and failed `BUILD`, on a repository whose AGENTS.md documents
+`make test` and `make lint` in a fenced block and whose Makefile defines both. It has
+`traefik/tests/*_test.yaml` and `hub-manager/tests/*_test.yaml`. Whatever the chart is built
+with, it is not a mystery, and the sentence was about anvil rather than about the chart.
+
+Make is one of the most common build systems in the world and anvil had no support for it:
+the only mention was a blanket `make build` inside the Go detector, emitted for *any*
+repository with a Makefile, labelled `detected`, with evidence `Makefile` and no claim that a
+`build` target existed. `cli/cli` is the proof that it was a guess — its Makefile defines
+`bin/gh`, `lint`, `test`, `install`, `site`, `licenses` and no `build` at all, so the command
+anvil published for it could never have run.
+
+There is a Makefile parser now. It returns real targets with the line each is declared on,
+and skips the three things that look like targets and are not: `.PHONY` (which declares that
+a target exists rather than defining it), variable assignments, and target-specific
+variables. A target defined in a Makefile is a file on disk saying so, which is precisely
+what `detected` means in the documented/detected/inferred contract. traefikchart 64→79, and
+the guess that cli/cli was given is gone.
+
+### Commands written inside a fenced block were never read
+
+The reason traefikchart's `make test` was not picked up as *documented* is worth separating
+out, because it is not Makefile-specific. `looksLikeCommandLine` required the line to carry
+its own backtick or to be a fence marker, so a command inside a ```bash block — which is
+how people write commands — was invisible to the documented-command extractor. nowinandroid
+documents `./gradlew testDemoDebug` that way and was invisible too. Fences are now tracked,
+and documented commands are found inside them.
+
+### `./gradlew` did not count as a command
+
+nowinandroid failed `AGENTS_COMMANDS` as a **blocker** with "Instructions exist but name no
+runnable command", on an AGENTS.md that documents the build, the formatter and the test tasks
+in detail. The leading-character class in `mentionsCommand` included markdown delimiters but
+not `/`, and a Gradle wrapper is invoked `./gradlew`. The rule was raised against the best
+agent instructions in the batch over a punctuation detail. Every alternative now requires a
+following space, which is also what keeps `/opt/gradlew/bin` — a path that merely contains
+the name — from reading as a command; both directions are pinned by tests.
+
+nowinandroid 73→83. Its `./gradlew test` is still what the detector reports, and its README
+says not to run it: the repo's tests are variant-specific (`testDemoDebug`). Naming a variant
+anvil cannot know would be a fabrication, so this stays a recorded limitation rather than a
+fix — an agent reading that repository's AGENTS.md is better off than an agent reading a
+wrong command.
+
+### A webhook public key was reported as a committed secret
+
+plausible/analytics failed `SECRET_SCAN` for `priv/paddle.pem` and `priv/paddle_sandbox.pem`.
+Both hold one `PUBLIC KEY` block and nothing else. They are Paddle's webhook signing keys: a
+receiver *verifies* a signature with the sender's public key, so committing it is the entire
+point. The extension cannot tell a public key from a leaked private key, and anvil asserted
+a credential was committed without opening either file — which is the failure the second pass
+recorded for this rule in the opposite direction, where the first pass had it dismissing files
+by path.
+
+PEM-family files are classified by content now: any private-key block fails, a bundle holding
+a certificate *and* a key fails, a body that is only public-key or certificate blocks is
+cleared and *named in the detail* rather than silently skipped, and anything opaque or
+unreadable stays flagged, because nothing proved it publishable. The rule narrows only what
+can be proven. plausible 51→57.
+
+### A Terraform module reported no commands at all
+
+terraform-aws-vpc is `.tf` files and a README. Terraform has no build and no test suite,
+which is true, and it is also true that `terraform fmt -check -recursive` answers the
+question an agent actually has and runs against the working tree with no `init`, no backend
+and no credentials. `terraform validate` is deliberately *not* emitted: on a module that has
+not been initialised it fails with "Module not installed", and choosing providers and a
+backend belongs to whoever owns the account. `tflint` is offered only where `.tflint.hcl`
+exists.
+
+### And one that pointing anvil at itself found
+
+Its own profile listed `node packages/cli/dist/cli.js <command>` as a documented **build**
+command. The classifier read the kind off the *line* while the extractor took the first code
+span on it, so a line naming `npm run build` and a second command produced the second command
+under the first one's kind. Both are now the same string — the pattern is tested against the
+extracted command — and a compound line is cut at its shell operator, because
+`npm run build && node dist/cli.js` handed to an agent runs whatever followed the `&&`.
+
+This is the cheapest version of the ten-repository criterion and it has now paid for itself
+in three separate passes.
+
+### The results
+
+| repository | before | after | what changed |
+|---|---|---|---|
+| traefikchart | 64 (C) | **79 (B)** | Makefile read; false `TEST` blocker and `BUILD` fail gone |
+| nowinandroid | 83 (B) | **83 (B)** | false `AGENTS_COMMANDS` blocker gone; fabricated `TEST_FAST` pass gone |
+| plausible | 51 (D) | **57 (C)** | public keys no longer "secrets"; terraform fmt offered |
+| ghcli | 91 (A) | **88 (A)** | lost the invented `make build`; its Makefile has no such target |
+| okhttp | 62 (C) | **59 (C)** | fabricated `TEST_FAST` pass → honest warning |
+| petclinic | 60 (C) | **57 (C)** | fabricated `TEST_FAST` pass → honest warning |
+| vuecore · sveltekit · vapor · tokio · eshop · tfawsvpc | — | unchanged | no defects |
+
+**Every remaining blocker and high finding across the twelve is a true positive**, and each
+was confirmed by opening the repository rather than by reading the report. Six have no agent
+instructions at all. `vapor` is the interesting one: its AGENTS.md is a well-written AI
+*policy* document — 42 lines about good-first-issues and who may author a pull request —
+which names no command anywhere. An agent there cannot verify anything, and the blocker is
+the finding the tool exists to report. That is also the evidence that the rule still has
+teeth after the `mentionsCommand` change.
+
+### What this batch did not fix
+
+- **A polyglot repository reports one test command.** eShop is xUnit behind an API and
+  Playwright in the browser; the documented `dotnet test --solution eShop.Web.slnf` now wins
+  over the `npm run test:e2e` that was detected, and neither is the whole story. The profile
+  holds one command per kind, and choosing between three real runners is a different problem
+  from detecting one — the same limitation recorded after the awkward shapes.
+- **Runners outside the documented-command patterns.** `swift`, `mix`, `bundle`, `rake`,
+  `terraform`, `helm` and `bazel` are recognised by their detectors but appear in neither
+  `DOC_PATTERNS` nor `mentionsCommand`, so an AGENTS.md documenting only `mix test` would
+  draw the same blocker nowinandroid did. Nothing in this batch exhibited it — vapor's
+  commands are `detected` from `Package.swift` and its AGENTS.md genuinely names none — so
+  the fix is not written blind. The awkward part is that `mix`, `rake` and `bundle` are
+  ordinary English words, and matching them in prose is how a blocker becomes a false pass.
+  It wants an allow-list of subcommands (`mix test|compile|format|run|iex|deps|phx`), not a
+  looser regex.
+- **The score of this repository is 96 (A)**, up from 94, and the movement is in the rules
+  the two reviews tightened rather than in anything new: every blocker and high finding here
+  passes. `ARCH_DOC` warns at 12 modules with no architecture document, and `SECURITY_MD`
+  warns for the reason it is designed to — the contact address is still `TODO`.
+
+### The method, once more
+
+Four of the seven defects were in the *false* direction — a fabricated pass, a false blocker,
+a public key called a secret, a command that cannot run — and none of them was visible to a
+suite that was green at 614/614. Every one was found by running the tool against a repository
+nobody here wrote, which is the entire argument for the exit criterion M1 wrote and this
+project kept failing to meet.
+
+The harness stayed out of the repository, in the temp directory, exactly as the first two
+batches did: `clone-repos-2.ps1`, `audit-repos-2.ps1`. Two details from the first run are
+worth keeping. Redirect each command to a file — `2>&1 | Out-String` on a large native
+payload deadlocks the PowerShell pipeline, and that cost fifteen minutes before it was
+diagnosed. And take commands from `profile --json`, never from `doctor --json`: the report
+has no `profile` key, and a script that reads one prints empty command lines for every
+repository while looking like a total detection failure.

@@ -173,9 +173,18 @@ function unidentified(ctx: RuleContext): boolean {
  * The leading-character class includes markdown delimiters, because in a rendered
  * instructions file a command is almost always wrapped in backticks -- and a rule that
  * cannot see its own generated output is a rule that will never be satisfied.
+ *
+ * The optional path prefix is the other half of that. A Gradle wrapper is invoked
+ * `./gradlew`, and the `/` in front of it was not in the class, so nowinandroid -- whose
+ * AGENTS.md documents the build, the formatter and the test tasks, all as `./gradlew ...` --
+ * was reported as naming no runnable command, and a *blocker* was raised against the best
+ * agent instructions in the batch.
+ *
+ * Every alternative now requires a following space or an end of token, which is what keeps
+ * `/opt/gradlew/bin` (a path that merely contains the name) from reading as a command.
  */
 function mentionsCommand(text: string): boolean {
-  return /(^|[\s`"'(])(npm |pnpm |yarn |bun |cargo |go |gradlew|mvnw|pytest|make |dotnet |tsc |ruff |mypy |eslint)/m.test(
+  return /(^|[\s`"'(])(?:\S*\/)?(npm|pnpm|yarn|bun|cargo|go|gradlew?|mvnw?|pytest|make|dotnet|tsc|ruff|mypy|eslint)(?=[\s`'"()]|$)/m.test(
     text,
   )
 }
@@ -394,7 +403,13 @@ const TEST_FAST: Rule = {
   evaluate(ctx) {
     if (!ctx.hasCode || !hasCommand(ctx, 'test')) return na('No test command to narrow')
 
-    const entries = ctx.profile.commands.testFast ?? []
+    // Only a command the repository actually shows counts as a documented subset. An
+    // `inferred` entry is a guess -- often one anvil generated itself from a playbook -- and
+    // three real Gradle repositories were reported as having a fast subset because of it,
+    // with a `--tests "*Changed*"` command that names a task none of them defines. A pass
+    // is a claim that the repository can run a narrow suite; it has to rest on evidence
+    // from the repository.
+    const entries = (ctx.profile.commands.testFast ?? []).filter((c) => c.source !== 'inferred')
     if (entries.length > 0)
       return pass(entries.map((c) => `${c.cmd} [${c.source}]`).join(', '), commandEvidence(ctx, entries))
 
@@ -1220,6 +1235,45 @@ function npmrcHasToken(root: string, path: string): boolean {
   }
 }
 
+/**
+ * What a `.pem`/`.key` file actually holds.
+ *
+ * Found by auditing plausible/analytics, which was failed by SECRET_SCAN for
+ * `priv/paddle.pem` and `priv/paddle_sandbox.pem`. Both are Paddle's *webhook* public keys,
+ * committed on purpose: a webhook receiver verifies a signature with the sender's public key,
+ * so publishing it is the entire point. Both files contain one `PUBLIC KEY` block and
+ * nothing else.
+ *
+ * The extension cannot tell the two apart. `paddle.pem` and a leaked `paddle.key` have the
+ * same name shape, and anvil asserted a credential was committed without opening either --
+ * which is the failure the second review pass recorded for this exact rule, in the opposite
+ * direction: the first pass had it dismissing files by path, the fix made content decide, and
+ * the remaining path-based arm is PEM.
+ *
+ * The asymmetry is deliberate. Only a positively identified *public* block clears a file.
+ * A private key of any kind fails, an unrecognised or binary body stays flagged because
+ * nothing proved otherwise, and an unreadable file is reported as unreadable rather than as
+ * a secret.
+ */
+function pemClassification(root: string, path: string): 'private' | 'public' | 'opaque' | 'unreadable' {
+  let text: string
+  try {
+    text = readFileSync(join(root, ...path.split('/')), 'utf8')
+  } catch {
+    return 'unreadable'
+  }
+  // Checked before the public arm on purpose: a bundle holding a certificate *and* a private
+  // key is a secret, and the certificate must not launder it.
+  if (/-----BEGIN (?:[A-Z0-9 ]*)PRIVATE KEY-----/.test(text)) return 'private'
+  const blocks = [...text.matchAll(/-----BEGIN ([A-Z0-9 ]+)-----/g)].map((m) => m[1] as string)
+  if (blocks.length === 0) return 'opaque'
+  // A public key and a certificate are both publishable material.
+  if (blocks.every((b) => /^(?:PUBLIC KEY|CERTIFICATE|TRUSTED CERTIFICATE)$/.test(b))) {
+    return 'public'
+  }
+  return 'opaque'
+}
+
 const SECRET_SCAN: Rule = {
   id: 'SECRET_SCAN',
   layer: 'governance',
@@ -1245,6 +1299,7 @@ const SECRET_SCAN: Rule = {
     const fixtures: string[] = []
     const uninspected: string[] = []
     const tokenFree: string[] = []
+    const publishable: string[] = []
     const real: string[] = []
     for (const file of shaped) {
       if (/(^|\/)\.npmrc$/.test(file)) {
@@ -1257,9 +1312,20 @@ const SECRET_SCAN: Rule = {
         uninspected.push(file)
         continue
       }
+      if (/\.(pem|key)$/.test(file)) {
+        // After the test-path exemption, so a committed fixture key is still reported as a
+        // fixture rather than as a leak -- the second pass decided that on purpose. Every
+        // other `.pem`/`.key` is opened before it is judged.
+        const kind = pemClassification(ctx.profile.root, file)
+        if (kind === 'private') real.push(file)
+        else if (kind === 'public') publishable.push(file)
+        else if (kind === 'unreadable') uninspected.push(file)
+        else real.push(file) // opaque: nothing proved it publishable, so nothing clears it
+        continue
+      }
       real.push(file)
     }
-    fixtures.push(...tokenFree, ...uninspected)
+    fixtures.push(...tokenFree, ...uninspected, ...publishable)
 
     if (real.length === 0) {
       const noted = [...new Set(fixtures)].slice(0, 4)
@@ -1269,6 +1335,9 @@ const SECRET_SCAN: Rule = {
           : [
               'No committed secret found in the tracked secret-shaped files.',
               tokenFree.length > 0 ? `${tokenFree.length} of them hold config with no auth token` : '',
+              publishable.length > 0
+                ? `${publishable.length} hold a public key or certificate, which is published by design`
+                : '',
               uninspected.length > 0
                 ? `${uninspected.length} sit in a test/sample path and were not content-inspected`
                 : '',

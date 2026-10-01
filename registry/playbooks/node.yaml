@@ -56,7 +56,10 @@ community:
 verify:
   build: ['npm run build']
   test: ['npm test']
-  testFast: ['npm run test:changed', 'npx vitest related --run']
+  # `npm run test:changed` is not here: it is a script the project has to define, so
+  # suggesting it recommends adding a script rather than running anything. `vitest related`
+  # is a real flag and works on a git checkout.
+  testFast: ['npx vitest related --run']
   lint: ['npm run lint']
   format: ['npm run format']
   typecheck: ['npm run typecheck', 'npx tsc --noEmit']

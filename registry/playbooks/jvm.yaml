@@ -55,7 +55,11 @@ community:
 verify:
   build: ['./gradlew build', './mvnw -q package -DskipTests']
   test: ['./gradlew test', './mvnw -q test']
-  testFast: ['./gradlew test --tests "*Changed*"', './mvnw test -Dit.test=*Changed*']
+  # No testFast entry: neither Gradle nor Maven ships a changed-files filter. Every form
+  # that looks like one -- a `*Changed` test task, `-Dtest=*Changed*` -- selects zero tests
+  # unless the project first defines the task or names its tests that way, and anvil
+  # suggested them anyway. See TEST_FAST in packages/audit/src/rules.ts.
+  testFast: []
   lint: ['./gradlew checkstyleMain', './mvnw checkstyle:check']
   format: ['./gradlew spotlessApply']
   typecheck: []
