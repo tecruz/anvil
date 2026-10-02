@@ -405,6 +405,99 @@ function hasAny(files: ReadonlySet<string>, candidates: readonly string[]): bool
 // Documented commands
 // ---------------------------------------------------------------------------
 
+/**
+ * The command runners anvil can name, in two tiers.
+ *
+ * **Unambiguous** tokens never appear in plain prose, so seeing one is seeing a command.
+ * **Constrained** tokens are ordinary English words -- `mix`, `rake`, `bundle`, `swift` --
+ * and naming one is only evidence of a command when a real subcommand follows it:
+ * "the mix of concerns I would bundle" mentions none of them, `swift test` is a command.
+ *
+ * One list, shared by the two consumers: `AGENTS_COMMANDS`, which asks whether an
+ * instructions file names a runnable command at all (a false pass is a blocker wrongly
+ * cleared), and documented-command extraction, which is fenced- or backtick-gated and so
+ * has a second layer of protection. Keeping one list is the same reasoning that merged
+ * the hook-framework lists: four near-copies of "what a commit hook looks like" were how a
+ * framework added to one of them ended up invisible to the other three.
+ */
+export const COMMAND_RUNNERS: {
+  readonly unambiguous: readonly string[]
+  readonly constrained: Readonly<Record<string, readonly string[]>>
+} = {
+  unambiguous: [
+    // npm/yarn/pnpm-era JS
+    'npm',
+    'pnpm',
+    'yarn',
+    'bun',
+    'jest',
+    'vitest',
+    'nextest',
+    'biome',
+    'eslint',
+    'tsc',
+    // Python
+    'pytest',
+    'ruff',
+    'mypy',
+    'uv',
+    'poetry',
+    // Go / Rust / JVM / .NET
+    'go',
+    'cargo',
+    'gradlew?',
+    'mvnw?',
+    'dotnet',
+    'sbt',
+    'golangci-lint',
+    // Ruby / PHP / Elixir / Erlang tooling with no English collision
+    'phpunit',
+    'phpstan',
+    'rubocop',
+    'rebar3',
+    // Swift / infra / CI
+    'swiftlint',
+    'terraform',
+    'tflint',
+    'helm',
+    'kubectl',
+    'bazel(?:isk)?',
+    'hadolint',
+    'actionlint',
+  ],
+  constrained: {
+    mix: ['test', 'compile', 'format', 'run', 'iex', 'deps', 'phx', 'credo', 'ecto', 'release', 'dialyzer', 'do'],
+    rake: ['test', 'spec', 'routes', 'db', 'lint', 'default', 'assets', 'build'],
+    bundle: ['exec', 'install', 'update', 'check', 'add', 'config', 'init'],
+    swift: ['build', 'test', 'run', 'package', 'resolve', 'format'],
+    php: ['artisan'],
+    docker: ['build', 'run', 'compose', 'exec', 'push', 'pull', 'images', 'tag'],
+    make: ['\\S+'], // any target at all: `make <something>` is how make is invoked
+  },
+}
+
+/**
+ * One regex alternation covering both tiers, used wherever anvil needs to decide "this text
+ * names a runnable command" without enumerating runners by hand in two packages.
+ */
+export function runnerAlternation(): string {
+  const flat = COMMAND_RUNNERS.unambiguous.join('|')
+  const paired = Object.entries(COMMAND_RUNNERS.constrained).map(
+    // The inner `()` are load-bearing: `x(?:\s+a|b)` binds the space to `a` alone, so
+    // `swift test` matched only when `test` happened to be the first subcommand listed.
+    ([runner, sub]) => `${runner}(?:\\s+(?:${sub.join('|')}))\\b`,
+  )
+  return [flat, ...paired].join('|')
+}
+
+/**
+ * Matches text that names a runnable command: a runner, optionally path-prefixed (`./`),
+ * followed by a token boundary, so `/opt/gradlew/bin` does not match as a command.
+ */
+export function mentionsRunner(text: string): boolean {
+  return new RegExp(`(^|[\\s\`"'(])(?:\\S*\\/)?(?:${runnerAlternation()})(?=[\\s\`'"()]|$)`, 'm').test(text)
+}
+
 const DOC_CANDIDATES: readonly string[] = [
   'README.md',
   'CONTRIBUTING.md',
@@ -431,17 +524,17 @@ const DOC_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
   },
   {
     kind: 'test',
-    re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|make (test|tests|check)|jest\b|vitest\b)/,
+    re: /(npm (run )?test|yarn test|pnpm test|bun test|pytest|go test|cargo test|dotnet test|mvnw? test|gradlew? test|make (test|tests|check)|jest\b|vitest\b|mix test|bundle exec (rspec|rake( test| spec)?)|rake (test|spec)|php artisan test|phpunit|swift test|helm unittest|bazel test)/,
   },
   {
     kind: 'build',
-    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build|make (build|all))/,
+    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build|make (build|all)|mix (compile|release)|swift build|bazel build|docker build)/,
   },
   {
     kind: 'lint',
-    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format|make lint)/,
+    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format|make lint|mix credo|bundle exec rubocop|rubocop|swiftlint|tflint\b|helm lint|hadolint|actionlint|biome (check|lint))/,
   },
-  { kind: 'typecheck', re: /(tsc --noEmit|typecheck|pyright|mypy)/ },
+  { kind: 'typecheck', re: /(tsc --noEmit|typecheck|pyright|mypy|phpstan)/ },
 ]
 
 export interface DocumentedCommand {
@@ -498,17 +591,12 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
 }
 
 function looksLikeCommandLine(line: string, inFence = false): boolean {
-  const hasRunner =
-    /(^|\s|\$|`)(npm|pnpm|yarn|bun|cargo|go|dotnet|gradlew?|mvnw?|pytest|ruff|mypy|make|jest|vitest|nextest|tsc)\b/.test(
-      line,
-    )
-  // A command is recognisable inside a fenced block too, and humans write them there more
-  // often than not: traefik's chart documents `make test` and `make lint` in a ```bash block
-  // and nowinandroid documents `./gradlew testDemoDebug` the same way. Requiring the line to
-  // carry its own backticks missed every one of them, so a repo with an excellent AGENTS.md
-  // was reported as having no documented command at all.
+  // One runner list (`COMMAND_RUNNERS`) is used here and by the AGENTS_COMMANDS rule, so an
+  // ecosystem added in one place is visible in both. The fenced-block half exists because
+  // humans write commands there more often than not: traefik's chart documents `make test`
+  // and `make lint` in a ```bash block, and requiring a per-line backtick missed every one.
   const fenced = inFence || /^\s{0,4}(?:\$|#|>)\s/.test(line) || /```/.test(line)
-  return hasRunner && (line.includes('`') || fenced)
+  return mentionsRunner(line) && (line.includes('`') || fenced)
 }
 
 /** Pull the runnable command out of a line, preferring an inline code span. */

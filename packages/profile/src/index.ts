@@ -42,14 +42,18 @@ export { nodeDetector } from './detectors/node.ts'
 export { pythonDetector } from './detectors/python.ts'
 export {
   addRiskHeuristics,
+  COMMAND_RUNNERS,
   type DocumentedCommand,
   detectDocs,
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
   globToRegExp,
+  makefileTargets,
   matchesAny,
   matchesGlob,
+  mentionsRunner,
+  runnerAlternation,
 } from './general.ts'
 export {
   asObject,

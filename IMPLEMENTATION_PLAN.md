@@ -2003,14 +2003,24 @@ teeth after the `mentionsCommand` change.
   holds one command per kind, and choosing between three real runners is a different problem
   from detecting one — the same limitation recorded after the awkward shapes.
 - **Runners outside the documented-command patterns.** `swift`, `mix`, `bundle`, `rake`,
-  `terraform`, `helm` and `bazel` are recognised by their detectors but appear in neither
+  `terraform`, `helm` and `bazel` are recognised by their detectors but appeared in neither
   `DOC_PATTERNS` nor `mentionsCommand`, so an AGENTS.md documenting only `mix test` would
-  draw the same blocker nowinandroid did. Nothing in this batch exhibited it — vapor's
-  commands are `detected` from `Package.swift` and its AGENTS.md genuinely names none — so
-  the fix is not written blind. The awkward part is that `mix`, `rake` and `bundle` are
-  ordinary English words, and matching them in prose is how a blocker becomes a false pass.
-  It wants an allow-list of subcommands (`mix test|compile|format|run|iex|deps|phx`), not a
-  looser regex.
+  have drawn the same blocker nowinandroid did. Nothing in this batch exhibited it — vapor's
+  commands are `detected` from `Package.swift` and its AGENTS.md genuinely names none — which
+  is why it stayed a note. **Fixed the next day** (2026-10-02), with exactly the shape this
+  bullet called for: one shared `COMMAND_RUNNERS` list in the profile package, with a
+  constrained tier for the ordinary-English names (`mix test` matches, "idiomatic Swift"
+  does not) so a false blocker cannot be traded for a false pass.
+
+  The first version of the fix had a bug the batch proves nothing without a test: the
+  constrained alternation was written `swift(?:\s+build|test|...)`, and alternation binds
+  tighter than the space, so only the first-listed subcommand ever matched — `mix test`
+  passed by accident of ordering while `swift test` failed. A two-line probe of
+  `mentionsRunner` on the exact strings would have caught it; instead it surfaced when the
+  new regression tests failed, which is what they are for. vapor still reports a blocker
+  after the change, because its AGENTS.md is an AI policy document that names no command —
+  the fix widened the list without clearing the one repo in the batch that deserves a
+  blocker.
 - **The score of this repository is 96 (A)**, up from 94, and the movement is in the rules
   the two reviews tightened rather than in anything new: every blocker and high finding here
   passes. `ARCH_DOC` warns at 12 modules with no architecture document, and `SECURITY_MD`

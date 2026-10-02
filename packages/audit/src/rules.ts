@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
+import { mentionsRunner } from '@anvil/profile'
 import type { Fix, Layer, Severity, Status } from './types.ts'
 
 export interface RuleContext {
@@ -170,23 +171,16 @@ function unidentified(ctx: RuleContext): boolean {
 /**
  * Does the instruction text name a runnable command?
  *
- * The leading-character class includes markdown delimiters, because in a rendered
- * instructions file a command is almost always wrapped in backticks -- and a rule that
- * cannot see its own generated output is a rule that will never be satisfied.
- *
- * The optional path prefix is the other half of that. A Gradle wrapper is invoked
- * `./gradlew`, and the `/` in front of it was not in the class, so nowinandroid -- whose
- * AGENTS.md documents the build, the formatter and the test tasks, all as `./gradlew ...` --
- * was reported as naming no runnable command, and a *blocker* was raised against the best
- * agent instructions in the batch.
- *
- * Every alternative now requires a following space or an end of token, which is what keeps
- * `/opt/gradlew/bin` (a path that merely contains the name) from reading as a command.
+ * The runner list is shared with the profile package (`COMMAND_RUNNERS`) rather than kept
+ * as a second copy, because the third audit found them drifting: `./gradlew` was counted by
+ * the profile but not here, and runners the detectors emit -- `mix`, `swift`, `terraform`,
+ * `helm`, `bazel` -- were invisible to both. A repo documenting only `mix test` would have
+ * drawn the same blocker nowinandroid did. The constrained tier keeps the English-word
+ * runners (`mix`, `rake`, `bundle`, `swift`) from matching prose: "we write idiomatic
+ * Swift" is not a command, `swift test` is.
  */
 function mentionsCommand(text: string): boolean {
-  return /(^|[\s`"'(])(?:\S*\/)?(npm|pnpm|yarn|bun|cargo|go|gradlew?|mvnw?|pytest|make|dotnet|tsc|ruff|mypy|eslint)(?=[\s`'"()]|$)/m.test(
-    text,
-  )
+  return mentionsRunner(text)
 }
 
 const AGENTS_FILE: Rule = {

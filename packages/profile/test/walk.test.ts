@@ -471,6 +471,33 @@ describe('a documented command is the command that was extracted, not the line i
       ['build: npm run build', 'test: npm test'],
     )
   })
+
+  test('runners the six new detectors emit are in the same list', () => {
+    // The runner list and the kind patterns were a snapshot of the first six detectors, so a
+    // Swift or Bazel project documenting `swift build` / `bazel test` produced nothing
+    // documented at all, and the AGENTS_COMMANDS rule -- a second copy of a narrower list --
+    // would have blocked it.
+    const found = documented({
+      'AGENTS.md': [
+        '# Repo',
+        '',
+        '```bash',
+        'swift build',
+        'swift test',
+        '```',
+        '',
+        '```bash',
+        'bazel build //...',
+        'bazel test //...',
+        '```',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(found.includes('build: swift build'), `missing swift build: ${found.join(', ')}`)
+    assert.ok(found.includes('test: swift test'), `missing swift test: ${found.join(', ')}`)
+    assert.ok(found.includes('build: bazel build //...'), `missing bazel build: ${found.join(', ')}`)
+    assert.ok(found.includes('test: bazel test //...'), `missing bazel test: ${found.join(', ')}`)
+  })
 })
 
 describe('the skip lists do not overlap', () => {

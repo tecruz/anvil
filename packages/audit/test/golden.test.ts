@@ -362,6 +362,62 @@ describe('cold-empty', () => {
     }
   })
 
+  /**
+   * The gap, recorded after the third audit: the runner list was a snapshot of the six
+   * original detectors, so an AGENTS.md documenting only `mix test` -- or `rake test`, or
+   * `swift test` -- would have drawn the same false blocker nowinandroid did for `./gradlew`.
+   * Nothing in the batch exhibited it, which is why it stayed a note rather than a fix; the
+   * fix is constrained subcommands, because three of those names are ordinary English words.
+   */
+  test('an Elixir repo documenting only mix commands names a command', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-agents-mix-'))
+    try {
+      writeFileSync(
+        join(dir, 'AGENTS.md'),
+        ['# App', '', '## Commands', '', '```bash', 'mix deps.get', 'mix test', 'mix credo --strict', '```', ''].join(
+          '\n',
+        ),
+      )
+      writeFileSync(join(dir, 'mix.exs'), 'defmodule App.MixProject do\n  use Mix.Project\nend\n')
+      mkdirSync(join(dir, 'lib'), { recursive: true })
+      writeFileSync(join(dir, 'lib', 'app.ex'), 'defmodule App do\nend\n')
+      mkdirSync(join(dir, 'test'), { recursive: true })
+      writeFileSync(join(dir, 'test', 'app_test.exs'), 'defmodule AppTest do\n  use ExUnit.Case\nend\n')
+      assert.equal(findFinding(auditDir(dir), 'AGENTS_COMMANDS').status, 'pass')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('runner names used as ordinary English are not commands', () => {
+    // The constrained tier is the reason the fix is safe to add: none of `mix`, `rake`,
+    // `bundle` or `swift` appears here with a subcommand, because none of it is a command.
+    // An unconstrained match on any of them would turn a blocker into a false pass, which is
+    // the most reassuring -- and therefore the most dangerous -- error this rule can make.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-agents-prose-'))
+    try {
+      writeFileSync(
+        join(dir, 'AGENTS.md'),
+        [
+          '# Notes',
+          '',
+          'The codebase is a mix of styles; we write idiomatic Swift and bundle the assets',
+          'by hand. Careful work will rake in good reviews.',
+          '',
+        ].join('\n'),
+      )
+      writeFileSync(join(dir, 'mix.exs'), 'defmodule App.MixProject do\n  use Mix.Project\nend\n')
+      mkdirSync(join(dir, 'lib'), { recursive: true })
+      writeFileSync(join(dir, 'lib', 'app.ex'), 'defmodule App do\nend\n')
+      mkdirSync(join(dir, 'test'), { recursive: true })
+      writeFileSync(join(dir, 'test', 'app_test.exs'), 'defmodule AppTest do\n  use ExUnit.Case\nend\n')
+      const f = findFinding(auditDir(dir), 'AGENTS_COMMANDS')
+      assert.equal(f.status, 'fail', f.detail)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a path that merely contains a runner name is not a command', () => {
     // The other direction, and the reason every alternative requires a following space: the
     // Gradle distribution lives at /opt/gradlew/bin/gradle, and a wrapper path in a doc must
