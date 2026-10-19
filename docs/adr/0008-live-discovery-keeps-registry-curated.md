@@ -77,7 +77,8 @@ ecosystem has published nothing.
 ## Consequences
 
 - New package `@anvil/discovery`, new command `anvil playbook discover [id|--all]
-  [--local-only] [--refresh] [--propose]`, and `plan`/`brief` gained `--offline`.
+  [--local-only] [--refresh] [--propose]`, and `plan`/`brief` gained `--offline` and
+  `--refresh`.
 - `Playbook` gained `discover`; `Suggestion` gained `provenance` and `fetchedAt`; all fifteen
   registry playbooks declare seeds. `generated.ts` is still the compiled registry and the
   parity test still enforces it.

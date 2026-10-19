@@ -40,7 +40,7 @@ import {
 import { discoverRepo } from '@anvil/git'
 import { loadPlaybooks, type MatchResult, matchPlaybooks, type Playbook } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
-import { loadLiveForPlan } from './discover.ts'
+import { liveEntriesForPlan } from './discover.ts'
 import type { Command, CommandContext } from './types.ts'
 
 function detectHost(remote: string | null): 'github' | 'gitlab' | 'bitbucket' | 'azure' | null {
@@ -98,7 +98,7 @@ const TARGETS: readonly BriefTarget[] = ['agents', 'commands', 'skills', 'all']
 export const briefCommand: Command = {
   name: 'brief',
   summary: 'Emit verified facts for the LLM step.',
-  usage: 'anvil brief --for <agents|commands|skills|all> [--json] [--profile <dir>] [--offline]',
+  usage: 'anvil brief --for <agents|commands|skills|all> [--json] [--profile <dir>] [--offline] [--refresh]',
   details: [
     'Every value here is verified against the repository and carries evidence. Nothing',
     'is a guess, and no model is called: anvil hands the facts over, and the agent turns',
@@ -108,6 +108,7 @@ export const briefCommand: Command = {
     'repository lacks, so a model does not write instructions for things already present.',
     '',
     '--offline      ignore the discovery cache; the guidance is curated only',
+    '--refresh      fetch live guidance now and cache it, instead of reading the cache',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -115,6 +116,7 @@ export const briefCommand: Command = {
     profile: { type: 'string' },
     for: { type: 'string' },
     offline: { type: 'boolean' },
+    refresh: { type: 'boolean' },
   },
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, briefCommand.flags)
@@ -131,8 +133,17 @@ export const briefCommand: Command = {
     // inside `buildBrief` so this package stays free of a dependency it does not need, and
     // so a brief can be built with no cache at all on a machine that has never run
     // `anvil playbook discover`.
-    const { live } =
-      args.values.offline === true ? { live: new Map() } : loadLiveForPlan(matches.map((m) => m.playbook.id))
+    const offline = args.values.offline === true
+    const refresh = args.values.refresh === true
+    if (offline && refresh) {
+      throw new AnvilError(ErrorCode.Usage, '--offline and --refresh contradict each other', {
+        hint: '--offline asks for no network at all; --refresh asks for a fetch. Pick one.',
+      })
+    }
+    const { live } = await liveEntriesForPlan(
+      matches.map((m) => m.playbook),
+      { offline, refresh, cwd: ctx.cwd },
+    )
     const brief = buildBrief({
       profile,
       report,

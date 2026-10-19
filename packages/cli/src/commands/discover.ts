@@ -25,19 +25,35 @@ import { AnvilError, ErrorCode, renderTable } from '@anvil/core'
 import {
   type DiscoveryEntry,
   dedupeEntries,
+  type FetchImpl,
   loadCache,
   proposePlaybookYaml,
+  type RefreshResult,
+  type RunOptions,
   type RunResult,
+  refreshLive,
   runDiscovery,
   type SourceNote,
   saveCache,
   usableEntries,
 } from '@anvil/discovery'
-import { matchPlaybooks, type Playbook } from '@anvil/playbooks'
+import { type DiscoverSeeds, matchPlaybooks, type Playbook } from '@anvil/playbooks'
 import { buildProfile } from '@anvil/profile'
 import type { CommandContext } from './types.ts'
 
 const DEFAULT_PROPOSAL_LIMIT = 5
+
+/**
+ * The fetch the CLI uses for the network sources.
+ *
+ * Node's own fetch, with the timeout the package asks for. A network failure throws here
+ * and becomes a warning there: the package turns "could not be reached" into a source that
+ * contributed nothing, rather than into a failed command.
+ */
+const liveFetch: FetchImpl = async (url, init) => {
+  const res = await fetch(url, { headers: init.headers, signal: init.signal })
+  return { status: res.status, text: () => res.text() }
+}
 
 /**
  * The default target set: the playbooks this repository matched, or every playbook when
@@ -121,13 +137,7 @@ export async function runDiscover(
       online: values.offline !== true,
       env: process.env,
       ...(localOnly ? { localOnly: true } : {}),
-      fetchImpl: async (url, init) => {
-        const res = await fetch(url, {
-          headers: init.headers,
-          signal: init.signal,
-        })
-        return { status: res.status, text: () => res.text() }
-      },
+      fetchImpl: liveFetch,
     })
     if (result.entries.length === 0) {
       results.push({ ...result, kept: 0 })
@@ -335,4 +345,45 @@ export function loadLiveForPlan(playbookIds: readonly string[]): {
     if (entries.length > 0) live.set(id, entries)
   }
   return { live, warnings }
+}
+
+/**
+ * The live entries a plan or a brief should merge, and the warnings that came with them.
+ *
+ * Three ways to get them, and the flags choose:
+ *
+ *   - `--offline`: none at all. No cache, no network.
+ *   - `--refresh`: fetched now, for the playbooks that matched. A refresh that finds
+ *     nothing keeps the entries the cache already had, so a registry that is briefly
+ *     unreachable costs guidance rather than removing it.
+ *   - the default: the cache, read from the home directory. No network, which is what makes
+ *     `plan` cheap enough to run on every question.
+ */
+export async function liveEntriesForPlan(
+  playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
+  options: {
+    offline: boolean
+    refresh: boolean
+    cwd: string
+    /** Injected in the unit test; the real one in every other call. */
+    refreshLive?: (
+      playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
+      options: RunOptions,
+    ) => Promise<RefreshResult>
+  },
+): Promise<{ live: Map<string, DiscoveryEntry[]>; warnings: string[] }> {
+  if (options.offline) return { live: new Map(), warnings: [] }
+
+  if (!options.refresh) {
+    return loadLiveForPlan(playbooks.map((p) => p.id))
+  }
+
+  const refresh = options.refreshLive ?? refreshLive
+  const result = await refresh(playbooks, {
+    cwd: options.cwd,
+    online: true,
+    env: process.env,
+    fetchImpl: liveFetch,
+  })
+  return { live: result.live, warnings: result.warnings }
 }

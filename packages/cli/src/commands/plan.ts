@@ -11,7 +11,7 @@ import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
 import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
-import { loadLiveForPlan } from './discover.ts'
+import { liveEntriesForPlan } from './discover.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const TIERS: readonly PlanTier[] = ['derived', 'official', 'community']
@@ -45,7 +45,7 @@ async function loadProfile(ctx: CommandContext, target: string | undefined): Pro
 export const planCommand: Command = {
   name: 'plan',
   summary: 'Rank fixes as derived / official / community.',
-  usage: 'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>] [--offline]',
+  usage: 'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>] [--offline] [--refresh]',
   details: [
     'Three tiers, ranked in this order:',
     '',
@@ -59,12 +59,14 @@ export const planCommand: Command = {
     '',
     'Guidance from `anvil playbook discover` is merged in, marked live and ranked below the',
     'curated entries of the same tier. It reads a cache in your home directory, so it costs',
-    'no network here; run `anvil playbook discover` to populate it.',
+    'no network here; run `anvil playbook discover` to populate it, or --refresh to fetch it',
+    'now.',
     '',
     '--tier <t>     only suggestions from one tier (derived, official, community)',
     '--only <ids>   comma-separated suggestion ids, e.g. fix:AGENTS_FILE',
     '--limit <n>    show at most n suggestions',
     '--offline      ignore the discovery cache entirely',
+    '--refresh      fetch live guidance now and cache it, instead of reading the cache',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -74,6 +76,7 @@ export const planCommand: Command = {
     only: { type: 'string' },
     limit: { type: 'string' },
     offline: { type: 'boolean' },
+    refresh: { type: 'boolean' },
   },
 
   async run(ctx, rawArgs) {
@@ -89,9 +92,16 @@ export const planCommand: Command = {
     // playbook that did not match contributes nothing. Reading it before would mean
     // reporting cached entries for technologies this repository does not use.
     const offline = args.values.offline === true
-    const { live, warnings: liveWarnings } = offline
-      ? { live: new Map(), warnings: [] }
-      : loadLiveForPlan(matches.map((m) => m.playbook.id))
+    const refresh = args.values.refresh === true
+    if (offline && refresh) {
+      throw new AnvilError(ErrorCode.Usage, '--offline and --refresh contradict each other', {
+        hint: '--offline asks for no network at all; --refresh asks for a fetch. Pick one.',
+      })
+    }
+    const { live, warnings: liveWarnings } = await liveEntriesForPlan(
+      matches.map((m) => m.playbook),
+      { offline, refresh, cwd: ctx.cwd },
+    )
 
     const plan = buildPlan(report, profile, matches, [...warnings, ...liveWarnings], live)
 
@@ -184,11 +194,13 @@ function renderPlan(ctx: CommandContext, plan: Plan): string {
     out.push('')
     // The live count is called out per tier rather than marked on each row: a plan can carry
     // dozens of live entries, and a per-row marker would put `live` on most of a screen
-    // without telling the reader anything they would act on differently.
+    // without telling the reader anything they would act on differently. The wording names
+    // discovery rather than the `discover` command, because a plan can also be given live
+    // entries by its own --refresh.
     const liveCount = items.filter((i) => i.provenance === 'live').length
     out.push(
       s.bold(`${tier} (${String(items.length)})`) +
-        (liveCount === 0 ? '' : s.dim(`  ${String(liveCount)} live, from \`anvil playbook discover\``)),
+        (liveCount === 0 ? '' : s.dim(`  ${String(liveCount)} live, from discovery`)),
     )
     out.push(
       renderTable(

@@ -374,8 +374,8 @@ unimplemented commands as if they exist is how a plan stops being usable as a sp
 ```
 anvil profile [--json] [--profile <dir>]
 anvil doctor  [--json] [--layer <l>] [--fail-on <severity>] [--profile <dir>]
-anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>] [--offline]
-anvil brief   --for agents|commands|skills|all [--offline]  # verified facts for the LLM step
+anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>] [--offline] [--refresh]
+anvil brief   --for agents|commands|skills|all [--offline] [--refresh]  # verified facts for the LLM step
 anvil init    [--apply] [--only <artifact>] [--allow-warnings]
 anvil playbook list | show <id> | check [--offline] [--probe] [--concurrency n] [--timeout ms] [--warnings]
 anvil playbook add <path|url> [--force]
@@ -2091,6 +2091,14 @@ does not delete what it found under `github-search`, nor launder the network hal
 cache path but not into the package, so a scan could read a different home from the cache it
 was merging with — pinned by a CLI test that plants a skill under the configured home and
 nothing in the real one.
+
+**`plan` and `brief` can fetch too.** Both read the cache by default, which is what keeps
+them cheap enough to run on every question; `--refresh` on either one fetches now for the
+playbooks that matched and writes the cache again, so the two-step "`discover`, then `plan`"
+becomes one command. A refresh that finds nothing keeps the entries the cache already had,
+because a plan that lost its live guidance to a rate limit would report, truthfully and
+uselessly, that the ecosystem has published nothing. `--offline` and `--refresh` contradict
+each other and the command says so rather than guessing which one was meant.
 
 **Two more gaps closed after the first review.** The seeds were not validated: an
 `officialOrgs` entry that is not a GitHub login, or a blank keyword, was accepted by the

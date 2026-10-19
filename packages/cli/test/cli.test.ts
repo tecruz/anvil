@@ -491,6 +491,13 @@ describe('anvil playbook', () => {
     assert.equal(res.code, 2)
     assert.match(res.stderr, /list, show, check, add/)
   })
+  test('--offline and --refresh contradict each other, and say so', () => {
+    // Both flags ask for the opposite of the other: one says "no network at all", the other
+    // says "fetch now". Guessing which one the user meant would be worse than refusing.
+    const res = runAnvil(['plan', '--offline', '--refresh'])
+    assert.equal(res.code, 2)
+    assert.match(res.stderr, /contradict/)
+  })
 })
 
 describe('playbook discover cache', () => {

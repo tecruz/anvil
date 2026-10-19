@@ -71,6 +71,7 @@ export {
 } from './localScan.ts'
 export { DEFAULT_MCP_REGISTRY, fetchMcpServers, type McpEntry, type McpOptions, parseServers } from './mcpRegistry.ts'
 export { citedUrls, type ProposalBlock, proposePlaybookYaml, rankForProposal } from './propose.ts'
+export { type RefreshResult, refreshLive } from './refresh.ts'
 export {
   dedupeEntries,
   discoverLocal,
