@@ -2092,6 +2092,16 @@ cache path but not into the package, so a scan could read a different home from 
 was merging with — pinned by a CLI test that plants a skill under the configured home and
 nothing in the real one.
 
+**Two more gaps closed after the first review.** The seeds were not validated: an
+`officialOrgs` entry that is not a GitHub login, or a blank keyword, was accepted by the
+schema and then searched for, matching nothing, so the plan reported that the ecosystem had
+published nothing — which is indistinguishable from the truth, and so is the worst kind of
+wrong. The schema now rejects both, with a dotted path, and `playbook check` reports them.
+And an MCP server published by a technology's own org was filed as community, because the
+registry record carries a URL and a name and no owner; when that URL is a GitHub repository
+the same org check the search results get applies to it. A server published as a running
+endpoint has no owner to check and stays community — there is no evidence either way.
+
 ### The real machine found two defects the fixtures could not
 
 The same theme as the three audits, and the same cause: the defect lived inside a fixture's

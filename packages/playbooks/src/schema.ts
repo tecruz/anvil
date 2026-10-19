@@ -181,6 +181,47 @@ function strArray(value: YamlValue | undefined, path: string, issues: Validation
   return out
 }
 
+/**
+ * A GitHub login, which is what a seeded official org is.
+ *
+ * The rule is GitHub's own: letters, digits and single hyphens, no leading or trailing
+ * hyphen, 39 characters. It is checked here because a typo in this list is silent in the
+ * worst way -- the search runs, matches nothing, and the plan reports that the ecosystem
+ * has published nothing, which is indistinguishable from the truth.
+ */
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/
+
+/**
+ * The orgs a technology speaks through.
+ *
+ * Every entry must be a login, because the org check in discovery compares against it
+ * exactly: "android" matches the android org and "Android" matches it too, but "android "
+ * with a trailing space matches nothing and says so nowhere.
+ */
+function loginArray(value: YamlValue | undefined, path: string, issues: ValidationIssue[]): string[] {
+  const out = strArray(value, path, issues)
+  for (const item of out) {
+    if (!GITHUB_LOGIN.test(item)) {
+      issues.push({ path, message: `not a GitHub login: "${item}"` })
+    }
+  }
+  return out
+}
+
+/**
+ * A list of strings that must all carry something.
+ *
+ * A blank keyword or a blank MCP term searches for nothing and costs a request, so it is
+ * an error here rather than a silent zero.
+ */
+function nonEmptyStrArray(value: YamlValue | undefined, path: string, issues: ValidationIssue[]): string[] {
+  const out = strArray(value, path, issues)
+  for (const item of out) {
+    if (item.trim() === '') issues.push({ path, message: 'expected a non-empty string' })
+  }
+  return out
+}
+
 function checkKeys(
   obj: Record<string, YamlValue>,
   allowed: readonly string[],
@@ -369,9 +410,9 @@ export function validatePlaybook(
       },
       riskGlobs: strArray(doc.riskGlobs, 'riskGlobs', issues),
       discover: {
-        officialOrgs: strArray(d.officialOrgs, 'discover.officialOrgs', issues),
-        keywords: strArray(d.keywords, 'discover.keywords', issues),
-        mcp: strArray(d.mcp, 'discover.mcp', issues),
+        officialOrgs: loginArray(d.officialOrgs, 'discover.officialOrgs', issues),
+        keywords: nonEmptyStrArray(d.keywords, 'discover.keywords', issues),
+        mcp: nonEmptyStrArray(d.mcp, 'discover.mcp', issues),
       },
       source,
     },

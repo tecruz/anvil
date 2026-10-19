@@ -377,4 +377,40 @@ describe('runDiscovery', () => {
       rmSync(h, { recursive: true, force: true })
     }
   })
+
+  test('a registry server published by a seeded org is official, and an endpoint is not', async () => {
+    // The registry publishes one URL per server: sometimes a repository, sometimes a running
+    // endpoint. Only the first can be checked against the seeded orgs, and the difference is
+    // the difference between first-party guidance and a stranger's server.
+    const registry: FetchImpl = async () => ({
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          servers: [
+            { name: 'android-mcp', url: 'https://github.com/android/android-mcp', description: 'By Android.' },
+            { name: 'third-party-mcp', url: 'https://example.test/mcp', description: 'By someone.' },
+          ],
+        }),
+    })
+    const h = tempHome()
+    try {
+      const result = await runDiscovery(
+        { id: 'android', discover: ANDROID },
+        { cwd: '.', env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv, fetchImpl: registry, gh: ghFail },
+      )
+      const first = result.entries.find((e) => e.label === 'android-mcp')
+      const second = result.entries.find((e) => e.label === 'third-party-mcp')
+      assert.ok(first !== undefined)
+      assert.ok(second !== undefined)
+      assert.equal(first.tier, 'official')
+      assert.equal(first.section, 'mcp')
+      assert.equal(first.owner, 'android')
+      assert.equal(first.repo, 'android/android-mcp')
+      assert.match(first.why, /one of this playbook's official orgs/)
+      assert.equal(second.tier, 'community')
+      assert.equal(second.owner, null)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
 })

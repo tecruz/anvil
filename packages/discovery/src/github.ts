@@ -141,6 +141,34 @@ export function isOfficialOrg(owner: string, seeds: DiscoverSeeds): boolean {
 }
 
 /**
+ * The GitHub repository a URL points at, when it points at one.
+ *
+ * The MCP registry publishes one URL per server, and that URL is sometimes a repository and
+ * sometimes a running endpoint. The org check needs a login, so it can only be applied to
+ * the first kind: without this, every registry entry was filed as community, and the
+ * server published by the technology's own org was filed alongside a stranger's.
+ *
+ * Returns null for anything that is not a GitHub repository URL, which is the answer the
+ * caller needs for the endpoint case: no owner, so no claim.
+ */
+export function ownerFromGitHubUrl(url: string): { owner: string; repo: string } | null {
+  const trimmed = url.trim()
+  if (trimmed === '') return null
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`)
+  } catch {
+    return null
+  }
+  if (parsed.hostname.toLowerCase() !== 'github.com') return null
+  const parts = parsed.pathname.split('/').filter((part) => part !== '')
+  const owner = parts[0] ?? ''
+  const repo = (parts[1] ?? '').replace(/\.git$/, '')
+  if (owner === '' || repo === '') return null
+  return { owner, repo }
+}
+
+/**
  * Which playbook section a repo belongs in, from its name and description.
  *
  * The order is fixed and the first match wins, so the result is a function of the seeds

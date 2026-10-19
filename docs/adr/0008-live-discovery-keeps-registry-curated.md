@@ -65,6 +65,15 @@ local setup, not of who maintains it — and one skill installed in three direct
 reported once, with the copies counted, because three copies that can drift is itself worth
 knowing.
 
+**The org check applies wherever a login exists.** A registry server whose URL is a GitHub
+repository is classified by that repository's owner, exactly as a search result is, so a
+first-party MCP server is not filed beside every third party's. A server published as a
+running endpoint has no owner to check and stays community — there is no evidence either
+way, and the absence of evidence is not evidence of ownership. The seeds themselves are
+validated: an `officialOrgs` entry that is not a GitHub login fails the playbook check,
+because a typo there searches for nothing and reports, truthfully and uselessly, that the
+ecosystem has published nothing.
+
 ## Consequences
 
 - New package `@anvil/discovery`, new command `anvil playbook discover [id|--all]

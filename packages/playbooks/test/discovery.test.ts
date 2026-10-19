@@ -152,6 +152,28 @@ describe('discover section validation', () => {
     assert.ok(issues.some((i) => i.path === 'discover.officialOrgs'))
   })
 
+  test('rejects an official org that is not a GitHub login', () => {
+    // A typo here is silent in the worst way: the search runs, matches nothing, and the
+    // plan reports that the ecosystem has published nothing.
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['android ', 'not a login']\n`),
+    )
+    const orgs = issues.filter((i) => i.path === 'discover.officialOrgs')
+    assert.equal(orgs.length, 2)
+    assert.match(orgs[0]?.message ?? '', /not a GitHub login/)
+  })
+
+  test('rejects a blank keyword or mcp term', () => {
+    const { issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  keywords: ['']\n  mcp: ['  ']\n`))
+    assert.ok(issues.some((i) => i.path === 'discover.keywords' && /non-empty/.test(i.message)))
+    assert.ok(issues.some((i) => i.path === 'discover.mcp' && /non-empty/.test(i.message)))
+  })
+
+  test('accepts a login with a hyphen, because GitHub allows one', () => {
+    const { issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['google-deepmind']\n`))
+    assert.deepEqual(issues, [])
+  })
+
   test('parsePlaybook keeps discover through a full round trip', () => {
     const pb = parsePlaybook(`${MINIMAL}discover:\n  officialOrgs: ['acme']\n`, 'toy.yaml')
     assert.deepEqual(pb.discover.officialOrgs, ['acme'])

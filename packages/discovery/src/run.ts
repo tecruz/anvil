@@ -15,6 +15,8 @@ import {
   type DiscoveryEntry,
   type DiscoverySource,
   discover as discoverGitHub,
+  isOfficialOrg,
+  ownerFromGitHubUrl,
   type SourceNote,
 } from './github.ts'
 import { type LocalSkill, scanLocalSkills, skillMatchesSeeds } from './localScan.ts'
@@ -162,19 +164,34 @@ export async function runDiscovery(
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.mcpRegistry === undefined ? {} : { registry: options.mcpRegistry }),
     })
-    const mcpEntries: DiscoveryEntry[] = mcp.entries.map((server) => ({
-      label: server.name,
-      url: server.url,
-      why: `${server.description ?? 'No description published.'} Listed in the official MCP registry${options.mcpRegistry === undefined || options.mcpRegistry === DEFAULT_MCP_REGISTRY ? '' : ` (${options.mcpRegistry})`}.`,
-      tier: 'community',
-      section: 'mcp',
-      source: 'mcp-registry',
-      fetchedAt: new Date().toISOString(),
-      stars: null,
-      install: null,
-      repo: null,
-      owner: null,
-    }))
+    const mcpEntries: DiscoveryEntry[] = mcp.entries.map((server) => {
+      // The registry publishes a URL per server; when that URL is a repository, the same
+      // org check the search results get applies to it. A server published by the
+      // technology's own org is official guidance, and filing it as community would put
+      // a first-party server beside every third party's.
+      const repo = ownerFromGitHubUrl(server.url)
+      const official = repo !== null && isOfficialOrg(repo.owner, seeds)
+      const registryNote =
+        options.mcpRegistry === undefined || options.mcpRegistry === DEFAULT_MCP_REGISTRY
+          ? 'Listed in the official MCP registry.'
+          : `Listed in the MCP registry at ${options.mcpRegistry}.`
+      const description = server.description ?? 'No description published.'
+      return {
+        label: server.name,
+        url: server.url,
+        why: official
+          ? `${description} Published by ${repo.owner}, one of this playbook's official orgs. ${registryNote}`
+          : `${description} ${registryNote}`,
+        tier: official ? 'official' : 'community',
+        section: 'mcp',
+        source: 'mcp-registry',
+        fetchedAt: new Date().toISOString(),
+        stars: null,
+        install: null,
+        repo: repo === null ? null : `${repo.owner}/${repo.repo}`,
+        owner: repo === null ? null : repo.owner,
+      }
+    })
     entries.push(...mcpEntries)
     sources.push({ source: 'mcp-registry', detail: mcp.detail, entries: mcpEntries.length })
   }
