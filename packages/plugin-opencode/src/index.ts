@@ -75,7 +75,9 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
       anvil_plan: tool({
         description:
           "Ranked fixes for the current repository, in three tiers: derived (from this repo's own facts), " +
-          "official (the technology's own documentation and skills) and community. Read-only.",
+          "official (the technology's own documentation and skills) and community. Entries that " +
+          '`anvil playbook discover` fetched are merged in as live, ranked below the curated ones and ' +
+          'marked with their provenance. Read-only.',
         args: {
           tier: tool.schema.enum(['derived', 'official', 'community']).optional().describe('Only this tier'),
           limit: tool.schema.number().optional().describe('Maximum suggestions to return'),

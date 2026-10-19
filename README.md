@@ -48,6 +48,7 @@ Three things worth knowing before you install:
 anvil doctor            # audit this repository, with a score and the reasoning
 anvil init              # derive AGENTS.md, a verify skill and a review command
 anvil playbook check    # check the playbook registry for dead links
+anvil playbook discover # find agent tooling the curated registry does not know yet
 ```
 
 Working a ticket is four commands: `anvil issue create`, `anvil claim` (branch, worktree and
@@ -70,6 +71,11 @@ the interesting part.
 - **Playbooks are executable configuration.** Their globs decide what counts as high risk and
   their verify commands are what a crew runs, so a playbook is validated before it is
   installed and never silently overwrites an existing one.
+- **The curated registry stays curated.** `anvil playbook discover` fetches what a
+  technology's own orgs have published since the last edit, caches it under `~/.anvil/`, and
+  merges it into `plan` marked live and ranked below the entries a human reviewed. It never
+  writes to `registry/playbooks/` — `--propose` prints the additions for a maintainer to
+  merge.
 
 ## Development
 

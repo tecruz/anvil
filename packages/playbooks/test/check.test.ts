@@ -43,6 +43,7 @@ function playbook(overrides: Partial<Playbook> = {}): Playbook {
     verify: { build: [], test: ['npm test'], testFast: [], lint: [], format: [], typecheck: [] },
     conventions: { moduleLayout: null, testNaming: null, reviewFocus: [] },
     riskGlobs: [],
+    discover: { officialOrgs: [], keywords: [], mcp: [] },
     source: 'test.yaml',
     ...overrides,
   }

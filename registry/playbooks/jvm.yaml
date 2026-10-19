@@ -78,3 +78,11 @@ riskGlobs:
   - '**/gradle/libs.versions.toml'
   - '**/AndroidManifest.xml'
   - '**/migrations/**'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['openjdk', 'gradle', 'apache']
+  keywords:
+    - 'java mcp server'
+    - 'gradle agent skills'
+    - 'kotlin agent'
+  mcp: ['java', 'gradle', 'maven']

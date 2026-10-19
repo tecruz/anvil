@@ -19,7 +19,7 @@
 import type { Finding, ReadinessReport } from '@anvil/audit'
 import { matchesAny, matchesGlob, type ProjectProfile } from '@anvil/profile'
 import type { MatchResult } from './match.ts'
-import type { CommunityResource, Playbook, Resource } from './schema.ts'
+import type { LiveResource, Playbook, Resource } from './schema.ts'
 
 export type PlanTier = 'derived' | 'official' | 'community'
 
@@ -41,6 +41,16 @@ export interface Suggestion {
   severity?: Finding['severity']
   /** The playbook that supplied this, for official/community entries. */
   playbook?: string
+  /**
+   * Where the guidance came from.
+   *
+   * `curated` is a playbook a human wrote and a reviewer read. `live` was fetched at
+   * runtime and is capped below curated confidence, so the reader can see which is which
+   * rather than having to infer it from a number.
+   */
+  provenance: 'curated' | 'live'
+  /** When the live fetch happened. Absent on curated entries. */
+  fetchedAt?: string
 }
 
 export interface Plan {
@@ -79,6 +89,7 @@ export function buildPlan(
   profile: ProjectProfile,
   matches: readonly MatchResult[],
   warnings: readonly string[] = [],
+  live: ReadonlyMap<string, readonly LiveResource[]> = new Map(),
 ): Plan {
   const suggestions: Suggestion[] = []
 
@@ -95,6 +106,7 @@ export function buildPlan(
       evidence: finding.evidence,
       severity: finding.severity,
       confidence: fix.confidence,
+      provenance: 'curated',
       ...(fix.source?.url === undefined ? {} : { url: fix.source.url }),
     })
   }
@@ -106,9 +118,32 @@ export function buildPlan(
   // `**/build.gradle.kts`; without this the same advice appears twice, which reads as two
   // separate concerns rather than one.
   const claimedRiskGlobs = new Set<string>()
+  const claimedUrls = new Set<string>()
   for (const match of matches) {
     for (const suggestion of playbookSuggestions(match.playbook, profile, claimedRiskGlobs)) {
+      // Collected as the curated suggestions are made, rather than in a second pass: a URL
+      // is only claimed once a suggestion carrying it exists, and the two must not be able
+      // to disagree.
+      if (suggestion.url !== undefined) claimedUrls.add(normalizeUrl(suggestion.url))
       suggestions.push(suggestion)
+    }
+  }
+
+  // Tier 4: live-discovered resources for the same playbooks, keyed by playbook id.
+  //
+  // Merged *after* the curated pass so a hand-written entry always wins a URL a fetch also
+  // found. The alternative -- letting a live entry displace a curated one, because the
+  // fetch happened to be fresher -- would make an audit's output depend on network state,
+  // which is the opposite of what this file's output is for.
+  for (const match of matches) {
+    const entries = live.get(match.playbook.id)
+    if (entries === undefined) continue
+    for (const entry of entries) {
+      // A local skill has no URL, so it cannot collide with a curated link; it is keyed by
+      // its install path instead.
+      if (entry.url.trim() !== '' && claimedUrls.has(normalizeUrl(entry.url))) continue
+      claimedUrls.add(normalizeUrl(entry.url))
+      suggestions.push(liveSuggestion(match.playbook.id, entry))
     }
   }
 
@@ -157,6 +192,7 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
       detail: `${playbook.title} projects conventionally use: ${cmds.join(' or ')}`,
       evidence: [playbook.source ?? playbook.id],
       confidence: 0.7,
+      provenance: 'curated',
     })
   }
 
@@ -185,6 +221,7 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
       }: ${playbook.conventions.reviewFocus[0] ?? 'changes here reach past code review'}`,
       evidence: [playbook.source ?? playbook.id, ...(hit === undefined ? [] : [hit])],
       confidence: 0.7,
+      provenance: 'curated',
     })
   }
 
@@ -208,6 +245,7 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
         url: resource.url,
         ...(resource.install === undefined ? {} : { install: resource.install }),
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
+        provenance: 'curated',
       })
     }
   }
@@ -225,18 +263,95 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
       // Popularity nudges the ranking, but does not manufacture confidence: "widely
       // starred" is not "correct for your repo".
       confidence: communityConfidence(resource),
+      provenance: 'curated',
     })
   }
 
   return out
 }
 
-function communityConfidence(resource: CommunityResource): number {
+/**
+ * Confidence for a community resource, from its star count.
+ *
+ * Takes only the field it reads, rather than a `CommunityResource`, for a reason that is
+ * about reuse rather than tidiness: live discovery ranks with this same ladder, and its
+ * entries are not community resources -- they have no `repo` and no hand-written `why`. A
+ * parameter that admits both keeps the table single-sourced, which is what stops curated
+ * and discovered entries from drifting apart on what "widely starred" means.
+ */
+export function communityConfidence(resource: { stars: number | null }): number {
   if (resource.stars === null) return 0.4
   if (resource.stars >= 20000) return 0.6
   if (resource.stars >= 5000) return 0.5
   if (resource.stars >= 1000) return 0.45
   return 0.35
+}
+
+/** Section name as a plan title prefix, matching the curated groups. */
+const LIVE_SECTION_LABEL: Record<LiveResource['section'], string> = {
+  docs: 'doc',
+  skills: 'skill',
+  agents: 'agent',
+  mcp: 'mcp',
+  styleGuides: 'style',
+  migrationGuides: 'migration',
+  community: 'community',
+}
+
+/**
+ * Live official guidance is capped below curated official guidance.
+ *
+ * 0.7 is what a curated `skill`, `agent` or `mcp` entry scores. A discovered one scores at
+ * most 0.65: same tier, same shape of claim, but nobody reviewed it, and the org check that
+ * promoted it to `official` is a seed list that can be wrong. A wrong link at 0.75 reads as
+ * settled advice; the same link at 0.65 with a `live` label reads as a lead.
+ */
+const LIVE_OFFICIAL_CAP = 0.65
+
+function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
+  // A local skill is a file on this machine, not a link. `url` is omitted rather than
+  // pointing at `file://`, which renders as a broken href in every consumer that takes one
+  // -- and the evidence line already carries the path, which is the part a reader needs.
+  const url = entry.url.trim()
+  return {
+    id: `live:${playbookId}:${url === '' ? (entry.install ?? entry.label) : normalizeUrl(url)}`,
+    tier: entry.tier,
+    title: `${LIVE_SECTION_LABEL[entry.section]}: ${entry.label}`,
+    detail: entry.why,
+    // The evidence is the fetch itself: which source produced this and when. A live entry
+    // has no file to point at, and claiming one would be a lie about where it came from.
+    evidence: [`live:${entry.source} ${entry.fetchedAt}`, ...(entry.install === null ? [] : [entry.install])],
+    ...(url === '' ? {} : { url }),
+    ...(entry.install === null ? {} : { install: entry.install }),
+    confidence:
+      entry.tier === 'official'
+        ? LIVE_OFFICIAL_CAP
+        : // The curated ladder, one notch down: same signal, less authority.
+          Math.max(0.3, Number((communityConfidence(entry) - 0.05).toFixed(2))),
+    provenance: 'live',
+    fetchedAt: entry.fetchedAt,
+  }
+}
+
+/**
+ * A URL reduced to a comparable key, for the curated-wins dedupe.
+ *
+ * Normalising rather than string-comparing because the two sides write the same link
+ * differently: a curated entry cites `https://github.com/android/nowinandroid`, while a
+ * search result arrives as `github.com/android/nowinandroid` in some shapes and with a
+ * trailing slash in others. Without this, the same resource prints twice on a screen that
+ * has room for one of them.
+ */
+export function normalizeUrl(url: string): string {
+  const trimmed = url.trim().toLowerCase()
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`
+  try {
+    const parsed = new URL(withScheme)
+    const path = parsed.pathname.replace(/\/+$/, '')
+    return `${parsed.host}${path}${parsed.search}${parsed.hash}`
+  } catch {
+    return trimmed
+  }
 }
 
 function dedupe(suggestions: readonly Suggestion[]): Suggestion[] {

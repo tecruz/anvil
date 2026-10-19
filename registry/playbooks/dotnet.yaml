@@ -79,3 +79,11 @@ riskGlobs:
   - '**/appsettings*.json'
   - '**/Migrations/**'
   - '**/Dockerfile*'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['dotnet', 'microsoft']
+  keywords:
+    - 'dotnet mcp server'
+    - 'csharp agent skills'
+    - 'aspnet agents'
+  mcp: ['dotnet', 'csharp']

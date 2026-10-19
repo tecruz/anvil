@@ -76,7 +76,7 @@ export interface Brief {
       reviewFocus: string[]
     }
     verify: Record<string, string[]>
-    guidance: Array<{ kind: string; label: string; url: string; why: string }>
+    guidance: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }>
   }>
   findings: Array<{
     id: string
@@ -119,6 +119,28 @@ export interface BuildBriefOptions {
   read: (relPath: string) => string | null
   /** Findings to omit, so a `brief --for agents` is not swamped by unrelated rules. */
   relevantLayers?: readonly string[]
+  /**
+   * Live-discovered resources, keyed by playbook id.
+   *
+   * Optional so nothing has to construct it: a brief on a machine that has never run
+   * `anvil playbook discover` builds exactly as before.
+   */
+  live?: ReadonlyMap<string, readonly LiveGuidance[]>
+}
+
+/**
+ * The shape a live entry needs to appear in a brief.
+ *
+ * Structural, like `LiveResource` in `@anvil/playbooks`, and for the same reason: `@anvil/derive`
+ * must not depend on `@anvil/discovery` to render a resource, or every consumer of the brief
+ * would pull the discovery package in. Stating the requirement here keeps the coupling at the
+ * boundary that actually needs it.
+ */
+export interface LiveGuidance {
+  label: string
+  url: string
+  why: string
+  section: string
 }
 
 export function buildBrief(options: BuildBriefOptions): Brief {
@@ -158,7 +180,7 @@ export function buildBrief(options: BuildBriefOptions): Brief {
       reviewFocus: m.playbook.conventions.reviewFocus,
     },
     verify: m.playbook.verify as unknown as Record<string, string[]>,
-    guidance: flattenGuidance(m.playbook),
+    guidance: flattenGuidance(m.playbook, options.live?.get(m.playbook.id) ?? []),
   }))
 
   const excerpts: BriefFileExcerpt[] = []
@@ -221,16 +243,20 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   }
 }
 
-function flattenGuidance(playbook: {
-  official: {
-    docs: unknown[]
-    skills: unknown[]
-    agents: unknown[]
-    mcp: unknown[]
-    styleGuides: unknown[]
-    migrationGuides: unknown[]
-  }
-}): Array<{ kind: string; label: string; url: string; why: string }> {
+function flattenGuidance(
+  playbook: {
+    official: {
+      docs: unknown[]
+      skills: unknown[]
+      agents: unknown[]
+      mcp: unknown[]
+      styleGuides: unknown[]
+      migrationGuides: unknown[]
+    }
+    community?: unknown[]
+  },
+  live: readonly LiveGuidance[] = [],
+): Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> {
   const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
     [
       'doc',
@@ -281,7 +307,26 @@ function flattenGuidance(playbook: {
       }>,
     ],
   ]
-  return groups.flatMap(([kind, resources]) => resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why })))
+  const curated: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> =
+    groups.flatMap(([kind, resources]) =>
+      resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why, provenance: 'curated' as const })),
+    )
+
+  // Live entries go last, and only when the curated list does not already cite them. Same
+  // rule as the plan: a person-reviewed entry outranks a fetched one, and a brief is the
+  // text an agent will read as authoritative, so a duplicate there is worse than a duplicate
+  // in a terminal.
+  const cited = new Set(curated.map((r) => r.url.toLowerCase().replace(/\/+$/, '')))
+  const added = live
+    .filter((r) => {
+      const key = r.url.trim().toLowerCase().replace(/\/+$/, '')
+      if (key === '' || cited.has(key)) return false
+      cited.add(key)
+      return true
+    })
+    .map((r) => ({ kind: `live ${r.section}`, label: r.label, url: r.url, why: r.why, provenance: 'live' as const }))
+
+  return [...curated, ...added]
 }
 
 /**

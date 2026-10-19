@@ -84,3 +84,11 @@ riskGlobs:
   - '**/requirements*.txt'
   - '**/poetry.lock'
   - '**/uv.lock'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['python', 'pypa']
+  keywords:
+    - 'python mcp server'
+    - 'django agent'
+    - 'fastmcp'
+  mcp: ['python', 'django', 'fastapi']

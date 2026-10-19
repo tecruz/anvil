@@ -1,11 +1,15 @@
 /**
- * `anvil playbook` -- inspect the registry, and check it for rot.
+ * `anvil playbook` -- inspect the registry, discover what is new, and check it for rot.
  *
- * Three subcommands, and the split is deliberate:
+ * Four subcommands, and the split is deliberate:
  *
  *   - `list` and `show` are **offline and read-only**. They answer "what guidance does
  *     anvil have for this technology, and where did it come from", which is the question
  *     `plan` answers from the other end. Cheap, deterministic, always available.
+ *
+ *   - `discover` is the one command that **writes**, and what it writes is a cache in the
+ *     user's home directory -- never `registry/playbooks/`, which stays hand-maintained.
+ *     `--propose` prints YAML instead of installing anything.
  *
  *   - `check` is the mitigation the plan's risk table promised and never built: it
  *     validates the registry, and with `--probe` (on by default when online) it asks the
@@ -14,7 +18,8 @@
  *     the promise is narrowed rather than faked.
  *
  * Exit codes: 0 clean, 6 (threshold) when something is wrong, 2 for usage. A rot check that
- * always exits 0 is a report, not a check.
+ * always exits 0 is a report, not a check. `discover` does not use 6: a source being
+ * unreachable is a partial result, not a failed run.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -32,9 +37,10 @@ import {
   parsePlaybook,
   userPlaybookDir,
 } from '@anvil/playbooks'
+import { runDiscover } from './discover.ts'
 import type { Command, CommandContext } from './types.ts'
 
-const SUBCOMMANDS = ['list', 'show', 'check', 'add'] as const
+const SUBCOMMANDS = ['list', 'show', 'check', 'add', 'discover'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 
 /**
@@ -93,17 +99,23 @@ const FLAGS: FlagSpecs = {
   timeout: { type: 'string' },
   warnings: { type: 'boolean' },
   force: { type: 'boolean' },
+  refresh: { type: 'boolean' },
+  'local-only': { type: 'boolean' },
+  propose: { type: 'boolean' },
+  all: { type: 'boolean' },
+  limit: { type: 'string' },
 }
 
 export const playbookCommand: Command = {
   name: 'playbook',
-  summary: 'Inspect the playbook registry and check it for rot.',
-  usage: 'anvil playbook <list|show|check|add> [flags]',
+  summary: 'Inspect the playbook registry, discover new resources, and check it for rot.',
+  usage: 'anvil playbook <list|show|check|add|discover> [flags]',
   details: [
-    'list     every playbook, where it came from, and what it matches',
-    'show     one playbook in full, with every resource and its url',
-    'check    validate the registry; with --probe, whether every url still resolves',
-    'add      install a playbook from a file or an https url, into your own directory',
+    'list       every playbook, where it came from, and what it matches',
+    'show       one playbook in full, with every resource and its url',
+    'check      validate the registry; with --probe, whether every url still resolves',
+    'add        install a playbook from a file or an https url, into your own directory',
+    'discover   look for agent tooling and community resources a playbook does not list yet',
     '',
     'check is the mitigation for playbook rot. It exits 6 when something is wrong, so it',
     'is usable as a CI gate rather than a report nobody reads.',
@@ -113,12 +125,28 @@ export const playbookCommand: Command = {
     'you are standing in: a company playbook is shared by being installed, not by being',
     "committed to someone else's project.",
     '',
+    'discover answers what a curated registry cannot: what has the ecosystem published since',
+    'a human last edited the file. It writes a cache under ~/.anvil/cache/discovery and',
+    'never touches registry/playbooks/. --propose prints the additions as YAML for you to',
+    'merge by hand. Results feed `plan` and `brief`, ranked below curated entries and',
+    'labelled live, so a fetched suggestion never outranks one a person reviewed. A fresh',
+    'cache is reused; --refresh asks for a new answer, and --local-only merges its partial',
+    'view into the cache instead of replacing it.',
+    '',
     '--offline            skip the network; run only the structural checks',
     '--probe              force the url probes (the default unless --offline)',
     '--concurrency <n>    parallel url probes (default 6)',
     '--timeout <ms>       per-request timeout (default 15000)',
     '--warnings           exit non-zero on warnings as well as errors',
     '--force              overwrite an existing playbook with the same id',
+    '',
+    'discover flags:',
+    '--refresh            ignore the cache and fetch again',
+    '--local-only         scan installed agent skills only; never touch the network',
+    '--offline            the same as --local-only here: the network sources are skipped',
+    '--propose            print the proposed YAML instead of writing the cache',
+    "--all                every playbook, not just this repository's",
+    '--limit <n>          cap the proposals printed (default 5 playbooks)',
   ].join('\n'),
   flags: FLAGS,
 
@@ -132,6 +160,13 @@ export const playbookCommand: Command = {
     }
 
     const { playbooks, warnings } = load()
+
+    if (sub === 'discover') {
+      const id = args.positionals[1]
+      const flagId = typeof args.values.id === 'string' ? args.values.id : undefined
+      return runDiscover(ctx, playbooks, id ?? flagId, args.values)
+    }
+
     if (sub === 'list') return runList(ctx, playbooks, warnings)
     if (sub === 'show') {
       // The id may be positional (`show terraform`) or a flag (`show --id terraform`);
@@ -497,6 +532,15 @@ function runShow(ctx: CommandContext, playbooks: readonly Playbook[], id: string
     }
     out.push(s.bold(`Resources (${resourceRows(playbook).length})`))
     out.push(renderTable(['kind', 'label', 'url'], resourceRows(playbook), s))
+    const seeds = playbook.discover
+    if (seeds.officialOrgs.length + seeds.keywords.length + seeds.mcp.length > 0) {
+      out.push('')
+      out.push(s.bold('Discovery seeds'))
+      if (seeds.officialOrgs.length > 0) out.push(`  orgs      ${seeds.officialOrgs.join(', ')}`)
+      if (seeds.keywords.length > 0) out.push(`  keywords  ${seeds.keywords.join(', ')}`)
+      if (seeds.mcp.length > 0) out.push(`  mcp       ${seeds.mcp.join(', ')}`)
+      out.push(s.dim('  `anvil playbook discover` searches these; results stay in a cache.'))
+    }
     return out.join('\n')
   })
   return undefined

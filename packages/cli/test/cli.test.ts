@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
+import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
 
@@ -238,6 +239,18 @@ describe('anvil playbook', () => {
     assert.equal(res.code, 0)
     assert.match(res.stdout, /terraform, priority/)
     assert.match(res.stdout, /High-risk paths/)
+  })
+
+  test('show prints the discovery seeds, so what discover searches is inspectable', () => {
+    // `show` claims to render one playbook "in full" but left out the half of the file that
+    // governs `discover` -- and JSON printed it, so the text and JSON views disagreed about
+    // the same playbook.
+    const res = runAnvil(['playbook', 'show', 'terraform'])
+    assert.equal(res.code, 0)
+    assert.match(res.stdout, /Discovery seeds/)
+    assert.match(res.stdout, /orgs {6}hashicorp/)
+    assert.match(res.stdout, /keywords {2}terraform mcp server/)
+    assert.match(res.stdout, /mcp {7}terraform, opentofu/)
   })
 
   test('show also accepts --id, and says so when the id is unknown', () => {
@@ -477,6 +490,101 @@ describe('anvil playbook', () => {
     const res = runAnvil(['playbook', 'frobnicate'])
     assert.equal(res.code, 2)
     assert.match(res.stderr, /list, show, check, add/)
+  })
+})
+
+describe('playbook discover cache', () => {
+  interface DiscoverData {
+    playbooks: Array<{
+      id: string
+      entries: number
+      kept: number
+      sources: Array<{ source: string; detail: string; entries: number }>
+      sample: Array<{ label: string; tier: string; section: string; source: string }>
+    }>
+    cacheWritten: number
+    cacheSkipped: string[]
+    warnings: string[]
+  }
+
+  function cachedEntry(label: string): DiscoveryEntry {
+    return {
+      label,
+      url: `https://github.com/${label}`,
+      why: 'Fetched by an earlier run.',
+      tier: 'community',
+      section: 'community',
+      source: 'github-search',
+      fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+      stars: 1000,
+      install: null,
+      repo: label,
+      owner: label.slice(0, label.indexOf('/')),
+    }
+  }
+
+  test('a fresh cache answers without fetching, and says so', () => {
+    // Every rerun used to spend a rate limit to rediscover what was fetched an hour ago.
+    // `--refresh` is the request for a new answer; the absence of it is the request for the
+    // cached one.
+    const home = tempDir('anvil-discover-home-')
+    saveCache(
+      {
+        schemaVersion: 1,
+        playbookId: 'android',
+        fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+        entries: [cachedEntry('android/androidify')],
+      },
+      { ANVIL_CONFIG_HOME: home },
+    )
+
+    const res = runAnvil(['playbook', 'discover', 'android', '--json'], { env: { ANVIL_CONFIG_HOME: home } })
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+    const data = jsonOf(res).data as DiscoverData
+    const row = data.playbooks[0]
+    assert.ok(row !== undefined)
+    assert.equal(row.entries, 1)
+    assert.equal(row.kept, 1)
+    assert.equal(row.sources[0]?.source, 'cache')
+    assert.match(row.sources[0]?.detail ?? '', /--refresh/)
+    assert.equal(data.cacheWritten, 0, 'reusing a cache must not rewrite it')
+    assert.deepEqual(data.warnings, [])
+  })
+
+  test('--local-only scans the configured home and merges rather than replaces the cache', () => {
+    // Two defects pinned here. The scan used to read the developer's real home because the
+    // CLI never passed `ANVIL_CONFIG_HOME` through to the package, so a test could pass while
+    // a user's cache came from somewhere else. And the local-only run used to overwrite the
+    // cache with local entries only, silently dropping everything the network had found.
+    const home = tempDir('anvil-discover-home-')
+    const fetchedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
+    saveCache(
+      { schemaVersion: 1, playbookId: 'android', fetchedAt, entries: [cachedEntry('android/androidify')] },
+      { ANVIL_CONFIG_HOME: home },
+    )
+    const skillDir = join(home, '.agents', 'skills', 'zz-anvil-test-android')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: zz-anvil-test-android\ndescription: A fixture skill for Android discovery tests.\n---\n\nBody.\n',
+    )
+
+    const res = runAnvil(['playbook', 'discover', 'android', '--local-only', '--json'], {
+      env: { ANVIL_CONFIG_HOME: home },
+    })
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+    const data = jsonOf(res).data as DiscoverData
+    const row = data.playbooks[0]
+    assert.ok(row !== undefined)
+    assert.equal(row.entries, 1, 'this run found only the local skill')
+    assert.equal(row.kept, 1, 'the fetched half should be preserved from the cache')
+    assert.equal(row.sample[0]?.label, 'zz-anvil-test-android')
+    assert.equal(row.sources.find((s) => s.source === 'local-scan')?.entries, 1)
+
+    const after = loadCache('android', { ANVIL_CONFIG_HOME: home })
+    assert.equal(after.status, 'fresh')
+    assert.equal(after.cache?.entries.length, 2, 'both halves should be in the cache')
+    assert.equal(after.cache?.fetchedAt, fetchedAt, 'the network half should keep its original age')
   })
 })
 

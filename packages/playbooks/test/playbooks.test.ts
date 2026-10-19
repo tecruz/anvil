@@ -704,6 +704,7 @@ describe('plan', () => {
       detail: '',
       evidence: [],
       confidence: 0.5,
+      provenance: 'curated',
     }
     const b: Suggestion = {
       id: 'b',
@@ -712,6 +713,7 @@ describe('plan', () => {
       detail: '',
       evidence: [],
       confidence: 0.5,
+      provenance: 'curated',
     }
     assert.deepEqual(
       rankSuggestions([b, a]).map((s) => s.id),
@@ -728,6 +730,7 @@ describe('plan', () => {
         detail: '',
         evidence: [],
         confidence: 0.9,
+        provenance: 'curated',
         severity: 'low',
       },
       {
@@ -737,6 +740,7 @@ describe('plan', () => {
         detail: '',
         evidence: [],
         confidence: 0.1,
+        provenance: 'curated',
         severity: 'blocker',
       },
     ])

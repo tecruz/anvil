@@ -75,3 +75,11 @@ riskGlobs:
   - '**/priv/repo/migrations/**'
   - '**/config/*.exs'
   - '**/Dockerfile*'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['elixir-lang', 'phoenixframework']
+  keywords:
+    - 'elixir mcp server'
+    - 'phoenix liveview agents'
+    - 'elixir agent skills'
+  mcp: ['elixir', 'phoenix']

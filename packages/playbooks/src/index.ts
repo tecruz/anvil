@@ -27,6 +27,8 @@ export {
 } from './match.ts'
 export {
   buildPlan,
+  communityConfidence,
+  normalizeUrl,
   type Plan,
   type PlanTier,
   rankSuggestions,
@@ -45,6 +47,8 @@ export {
 export {
   type CommunityResource,
   type Conventions,
+  type DiscoverSeeds,
+  type LiveResource,
   type OfficialResources,
   type Playbook,
   type PlaybookMatch,

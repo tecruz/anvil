@@ -1,0 +1,14 @@
+{
+  "name": "@anvil/discovery",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Live discovery of official agent tooling and community resources for a technology.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anvil/core": "*",
+    "@anvil/playbooks": "*"
+  }
+}

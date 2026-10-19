@@ -42,6 +42,21 @@ official:
         Required before an AndroidX bump. Behaviour changes ship inside minor versions and
         are not always mentioned in release notes, so a diff of the release notes matters.
 
+# Live-discovery seeds. Questions to ask the network, not answers written down.
+#
+# This playbook shipped with `agents: []` above, and the reason is worth recording: Google
+# publishes an official `android` CLI and an agent-skills repository, so the empty list was
+# not "there is none" but "nobody had written it down yet". Nothing in the format could
+# notice the difference, which is what `discover` is for.
+discover:
+  officialOrgs: ['android', 'google']
+  keywords:
+    - 'android agent skills'
+    - 'android cli'
+    - 'android mcp server'
+    - 'jetpack compose agents'
+  mcp: ['android', 'gradle']
+
 community:
   - repo: 'android/nowinandroid'
     label: Now in Android

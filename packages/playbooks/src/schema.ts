@@ -37,6 +37,34 @@ export interface OfficialResources {
   migrationGuides: Resource[]
 }
 
+/**
+ * What to ask the network about a technology, rather than what it says today.
+ *
+ * The split from the rest of the playbook is the whole design. Which GitHub
+ * organisations speak officially for Android is hand-authored fact, exactly the kind
+ * of fact this registry exists to hold, and it changes on a scale of years. The
+ * repositories, agent skills and MCP servers those organisations publish change on a
+ * scale of weeks: Google shipped an official `android` CLI and a skills repository
+ * after this playbook was written, and nothing here could have recorded it.
+ *
+ * So the seeds are curated and reviewable, everything derived from them is fetched at
+ * runtime, labelled `live`, and merged *below* the curated entries. A promoted finding
+ * becomes curated data through a human editing YAML and opening a PR -- never by
+ * `anvil playbook discover`, which writes a proposal and nothing else.
+ *
+ * Deliberately no list of awesome-lists here. An awesome list is a curated resource, it
+ * rots like one, and `official.docs` already holds those with the probe that catches a
+ * dead link. A second copy in `discover` would rot separately and be checked separately.
+ */
+export interface DiscoverSeeds {
+  /** GitHub orgs or users that publish on behalf of the technology. */
+  officialOrgs: string[]
+  /** Repository-search terms. Kept generic enough that new repos match too. */
+  keywords: string[]
+  /** Search terms for the MCP registry. */
+  mcp: string[]
+}
+
 export interface CommunityResource extends Resource {
   repo: string
   /** Approximate stars, for ranking. `null` when unknown. */
@@ -56,6 +84,32 @@ export interface Conventions {
   moduleLayout: string | null
   testNaming: string | null
   reviewFocus: string[]
+}
+
+/**
+ * A resource found by live discovery, in the shape the plan needs.
+ *
+ * Declared here rather than imported from `@anvil/discovery` on purpose: discovery
+ * depends on playbooks, so playbooks depending on discovery would be a cycle. The types
+ * line up structurally instead, which is also the safer coupling -- the plan says what it
+ * needs, and the producer satisfies it without either package knowing the other's shape.
+ */
+export interface LiveResource {
+  url: string
+  label: string
+  why: string
+  /** `official` only when the owner is a seeded official org; otherwise `community`. */
+  tier: 'official' | 'community'
+  /** The playbook section this belongs in, which is also its label prefix in the plan. */
+  section: 'docs' | 'skills' | 'agents' | 'mcp' | 'styleGuides' | 'migrationGuides' | 'community'
+  /** Star count at fetch time. `null` when the source has no such number. */
+  stars: number | null
+  /** How to install it, when it is not just a URL to read. */
+  install: string | null
+  /** Which source produced it: `github-search`, `mcp-registry`, `local-scan`. */
+  source: string
+  /** ISO timestamp of the fetch that produced this entry. */
+  fetchedAt: string
 }
 
 export interface PlaybookMatch {
@@ -78,6 +132,8 @@ export interface Playbook {
   verify: PlaybookVerify
   conventions: Conventions
   riskGlobs: string[]
+  /** Live-discovery seeds. Empty when the playbook declares nothing to look for. */
+  discover: DiscoverSeeds
   /** File this playbook was loaded from, for provenance. */
   source?: string
 }
@@ -195,7 +251,7 @@ export function validatePlaybook(
   const doc = issuesOn(raw, '', issues)
   checkKeys(
     doc,
-    ['id', 'title', 'priority', 'match', 'official', 'community', 'verify', 'conventions', 'riskGlobs'],
+    ['id', 'title', 'priority', 'match', 'official', 'community', 'verify', 'conventions', 'riskGlobs', 'discover'],
     '',
     issues,
   )
@@ -232,6 +288,9 @@ export function validatePlaybook(
 
   const c = optionalSection(doc.conventions)
   checkKeys(c, ['moduleLayout', 'testNaming', 'reviewFocus'], 'conventions', issues)
+
+  const d = optionalSection(doc.discover)
+  checkKeys(d, ['officialOrgs', 'keywords', 'mcp'], 'discover', issues)
 
   const communityRaw = doc.community
   const community: CommunityResource[] = []
@@ -309,6 +368,11 @@ export function validatePlaybook(
         reviewFocus: strArray(c.reviewFocus, 'conventions.reviewFocus', issues),
       },
       riskGlobs: strArray(doc.riskGlobs, 'riskGlobs', issues),
+      discover: {
+        officialOrgs: strArray(d.officialOrgs, 'discover.officialOrgs', issues),
+        keywords: strArray(d.keywords, 'discover.keywords', issues),
+        mcp: strArray(d.mcp, 'discover.mcp', issues),
+      },
       source,
     },
     issues,

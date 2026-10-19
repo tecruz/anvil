@@ -5,12 +5,12 @@ Typescript project, with javascript.
 ## Commands
 
 - **Install:** `npm ci` _(detected)_ `package-lock.json`
-- **Build:** `npm run build` `AGENTS.md:7`
-- **Test:** `npm run test` `AGENTS.md:8`
-- **Test (changed files only):** `npm run test:changed` `CONTRIBUTING.md:17`
-- **Lint:** `npm run lint` `AGENTS.md:10`
-- **Format:** `npm run format` _(detected)_ `package.json:18`
-- **Typecheck:** `npm run typecheck` _(detected)_ `package.json:15`
+- **Build:** `npm run build` `AGENTS.md:8`
+- **Test:** `npm run test` `CONTRIBUTING.md:38`
+- **Test (changed files only):** `npm run test:changed` `README.md:85`
+- **Lint:** `npm run lint` `AGENTS.md:11`
+- **Format:** `npm run format` _(detected)_ `package.json:47`
+- **Typecheck:** `npm run typecheck` `AGENTS.md:13`
 
 ## Layout
 
@@ -18,6 +18,7 @@ Typescript project, with javascript.
 - `packages/cli` -- @anvil/cli
 - `packages/core` -- @anvil/core
 - `packages/derive` -- @anvil/derive (depends on @anvil/audit, @anvil/playbooks, @anvil/profile)
+- `packages/discovery` -- @anvil/discovery (depends on @anvil/core, @anvil/playbooks)
 - `packages/git` -- @anvil/git (depends on @anvil/core)
 - `packages/playbooks` -- @anvil/playbooks
 - `packages/plugin-opencode` -- opencode-anvil

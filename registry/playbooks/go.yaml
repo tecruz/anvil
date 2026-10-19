@@ -81,3 +81,11 @@ riskGlobs:
   - '**/go.sum'
   - '**/Dockerfile*'
   - '**/*.go'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['golang']
+  keywords:
+    - 'go mcp server'
+    - 'golang agent skills'
+    - 'gopls agent'
+  mcp: ['go', 'golang']

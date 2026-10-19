@@ -7,6 +7,9 @@
 > repositories, no false blockers -- is met, extended to five deliberately awkward shapes,
 > a subdirectory project, and every ecosystem detector. Twenty-seven repositories, no false
 > blocker among them.
+> Post-M6 additions: git-install distribution
+> ([ADR-0007](docs/adr/0007-distribution-git-install.md)) and live discovery
+> ([ADR-0008](docs/adr/0008-live-discovery-keeps-registry-curated.md)).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
 ## The problem
@@ -371,11 +374,12 @@ unimplemented commands as if they exist is how a plan stops being usable as a sp
 ```
 anvil profile [--json] [--profile <dir>]
 anvil doctor  [--json] [--layer <l>] [--fail-on <severity>] [--profile <dir>]
-anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>]
-anvil brief   --for agents|commands|skills|all    # verified facts for the LLM step
+anvil plan    [--json] [--tier derived|official|community] [--only <ids>] [--limit <n>] [--offline]
+anvil brief   --for agents|commands|skills|all [--offline]  # verified facts for the LLM step
 anvil init    [--apply] [--only <artifact>] [--allow-warnings]
 anvil playbook list | show <id> | check [--offline] [--probe] [--concurrency n] [--timeout ms] [--warnings]
 anvil playbook add <path|url> [--force]
+anvil playbook discover [<id>] [--all] [--local-only] [--refresh] [--offline] [--propose] [--limit <n>]
 anvil auth github | local
 
 anvil issue show|list|create|comment|set-state <ref>
@@ -583,6 +587,8 @@ entries are listed as plain text, not links, so this document has no dead refere
 | [ADR-0004](docs/adr/0004-local-provider-as-egress-escape-hatch.md) | `local` provider as the API-egress escape hatch | **written (M6)** |
 | [ADR-0005](docs/adr/0005-governance-ships-in-m4.md) | Governance ships in M4, not M6 | **written (M6)** |
 | [ADR-0006](docs/adr/0006-single-file-bundle-location.md) | Single-file bundle lives in `packages/cli/dist` | **written (M0)** |
+| [ADR-0007](docs/adr/0007-distribution-git-install.md) | Distribution is a git install; the workspace root is the package | **written (post-M6)** |
+| [ADR-0008](docs/adr/0008-live-discovery-keeps-registry-curated.md) | Live discovery enriches the plan; the registry stays curated | **written (post-M6)** |
 
 Each is written by the milestone that puts it under load, not before - an ADR for a decision
 no code has exercised yet is a guess with a date on it.
@@ -2041,3 +2047,100 @@ payload deadlocks the PowerShell pipeline, and that cost fifteen minutes before 
 diagnosed. And take commands from `profile --json`, never from `doctor --json`: the report
 has no `profile` key, and a script that reads one prints empty command lines for every
 repository while looking like a total detection failure.
+
+---
+
+## Live discovery — the registry learns to say "go and look" (2026-10-19)
+
+The registry is curated, and that is the feature. It is also a blind spot, and one file made
+it concrete: `android.yaml` listed no `official.agents` and no `official.mcp` entries at all,
+while Google ships an official `android` CLI and an `android/skills` repository. The entries
+had not been considered and rejected — there was nowhere in the format to record *"these orgs
+speak for this technology; go and find what they published."*
+[ADR-0008](docs/adr/0008-live-discovery-keeps-registry-curated.md) records the decision; this
+section records what building it cost.
+
+**What shipped.** A new package, `packages/discovery` (`@anvil/discovery`); a new command,
+`anvil playbook discover [<id>|--all] [--local-only] [--refresh] [--offline] [--propose]
+[--limit <n>]`; a `discover:` seed section in the playbook schema with `officialOrgs`,
+`keywords` and `mcp`, declared by all fifteen registry playbooks; `plan` and `brief` merging
+the cache and gaining `--offline`; `Suggestion.provenance` and `fetchedAt`; and the
+opencode plugin's `anvil_plan` description updated — its data already flowed through
+`anvil plan --json`, so no plugin code changed.
+
+**The rules, all of them visible in the output.** Seeds are curated, answers are fetched into
+`~/.anvil/cache/discovery/<id>.json` with a seven-day TTL; nothing ever writes to
+`registry/playbooks/`. `--propose` prints YAML with the source and fetch time as comments so
+a maintainer merges by hand; entries with no URL are dropped from proposals, because a
+playbook resource without a URL fails `check`, and local skills (no URL) therefore appear in
+the plan but are never proposed. Curated wins a contested URL. Live confidence is capped
+below curated — 0.65 for live official against 0.70–0.75 for curated, community at the star
+ladder minus 0.05 with a 0.3 floor — because a fetched entry nobody reviewed must not read
+as settled advice. A run that found nothing never overwrites a good cache, so a rate limit
+cannot become a week of "anvil found nothing." Transport is `gh`, then the REST API with a
+token, then anonymous with a warning printed; a source that cannot be reached contributes
+nothing and says so.
+
+**The cache is read, not rewritten.** Three defects here were found by review after the first
+green run. A fresh cache is reused without fetching, because rerunning the searches to
+rediscover an answer from an hour ago spends a rate limit to reproduce the same plan —
+`--refresh` is how a caller asks for a new answer. `--local-only` merges its partial view into
+the cache instead of replacing it, and keeps the original fetch time, so skipping the network
+does not delete what it found under `github-search`, nor launder the network half's age into
+"fresh". And `ANVIL_CONFIG_HOME` is honoured the whole way down: the CLI passed it to the
+cache path but not into the package, so a scan could read a different home from the cache it
+was merging with — pinned by a CLI test that plants a skill under the configured home and
+nothing in the real one.
+
+### The real machine found two defects the fixtures could not
+
+The same theme as the three audits, and the same cause: the defect lived inside a fixture's
+assumption.
+
+1. **The frontmatter parser truncated plain multi-line scalars.** Every SKILL.md fixture used
+   a single-line `description:`, so the plain-scalar path had never met a wrapped value.
+   Scanning 38 real installed skills found it immediately: a `description:` continued on the
+   next line was silently cut, and the truncated text was what the plan would have shown.
+   Fixed with continuation handling, and the parser now also reads the block scalars and
+   `- item` sequences real SKILL.md files use.
+2. **Local dedupe keyed on the install path.** `navigation-3` installed under `~/.agents`,
+   `~/.claude` and `~/.config/opencode` was reported three times — the same skill presented
+   as three findings. Dedupe is keyed on the skill name now, reported once, with "Also
+   installed in N other location(s)" kept because three copies that can drift is itself worth
+   knowing.
+3. **`--local-only` returned before dedupe.** The flag changed the result set, not just the
+   sources, so the same machine gave two different answers depending on it. One line, and it
+   is pinned by a test whose name says so.
+
+### Verified against the authoring machine, not a fixture
+
+```
+$ anvil playbook discover android --local-only
+Discovery  18 entries from 1 playbook(s)
+
+playbook  source         n   detail
+────────  ─────────────  ──  ─────────────────────────────────────────────────────
+android   local-scan     18  scanned 38 installed skill(s), 18 for this technology
+android   github-search  0   skipped (--local-only or offline)
+```
+
+Thirty-eight skills are installed on this machine; eighteen match Android's seeds, including
+`navigation-3` via `keywords:`, and the deliberately-adjacent skill that does not match is
+absent. That last part is the check that matters: a scan that returns everything returns
+nothing useful.
+
+**The suite was green at 760/760**, including the new tests that matter most — the proposal
+renderer round-trips its own YAML through this project's parser and validator, because a
+proposal is a file a maintainer will paste into the registry and "it looks about right" is
+not the standard the registry holds itself to. The live suites — `packages/providers/test/gh-live.test.ts`
+and `packages/discovery/test/live.test.ts`, both run by `npm run test:live` — stay behind
+`ANVIL_LIVE=1`, as the transport ADR requires, and CI runs their argv tier on every push:
+the flag shape is the part a mocked runner cannot see, and it is the part that has broken
+before. The search tier runs wherever `gh` is authenticated and skips itself otherwise, so
+an anonymous rate limit cannot fail a build for a reason that is not the code's.
+
+**Deliberately not built in v1:** per-repository contributor lookups (a request per repo to
+identify people rather than tooling, on top of search — a rate-limit cost with no matching
+question); automatic writes to the registry (a bad fetch would become permanent,
+reviewed-looking content); and MCP search beyond the official registry, which is the one
+index with a published schema to validate against.

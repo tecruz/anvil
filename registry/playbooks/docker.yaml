@@ -74,3 +74,11 @@ riskGlobs:
   - '**/compose*.y*ml'
   - '**/.dockerignore'
   - '**/.env*'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['docker', 'moby']
+  keywords:
+    - 'docker mcp server'
+    - 'dockerfile agent'
+    - 'container agent skills'
+  mcp: ['docker', 'kubernetes']

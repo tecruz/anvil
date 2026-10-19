@@ -72,3 +72,11 @@ riskGlobs:
   - '**/Podfile.lock'
   - '**/*.entitlements'
   - '**/Info.plist'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['swiftlang', 'apple']
+  keywords:
+    - 'swift mcp server'
+    - 'swiftui agent'
+    - 'apple developer agents'
+  mcp: ['swift', 'swiftui']

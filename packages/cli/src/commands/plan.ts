@@ -11,6 +11,7 @@ import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
 import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { loadLiveForPlan } from './discover.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const TIERS: readonly PlanTier[] = ['derived', 'official', 'community']
@@ -44,7 +45,7 @@ async function loadProfile(ctx: CommandContext, target: string | undefined): Pro
 export const planCommand: Command = {
   name: 'plan',
   summary: 'Rank fixes as derived / official / community.',
-  usage: 'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>]',
+  usage: 'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>] [--offline]',
   details: [
     'Three tiers, ranked in this order:',
     '',
@@ -56,9 +57,14 @@ export const planCommand: Command = {
     '',
     'Reads only. Nothing is written to the repository.',
     '',
+    'Guidance from `anvil playbook discover` is merged in, marked live and ranked below the',
+    'curated entries of the same tier. It reads a cache in your home directory, so it costs',
+    'no network here; run `anvil playbook discover` to populate it.',
+    '',
     '--tier <t>     only suggestions from one tier (derived, official, community)',
     '--only <ids>   comma-separated suggestion ids, e.g. fix:AGENTS_FILE',
     '--limit <n>    show at most n suggestions',
+    '--offline      ignore the discovery cache entirely',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -67,6 +73,7 @@ export const planCommand: Command = {
     tier: { type: 'string', multiple: true },
     only: { type: 'string' },
     limit: { type: 'string' },
+    offline: { type: 'boolean' },
   },
 
   async run(ctx, rawArgs) {
@@ -77,7 +84,16 @@ export const planCommand: Command = {
     const { playbooks, warnings } = loadPlaybooks(process.env)
     const matches = matchPlaybooks(profile, playbooks)
     const report: ReadinessReport = audit(profile)
-    const plan = buildPlan(report, profile, matches, warnings)
+
+    // Discovery runs *after* matching, because the cache is keyed by playbook id and a
+    // playbook that did not match contributes nothing. Reading it before would mean
+    // reporting cached entries for technologies this repository does not use.
+    const offline = args.values.offline === true
+    const { live, warnings: liveWarnings } = offline
+      ? { live: new Map(), warnings: [] }
+      : loadLiveForPlan(matches.map((m) => m.playbook.id))
+
+    const plan = buildPlan(report, profile, matches, [...warnings, ...liveWarnings], live)
 
     const tiers = parseTiers(args.values.tier)
     const only = parseIds(args.values.only)
@@ -166,7 +182,14 @@ function renderPlan(ctx: CommandContext, plan: Plan): string {
     const items = plan.suggestions.filter((s2) => s2.tier === tier)
     if (items.length === 0) continue
     out.push('')
-    out.push(s.bold(`${tier} (${items.length})`))
+    // The live count is called out per tier rather than marked on each row: a plan can carry
+    // dozens of live entries, and a per-row marker would put `live` on most of a screen
+    // without telling the reader anything they would act on differently.
+    const liveCount = items.filter((i) => i.provenance === 'live').length
+    out.push(
+      s.bold(`${tier} (${String(items.length)})`) +
+        (liveCount === 0 ? '' : s.dim(`  ${String(liveCount)} live, from \`anvil playbook discover\``)),
+    )
     out.push(
       renderTable(
         ['#', 'suggestion', 'conf', 'detail'],

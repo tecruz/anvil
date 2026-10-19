@@ -78,18 +78,26 @@ jobs:
       - name: every url in the registry still resolves
         run: node packages/cli/dist/cli.js playbook check
 
-  # The live `gh` contract suite is deliberately not in the matrix above: it needs the gh
-  # binary, and on some runners it would authenticate as nobody. It is the check that
+  # The live `gh` contract suites are deliberately not in the matrix above: they need the gh
+  # binary, and on some runners it would authenticate as nobody. They are the check that
   # catches "the flag we pass is not a flag gh has" -- eight defects in one family, none of
-  # which the mocked suite could see -- so it runs where gh is available.
+  # which the mocked suite could see -- so they run where gh is available. The discovery
+  # suite is here for the same reason: its argv is built in the same shape, and a wrong flag
+  # would fail every search the tool makes.
   #
-  # Two things make it a gate rather than a report nobody reads:
+  # Three things make this a gate rather than a report nobody reads:
   #
-  #   1. `ANVIL_LIVE=1` is set here. The suite skips itself without it, and the first version
-  #      of this job ran `npm run test:live` with no such variable: zero tests, green build,
-  #      and a comment claiming the suite could not skip silently. It skipped silently.
-  #   2. The output is grepped for a passing test, so a future rename that empties the file
+  #   1. `ANVIL_LIVE=1` is set here. The suites skip themselves without it, and the first
+  #      version of this job ran `npm run test:live` with no such variable: zero tests, green
+  #      build, and a comment claiming the suite could not skip silently. It skipped silently.
+  #   2. The output is grepped for a passing test, so a future rename that empties a file
   #      fails the job instead of reporting a reassuring zero.
+  #   3. Each file is checked on its own, so one suite passing cannot cover for another
+  #      having emptied itself.
+  #
+  # The search tier of the discovery suite needs credentials and skips itself without them:
+  # an anonymous search is capped at ten requests a minute, which a shared runner address is
+  # already past, so that tier would fail for reasons that are not the code's.
   gh-contract:
     name: gh contract (live)
     runs-on: ubuntu-latest
@@ -115,8 +123,10 @@ jobs:
         env:
           ANVIL_LIVE: '1'
         run: |
-          out=$(node --test --test-reporter=spec packages/providers/test/gh-live.test.ts 2>&1) || { echo "$out"; exit 1; }
-          echo "$out"
-          # The summary prints `pass <n>`. Zero tests is how a skipped suite reports success,
-          # so the count is checked rather than assumed: an empty or renamed file must fail.
-          echo "$out" | grep -Eq 'pass [1-9][0-9]*' || { echo "::error::the live gh contract suite ran zero tests"; exit 1; }
+          for file in packages/providers/test/gh-live.test.ts packages/discovery/test/live.test.ts; do
+            out=$(node --test --test-reporter=spec "$file" 2>&1) || { echo "$out"; exit 1; }
+            echo "$out"
+            # The summary prints `pass <n>`. Zero tests is how a skipped suite reports success,
+            # so the count is checked rather than assumed: an empty or renamed file must fail.
+            echo "$out" | grep -Eq 'pass [1-9][0-9]*' || { echo "::error::$file ran zero tests"; exit 1; }
+          done

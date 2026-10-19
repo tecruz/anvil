@@ -86,3 +86,11 @@ riskGlobs:
   - '**/routes/**'
   - '**/.env*'
   - '**/Dockerfile*'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['php', 'laravel']
+  keywords:
+    - 'php mcp server'
+    - 'laravel agent'
+    - 'symfony agents'
+  mcp: ['php', 'laravel']

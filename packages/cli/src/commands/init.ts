@@ -40,6 +40,7 @@ import {
 import { discoverRepo } from '@anvil/git'
 import { loadPlaybooks, type MatchResult, matchPlaybooks, type Playbook } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { loadLiveForPlan } from './discover.ts'
 import type { Command, CommandContext } from './types.ts'
 
 function detectHost(remote: string | null): 'github' | 'gitlab' | 'bitbucket' | 'azure' | null {
@@ -97,7 +98,7 @@ const TARGETS: readonly BriefTarget[] = ['agents', 'commands', 'skills', 'all']
 export const briefCommand: Command = {
   name: 'brief',
   summary: 'Emit verified facts for the LLM step.',
-  usage: 'anvil brief --for <agents|commands|skills|all> [--json] [--profile <dir>]',
+  usage: 'anvil brief --for <agents|commands|skills|all> [--json] [--profile <dir>] [--offline]',
   details: [
     'Every value here is verified against the repository and carries evidence. Nothing',
     'is a guess, and no model is called: anvil hands the facts over, and the agent turns',
@@ -105,12 +106,15 @@ export const briefCommand: Command = {
     '',
     'The `gaps` field is the part that keeps generated guidance honest. It lists what the',
     'repository lacks, so a model does not write instructions for things already present.',
+    '',
+    '--offline      ignore the discovery cache; the guidance is curated only',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
     for: { type: 'string' },
+    offline: { type: 'boolean' },
   },
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, briefCommand.flags)
@@ -123,12 +127,19 @@ export const briefCommand: Command = {
 
     const dir = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const { root, profile, report, matches } = await loadAll(ctx, dir)
+    // From the discovery cache, keyed by the playbooks that matched. Read here rather than
+    // inside `buildBrief` so this package stays free of a dependency it does not need, and
+    // so a brief can be built with no cache at all on a machine that has never run
+    // `anvil playbook discover`.
+    const { live } =
+      args.values.offline === true ? { live: new Map() } : loadLiveForPlan(matches.map((m) => m.playbook.id))
     const brief = buildBrief({
       profile,
       report,
       matches,
       target: target as BriefTarget,
       read: (rel) => readRepoFile(root, rel),
+      live,
     })
 
     ctx.out(brief, () => renderBrief(ctx, brief))

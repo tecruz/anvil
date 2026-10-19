@@ -80,3 +80,11 @@ riskGlobs:
   - '**/db/schema.rb'
   - '**/config/routes.rb'
   - '**/Dockerfile*'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['ruby', 'rails']
+  keywords:
+    - 'ruby mcp server'
+    - 'rails agents'
+    - 'ruby agent skills'
+  mcp: ['ruby', 'rails']

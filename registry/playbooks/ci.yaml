@@ -72,3 +72,11 @@ riskGlobs:
   - '**/.circleci/**'
   - '**/azure-pipelines.yml'
   - '**/codecov.yml'
+# Live-discovery seeds; see ndroid.yaml for why this section exists.
+discover:
+  officialOrgs: ['github', 'actions']
+  keywords:
+    - 'github actions agent'
+    - 'ci pipeline linter'
+    - 'workflow validation'
+  mcp: ['github-actions', 'ci']
