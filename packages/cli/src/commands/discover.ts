@@ -24,9 +24,10 @@
 import { AnvilError, ErrorCode, renderTable } from '@anvil/core'
 import {
   type DiscoveryEntry,
-  dedupeEntries,
   type FetchImpl,
   loadCache,
+  mergeBySource,
+  oldestEntryTimestamp,
   proposePlaybookYaml,
   type RefreshResult,
   type RunOptions,
@@ -125,7 +126,14 @@ export async function runDiscover(
       results.push({
         playbookId: playbook.id,
         entries,
-        sources: [{ source: 'cache', detail: `${cached.detail}; --refresh to fetch again`, entries: entries.length }],
+        sources: [
+          {
+            source: 'cache',
+            detail: `${cached.detail}; --refresh to fetch again`,
+            entries: entries.length,
+            answered: true,
+          },
+        ],
         warnings: [],
         kept: entries.length,
       })
@@ -144,20 +152,17 @@ export async function runDiscover(
       continue
     }
 
-    // A local-only run is a partial view of the cache's world, so it merges rather than
-    // replaces: erasing fetched entries because the network was skipped would make the next
-    // `plan` quietly lose guidance it had yesterday. The file keeps its original fetch time,
-    // so the network half is still reported as old rather than laundered into fresh.
-    let prior: DiscoveryEntry[] = []
-    let priorFetchedAt: string | null = null
-    if (cached !== null && cached.cache !== null) {
-      prior = usableEntries(cached)
-      priorFetchedAt = cached.cache.fetchedAt
-    }
-    const merge = (localOnly === true || values.offline === true) && priorFetchedAt !== null
-    const entries = merge ? dedupeEntries([...result.entries, ...prior]) : result.entries
-    const fetchedAt = merge && priorFetchedAt !== null ? priorFetchedAt : new Date().toISOString()
-    writes.push({ playbookId: playbook.id, entries, fetchedAt })
+    // The merge is per source: a source that answered replaces its own entries, and a
+    // source that could not be reached keeps the ones it contributed last time. A run where
+    // GitHub is rate-limited but the MCP registry answers must not erase the GitHub half of
+    // the cache -- the next plan would then show less live guidance than the one before it,
+    // with nothing to say why.
+    const prior = cached !== null && cached.cache !== null ? usableEntries(cached) : []
+    const entries = mergeBySource(prior, result.entries, result.sources)
+    // Only what came back is written. A run that found nothing leaves the cache alone, and
+    // the file's timestamp is the age of its oldest entry, so a merged cache never looks
+    // fresher than the part of it that is actually old.
+    writes.push({ playbookId: playbook.id, entries, fetchedAt: oldestEntryTimestamp(entries) })
     results.push({ ...result, kept: entries.length - result.entries.length })
   }
 

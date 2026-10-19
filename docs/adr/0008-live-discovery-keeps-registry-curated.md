@@ -41,6 +41,15 @@ so a rate limit cannot become seven days of "anvil found nothing." While the cac
 into the cache instead of replacing it, keeping the original fetch time so the network half
 still reports as old.
 
+**The merge is per source.** A source that answered replaces its own entries; a source that
+could not be reached keeps them. Discovery has three sources that answer independently, and
+writing whatever a run found meant that a rate-limited GitHub erased the cached GitHub half
+while the MCP registry answered with its own — the next plan then showed less live guidance
+than the one before it, with nothing to say why, and the conclusion a reader would draw was
+the one the tool was never entitled to draw. The cache's timestamp is the age of its oldest
+entry rather than the time the file was written, so a merged cache never looks fresher than
+the part of it that is actually old.
+
 **Curated always wins a contested URL**, and live confidence is capped below curated:
 official live entries at 0.65 against curated official 0.7–0.75, community live at the star
 ladder minus 0.05 with a 0.3 floor. A fetched entry nobody reviewed must not read as settled

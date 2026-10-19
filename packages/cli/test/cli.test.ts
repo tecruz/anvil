@@ -514,7 +514,7 @@ describe('playbook discover cache', () => {
     warnings: string[]
   }
 
-  function cachedEntry(label: string): DiscoveryEntry {
+  function cachedEntry(label: string, fetchedAt = new Date(Date.now() - 60_000).toISOString()): DiscoveryEntry {
     return {
       label,
       url: `https://github.com/${label}`,
@@ -522,7 +522,7 @@ describe('playbook discover cache', () => {
       tier: 'community',
       section: 'community',
       source: 'github-search',
-      fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+      fetchedAt,
       stars: 1000,
       install: null,
       repo: label,
@@ -566,7 +566,15 @@ describe('playbook discover cache', () => {
     const home = tempDir('anvil-discover-home-')
     const fetchedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
     saveCache(
-      { schemaVersion: 1, playbookId: 'android', fetchedAt, entries: [cachedEntry('android/androidify')] },
+      {
+        schemaVersion: 1,
+        playbookId: 'android',
+        fetchedAt,
+        entries: [
+          cachedEntry('android/androidify', fetchedAt),
+          { ...cachedEntry('android/mcp-server', fetchedAt), source: 'mcp-registry', url: 'https://example.test/mcp' },
+        ],
+      },
       { ANVIL_CONFIG_HOME: home },
     )
     const skillDir = join(home, '.agents', 'skills', 'zz-anvil-test-android')
@@ -584,13 +592,13 @@ describe('playbook discover cache', () => {
     const row = data.playbooks[0]
     assert.ok(row !== undefined)
     assert.equal(row.entries, 1, 'this run found only the local skill')
-    assert.equal(row.kept, 1, 'the fetched half should be preserved from the cache')
+    assert.equal(row.kept, 2, 'both fetched entries should be preserved from the cache')
     assert.equal(row.sample[0]?.label, 'zz-anvil-test-android')
     assert.equal(row.sources.find((s) => s.source === 'local-scan')?.entries, 1)
 
     const after = loadCache('android', { ANVIL_CONFIG_HOME: home })
     assert.equal(after.status, 'fresh')
-    assert.equal(after.cache?.entries.length, 2, 'both halves should be in the cache')
+    assert.equal(after.cache?.entries.length, 3, 'the local skill and both fetched entries')
     assert.equal(after.cache?.fetchedAt, fetchedAt, 'the network half should keep its original age')
   })
 })

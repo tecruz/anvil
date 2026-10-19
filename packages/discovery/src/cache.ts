@@ -32,7 +32,14 @@ const TTL_MS = DEFAULT_TTL_DAYS * 24 * 60 * 60 * 1000
 export interface CacheFile {
   schemaVersion: 1
   playbookId: string
-  /** ISO timestamp of the run that produced these entries. */
+  /**
+   * When the cache's *oldest* entry was fetched.
+   *
+   * Not when the file was written. The two differ as soon as a run merges: a local scan
+   * today plus network entries from last month is a file written today and as old as its
+   * oldest answer, and a timestamp that said "today" would make a month-old half look
+   * fresh. The age of the cache is the age of the least fresh thing in it.
+   */
   fetchedAt: string
   entries: DiscoveryEntry[]
 }
@@ -142,6 +149,21 @@ export function saveCache(file: CacheFile, env: NodeJS.ProcessEnv = process.env)
 export function usableEntries(read: CacheRead): DiscoveryEntry[] {
   if (read.cache === null) return []
   return read.cache.entries.filter(isEntry)
+}
+
+/**
+ * The timestamp of the oldest entry, which is the age of the cache.
+ *
+ * Falls back to now when no entry carries a usable timestamp, because a cache that cannot
+ * be aged must not read as brand new.
+ */
+export function oldestEntryTimestamp(entries: readonly DiscoveryEntry[]): string {
+  let oldest = Number.POSITIVE_INFINITY
+  for (const entry of entries) {
+    const parsed = Date.parse(entry.fetchedAt)
+    if (Number.isFinite(parsed) && parsed < oldest) oldest = parsed
+  }
+  return new Date(Number.isFinite(oldest) ? oldest : Date.now()).toISOString()
 }
 
 /**

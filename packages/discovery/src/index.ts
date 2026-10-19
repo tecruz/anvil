@@ -23,7 +23,10 @@
  *   3. **A source that cannot be reached says so and contributes nothing.** `gh` missing,
  *      no token, a rate limit, a timeout -- each is a partial result with a warning, never
  *      a silently smaller list that reads like a complete one. "I don't know" is an answer,
- *      and it is the answer this package gives when the network does not cooperate.
+ *      and it is the answer this package gives when the network does not cooperate. What a
+ *      source that does not know must not do is erase what it knew last time: the merge is
+ *      per source, so an unreachable GitHub leaves the cached GitHub entries alone while the
+ *      MCP registry answers with its own.
  *
  * Network I/O is behind injected seams throughout, for the reason `check.ts` already
  * documents: a test that reads whatever the developer's network happens to return is not a
@@ -41,6 +44,7 @@ export {
   discoveryCacheDir,
   isEntry,
   loadCache,
+  oldestEntryTimestamp,
   saveCache,
   usableEntries,
 } from './cache.ts'
@@ -70,6 +74,7 @@ export {
   skillSearchRoots,
 } from './localScan.ts'
 export { DEFAULT_MCP_REGISTRY, fetchMcpServers, type McpEntry, type McpOptions, parseServers } from './mcpRegistry.ts'
+export { mergeBySource, unansweredSources } from './merge.ts'
 export { citedUrls, type ProposalBlock, proposePlaybookYaml, rankForProposal } from './propose.ts'
 export { type RefreshResult, refreshLive } from './refresh.ts'
 export {

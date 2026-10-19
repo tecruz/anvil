@@ -290,11 +290,22 @@ describe('fetchMcpServers', () => {
   })
 
   test('reports an unreachable registry without throwing', async () => {
+    // The old wording said "no servers matched", which claimed the registry had answered.
+    // It had not been reached at all, and a report that says "answered" when nothing was
+    // asked is a report that lies in the reassuring direction.
     const fetchImpl: FetchImpl = async () => {
       throw new Error('offline')
     }
     const result = await fetchMcpServers(['android'], { fetchImpl })
     assert.deepEqual(result.entries, [])
+    assert.equal(result.answered, false)
+    assert.match(result.detail, /could not be reached/)
+  })
+
+  test('a registry that answered and matched nothing says so, and says it answered', async () => {
+    const fetchImpl: FetchImpl = async () => ({ status: 200, text: async () => JSON.stringify({ servers: [] }) })
+    const result = await fetchMcpServers(['android'], { fetchImpl })
+    assert.equal(result.answered, true)
     assert.match(result.detail, /no servers matched/)
   })
 

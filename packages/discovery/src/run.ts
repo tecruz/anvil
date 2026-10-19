@@ -127,6 +127,8 @@ export function discoverLocal(
           ? `scanned ${String(skills.length)} installed skill(s), none for this technology`
           : `scanned ${String(skills.length)} installed skill(s), ${String(entries.length)} for this technology`,
       entries: entries.length,
+      // The scan reads files on this machine. It cannot fail to answer.
+      answered: true,
     },
   }
 }
@@ -146,7 +148,7 @@ export async function runDiscovery(
   entries.push(...local.entries)
 
   if (options.localOnly === true || options.online === false) {
-    sources.push({ source: 'github-search', detail: 'skipped (--local-only or offline)', entries: 0 })
+    sources.push({ source: 'github-search', detail: 'skipped (--local-only or offline)', entries: 0, answered: false })
     // Dedupe here as well as below. This early return was the bug: `--local-only` produced
     // raw entries while a full run produced deduped ones, so the same machine gave two
     // different answers for the same skills depending on a flag.
@@ -193,7 +195,7 @@ export async function runDiscovery(
       }
     })
     entries.push(...mcpEntries)
-    sources.push({ source: 'mcp-registry', detail: mcp.detail, entries: mcpEntries.length })
+    sources.push({ source: 'mcp-registry', detail: mcp.detail, entries: mcpEntries.length, answered: mcp.answered })
   }
 
   return { playbookId: id, entries: dedupeEntries(entries), sources, warnings, kept: 0 }

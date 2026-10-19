@@ -2110,6 +2110,25 @@ registry record carries a URL and a name and no owner; when that URL is a GitHub
 the same org check the search results get applies to it. A server published as a running
 endpoint has no owner to check and stays community — there is no evidence either way.
 
+**A second review pass found three more, and they were all the same mistake.** The package
+claims a source that cannot be reached contributes nothing and says so, and in three places
+it did the opposite. The MCP registry, when it was unreachable, reported "registry answered,
+no servers matched" — it had not been reached at all, and a report that says "answered" when
+nothing was asked lies in the reassuring direction. The source notes had no machine-readable
+answer flag, so a caller could not tell "answered, and found nothing" from "could not ask"
+except by reading a detail string. And the cache write took whatever the run found, so a run
+whose GitHub search was rate-limited but whose MCP registry answered wrote a cache holding
+only the MCP entries: the GitHub half was erased by a source that simply did not run, and
+the next plan showed less live guidance than the one before it, with nothing to say why.
+
+The merge is per source now, and it is one sentence: **a source that answered replaces its
+own entries; a source that could not be reached keeps them.** Not knowing is not the same as
+knowing there is nothing, and the difference is exactly what the cache is for. The cache's
+timestamp is the age of its oldest entry rather than the time the file was written, because
+a merged cache that claimed to be fresh would launder a month-old half into a day-old one.
+A source that answered with nothing still replaces its entries — that is a real answer, and
+a source that stopped publishing must not keep its entries forever.
+
 ### The real machine found two defects the fixtures could not
 
 The same theme as the three audits, and the same cause: the defect lived inside a fixture's

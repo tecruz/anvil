@@ -80,6 +80,15 @@ export interface SourceNote {
   /** What the source produced, or why it produced nothing. */
   detail: string
   entries: number
+  /**
+   * Whether the source answered at all.
+   *
+   * The difference between "answered, and found nothing" and "could not be asked" is the
+   * difference between a fact and an absence, and the detail string alone cannot carry it
+   * safely. It is also what decides whether the source's previous answers survive a refresh:
+   * a source that could not be reached must not erase what it contributed last time.
+   */
+  answered: boolean
 }
 
 export interface PlaybookDiscovery {
@@ -378,7 +387,7 @@ export async function discover(
   const entries: DiscoveryEntry[] = []
 
   if (options.online === false) {
-    sources.push({ source: 'github-search', detail: 'skipped, offline', entries: 0 })
+    sources.push({ source: 'github-search', detail: 'skipped, offline', entries: 0, answered: false })
     return { playbookId, entries, sources, warnings }
   }
 
@@ -409,9 +418,9 @@ export async function discover(
     warnings.push(
       `${playbookId}: no transport could reach GitHub (gh unavailable, no token, or the network is blocked)`,
     )
-    sources.push({ source: 'github-search', detail: 'no transport available', entries: 0 })
+    sources.push({ source: 'github-search', detail: 'no transport available', entries: 0, answered: false })
   } else {
-    sources.push({ source: 'github-search', detail, entries: agentish.length })
+    sources.push({ source: 'github-search', detail, entries: agentish.length, answered: true })
     if (agentish.length === 0) {
       warnings.push(`${playbookId}: GitHub answered, but nothing matching these seeds is agent tooling`)
     }

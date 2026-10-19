@@ -16,8 +16,9 @@
  */
 
 import type { DiscoverSeeds } from '@anvil/playbooks'
-import { loadCache, saveCache, usableEntries } from './cache.ts'
+import { loadCache, oldestEntryTimestamp, saveCache, usableEntries } from './cache.ts'
 import type { DiscoveryEntry } from './github.ts'
+import { mergeBySource } from './merge.ts'
 import { type RunOptions, runDiscovery } from './run.ts'
 
 export interface RefreshResult {
@@ -51,16 +52,18 @@ export async function refreshLive(
     const result = await runDiscovery(playbook, options)
     warnings.push(...result.warnings)
 
+    // The same per-source rule as the cache write: a source that answered replaces its own
+    // entries, a source that could not be reached keeps the ones it contributed last time.
+    const previous = usableEntries(loadCache(playbook.id, env))
+    const entries = mergeBySource(previous, result.entries, result.sources)
+
     if (result.entries.length === 0) {
       // A refresh that found nothing keeps what the last run found. The cache is only
       // replaced by an answer, and "no answer" is not an answer -- a plan that lost its
       // live guidance because a registry was briefly unreachable would look like the
       // ecosystem having published nothing.
-      const previous = usableEntries(loadCache(playbook.id, env))
-      if (previous.length > 0) {
-        live.set(playbook.id, previous)
-        warnings.push(`${playbook.id}: the refresh found nothing; the cached entries were kept`)
-      }
+      if (entries.length > 0) live.set(playbook.id, entries)
+      warnings.push(`${playbook.id}: the refresh found nothing; the cached entries were kept`)
       continue
     }
 
@@ -68,13 +71,15 @@ export async function refreshLive(
       {
         schemaVersion: 1,
         playbookId: result.playbookId,
-        fetchedAt: new Date().toISOString(),
-        entries: result.entries,
+        // The age of the cache is the age of its oldest entry, so a half that could not be
+        // refreshed keeps reporting itself as old.
+        fetchedAt: oldestEntryTimestamp(entries),
+        entries,
       },
       env,
     )
     cached.push(path)
-    live.set(playbook.id, result.entries)
+    live.set(playbook.id, entries)
   }
 
   return { live, warnings, cached }

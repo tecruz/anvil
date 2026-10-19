@@ -82,17 +82,25 @@ export function parseServers(body: string): McpEntry[] {
 /**
  * Query the registry for servers matching any of a playbook's terms.
  *
- * Returns `{ entries, detail }` rather than throwing: an unreachable registry is a warning
- * and nothing else. A run that cannot reach one of three sources still returns the other two.
+ * Returns `{ entries, detail, answered }` rather than throwing: an unreachable registry is
+ * a warning and nothing else. A run that cannot reach one of three sources still returns the
+ * other two.
+ *
+ * `answered` is the part that matters. "The registry answered and no server matched" and
+ * "the registry could not be reached" are different facts, and the detail string alone
+ * cannot carry the difference safely -- a report that says "answered" when nothing was
+ * asked is a report that lies in the reassuring direction.
  */
 export async function fetchMcpServers(
   terms: readonly string[],
   options: McpOptions,
-): Promise<{ entries: McpEntry[]; detail: string }> {
-  if (terms.length === 0) return { entries: [], detail: 'no mcp terms seeded' }
+): Promise<{ entries: McpEntry[]; detail: string; answered: boolean }> {
+  if (terms.length === 0) return { entries: [], detail: 'no mcp terms seeded', answered: true }
   const registry = (options.registry ?? DEFAULT_MCP_REGISTRY).replace(/\/+$/, '')
   const limit = options.limit ?? DEFAULT_LIMIT
   const seen = new Map<string, McpEntry>()
+  let asked = 0
+  let failed = 0
 
   for (const term of terms) {
     const url = `${registry}/v0/servers?search=${encodeURIComponent(term)}&limit=${String(limit)}`
@@ -100,17 +108,28 @@ export async function fetchMcpServers(
       fetchImpl: options.fetchImpl,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     })
-    if (res.transportError !== undefined) continue
-    if (res.status !== 200) continue
+    if (res.transportError !== undefined) {
+      failed++
+      continue
+    }
+    if (res.status !== 200) {
+      failed++
+      continue
+    }
+    asked++
     for (const entry of parseServers(res.body)) {
       if (!seen.has(entry.name)) seen.set(entry.name, entry)
     }
   }
 
   const entries = [...seen.values()].slice(0, limit)
-  return {
-    entries,
-    detail:
-      entries.length === 0 ? 'registry answered, no servers matched' : `registry: ${String(entries.length)} server(s)`,
-  }
+  const detail =
+    asked === 0
+      ? 'the registry could not be reached'
+      : failed > 0
+        ? `registry: ${String(entries.length)} server(s), ${String(failed)} of ${String(terms.length)} query(s) failed`
+        : entries.length === 0
+          ? 'registry answered, no servers matched'
+          : `registry: ${String(entries.length)} server(s)`
+  return { entries, detail, answered: asked > 0 }
 }
