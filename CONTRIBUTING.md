@@ -6,7 +6,7 @@ from problems this repository has actually had.
 ## Before you push
 
 ```bash
-npm run check     # lint, typecheck, the whole suite, the build
+npm run check     # lint, typecheck, the whole suite, the build, the docs check
 ```
 
 That is exactly what CI runs, on Windows, Linux and macOS. `anvil doctor` calls the same
@@ -90,6 +90,40 @@ If you would rather not install anything globally, the equivalent is
 Biome enforces formatting and lint (`biome.jsonc`); `npm run lint:fix` applies the safe
 fixes. The three rules switched off have the reason recorded next to them, so read those
 before deciding one of them is wrong.
+
+## The documentation
+
+The documents have different jobs, and putting two of them in one file is how a
+document stops answering either question:
+
+| Document | Its job |
+| --- | --- |
+| `README.md` | why anvil exists, and how to install it |
+| `docs/USAGE.md` | the manual: what to run, what it writes, the exit codes |
+| `docs/ARCHITECTURE.md` | the module map, the contracts, where the state lives |
+| `docs/adr/` | one decision per document, with the alternatives that were rejected |
+| `CONTRIBUTING.md` | the conventions, and what CI runs |
+| `SECURITY.md` | how to report a vulnerability, and what is out of scope |
+| `IMPLEMENTATION_PLAN.md` | the history: the design, the milestones, the defects |
+
+Three rules, and they are the reason `npm run check` includes a docs check:
+
+- **One fact, one place.** A command's flags are documented by `anvil <command> --help`,
+  and the usage guide points at that instead of repeating it. If a document and the code
+  disagree, the code wins and the document is a bug.
+- **A named command is a real command.** `npm run check:docs` reads every document and
+  fails when it names an `anvil <command>` that does not exist, an `npm run <script>` the
+  manifest does not have, or a relative link that points at nothing. Documentation that
+  names a command which was renamed is the same defect as a test that asserts a
+  function that was deleted. The one exception is `IMPLEMENTATION_PLAN.md`: it is
+  history, and history records the commands and scripts that existed at the time. Its
+  links are still checked, because a link in a historical document is either right or
+  broken.
+- **Evidence is a file and a line.** `AGENTS.md` in this repository is generated, and its
+  command entries cite where the command was found -- `CONTRIBUTING.md:38`, and so on.
+  Editing one of those files moves the line numbers, so the citation is stale the moment
+  you save. Run `anvil init` to see the diff and `anvil init --apply` to write it; do not
+  hand-edit the generated file.
 
 ## Working on a ticket
 

@@ -1,15 +1,18 @@
 # Security policy
 
-> **This file is a template. Replace the contact address before publishing.**
->
-> A security contact that is not monitored is worse than none: a researcher who mails a
-> real vulnerability and gets nothing back concludes the project is not worth reporting to.
-> Fill in the address below, and prefer a dedicated inbox over a personal one.
-
 ## Reporting a vulnerability
 
-Report it privately to **TODO: security contact address** (a dedicated inbox such as
-`security@TODO-DOMAIN`). Please do not open a public issue for a vulnerability.
+Report it privately, through GitHub's private vulnerability reporting for this repository:
+
+<https://github.com/tecruz/anvil/security/advisories/new>
+
+That opens a private advisory: only you and the maintainer can read it, and nothing is
+published until the maintainer opens a draft. Please do not describe a vulnerability in a
+public issue.
+
+If that page is unavailable, private reporting is switched off for this repository. Open
+an issue titled `security report` containing nothing but that sentence: it leaks no
+detail, and the maintainer answers with a private channel.
 
 Include, as far as you can:
 

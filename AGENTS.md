@@ -7,7 +7,7 @@ Typescript project, with javascript.
 - **Install:** `npm ci` _(detected)_ `package-lock.json`
 - **Build:** `npm run build` `AGENTS.md:8`
 - **Test:** `npm run test` `CONTRIBUTING.md:38`
-- **Test (changed files only):** `npm run test:changed` `README.md:85`
+- **Test (changed files only):** `npm run test:changed` `README.md:105`
 - **Lint:** `npm run lint` `AGENTS.md:11`
 - **Format:** `npm run format` _(detected)_ `package.json:47`
 - **Typecheck:** `npm run typecheck` `AGENTS.md:13`
@@ -33,6 +33,10 @@ Typescript project, with javascript.
 Changes here reach past code review. Say so in the PR description and get a second pair of eyes.
 
 - `.github/workflows/**` -- CI definition; a change can silently disable checks
+
+## Architecture
+
+See `docs/ARCHITECTURE.md`.
 
 ## Technology guidance
 

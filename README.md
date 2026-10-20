@@ -22,6 +22,9 @@ or without installing, for one run:
 npx github:tecruz/anvil doctor
 ```
 
+**Not `npm install -g anvil`.** That name belongs to an unrelated package on npm, and
+the install path above is the one that works.
+
 **Pin a tag if you care what you get.** A git install with no ref tracks the default branch,
 so a breaking change reaches you on someone else's schedule — the same reason a lockfile
 exists:
@@ -60,6 +63,15 @@ worth reporting - the tool was built by auditing twenty-seven real repositories,
 it found in itself are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) because they are
 the interesting part.
 
+**The [usage guide](docs/USAGE.md) is the manual**: what each command writes, how to
+configure it, the environment variables, and the exit codes to script against.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is for contributors: how the packages fit
+together and where the state lives.
+
+Inside opencode, the [plugin](packages/plugin-opencode/README.md) registers the same
+tools for the agent, and keeps the ticket context alive when the conversation is
+compacted.
+
 ## How it decides
 
 - **Detection is evidence, not convention.** A command is reported because a file says so
@@ -89,22 +101,25 @@ the interesting part.
 
 ```bash
 npm ci                  # install, and build the bundle (prepare runs on install)
-npm run check           # lint, typecheck, the whole suite, the build
+npm run check           # lint, typecheck, the whole suite, the build, the docs check
 npm run test:changed    # only the packages your change affects, and their dependents
 npm run setup:hooks     # once per clone: enable the pre-commit hook
 ```
 
 `npm run check` is exactly what CI runs, on Windows, Linux and macOS, and a `CI_PARITY` rule
-exists to catch the day those two stop agreeing.
+exists to catch the day those two stop agreeing. The docs check is part of it on purpose:
+a document that names a command which does not exist, or a script the manifest does not
+have, fails the build.
 
-Architectural decisions are recorded in [docs/adr](docs/adr), and
-[CONTRIBUTING.md](CONTRIBUTING.md) has the conventions.
+Architectural decisions are recorded in [docs/adr](docs/adr), the module map is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) has
+the conventions.
 
 ## Status
 
 Pre-1.0, and honest about it. The command surface may change; the install instructions above
-are the supported path. Security reports go to the address in
-[SECURITY.md](SECURITY.md) — read it before reporting, because it also says what is out of
-scope.
+are the supported path. Security reports go through GitHub's private vulnerability reporting
+for this repository - the address and the fallback are in [SECURITY.md](SECURITY.md) - read
+it before reporting, because it also says what is out of scope.
 
 MIT licensed. See [LICENSE](LICENSE).

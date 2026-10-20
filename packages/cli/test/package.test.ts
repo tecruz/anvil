@@ -253,6 +253,18 @@ describe('the opencode plugin package', () => {
     assert.ok(existsSync(entry), `${entry} is missing; the build did not emit the entry point`)
   })
 
+  test('the documentation it lists exists, so the published plugin is not missing its README', () => {
+    // The same defect the root manifest had, in the manifest nobody was reading: `files`
+    // naming a README that does not exist is a silent packaging bug -- npm skips it, and
+    // the installed package has no documentation at all. A published plugin whose README
+    // says nothing about how to install it is a plugin nobody can install.
+    const files = PLUGIN_PKG.files as string[]
+    for (const f of files) {
+      if (f.startsWith('dist/')) continue
+      assert.ok(existsSync(join(PLUGIN_DIR, ...f.split('/'))), `${f} is listed in files but does not exist`)
+    }
+  })
+
   test('the plugin SDK is a peer dependency, not a bundled or vendored copy', () => {
     // opencode already has the SDK loaded. Bundling a second copy would give the plugin a
     // different `Plugin` type than the host expects, and the tools would not register.
