@@ -75,7 +75,7 @@ riskGlobs:
   - '**/*-service.y*ml'
   - '**/*ingress*.y*ml'
   - '**/Chart.lock'
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['kubernetes']
   keywords:

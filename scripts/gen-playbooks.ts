@@ -6,8 +6,9 @@
  * a build-time place to fail: an invalid playbook breaks the build instead of quietly
  * disappearing at runtime.
  *
- * Run with `npm run gen:playbooks`. A test asserts the generated file matches the YAML
- * sources, so editing a playbook without regenerating fails CI.
+ * Run with `npm run gen:playbooks`. `--check` validates the sources and compares the
+ * generated output without writing, which is what `npm run check` uses: a working tree
+ * with uncommitted changes is normal during development, so `git diff` is the wrong test.
  */
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -20,6 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const registryDir = join(repoRoot, 'registry', 'playbooks')
 const outFile = join(repoRoot, 'packages', 'playbooks', 'src', 'generated.ts')
+const checkOnly = process.argv.includes('--check')
 
 /** Recursively convert a parsed YAML value into a JSON-safe literal. */
 function toLiteral(value: YamlValue): string {
@@ -77,8 +79,25 @@ for (const file of files) {
 parts.push('])')
 parts.push('')
 
+const content = parts.join('\n')
+
+if (checkOnly) {
+  let current: string | null = null
+  try {
+    current = readFileSync(outFile, 'utf8')
+  } catch {
+    // Missing generated output is stale by definition.
+  }
+  if (current !== content) {
+    console.error('Generated playbooks are stale; run `npm run gen:playbooks` and commit the result.')
+    process.exit(1)
+  }
+  console.log('Generated playbooks are up to date.')
+  process.exit(0)
+}
+
 mkdirSync(dirname(outFile), { recursive: true })
-writeFileSync(outFile, parts.join('\n'), 'utf8')
+writeFileSync(outFile, content, 'utf8')
 
 console.log(`Generated ${outFile}`)
 console.log(`  ${entries.length} playbook(s): ${entries.map((e) => `${e.file} -> ${e.id}`).join(', ')}`)

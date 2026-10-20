@@ -73,7 +73,7 @@ conventions:
     - 'unhandled promise rejections'
 
 riskGlobs: ['**/package.json', '**/package-lock.json', '**/pnpm-lock.yaml', '**/Dockerfile*']
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['nodejs', 'vercel']
   keywords:

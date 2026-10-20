@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { buildProfile, SKIP_DIRS, SKIP_TEST_DATA_DIRS, walkFiles } from '@anvil/profile'
+import { buildProfile, profileWarnings, SKIP_DIRS, SKIP_TEST_DATA_DIRS, walkFiles } from '@anvil/profile'
 
 const temps: string[] = []
 after(() => {
@@ -100,6 +100,78 @@ describe('walkFiles', () => {
     assert.ok(walkFiles(dir).files.some((f) => f.startsWith('tools/')))
     const skipped = walkFiles(dir, { extraSkipDirs: new Set(['tools']) })
     assert.ok(!skipped.files.some((f) => f.startsWith('tools/')))
+  })
+})
+
+describe('paths a rule needs are visible without walking the whole directory', () => {
+  test('a hidden CI directory is walked, so CI evidence is reachable', () => {
+    const dir = repo({
+      '.circleci/config.yml': 'version: 2.1\n',
+      'package.json': '{}',
+    })
+    const { files } = walkFiles(dir)
+    assert.ok(files.includes('.circleci/config.yml'))
+
+    const { profile } = buildProfile(dir, { ...VCS, root: dir })
+    assert.ok(profile.tooling.ci.includes('.circleci/config.yml'))
+  })
+
+  test('the one MCP file under .vscode is probed, without walking editor state', () => {
+    const dir = repo({
+      '.vscode/mcp.json': '{"servers":{}}',
+      '.vscode/settings.json': '{}',
+      'package.json': '{}',
+    })
+    const { files } = walkFiles(dir)
+    assert.ok(files.includes('.vscode/mcp.json'))
+    assert.ok(!files.includes('.vscode/settings.json'))
+  })
+
+  test('CODEOWNERS under .gitlab is found by the direct docs probe', () => {
+    // `.gitlab` is hidden and intentionally not walked. `detectDocs` probes the path
+    // directly, so skipping the directory does not hide the file from the profile.
+    const dir = repo({
+      '.gitlab/CODEOWNERS': '* @acme/platform\n',
+      'package.json': '{}',
+    })
+    const { profile } = buildProfile(dir, { ...VCS, root: dir })
+    assert.equal(profile.docs.codeowners, '.gitlab/CODEOWNERS')
+  })
+})
+
+describe('an incomplete profile says so', () => {
+  test('the file cap is recorded and rendered as a warning', () => {
+    const dir = repo({ 'a.ts': 'export {}\n', 'b.ts': 'export {}\n', 'c.ts': 'export {}\n' })
+    const { profile, truncated } = buildProfile(dir, { ...VCS, root: dir }, { maxFiles: 2 })
+
+    assert.equal(truncated, true)
+    assert.equal(profile.diagnostics.truncated, true)
+    assert.equal(profile.diagnostics.fileLimit, 2)
+    assert.ok(profileWarnings(profile).some((w) => w.includes('stopped at 2 files')))
+  })
+
+  test('a detector that throws is recorded, not silently dropped', () => {
+    const dir = repo({ 'package.json': '{}', 'src/a.ts': 'export {}\n' })
+    const { profile } = buildProfile(
+      dir,
+      { ...VCS, root: dir },
+      {
+        extraDetectors: [
+          {
+            id: 'boom',
+            title: 'Boom',
+            priority: 1,
+            matches: () => true,
+            detect: () => {
+              throw new Error('deliberate failure')
+            },
+          },
+        ],
+      },
+    )
+
+    assert.deepEqual(profile.diagnostics.failedDetectors, [{ id: 'boom', error: 'deliberate failure' }])
+    assert.ok(profileWarnings(profile).some((w) => w.includes('detector boom failed: deliberate failure')))
   })
 })
 

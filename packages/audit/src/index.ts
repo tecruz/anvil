@@ -34,6 +34,7 @@ export {
   LAYER_QUESTIONS,
   type Layer,
   type LayerScore,
+  type PlaybookMatchInfo,
   type ReadinessReport,
   type SchemaVersion,
   SEVERITY_WEIGHT,

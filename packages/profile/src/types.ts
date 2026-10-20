@@ -117,11 +117,26 @@ export interface Docs {
   issueTemplate: string | null
 }
 
-/** A detected stack entry. The id maps to a playbook in M2a. */
+/** A detected stack entry. The id maps to a playbook in the registry. */
 export interface Stack {
   id: string
   version: string | null
   evidence: string[]
+}
+
+/**
+ * How complete the profile is.
+ *
+ * A partial profile is still useful, but it must not be presented as a complete one: a
+ * file cap or a detector that threw means a consumer is reasoning from an unknown subset.
+ */
+export interface ProfileDiagnostics {
+  /** True when the walk stopped at `fileLimit`. */
+  truncated: boolean
+  /** The cap the walk ran under, whether or not it was reached. */
+  fileLimit: number
+  /** Detectors that threw, with the reason. */
+  failedDetectors: Array<{ id: string; error: string }>
 }
 
 export interface ProjectProfile {
@@ -158,6 +173,8 @@ export interface ProjectProfile {
    * directory from an evidence path, and would then be the one guessing.
    */
   projectDir: string
+  /** How complete the walk and detector run were. Additive in schema version 1. */
+  diagnostics: ProfileDiagnostics
 }
 
 export interface InstructionFile {
@@ -204,6 +221,11 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     instructions: [],
     files: [],
     projectDir: '',
+    diagnostics: {
+      truncated: false,
+      fileLimit: 0,
+      failedDetectors: [],
+    },
   }
 }
 

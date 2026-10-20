@@ -40,6 +40,7 @@ export {
 } from './detectors/more.ts'
 export { nodeDetector } from './detectors/node.ts'
 export { pythonDetector } from './detectors/python.ts'
+export { profileWarnings } from './diagnostics.ts'
 export {
   addRiskHeuristics,
   COMMAND_RUNNERS,
@@ -79,6 +80,7 @@ export {
   type Monorepo,
   type MonorepoTool,
   normalizeRelPath,
+  type ProfileDiagnostics,
   type ProjectProfile,
   type RiskLevel,
   type RiskPath,
@@ -90,6 +92,7 @@ export {
   type VcsHost,
 } from './types.ts'
 export {
+  DEFAULT_MAX_FILES,
   extensionOf,
   firstExisting,
   HIDDEN_DIR_ALLOW,

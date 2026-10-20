@@ -56,6 +56,7 @@ function splitLines(input: string): Line[] {
 
   for (let i = 0; i < raw.length; i++) {
     const original = raw[i] ?? ''
+    assertPrintable(original, i + 1)
     const leading = original.slice(0, original.length - original.trimStart().length)
     if (leading.includes('\t')) {
       throw new YamlError('tab characters are not allowed for indentation', i + 1)
@@ -67,6 +68,28 @@ function splitLines(input: string): Line[] {
     out.push({ indent, text: text.trimStart(), lineNo: i + 1 })
   }
   return out
+}
+
+/**
+ * Reject C0/C1 controls and DEL.
+ *
+ * A literal BEL in a YAML comment is invisible in most editors and survives into the
+ * generated registry, where it corrupts a human-readable sentence. YAML only permits tab,
+ * newline and carriage return among the control characters, so the rest are malformed data
+ * rather than a style preference.
+ */
+function assertPrintable(line: string, lineNo: number): void {
+  for (let i = 0; i < line.length; i++) {
+    const code = line.charCodeAt(i)
+    const invalid =
+      code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || (code >= 127 && code <= 159)
+    if (invalid) {
+      throw new YamlError(
+        `non-printable control character U+${code.toString(16).toUpperCase().padStart(4, '0')}`,
+        lineNo,
+      )
+    }
+  }
 }
 
 /** Remove a trailing `# comment`, respecting quotes. */

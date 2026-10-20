@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ProjectProfile } from '@anvil/profile'
+import { type ProjectProfile, profileWarnings } from '@anvil/profile'
 import { RULES, type Rule, type RuleContext } from './rules.ts'
 import {
   type Finding,
@@ -20,6 +20,7 @@ import {
   LAYERS,
   type Layer,
   type LayerScore,
+  type PlaybookMatchInfo,
   type ReadinessReport,
   SEVERITY_WEIGHT,
   STATUS_CREDIT,
@@ -35,6 +36,11 @@ export interface AuditOptions {
   layers?: readonly Layer[]
   /** Pre-read instruction text; the engine reads from disk when omitted. */
   instructionsText?: string
+  /**
+   * Playbooks matched to this profile. Omitted means matching was not run, which makes
+   * the PLAYBOOK rule `na` rather than asserting that no guidance exists.
+   */
+  playbookMatches?: readonly PlaybookMatchInfo[]
 }
 
 export function buildRuleContext(profile: ProjectProfile, options: AuditOptions = {}): RuleContext {
@@ -85,6 +91,7 @@ export function buildRuleContext(profile: ProjectProfile, options: AuditOptions 
     codeowners,
     security: readBody(root, profile.docs.security),
     npmScripts: readNpmScripts(root),
+    playbookMatches: options.playbookMatches ?? null,
   }
 }
 
@@ -124,7 +131,7 @@ function readNpmScripts(root: string): Record<string, string> {
 
 export function audit(profile: ProjectProfile, options: AuditOptions = {}): ReadinessReport {
   const ctx = buildRuleContext(profile, options)
-  const degraded: Array<{ reason: string }> = []
+  const degraded: Array<{ reason: string }> = profileWarnings(profile).map((reason) => ({ reason }))
 
   let rules: readonly Rule[] = RULES
   if (options.layers !== undefined) {

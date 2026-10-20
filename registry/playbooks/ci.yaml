@@ -72,7 +72,7 @@ riskGlobs:
   - '**/.circleci/**'
   - '**/azure-pipelines.yml'
   - '**/codecov.yml'
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['github', 'actions']
   keywords:

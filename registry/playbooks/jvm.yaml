@@ -80,7 +80,7 @@ riskGlobs:
   - '**/gradle/libs.versions.toml'
   - '**/AndroidManifest.xml'
   - '**/migrations/**'
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['openjdk', 'gradle', 'apache']
   keywords:

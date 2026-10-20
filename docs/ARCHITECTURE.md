@@ -76,7 +76,7 @@ published — the profile, the report, the plan, the brief, the envelope — car
 
 | Contract | Defined in | What it carries |
 | --- | --- | --- |
-| `ProjectProfile` | `packages/profile/src/types.ts` | the repository as facts: languages, modules, stacks, commands, tooling, docs, risk paths, instruction files |
+| `ProjectProfile` | `packages/profile/src/types.ts` | the repository as facts: languages, modules, stacks, commands, tooling, docs, risk paths, instruction files, and `diagnostics` for scan completeness |
 | `Finding` | `packages/audit/src/types.ts` | one rule's verdict: `pass`, `warn`, `fail` or `na`, a severity, evidence, and a fix |
 | `Plan` | `packages/playbooks/src/plan.ts` | ranked suggestions in three tiers, with the satisfied ones counted and left out |
 | `Brief` | `packages/derive/src/brief.ts` | verified facts and the `gaps` that keep generated guidance honest |

@@ -727,6 +727,58 @@ describe('anvil config init inside a repo', () => {
   })
 })
 
+describe('profile completeness and playbook matching', () => {
+  function tempRepo(files: Record<string, string>): string {
+    const dir = tempDir('anvil-profile-')
+    for (const [rel, content] of Object.entries(files)) {
+      const target = join(dir, ...rel.split('/'))
+      mkdirSync(join(target, '..'), { recursive: true })
+      writeFileSync(target, content, 'utf8')
+    }
+    return dir
+  }
+
+  test('doctor matches the repository to the registry instead of warning forever', () => {
+    const fixture = join(import.meta.dirname, '..', '..', '..', 'fixtures', 'node-npm')
+    const res = runAnvil(['doctor', '--profile', fixture, '--json'])
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+    const report = jsonOf(res).data as {
+      findings: Array<{ id: string; status: string; detail: string }>
+    }
+    const playbook = report.findings.find((f) => f.id === 'PLAYBOOK')
+    assert.equal(playbook?.status, 'pass')
+    assert.match(playbook?.detail ?? '', /Matched: /)
+    assert.ok(!res.stdout.includes('M2a'), 'the stale milestone text must be gone')
+  })
+
+  test('profile --max-files reports diagnostics, and strict treats an incomplete scan as failure', () => {
+    const dir = tempRepo({
+      'package.json': '{"name":"tiny"}',
+      'src/a.ts': 'export const a = 1\n',
+      'src/b.ts': 'export const b = 1\n',
+    })
+
+    const profile = jsonOf(runAnvil(['profile', '--profile', dir, '--max-files', '1', '--json', '--no-files']))
+      .data as { diagnostics: { truncated: boolean; fileLimit: number } }
+    assert.equal(profile.diagnostics.truncated, true)
+    assert.equal(profile.diagnostics.fileLimit, 1)
+
+    const res = runAnvil(['doctor', '--profile', dir, '--max-files', '1', '--layer', 'context', '--strict', '--json'])
+    assert.equal(res.code, 6, res.stdout + res.stderr)
+    const body = jsonOf(res)
+    assert.equal(body.ok, false)
+    assert.match((body.error as { message: string }).message, /profile is incomplete/)
+  })
+
+  test('--max-files rejects a non-positive value', () => {
+    const res = runAnvil(['profile', '--max-files', '0', '--profile', 'fixtures/node-npm', '--json'])
+    assert.equal(res.code, 2, res.stdout + res.stderr)
+    const body = jsonOf(res)
+    assert.equal(body.ok, false)
+    assert.match((body.error as { message: string }).message, /Invalid --max-files/)
+  })
+})
+
 describe('anvil profile / doctor with --profile', () => {
   // Regression: `--profile <dir>` used to hoist to the enclosing git repo root, so
   // pointing it at a nested fixture silently audited the parent project instead.

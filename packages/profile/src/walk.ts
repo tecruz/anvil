@@ -102,8 +102,17 @@ export interface WalkResult {
   truncated: boolean
 }
 
-const DEFAULT_MAX_FILES = 20_000
+export const DEFAULT_MAX_FILES = 20_000
 const DEFAULT_MAX_DEPTH = 12
+
+/**
+ * Files a detector needs even when their directory is skipped.
+ *
+ * `.vscode` is in `SKIP_DIRS` because editor state is usually noise, but `.vscode/mcp.json`
+ * is project configuration. A full `.vscode` walk would trade one known file for every
+ * settings file in every repository, so the one file is probed directly instead.
+ */
+const PROBED_FILES: readonly string[] = ['.vscode/mcp.json']
 
 /**
  * Hidden directories are almost always tooling rather than source, so they are skipped
@@ -119,6 +128,9 @@ export const HIDDEN_DIR_ALLOW: ReadonlySet<string> = new Set([
   '.github',
   '.githooks',
   '.husky',
+  // CircleCI's config is CI evidence, and `detectGenericTooling` already looks for it.
+  // Skipping the hidden directory made that check unreachable.
+  '.circleci',
   // The documented home of Maestro's flows. Skipping it made the `maestro` and `qa`
   // playbooks unmatchable, because the only file that identifies a Maestro project was
   // inside a directory the walk refused to enter.
@@ -186,6 +198,20 @@ export function walkFiles(root: string, options: WalkOptions = {}): WalkResult {
   }
 
   walk(root, '', 0)
+
+  for (const rel of PROBED_FILES) {
+    if (files.includes(rel)) continue
+    if (extensions && extensions.size > 0) {
+      const ext = extensionOf(rel)
+      if (ext !== null && !extensions.has(ext)) continue
+    }
+    try {
+      if (statSync(join(root, rel)).isFile()) files.push(rel)
+    } catch {
+      // Absent or unreadable: the same answer every caller already handles.
+    }
+  }
+
   files.sort()
   return { files, truncated }
 }

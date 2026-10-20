@@ -175,6 +175,13 @@ describe('rejected constructs', () => {
       assert.equal(err.line, 3)
     }
   })
+
+  test('rejects an invisible control character instead of carrying it into the registry', () => {
+    // A literal BEL in a comment is invisible in most editors and survived into the
+    // generated playbooks, where it corrupted a sentence. The parser is the one place that
+    // sees every byte, so this is where it stops.
+    expectRejection('a: 1 # see \u0007ndroid.yaml', /U\+0007/)
+  })
 })
 
 describe('realistic playbook shape', () => {

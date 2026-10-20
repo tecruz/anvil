@@ -79,7 +79,7 @@ riskGlobs:
   - '**/Cargo.lock'
   - '**/build.rs'
   - '**/rust-toolchain*'
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['rust-lang']
   keywords:

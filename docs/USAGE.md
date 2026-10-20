@@ -154,10 +154,10 @@ accepts. This table is the summary; the help text is the contract.
 
 | Command | What it does |
 | --- | --- |
-| `anvil doctor` | Audit AI-readiness and score the repository. `--layer`, `--fail-on <severity>`, `--strict`. |
+| `anvil doctor` | Audit AI-readiness and score the repository. `--layer`, `--fail-on <severity>`, `--strict`, `--max-files <n>`. |
 | `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--apply` writes them. |
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
-| `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. |
+| `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |
@@ -169,6 +169,11 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil version` | The anvil version and the JSON schema version. |
+
+`anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
+`fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
+reasons under `degraded`, and `--strict` fails when the profile is incomplete. Raise
+`--max-files` when a real repository exceeds the default 20,000-file cap.
 
 ## Configuration
 

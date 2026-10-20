@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 import { mentionsRunner } from '@anvil/profile'
 import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes, WARN_INSTRUCTION_BYTES } from './budget.ts'
-import type { Fix, Layer, Severity, Status } from './types.ts'
+import type { Fix, Layer, PlaybookMatchInfo, Severity, Status } from './types.ts'
 
 export interface RuleContext {
   profile: ProjectProfile
@@ -46,6 +46,13 @@ export interface RuleContext {
    * `npm run check` does run lint and test, because `check` does.
    */
   npmScripts: Readonly<Record<string, string>>
+  /**
+   * Playbooks matched to this profile, or `null` when matching was not run.
+   *
+   * `null` and `[]` are different answers: the first means the question was not asked,
+   * the second means it was asked and the registry had nothing for this repository.
+   */
+  playbookMatches: readonly PlaybookMatchInfo[] | null
 }
 
 export interface Rule {
@@ -924,12 +931,21 @@ const PLAYBOOK: Rule = {
   title: 'Stack matched to known technology guidance',
   order: 40,
   evaluate(ctx) {
-    const ids = ctx.profile.stacks.map((s) => s.id)
-    if (ids.length === 0) {
-      return na('No stack detected; M1 runs with the built-in detectors only')
+    if (ctx.playbookMatches === null) {
+      return na('Playbook matching was not run')
     }
+
+    if (ctx.playbookMatches.length > 0) {
+      const ids = [...new Set(ctx.playbookMatches.map((m) => m.id))]
+      const evidence = [...new Set(ctx.playbookMatches.flatMap((m) => m.evidence))].slice(0, 4)
+      return pass(`Matched: ${ids.join(', ')}`, evidence)
+    }
+
+    const detected = [...new Set([...ctx.profile.stacks.map((s) => s.id), ...ctx.profile.languages.map((l) => l.id)])]
+    if (detected.length === 0) return na('No stack detected')
+
     return warn(
-      `Detected: ${ids.join(', ')}. Playbook matching (official docs, skills and community resources per technology) lands in M2a.`,
+      `Detected: ${detected.join(', ')}. No matching playbook in the registry.`,
       ctx.profile.stacks.flatMap((s) => s.evidence).slice(0, 4),
     )
   },
@@ -969,7 +985,7 @@ const STYLE_GUIDE: Rule = {
   id: 'STYLE_GUIDE',
   layer: 'context',
   severity: 'low',
-  title: 'Style guide or ADR history present',
+  title: 'Architecture decision records present',
   order: 42,
   evaluate(ctx) {
     if (ctx.profile.docs.adr !== null) return pass('ADR / decision records present', [ctx.profile.docs.adr])

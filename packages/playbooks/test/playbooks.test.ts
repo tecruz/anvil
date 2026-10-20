@@ -250,6 +250,23 @@ describe('built-in registry', () => {
   })
 })
 
+describe('registry files are clean text', () => {
+  test('no playbook contains a non-printable control character', () => {
+    for (const file of readdirSync(REGISTRY_DIR).filter((f) => /\.ya?ml$/.test(f))) {
+      const text = readFileSync(join(REGISTRY_DIR, file), 'utf8')
+      for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i)
+        const invalid =
+          code <= 8 || code === 11 || code === 12 || (code >= 14 && code <= 31) || (code >= 127 && code <= 159)
+        assert.ok(
+          !invalid,
+          `${file} contains U+${code.toString(16).toUpperCase().padStart(4, '0')} at offset ${String(i)}`,
+        )
+      }
+    }
+  })
+})
+
 describe('generated file is in sync with the YAML sources', () => {
   // If someone edits a playbook and forgets `npm run gen:playbooks`, the change silently
   // does not exist. This is the guard.

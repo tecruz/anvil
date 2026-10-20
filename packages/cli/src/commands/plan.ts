@@ -10,8 +10,9 @@ import { audit, type ReadinessReport } from '@anvil/audit'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
 import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, type ProjectProfile, profileWarnings } from '@anvil/profile'
 import { liveEntriesForPlan } from './discover.ts'
+import { toPlaybookMatchInfo } from './matches.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const TIERS: readonly PlanTier[] = ['derived', 'official', 'community']
@@ -94,7 +95,9 @@ export const planCommand: Command = {
 
     const { playbooks, warnings } = loadPlaybooks(process.env)
     const matches = matchPlaybooks(profile, playbooks)
-    const report: ReadinessReport = audit(profile)
+    const report: ReadinessReport = audit(profile, {
+      playbookMatches: toPlaybookMatchInfo(matches, profile),
+    })
 
     // Discovery runs *after* matching, because the cache is keyed by playbook id and a
     // playbook that did not match contributes nothing. Reading it before would mean
@@ -111,9 +114,14 @@ export const planCommand: Command = {
       { offline, refresh, cwd: ctx.cwd },
     )
 
-    const plan = buildPlan(report, profile, matches, [...warnings, ...liveWarnings], live, {
-      includeSatisfied,
-    })
+    const plan = buildPlan(
+      report,
+      profile,
+      matches,
+      [...profileWarnings(profile), ...warnings, ...liveWarnings],
+      live,
+      { includeSatisfied },
+    )
 
     const tiers = parseTiers(args.values.tier)
     const only = parseIds(args.values.only)

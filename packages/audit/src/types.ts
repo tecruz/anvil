@@ -48,6 +48,18 @@ export interface Fix {
   confidence: number
 }
 
+/**
+ * A matched playbook, injected by the caller.
+ *
+ * The audit package deliberately does not import the registry: matching needs the
+ * playbooks and their schema, and a rule engine that also owns that would be two concerns
+ * in one. The CLI has both and passes the answer in; `null` means matching did not run.
+ */
+export interface PlaybookMatchInfo {
+  id: string
+  evidence: string[]
+}
+
 export interface Finding {
   /** Stable rule id, e.g. 'AGENTS_COMMANDS'. Safe to branch on. */
   id: string

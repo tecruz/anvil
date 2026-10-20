@@ -20,7 +20,9 @@ import {
 } from '@anvil/audit'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable, type Style } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
-import { buildProfile, type ProjectProfile, type VcsHost } from '@anvil/profile'
+import { loadPlaybooks, matchPlaybooks } from '@anvil/playbooks'
+import { buildProfile, type ProjectProfile, profileWarnings, type VcsHost } from '@anvil/profile'
+import { toPlaybookMatchInfo } from './matches.ts'
 import type { Command, CommandContext } from './types.ts'
 
 function detectHost(remote: string): VcsHost {
@@ -40,7 +42,11 @@ function detectHost(remote: string): VcsHost {
  * with total confidence. The enclosing repo is consulted only for provenance (host,
  * remote, default branch).
  */
-async function loadProfile(ctx: CommandContext, target: string | undefined): Promise<ProjectProfile> {
+async function loadProfile(
+  ctx: CommandContext,
+  target: string | undefined,
+  maxFiles?: number,
+): Promise<ProjectProfile> {
   const dir = target ?? ctx.repoRoot
   if (dir === undefined || dir === null) {
     throw new AnvilError(ErrorCode.NotAGitRepo, 'Not inside a git repository', {
@@ -51,12 +57,26 @@ async function loadProfile(ctx: CommandContext, target: string | undefined): Pro
   const root = resolve(dir)
   const info = target === undefined ? ctx.repo : await discoverRepo(root)
 
-  return buildProfile(root, {
+  return buildProfile(
     root,
-    host: info?.remote == null ? null : detectHost(info.remote),
-    remote: info?.remote ?? null,
-    defaultBranch: info?.defaultBranch ?? null,
-  }).profile
+    {
+      root,
+      host: info?.remote == null ? null : detectHost(info.remote),
+      remote: info?.remote ?? null,
+      defaultBranch: info?.defaultBranch ?? null,
+    },
+    maxFiles === undefined ? {} : { maxFiles },
+  ).profile
+}
+
+function parseMaxFiles(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !/^\d+$/.test(value) || Number(value) < 1) {
+    throw new AnvilError(ErrorCode.Usage, `Invalid --max-files: ${String(value)}`, {
+      hint: 'Expected a positive integer.',
+    })
+  }
+  return Number(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,25 +86,29 @@ async function loadProfile(ctx: CommandContext, target: string | undefined): Pro
 export const profileCommand: Command = {
   name: 'profile',
   summary: 'Detect the stack and emit a ProjectProfile.',
-  usage: 'anvil profile [--json] [--profile <dir>] [--no-files]',
+  usage: 'anvil profile [--json] [--profile <dir>] [--max-files <n>] [--no-files]',
   details: [
     'Reads files; never runs a build.',
     '',
     'Every command is labeled documented, detected or inferred. Only a documented',
     'command has been written down by a human, and `ship` will not execute an inferred',
     'one without --probe.',
+    '',
+    '--max-files <n>  cap the walk; a truncated profile is reported as incomplete',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
+    'max-files': { type: 'string' },
     'no-files': { type: 'boolean' },
   },
 
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, profileCommand.flags)
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
-    const profile = await loadProfile(ctx, target)
+    const maxFiles = parseMaxFiles(args.values['max-files'])
+    const profile = await loadProfile(ctx, target, maxFiles)
     const omitFiles = args.values['no-files'] === true
 
     // The file list dominates the payload, so `--no-files` replaces it with a count
@@ -183,6 +207,13 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
           .join('\n'),
   )
 
+  const warnings = profileWarnings(p)
+  if (warnings.length > 0) {
+    out.push('')
+    out.push(s.yellow('Warnings'))
+    for (const warning of warnings) out.push(`  ${warning}`)
+  }
+
   return out.join('\n')
 }
 
@@ -201,7 +232,7 @@ const SEVERITY_RANK: Record<Severity, number> = {
 export const doctorCommand: Command = {
   name: 'doctor',
   summary: 'Audit AI-readiness and score the repository.',
-  usage: 'anvil doctor [--json] [--profile <dir>] [--layer <l>] [--fail-on <sev>] [--strict]',
+  usage: 'anvil doctor [--json] [--profile <dir>] [--max-files <n>] [--layer <l>] [--fail-on <sev>] [--strict]',
   details: [
     'Four layers: can the agent understand the repo, can it verify its work, does it',
     'know the technology, should it be allowed to act.',
@@ -211,12 +242,14 @@ export const doctorCommand: Command = {
     'positives.',
     '',
     '--fail-on <severity>  exit 6 when a finding of that severity or worse fails',
-    '--strict              shorthand for --fail-on high',
+    '--strict              --fail-on high, plus fail when the profile is incomplete',
+    '--max-files <n>       cap the walk; a truncated profile is reported as incomplete',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
     help: { type: 'boolean', short: 'h' },
     profile: { type: 'string' },
+    'max-files': { type: 'string' },
     layer: { type: 'string', multiple: true },
     'fail-on': { type: 'string' },
     strict: { type: 'boolean' },
@@ -225,10 +258,16 @@ export const doctorCommand: Command = {
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, doctorCommand.flags)
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
-    const profile = await loadProfile(ctx, target)
+    const maxFiles = parseMaxFiles(args.values['max-files'])
+    const profile = await loadProfile(ctx, target, maxFiles)
 
+    const { playbooks } = loadPlaybooks(process.env)
+    const matches = matchPlaybooks(profile, playbooks)
     const layers = parseLayers(args.values.layer)
-    const report = audit(profile, layers === null ? {} : { layers })
+    const report = audit(profile, {
+      ...(layers === null ? {} : { layers }),
+      playbookMatches: toPlaybookMatchInfo(matches, profile),
+    })
 
     const failOn = parseSeverity(args.values['fail-on']) ?? (args.values.strict === true ? 'high' : null)
     const breach =
@@ -255,6 +294,23 @@ export const doctorCommand: Command = {
       // branching on `ok` is the documented contract, and this is the only payload-bearing
       // failure that was still reporting success. The report travels as the failure's payload,
       // so a consumer parsing the envelope still gets the full findings either way.
+      ctx.outFailure(report, err, () => `${renderReport(ctx, report)}\n\n${renderErrorText(err, ctx.style)}`)
+      return err.exitCode
+    }
+
+    // A truncated walk or a detector that threw means the report is about an unknown
+    // subset of the repository. `--strict` is the caller saying "do not score a partial
+    // answer as a complete one", so it fails even when every evaluated rule passed.
+    if (args.values.strict === true && report.degraded.length > 0) {
+      const reasons = report.degraded.map((d) => d.reason)
+      const err = new AnvilError(
+        ErrorCode.ThresholdNotMet,
+        `Readiness threshold not met: profile is incomplete (${reasons.join('; ')})`,
+        {
+          hint: 'Raise --max-files or fix the failing detector, then re-run.',
+          details: { degraded: reasons, score: report.score, grade: report.grade },
+        },
+      )
       ctx.outFailure(report, err, () => `${renderReport(ctx, report)}\n\n${renderErrorText(err, ctx.style)}`)
       return err.exitCode
     }

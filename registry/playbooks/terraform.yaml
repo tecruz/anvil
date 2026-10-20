@@ -71,7 +71,7 @@ riskGlobs:
   - '**/.terraform.lock.hcl'
   - '**/terraform.tfstate'
   - '**/terraform.tfstate.backup'
-# Live-discovery seeds; see ndroid.yaml for why this section exists.
+# Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['hashicorp']
   keywords:

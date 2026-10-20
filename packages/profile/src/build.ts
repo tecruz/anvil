@@ -19,7 +19,7 @@ import {
 } from './general.ts'
 import type { CommandKind } from './types.ts'
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
-import { extensionOf, makeResolver, projectDirOf, walkFiles } from './walk.ts'
+import { DEFAULT_MAX_FILES, extensionOf, makeResolver, projectDirOf, walkFiles } from './walk.ts'
 
 /** Extension → language. The set that matters for agent context, not an exhaustive map. */
 const EXTENSION_LANGUAGES: ReadonlyArray<[ext: string, lang: string]> = [
@@ -84,6 +84,8 @@ export interface BuildProfileOptions {
    * genuinely keeps source in a directory the defaults treat as output.
    */
   followDirs?: ReadonlySet<string>
+  /** Hard cap on walked files. Defaults to `DEFAULT_MAX_FILES`. */
+  maxFiles?: number
 }
 
 export interface BuildProfileResult {
@@ -95,9 +97,11 @@ export interface BuildProfileResult {
 }
 
 export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOptions = {}): BuildProfileResult {
+  const fileLimit = options.maxFiles ?? DEFAULT_MAX_FILES
   const { files, truncated } = walkFiles(root, {
     ...(options.skipDirs === undefined ? {} : { extraSkipDirs: options.skipDirs }),
     ...(options.followDirs === undefined ? {} : { followDirs: options.followDirs }),
+    maxFiles: fileLimit,
   })
   const fileSet = new Set(files)
 
@@ -183,6 +187,11 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     docs: detectDocs(root),
     files,
     projectDir,
+    diagnostics: {
+      truncated,
+      fileLimit,
+      failedDetectors: failedDetectors.map((d) => ({ ...d })),
+    },
   }
 
   // Detectors ask for `Cargo.toml` and were answered about `engine/Cargo.toml`; the paths

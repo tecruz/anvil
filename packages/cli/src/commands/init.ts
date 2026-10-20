@@ -39,8 +39,9 @@ import {
 } from '@anvil/derive'
 import { discoverRepo } from '@anvil/git'
 import { loadPlaybooks, type MatchResult, matchPlaybooks, type Playbook } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, type ProjectProfile, profileWarnings } from '@anvil/profile'
 import { liveEntriesForPlan } from './discover.ts'
+import { toPlaybookMatchInfo } from './matches.ts'
 import type { Command, CommandContext } from './types.ts'
 
 function detectHost(remote: string | null): 'github' | 'gitlab' | 'bitbucket' | 'azure' | null {
@@ -82,10 +83,10 @@ async function loadAll(ctx: CommandContext, target: string | undefined): Promise
   return {
     root,
     profile,
-    report: audit(profile),
+    report: audit(profile, { playbookMatches: toPlaybookMatchInfo(matches, profile) }),
     matches,
     playbooks,
-    warnings,
+    warnings: [...profileWarnings(profile), ...warnings],
   }
 }
 
