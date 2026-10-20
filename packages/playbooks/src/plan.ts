@@ -23,6 +23,18 @@ import type { LiveResource, Playbook, Resource } from './schema.ts'
 
 export type PlanTier = 'derived' | 'official' | 'community'
 
+/** How to build the plan. */
+export interface PlanOptions {
+  /**
+   * Keep suggestions the repository already satisfies.
+   *
+   * Off by default: the plan is a list of what to do next, and a repository that already
+   * follows the guidance has nothing to do about it. The count of what was left out is
+   * still reported, so the omission is visible rather than silent.
+   */
+  includeSatisfied?: boolean
+}
+
 export interface Suggestion {
   /** Stable id for dedupe and for `--only <tier>` filtering. */
   id: string
@@ -54,7 +66,7 @@ export interface Suggestion {
 }
 
 export interface Plan {
-  schemaVersion: 1
+  schemaVersion: 2
   score: number
   grade: ReadinessReport['grade']
   /** Playbooks that matched, with why. */
@@ -66,6 +78,13 @@ export interface Plan {
   }>
   suggestions: Suggestion[]
   counts: Record<PlanTier, number>
+  /**
+   * Suggestions left out because the repository already satisfies them.
+   *
+   * The count is part of the contract because the omission is a decision, and a decision
+   * the reader cannot see is one they cannot check. `--include-satisfied` prints them.
+   */
+  satisfied: number
   /** Anything that could not be loaded, so it is visible rather than silent. */
   warnings: string[]
 }
@@ -90,8 +109,10 @@ export function buildPlan(
   matches: readonly MatchResult[],
   warnings: readonly string[] = [],
   live: ReadonlyMap<string, readonly LiveResource[]> = new Map(),
+  options: PlanOptions = {},
 ): Plan {
   const suggestions: Suggestion[] = []
+  let satisfied = 0
 
   // Tier 1: derived. Every failing/warning finding that carries a fix.
   for (const finding of report.findings) {
@@ -120,13 +141,15 @@ export function buildPlan(
   const claimedRiskGlobs = new Set<string>()
   const claimedUrls = new Set<string>()
   for (const match of matches) {
-    for (const suggestion of playbookSuggestions(match.playbook, profile, claimedRiskGlobs)) {
+    const produced = playbookSuggestions(match.playbook, profile, claimedRiskGlobs, options)
+    for (const suggestion of produced.suggestions) {
       // Collected as the curated suggestions are made, rather than in a second pass: a URL
       // is only claimed once a suggestion carrying it exists, and the two must not be able
       // to disagree.
       if (suggestion.url !== undefined) claimedUrls.add(normalizeUrl(suggestion.url))
       suggestions.push(suggestion)
     }
+    satisfied += produced.satisfied
   }
 
   // Tier 4: live-discovered resources for the same playbooks, keyed by playbook id.
@@ -150,7 +173,7 @@ export function buildPlan(
   const ranked = rankSuggestions(dedupe(suggestions))
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     score: report.score,
     grade: report.grade,
     playbooks: matches.map((m) => ({
@@ -165,14 +188,21 @@ export function buildPlan(
       official: ranked.filter((s) => s.tier === 'official').length,
       community: ranked.filter((s) => s.tier === 'community').length,
     },
+    satisfied,
     warnings: [...warnings],
   }
 }
 
 /** Guidance a playbook contributes for a specific repo, not a generic resource dump. */
-function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claimedRiskGlobs: Set<string>): Suggestion[] {
+function playbookSuggestions(
+  playbook: Playbook,
+  profile: ProjectProfile,
+  claimedRiskGlobs: Set<string>,
+  options: PlanOptions,
+): { suggestions: Suggestion[]; satisfied: number } {
   const out: Suggestion[] = []
   const base = { playbook: playbook.id }
+  let satisfied = 0
 
   // A documented test command is only useful if the repo does not already have one, so
   // these are conditional rather than always-on.
@@ -235,13 +265,20 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
   ]
   for (const [kind, resources] of officialGroups) {
     for (const resource of resources) {
+      // The repository may already follow this guidance, in which case the suggestion is
+      // noise: the reader has it, and being told about it teaches them to skip the list.
+      const satisfiedBy = satisfiedByFile(resource, profile)
+      if (satisfiedBy !== null) {
+        satisfied++
+        if (options.includeSatisfied !== true) continue
+      }
       out.push({
         ...base,
         id: `official:${playbook.id}:${resource.url}`,
         tier: 'official',
         title: `${kind}: ${resource.label}`,
         detail: resource.why,
-        evidence: [playbook.source ?? playbook.id],
+        evidence: [playbook.source ?? playbook.id, ...(satisfiedBy === null ? [] : [satisfiedBy])],
         url: resource.url,
         ...(resource.install === undefined ? {} : { install: resource.install }),
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
@@ -251,13 +288,18 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
   }
 
   for (const resource of playbook.community) {
+    const satisfiedBy = satisfiedByFile(resource, profile)
+    if (satisfiedBy !== null) {
+      satisfied++
+      if (options.includeSatisfied !== true) continue
+    }
     out.push({
       ...base,
       id: `community:${playbook.id}:${resource.repo}`,
       tier: 'community',
       title: `community: ${resource.label}`,
       detail: resource.why,
-      evidence: [playbook.source ?? playbook.id],
+      evidence: [playbook.source ?? playbook.id, ...(satisfiedBy === null ? [] : [satisfiedBy])],
       url: resource.url,
       ...(resource.install === undefined ? {} : { install: resource.install }),
       // Popularity nudges the ranking, but does not manufacture confidence: "widely
@@ -267,7 +309,25 @@ function playbookSuggestions(playbook: Playbook, profile: ProjectProfile, claime
     })
   }
 
-  return out
+  return { suggestions: out, satisfied }
+}
+
+/**
+ * The file that says the repository already follows this resource's guidance.
+ *
+ * Null when the resource declares no `satisfiedBy` globs, or when none of them match.
+ * The check is file presence, not content: a file's existence is the one signal that can
+ * be read without reading it, and a suggestion that costs a repository scan to decide is
+ * a suggestion that will not be decided.
+ */
+function satisfiedByFile(resource: Resource, profile: ProjectProfile): string | null {
+  const globs = resource.satisfiedBy
+  if (globs === undefined || globs.length === 0) return null
+  for (const glob of globs) {
+    const hit = profile.files.find((f) => matchesGlob(f, glob))
+    if (hit !== undefined) return hit
+  }
+  return null
 }
 
 /**

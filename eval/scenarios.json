@@ -1,0 +1,18 @@
+{
+  "scenarios": [
+    {
+      "id": "node-tiny-slugify",
+      "repo": "eval/repos/node-tiny",
+      "task": "Implement `slugify` in `src/slug.js`: lowercase the title, replace runs of spaces with a single dash, and trim any dashes at the ends. Add tests for it in `test/slug.test.js`, following the conventions in README.md.",
+      "verify": ["npm test", "node --test test/slug.test.js"],
+      "hidden": [
+        {
+          "from": "eval/hidden/node-tiny-slugify.test.js",
+          "to": "test/hidden-slugify.test.js"
+        }
+      ],
+      "hiddenVerify": ["node --test test/hidden-slugify.test.js"],
+      "timeoutMinutes": 10
+    }
+  ]
+}

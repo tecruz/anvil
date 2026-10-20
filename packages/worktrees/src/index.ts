@@ -58,7 +58,20 @@ export interface Claim {
   worktreeId: string | null
   state: ClaimState
   createdAt: string
-  agent?: { runner: string; sessionId?: string; launchedAt?: string }
+  agent?: {
+    runner: string
+    /** The agent process id, when one was launched. */
+    pid?: number
+    /**
+     * Legacy: the process id, as a string.
+     *
+     * This field was named `sessionId` and held the pid, because the launcher had nowhere
+     * to put a session id and the name was not checked. Registries written before the
+     * rename still carry it, so it is read as a pid and written as `pid`.
+     */
+    sessionId?: string
+    launchedAt?: string
+  }
   pr?: { number: number; url: string; state: string }
   lastVerifiedAt?: string
 }
@@ -92,6 +105,61 @@ export function writeClaims(repoRoot: string, registry: ClaimRegistry): void {
   const path = claimsPath(repoRoot)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
+}
+
+/**
+ * The agent session running in a worktree, as recorded by the opencode plugin.
+ *
+ * The plugin writes `.anvil/session.json` in the worktree it runs in, because that is the
+ * only place it knows for certain it is: the session id belongs to a conversation, and the
+ * conversation belongs to a directory.
+ *
+ * The file is written by the plugin rather than by anvil because anvil launches the agent
+ * and then has no way to learn which session the agent opened -- opencode chooses the id.
+ */
+export interface AgentSession {
+  sessionId: string
+  /** ISO timestamp of when the plugin recorded it. */
+  recordedAt?: string
+}
+
+/** Where the plugin records the session id inside a worktree. */
+export const AGENT_SESSION_FILE = join('.anvil', 'session.json')
+
+/** The agent session recorded for a worktree, or null when there is none. */
+export function readAgentSession(worktreePath: string): AgentSession | null {
+  const path = join(worktreePath, AGENT_SESSION_FILE)
+  if (!existsSync(path)) return null
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const record = parsed as { sessionId?: unknown; recordedAt?: unknown }
+    if (typeof record.sessionId !== 'string' || record.sessionId.trim() === '') return null
+    return {
+      sessionId: record.sessionId,
+      ...(typeof record.recordedAt === 'string' ? { recordedAt: record.recordedAt } : {}),
+    }
+  } catch {
+    // A half-written file is not a session. The agent is still running either way.
+    return null
+  }
+}
+
+/**
+ * The pid of a claim's agent, whether it was recorded as a pid or as the legacy string.
+ *
+ * Two field names for one value, because the registry is written on disk and read back by
+ * versions that disagree about the name.
+ */
+export function claimAgentPid(claim: Claim): number | null {
+  const agent = claim.agent
+  if (agent === undefined) return null
+  if (typeof agent.pid === 'number' && Number.isFinite(agent.pid)) return agent.pid
+  if (typeof agent.sessionId === 'string') {
+    const parsed = Number.parseInt(agent.sessionId, 10)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
 }
 
 /**

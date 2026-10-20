@@ -35,6 +35,8 @@ official:
       why: >-
         The formatter is non-negotiable in Rust. Generated code and macro bodies are the
         known exceptions, and both need an explicit allow.
+      satisfiedBy: ['**/rustfmt.toml', '**/.rustfmt.toml']
+
   migrationGuides:
     - label: Rust editions
       url: 'https://doc.rust-lang.org/edition-guide/'
@@ -53,6 +55,7 @@ community:
     why: >-
       The linter most Rust projects run in CI. Its lint list documents the community's
       preferred idioms and explains why each one exists.
+    satisfiedBy: ['**/clippy.toml', '**/.clippy.toml']
 
 verify:
   build: ['cargo build']

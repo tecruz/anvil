@@ -77,10 +77,12 @@ describe('walkFiles', () => {
   test('still walks hidden directories a detector needs', () => {
     const dir = repo({
       '.github/workflows/ci.yml': 'on: push',
+      '.maestro/login.yaml': 'appId: com.example.app',
       'package.json': '{}',
     })
     const { files } = walkFiles(dir)
     assert.ok(files.includes('.github/workflows/ci.yml'), 'CI workflows are evidence for CI_PARITY')
+    assert.ok(files.includes('.maestro/login.yaml'), 'Maestro flows are evidence for the QA playbooks')
   })
 
   test('followDirs overrides the skip lists, for source kept in a skipped name', () => {

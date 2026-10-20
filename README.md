@@ -76,6 +76,14 @@ the interesting part.
   merges it into `plan` marked live and ranked below the entries a human reviewed. It never
   writes to `registry/playbooks/` — `--propose` prints the additions for a maintainer to
   merge.
+- **Guidance has to earn its place.** The instruction file has a byte budget, and over it
+  the commands have to be at the top: guidance an agent cannot infer from the repository is
+  the part that pays for itself, and the rest is paid for on every request. A playbook
+  resource can declare the files that mean the repository already follows it, and then the
+  plan leaves it out and says how many it left out.
+- **Cost is read, never recorded.** `anvil crew status --cost` prices the agent sessions
+  with `ccusage`, which reads the usage logs already on the machine. anvil stores no usage
+  data, uploads nothing, and a machine without ccusage still gets a complete report.
 
 ## Development
 

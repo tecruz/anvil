@@ -119,6 +119,10 @@ export const HIDDEN_DIR_ALLOW: ReadonlySet<string> = new Set([
   '.github',
   '.githooks',
   '.husky',
+  // The documented home of Maestro's flows. Skipping it made the `maestro` and `qa`
+  // playbooks unmatchable, because the only file that identifies a Maestro project was
+  // inside a directory the walk refused to enter.
+  '.maestro',
   '.config',
   '.devcontainer',
   '.claude',

@@ -137,6 +137,49 @@ describe('checkStructure', () => {
     assert.equal(problems.filter((p) => p.level === 'warn').length, 1)
   })
 
+  test('a satisfiedBy glob the playbook already matches on is reported', () => {
+    // The playbook only matches repositories that have the file, so the suggestion is
+    // dropped every time and never shown. The author meant to say something else.
+    const problems = checkStructure([
+      playbook({
+        official: {
+          ...playbook().official,
+          docs: [
+            {
+              label: 'Docs',
+              url: 'https://example.test/docs',
+              why: 'because',
+              satisfiedBy: ['package.json'],
+            },
+          ],
+        },
+      }),
+    ])
+    const reported = problems.find((p) => p.message.includes('satisfiedBy'))
+    assert.ok(reported !== undefined, messages(problems))
+    assert.equal(reported.level, 'warn')
+    assert.match(reported.fix ?? '', /never shown/)
+  })
+
+  test('a satisfiedBy glob the playbook does not match on is not reported', () => {
+    const problems = checkStructure([
+      playbook({
+        official: {
+          ...playbook().official,
+          docs: [
+            {
+              label: 'Docs',
+              url: 'https://example.test/docs',
+              why: 'because',
+              satisfiedBy: ['**/eslint.config.js'],
+            },
+          ],
+        },
+      }),
+    ])
+    assert.equal(problems.filter((p) => p.message.includes('satisfiedBy')).length, 0, messages(problems))
+  })
+
   test('a risk glob claimed twice is reported with the winner named', () => {
     const problems = checkStructure([
       playbook({ id: 'jvm', priority: 60, riskGlobs: ['**/build.gradle.kts'] }),

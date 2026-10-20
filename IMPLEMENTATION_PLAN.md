@@ -572,6 +572,15 @@ confident wrong output. Six that are right beats twelve that are mostly right.
 3. **Detected command confirmation**: should `ship` require an explicit human confirm when
    a verify command is `inferred`? *Partly resolved: `ship` refuses an `inferred` verify
    command without `--probe`, and logs it loudly otherwise.* Full resolution in M6.
+4. ~~**Should anvil carry a code graph, an agent memory, a web dashboard or a
+   self-improvement loop?**~~ **Resolved: no, to all four, and the reasons are recorded
+   under "Deliberately not built, and why" (2026-10-20).** The question was re-opened
+   against the 2026 literature — harness engineering, agent memory, evals, cost
+   observability — and the answer was the same in every case: each would make the plan
+   depend on something a reader cannot check. The measurement that would settle the
+   self-improvement question now exists as the eval harness, so the question can be
+   re-opened with evidence rather than with taste.
+
 
 ### Decisions get an ADR
 
@@ -589,6 +598,8 @@ entries are listed as plain text, not links, so this document has no dead refere
 | [ADR-0006](docs/adr/0006-single-file-bundle-location.md) | Single-file bundle lives in `packages/cli/dist` | **written (M0)** |
 | [ADR-0007](docs/adr/0007-distribution-git-install.md) | Distribution is a git install; the workspace root is the package | **written (post-M6)** |
 | [ADR-0008](docs/adr/0008-live-discovery-keeps-registry-curated.md) | Live discovery enriches the plan; the registry stays curated | **written (post-M6)** |
+| [ADR-0009](docs/adr/0009-guidance-has-to-earn-its-place.md) | Guidance has to earn its place: an instruction budget, and resources that can be satisfied | **written (post-M6)** |
+| [ADR-0010](docs/adr/0010-cost-is-read-from-the-hosts-ledger.md) | Cost is read from the host's ledger (ccusage); anvil records nothing | **written (post-M6)** |
 
 Each is written by the milestone that puts it under load, not before - an ADR for a decision
 no code has exercised yet is a guess with a date on it.
@@ -2181,3 +2192,200 @@ identify people rather than tooling, on top of search — a rate-limit cost with
 question); automatic writes to the registry (a bad fetch would become permanent,
 reviewed-looking content); and MCP search beyond the official registry, which is the one
 index with a published schema to validate against.
+
+---
+
+## Guidance, cost, QA and the eval harness (2026-10-20)
+
+A quarter after M6, the same three questions kept coming back: *does the guidance anvil
+hands an agent actually help*, *what does the work cost*, and *is there anything in the
+plan that is not earning its place*. The answers were taken from the published evidence
+rather than from taste, and the work is in four milestones. All four are complete as of
+2026-10-20, including the corpus calibration M7 deferred.
+
+### M7 — Guidance has to earn its place
+
+**The instruction budget.** A study of AGENTS.md files in real repositories
+([arXiv:2602.11988](https://arxiv.org/abs/2602.11988)) found that adding one did not
+generally raise task success and raised inference cost by more than 20%; the guidance that
+paid for itself was the part a model cannot infer — the project's own commands and its
+non-standard tooling. Thoughtworks' [agent instruction bloat](https://www.thoughtworks.com/en-br/radar/techniques/agent-instruction-bloat)
+describes the same failure from the other side. anvil had a size check, and it was the
+wrong one: `derive` warned at 40 kB on the file *it* wrote, and the audit only noticed a
+file that was nearly empty. Nothing measured the file the *repository* ships.
+
+So the audit gained `INSTRUCTION_BUDGET`: it measures the largest instruction file the
+repository ships, warns past 16 kB, fails past 40 kB, and says what to do — keep the commands, the
+module map and the risk paths, move the rest into a skill. Over the threshold it also
+checks that a runnable command appears in the first eighty lines, because a command buried
+under prose is the part of the file that does not pay for itself. The thresholds are bytes
+and not tokens, because bytes are measured the same way on every machine; the token count
+in the message is an estimate for the reader and never the verdict. `derive` now uses the
+same threshold, so a file `anvil doctor` rejects cannot be written by `anvil init --apply`
+without the writer being told why.
+
+**Calibration.** The thresholds were run against the corpus the earlier audits used. The
+twenty-two real repositories were reconstructed from their names at their current default
+branches; the five synthetic shapes from the second audit were not rebuilt, because they
+ship no instructions, so the rule is `na` for them and their scores cannot move. Nine of
+the twenty-two ship instruction files. The run changed one thing before it confirmed the
+numbers: summing every instruction file warned on axios, whose 14.7 kB `AGENTS.md` and
+6.0 kB `.github/copilot-instructions.md` are read by different tools and never together.
+The budget now measures the largest instruction source, which is what one agent actually
+pays for. That leaves one warning in twenty-two: zod's `AGENTS.md` at 21.5 kB. The next
+largest is axios's at 14.7 kB, so the line separates one real outlier rather than a
+cluster, and 40 kB is 1.9x the largest real file. No repository fails. Score movement is
+the rule's weight and rounding: +1 where it passes in five repositories (laravel,
+nowinandroid, sveltekit, traefikchart and vapor), -1 for the one warning, and 0 elsewhere
+(thirteen `na`; axios, ghcli and vite passed without moving the rounded integer), and no
+other finding changed status.
+The earlier, authoring-machine-only sample said the warning did not fire on real-world
+files; that was false of the corpus, which is why the corpus was the remaining step.
+
+| repository | largest instruction source | budget | score |
+|---|---|---|---|
+| axios | `AGENTS.md`, 14.7 kB (plus a 6.0 kB Copilot file) | pass | 94 → 94 |
+| ghcli | `AGENTS.md`, 5.6 kB | pass | 88 → 88 |
+| laravel | `AGENTS.md`, 1.4 kB (duplicated as `CLAUDE.md`) | pass | 75 → 76 |
+| nowinandroid | `AGENTS.md`, 3.0 kB | pass | 83 → 84 |
+| sveltekit | `AGENTS.md`, 4.1 kB | pass | 84 → 85 |
+| traefikchart | `AGENTS.md`, 3.9 kB | pass | 79 → 80 |
+| vapor | `AGENTS.md`, 3.1 kB | pass | 69 → 70 |
+| vite | `.github/copilot-instructions.md`, 1.6 kB | pass | 85 → 85 |
+| zod | `AGENTS.md`, 21.5 kB | warn | 88 → 87 |
+
+The other thirteen — eshop, express, flask, gin, okhttp, petclinic, plausible, requests,
+ripgrep, sinatra, tfawsvpc, tokio and vuecore — ship no instructions, so the rule is `na`
+and their scores did not move.
+
+**Satisfaction.** The plan offered a repository the official style guide and the community
+tools whether or not the repository already had them configured. The guidance was not
+wrong; it was redundant, and redundancy is what teaches a reader to skip a list. A playbook
+resource may now declare `satisfiedBy` — repo-relative globs whose presence means the
+repository already follows it — and a satisfied resource is left out of the plan. The count
+of what was left out is printed, because the omission is a decision and a decision the
+reader cannot see is one they cannot check; `anvil plan --include-satisfied` keeps them,
+and then the evidence names the file that satisfied them. Eleven annotations went into
+seven playbooks, and only where a config file honestly implies the guidance:
+`ruff.toml` means the repository uses Ruff, `.editorconfig` means it declares its own
+style. Most resources have no such signal and are still offered, which is the right answer:
+a repository that uses Ruff still needs to know what Ruff's rules mean.
+
+`Plan.schemaVersion` is 2. `playbook check` reports a `satisfiedBy` that can never fire —
+every glob a resource lists is also a file its own playbook matches on, so the suggestion is
+dropped every time and never shown. One annotation was written that way and the check said
+so before it shipped.
+
+### M8 — Cost, read from the host's ledger
+
+`anvil crew status --cost` reports what each agent session cost. The cost comes from
+[ccusage](https://ccusage.com/guide/opencode), which already reads the local usage logs of
+the coding agents on the machine and prices them; anvil records nothing, uploads nothing
+and depends on nothing. A machine without ccusage gets a complete status report and one
+line saying why the cost column is empty.
+
+The hard part was attribution: a claim knows its worktree, and a session id belongs to a
+conversation, and opencode chooses the id. Time windows would have been a guess wearing a
+decimal point, and reading opencode's own session storage would have coupled anvil to
+another project's private schema. The opencode plugin already runs inside the agent, and
+its `chat.message` hook receives the session id while the directory it runs in is the
+worktree: the plugin writes `.anvil/session.json` there, and the CLI reads it from the
+claim's worktree path. The mapping is exact rather than inferred.
+
+The claim registry also stopped calling a process id `sessionId` — it always was the pid,
+and the launcher had nowhere to put a session id, so the name was never checked. The field
+is `pid` now, and a registry written before the rename is still read.
+
+### M9 — QA, one playbook per tool
+
+The first cut was one `qa` playbook, and the machine said it was wrong within minutes: a
+Playwright repository was being offered the Cypress documentation, because a single
+playbook has to describe every tool it might match. One playbook per tool is the same rule
+this project applies everywhere — say what applies to this repository, and nothing else —
+so the QA story is now `qa` (what every browser-test repository needs), `playwright`,
+`cypress`, `webdriverio` and `maestro`, each matched on its own config file. The
+cross-cutting playbook answers with risk globs and the shared conventions; the per-tool
+ones answer with the command and the documentation.
+
+Playwright's own README recommends the CLI and skills over the MCP server for ordinary
+coding work, because an MCP server's tool schema costs context on every call and a command
+does not. The playbook says so in the `why` rather than quietly linking both.
+
+**The Maestro match was wrong, and only a reader of Maestro's documentation could have
+found it.** The playbook matched `maestro.yaml`, which Maestro does not use: its workspace
+config is always named `config.yaml`, and the flows live in a `.maestro/` directory. Worse,
+the walk skipped every hidden directory, so even the right glob could not have matched.
+`playbook check` cannot see this — the URLs are fine and the glob is valid YAML — and it
+is the same class of defect as the fabricated commands in the audits: a rule that can never
+fire, reported as a feature. The fix is the documented directory (`.maestro/**`) added to
+the walk's hidden-directory allow-list, with a test that a Maestro repository matches both
+the `maestro` and `qa` playbooks.
+
+A full QA product — planning, generating, running and healing tests as its own product, with
+a browser and a service to test against — is deliberately **not** built here. The evidence
+that it is worth building is that repositories match the QA playbooks and ask the same
+questions; until then, the documentation that exists and the paths where a browser test does
+more damage than a unit test are worth more than a product.
+
+### M10 — The eval harness
+
+Everything else in this project is a proxy for one question: does the derived context
+actually help an agent? The doctor score says a repository is oriented; the plan says what
+to fix next. Neither says whether the agent got the work done.
+
+`ANVIL_EVAL=1 npm run eval` runs the same task twice in the same repository — once with
+the artifacts `anvil init --apply` writes, once without — and grades both the same way.
+The repository's own verify command decides whether the work was done; a hidden test,
+copied in only after the agent has finished, decides whether the work was *the work*; and
+the host's ledger decides what it cost. The grading is deterministic even though the agent
+is not, which is the only reason the comparison is worth running twice.
+
+The harness found two things before it found anything about agents. The task is prose, and
+prose contains backticks and ampersands, so anvil's Windows safety check refused to pass it
+as an argument — the right behaviour, and the answer is the one the crew already uses: the
+task goes in a file and the agent is told to read it. And a scenario that verified "no" is
+not a broken scenario: the first real run hit a provider quota limit, the agent did
+nothing, the visible verifier passed anyway, and the hidden verifier caught it. That is the
+whole reason the hidden test exists.
+
+That quasi-run also exposed two harness defects, fixed before the first measurement. The
+machine's default model was an image model with an exhausted free tier, so the harness now
+takes `ANVIL_EVAL_MODEL` (`provider/model`) and prints the model it used: a result that
+cannot name its model cannot be compared with another. And `npm test` passed when the agent
+had done nothing, because the repository had no test for the function under test; the
+scenario now also runs `node --test test/slug.test.js`, so a no-op fails the visible
+verifier as well as the hidden one.
+
+The first measurement used `opencode/deepseek-v4.1-flash-free`: both variants passed both
+verifiers (bare 43s, anvil 67s). That is a floor, not evidence that the artifacts help —
+the task is small enough that a competent model needs no guidance. The cost column was
+empty because neither half of the measurement was present on this machine: the opencode
+plugin that records the session id is not installed, and `ccusage` is not installed. Both
+are notes by design, and the report shows unknown rather than zero. The next useful data
+point is a harder scenario, not another run of this one.
+
+The harness is not part of `npm test` and needs an agent and a model to run at all, so it is
+behind `ANVIL_EVAL=1`. `npm run eval -- --dry-run` prints what it would do and costs
+nothing.
+
+### Deliberately not built, and why
+
+The same review produced four answers of "no", and they are recorded here so they are not
+re-litigated:
+
+- **No code graph.** The space is crowded, and a graph is a retrieval tool: it makes the
+  plan depend on an index whose staleness is invisible. The derived module map is the cheap
+  version of the same idea, and it cannot go stale in a way a reader cannot see. If an
+  index is wanted, the right shape is a playbook entry pointing at an existing one.
+- **No memory store.** Curated, versioned files that a reviewer can read beat an embedding
+  database that cannot cite a line. A memory nobody can check is a memory nobody can
+  correct.
+- **No web dashboard.** A server, an account system and a retention policy, in exchange for
+  a picture of numbers the machine already has — and it would break the no-telemetry promise
+  that the rest of this project is built on. The JSON envelope and the PR description are
+  the right surface for the same information.
+- **No autonomous self-improvement.** The research on self-evolving agent harnesses is
+  explicit that the proposer and the crediter have to be separate, with deterministic
+  measurement and a human gate. anvil's shape already is that: the agent proposes, the CLI
+  verifies, a human applies. What is missing is the measurement — which is what the eval
+  harness is for.

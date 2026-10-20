@@ -12,10 +12,11 @@
  *     the reader to ignore the report.
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 import { mentionsRunner } from '@anvil/profile'
+import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes, WARN_INSTRUCTION_BYTES } from './budget.ts'
 import type { Fix, Layer, Severity, Status } from './types.ts'
 
 export interface RuleContext {
@@ -249,6 +250,127 @@ const AGENTS_COMMANDS: Rule = {
       ctx.profile.instructions.map((i) => i.path),
     )
   },
+}
+
+/**
+ * The instruction file's size, and where its commands are.
+ *
+ * Two questions, one rule, because they are the same question: is the guidance an agent
+ * loads worth the tokens it costs?
+ *
+ * The size is the half with evidence. The position of the commands is the half that
+ * decides whether the guidance works at all: arXiv:2602.11988 found that the content
+ * that paid for itself was the project's own commands and non-standard tooling, so an
+ * AGENTS.md that buries the commands under a wall of prose is spending its budget on the
+ * part that did not help.
+ *
+ * The command check only runs once the file is already over the warning threshold.
+ * A short file that lists its commands late is not a problem worth a finding, and a rule
+ * that reports on every file it can see is a rule the reader learns to skip.
+ */
+const INSTRUCTION_BUDGET: Rule = {
+  id: 'INSTRUCTION_BUDGET',
+  layer: 'orientability',
+  severity: 'medium',
+  title: 'Agent instructions fit the context budget',
+  order: 15,
+  evaluate(ctx) {
+    // A global instruction file is the developer's, not the repository's, and is not
+    // shipped with the code. Counting it would make one person's setup change another
+    // person's score.
+    const files = ctx.profile.instructions.filter((i) => i.category !== 'global' && i.bytes > 0)
+    if (files.length === 0) {
+      // AGENTS_FILE already reports the absence. Repeating it here is noise.
+      return na('No agent instructions file to measure')
+    }
+
+    // The budget is what one agent loads, not what the repository ships: axios keeps
+    // 14.7 kB of AGENTS.md and 6.0 kB of Copilot instructions, and no tool reads both.
+    // Summing them warned on a repository whose guidance is under the line.
+    const largest = files.reduce((a, b) => (b.bytes > a.bytes ? b : a))
+    const evidence = files.map((f) => f.path)
+    const size = `${formatBytes(largest.bytes)} (~${estimateTokens(largest.bytes)} tokens)`
+
+    if (largest.bytes <= WARN_INSTRUCTION_BYTES) {
+      return pass(
+        files.length === 1
+          ? `${largest.path} is ${size}`
+          : `Largest of ${files.length} instruction files is ${largest.path} at ${size}`,
+        evidence,
+      )
+    }
+
+    const overBudget = largest.bytes > FAIL_INSTRUCTION_BYTES
+    const parts: string[] = [
+      files.length === 1
+        ? `${largest.path} is ${size}.`
+        : `${files.length} instruction files; the largest is ${largest.path} at ${size}.`,
+    ]
+
+    if (overBudget) {
+      parts.push(
+        `Past ${formatBytes(FAIL_INSTRUCTION_BYTES)} the file is paid for on every request and most of it is never read closely.`,
+      )
+    } else {
+      parts.push(`Past ${formatBytes(WARN_INSTRUCTION_BYTES)} detail stops landing.`)
+    }
+
+    const primary = primaryInstructionFile(files)
+    if (primary !== null) {
+      // Null when the primary is a directory (Cursor rules) rather than a file: there are
+      // no "first 80 lines" to inspect, and saying so would be a false accusation.
+      const early = firstLinesOf(ctx.profile.root, primary.path, COMMAND_LEAD_LINES)
+      if (early !== null && !mentionsRunner(early)) {
+        parts.push(
+          `${primary.path} names no runnable command in its first ${COMMAND_LEAD_LINES} lines, which is where the guidance that pays for itself belongs.`,
+        )
+      }
+    }
+
+    // The fix names the file the reader actually has, because a repo whose instructions
+    // live in CLAUDE.md is not helped by a suggestion to edit a file it does not ship.
+    // It targets the largest source, which is the one the budget is measuring.
+    const fix = budgetFix(largest.path)
+    return overBudget ? fail(parts.join(' '), evidence, fix) : warn(parts.join(' '), evidence, fix)
+  },
+}
+
+/**
+ * The instruction file an agent actually reads first.
+ *
+ * The `agents` category is what opencode, Claude Code and Codex all load; when a repo
+ * has no such file, the largest one is the best guess at what the agent will read.
+ */
+function primaryInstructionFile(
+  files: ReadonlyArray<{ path: string; bytes: number; category: string }>,
+): { path: string; bytes: number; category: string } | null {
+  const agents = files.filter((f) => f.category === 'agents')
+  if (agents.length > 0) return agents[0] ?? null
+  return [...files].sort((a, b) => b.bytes - a.bytes)[0] ?? null
+}
+
+/** How many lines of the instructions count as "the top" for the command check. */
+const COMMAND_LEAD_LINES = 80
+
+/** The first N lines of a file, or null when the path is not a readable file. */
+function firstLinesOf(root: string, path: string, count: number): string | null {
+  try {
+    const absolute = join(root, ...path.split('/'))
+    if (!statSync(absolute).isFile()) return null
+    const text = readFileSync(absolute, 'utf8')
+    return text.split('\n').slice(0, count).join('\n')
+  } catch {
+    // Unreadable is not evidence of anything. The size half of the rule still stands.
+    return null
+  }
+}
+
+function budgetFix(path: string): Fix {
+  return derived(
+    path,
+    `Keep ${path} to the commands, the module map and the risk paths; move the long-form detail into a skill that is read only when it is needed`,
+    0.7,
+  )
 }
 
 const ARCH_DOC: Rule = {
@@ -1388,6 +1510,7 @@ const RISK_MAP: Rule = {
 export const RULES: readonly Rule[] = [
   AGENTS_FILE,
   AGENTS_COMMANDS,
+  INSTRUCTION_BUDGET,
   ARCH_DOC,
   MODULE_MAP,
   CONVENTIONS,

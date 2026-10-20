@@ -117,6 +117,35 @@ anvil playbook check           # structural checks, plus every URL over the netw
 down; if there is no honest replacement, delete the entry rather than pointing it at
 something plausible.
 
+A resource may declare `satisfiedBy`: repo-relative globs whose presence means the
+repository already follows that guidance, so the plan leaves it out and counts it. Two
+rules make that honest. A glob must be a file whose presence really does imply the
+guidance — `ruff.toml` means the repository uses Ruff, and `package.json` does not mean the
+repository uses Ruff. And a `satisfiedBy` whose globs are all files the playbook itself
+matches on is a defect, because the suggestion can then never be shown; `playbook check`
+reports it.
+
+## The harness that runs an agent
+
+```bash
+npm run eval -- --dry-run   # what it would do, and it costs nothing
+ANVIL_EVAL=1 npm run eval   # what it would do, with an agent and a model
+ANVIL_EVAL=1 ANVIL_EVAL_MODEL=provider/model npm run eval   # when the default cannot run it
+```
+
+The report prints the model used. Set `ANVIL_EVAL_MODEL` when the configured default is an
+image model, an exhausted free tier or anything else that cannot do the task: a run that
+cannot name its model is not comparable with the next one.
+
+The eval harness runs the same task twice in the same repository — once with the artifacts
+`anvil init --apply` writes, once without — and grades both the same way: the repository's
+own verify command, a hidden test copied in after the agent finishes, and the cost read
+from the host's ledger. It is not part of `npm test`, because it needs an agent, a model
+and a network, and because a slow suite is a suite people stop running.
+
+A scenario that fails is a finding, not a nuisance: read the transcript in
+`eval-results/` before changing the harness.
+
 ## The one suite that needs `gh`
 
 ```bash

@@ -49,6 +49,7 @@
     "test:live": "node --test --test-reporter=spec \"packages/providers/test/gh-live.test.ts\" \"packages/discovery/test/live.test.ts\"",
     "test:changed": "node scripts/test-changed.mjs",
     "test:watch": "node --test --watch \"packages/*/test/*.test.ts\"",
+    "eval": "node scripts/eval.ts",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "ci:local": "npm ci && npm run check",
     "clean": "node scripts/clean.mjs",

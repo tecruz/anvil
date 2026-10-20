@@ -32,6 +32,10 @@ official:
       why: >-
         The analyzer rules the SDK ships with. These are the errors a reviewer will expect
         to be clean, so treat new ones as defects.
+      # A repo that configures its own analyzers or editor rules has already answered the
+      # question this resource answers, so offering it again is noise.
+      satisfiedBy: ['**/.editorconfig', '**/Directory.Build.props']
+
   migrationGuides:
     - label: .NET upgrade guide
       url: 'https://learn.microsoft.com/en-us/dotnet/core/compatibility/'

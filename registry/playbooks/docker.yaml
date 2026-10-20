@@ -47,6 +47,7 @@ community:
     why: >-
         A Dockerfile linter whose rules each cite the reason. Useful as a CI gate, and a
         decent way to discover the conventions a project has not written down.
+    satisfiedBy: ['**/.hadolint.yaml', '**/.hadolint.yml']
 
 verify:
   build: ['docker build -t anvil-check .']

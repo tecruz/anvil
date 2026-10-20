@@ -1,0 +1,95 @@
+# Playwright playbook.
+#
+# Matched on the config file, so a repository that runs Cypress does not get Playwright
+# documentation and a repository that runs Playwright does not get Cypress documentation.
+# The cross-cutting QA guidance lives in the `qa` playbook.
+#
+# The agent-facing tools are here because they exist and work today. Playwright's test
+# agents (planner, generator, healer) write a plan, then the tests, then repair what
+# broke, and `npx playwright init-agents` writes their definitions into the repository.
+#
+# Note what Playwright itself says about its MCP server for coding agents: the CLI and
+# skills are usually the better fit, because an MCP server loads a large tool schema into
+# the context window on every call and the CLI does not. The MCP server earns its place
+# in the exploratory and self-healing loops, where a persistent browser is the point.
+# That is the same trade-off this project makes everywhere else: a command the agent
+# runs beats a schema the agent carries.
+
+id: playwright
+title: Playwright
+priority: 65
+
+match:
+  files:
+    - '**/playwright.config.*'
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Playwright documentation
+      url: 'https://playwright.dev/docs/intro'
+      why: >-
+        The reference for the runner, the configuration file and the assertions. The
+        config is where the base URL, the projects and the retries live, and all three
+        decide whether a test failure means the product broke.
+    - label: Playwright test agents
+      url: 'https://playwright.dev/docs/test-agents'
+      why: >-
+        The planner, generator and healer agents, and `npx playwright init-agents`, which
+        writes their definitions into the repository -- as agents and as skills, and
+        regenerated whenever Playwright is updated, so a repository that installs them
+        once gets the current tools rather than a stale copy. The order is the point: a
+        plan written before the code produces a test that documents the product, and a
+        test written first produces one that documents the agent.
+    - label: Playwright best practices
+      url: 'https://playwright.dev/docs/best-practices'
+      why: >-
+        Web-first assertions, locators by role, and no fixed waits. Most flaky browser
+        tests are one of those three mistakes, and this page names them.
+  skills: []
+  agents: []
+  mcp:
+    - label: Playwright MCP server
+      url: 'https://github.com/microsoft/playwright-mcp'
+      why: >-
+        A live browser the agent can drive, for exploratory testing and for repairing a
+        broken test against the running product. Its own README recommends the CLI and
+        skills instead for ordinary coding work, because the MCP server's tool schema
+        costs context on every call; use it when the browser session is the point.
+  styleGuides: []
+  migrationGuides: []
+
+community:
+  - repo: 'microsoft/playwright'
+    label: Playwright
+    why: >-
+      The runner, the test agents and the documentation in one place, and the source of
+      the examples the documentation links to.
+
+verify:
+  build: []
+  test: ['npx playwright test']
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'the config file at the repository root, tests under its testDir'
+  testNaming: '*.spec.ts'
+  reviewFocus:
+    - 'a wait for a fixed time instead of a wait for a state'
+    - 'a locator that depends on the order the page renders'
+
+riskGlobs:
+  - '**/playwright-report/**'
+  - '**/test-results/**'
+  - '**/blob-report/**'
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['microsoft']
+  keywords:
+    - 'playwright agent'
+    - 'playwright test agent'
+  mcp: ['playwright']

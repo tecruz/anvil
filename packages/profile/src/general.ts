@@ -39,7 +39,12 @@ export function detectInstructionFiles(root: string, files: ReadonlySet<string>)
     if (candidate.rel.endsWith('/rules')) {
       const members = [...files].filter((f) => f.startsWith(`${candidate.rel}/`))
       if (members.length === 0) continue
-      out.push({ path: candidate.rel, category: candidate.category, bytes: 0 })
+      // A rules directory is still guidance the agent loads, so its members are measured.
+      // Reporting zero made the instruction budget treat a Cursor repo as having nothing
+      // to measure, which is the one answer a budget rule must not get wrong.
+      let bytes = 0
+      for (const member of members) bytes += readText(join(root, member)).bytes
+      out.push({ path: candidate.rel, category: candidate.category, bytes })
       continue
     }
     if (!files.has(candidate.rel)) continue

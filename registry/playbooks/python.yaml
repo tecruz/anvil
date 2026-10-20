@@ -39,6 +39,11 @@ official:
       why: >-
         The default Python style. Prefer a repo's own documented style when one exists;
         this is the fallback.
+      # The fallback is redundant once the repo declares a style of its own. A config file
+      # is the only signal that can be checked without reading it, so a repo that keeps
+      # its rules in `setup.cfg` or `.flake8` counts as satisfied; one that keeps them in
+      # `pyproject.toml` does not, and is still offered this.
+      satisfiedBy: ['**/setup.cfg', '**/.flake8', '**/.editorconfig']
   migrationGuides:
     - label: Django deployment and upgrade notes
       url: 'https://docs.djangoproject.com/en/stable/releases/'
@@ -53,11 +58,13 @@ community:
     why: >-
       The fast linter and formatter most modern Python repos standardise on. Its rule
       documentation explains what each check actually catches.
+    satisfiedBy: ['**/ruff.toml', '**/.ruff.toml']
   - repo: 'pytest-dev/pytest'
     label: pytest
     why: >-
       The documentation for markers, fixtures and `-k` selection is the reference for the
       fast-test subset the audit looks for.
+    satisfiedBy: ['**/pytest.ini']
 
 verify:
   build: ['python -m build', 'poetry build']

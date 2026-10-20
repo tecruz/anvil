@@ -21,6 +21,8 @@
  *   Rules    AGENTS.md                    plain markdown; no frontmatter required.
  */
 
+import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes } from '@anvil/audit'
+
 export type ArtifactKind = 'agent' | 'command' | 'skill' | 'agents-file'
 
 export const SKILL_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/
@@ -156,8 +158,18 @@ function validateAgentsFile(path: string, content: string): ArtifactValidation {
   const warnings: string[] = []
 
   if (content.trim() === '') errors.push('AGENTS.md is empty; an empty instructions file is worse than none')
-  if (content.length > 40_000) {
-    warnings.push(`AGENTS.md is ${content.length} bytes. Guidance beyond a few KB stops being read carefully.`)
+  // Bytes, not UTF-16 code units: the audit measures the file on disk, and a repo whose
+  // guidance is not ASCII must get the same verdict from both halves of the tool.
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > FAIL_INSTRUCTION_BYTES) {
+    // The same threshold the audit rule fails on, so a file that would fail `anvil doctor`
+    // cannot be written by `anvil init --apply` without the writer seeing why. The token
+    // count is an estimate for the reader; the bytes are the verdict.
+    const lines = content.split('\n').length
+    warnings.push(
+      `AGENTS.md is ${formatBytes(bytes)} (~${estimateTokens(bytes)} tokens, ${lines} lines). ` +
+        'Guidance beyond a few KB stops being read carefully: move the long-form detail into a skill.',
+    )
   }
   // opencode does not parse @file references itself, so an AGENTS.md leaning on them has
   // to say so explicitly or the agent never loads them.

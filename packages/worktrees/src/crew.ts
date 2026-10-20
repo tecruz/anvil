@@ -330,7 +330,10 @@ function recordLaunch(repoRoot: string, key: string, pid: number | null): void {
           agent: {
             ...(c.agent ?? { runner: 'opencode' }),
             launchedAt: new Date().toISOString(),
-            ...(pid === null ? {} : { sessionId: String(pid) }),
+            // The pid, under its own name. It used to be written as `sessionId`, which is
+            // how a process id ended up in a field called "session"; readers still accept
+            // that, but nothing writes it any more.
+            ...(pid === null ? {} : { pid }),
           },
         }
       : c,

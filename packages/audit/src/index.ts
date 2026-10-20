@@ -3,6 +3,12 @@
  */
 
 export {
+  estimateTokens,
+  FAIL_INSTRUCTION_BYTES,
+  formatBytes,
+  WARN_INSTRUCTION_BYTES,
+} from './budget.ts'
+export {
   type AuditOptions,
   audit,
   buildRuleContext,

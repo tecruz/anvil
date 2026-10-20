@@ -1,0 +1,54 @@
+# WebdriverIO playbook.
+#
+# Matched on the config file. WebdriverIO is the mobile and remote-browser case: the
+# runner is a device farm or a remote grid rather than a local browser, which changes
+# what a test can rely on. The cross-cutting QA guidance lives in the `qa` playbook.
+
+id: webdriverio
+title: WebdriverIO
+priority: 65
+
+match:
+  files:
+    - '**/wdio.conf.*'
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: WebdriverIO documentation
+      url: 'https://webdriver.io/docs/api/'
+      why: >-
+        The runner API and its configuration. The `capabilities` block is the part worth
+        reading before an agent writes a test: it decides the device, the platform and
+        the timeouts the test will actually get.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+
+community: []
+
+verify:
+  build: []
+  test: ['npx wdio run']
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'the config file at the repository root, specs in a folder it names'
+  testNaming: '*.e2e.js'
+  reviewFocus:
+    - 'a capability that pins a device or a platform version'
+    - 'a test that waits for a device rather than for a state'
+
+riskGlobs: []
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['webdriverio']
+  keywords:
+    - 'webdriverio agent'
+  mcp: ['webdriverio']

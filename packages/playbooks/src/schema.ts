@@ -26,6 +26,18 @@ export interface Resource {
   why: string
   /** How to use it, when it is not just a URL to read. */
   install?: string
+  /**
+   * Files whose presence means the repository already follows this guidance.
+   *
+   * The plan used to offer a repository the official style guide whether or not the
+   * repository already had that style guide configured. The guidance was not wrong; it
+   * was redundant, and redundancy is what teaches a reader to skip a list.
+   *
+   * Glob-only in this version, and that is a narrowing rather than a decision: a file's
+   * presence is the one signal that can be checked without reading it. Content signals
+   * ("the pyproject declares ruff") would be stronger, and are not supported yet.
+   */
+  satisfiedBy?: string[]
 }
 
 export interface OfficialResources {
@@ -238,7 +250,36 @@ function checkKeys(
   }
 }
 
-const RESOURCE_KEYS = ['label', 'url', 'why', 'install'] as const
+const RESOURCE_KEYS = ['label', 'url', 'why', 'install', 'satisfiedBy'] as const
+
+/**
+ * The globs that say a repository already follows a piece of guidance.
+ *
+ * Validated rather than trusted, because a glob that matches nothing is a rule that
+ * never fires: the suggestion it guards would be offered forever, which is the exact
+ * behaviour `satisfiedBy` exists to remove.
+ */
+function satisfiedByList(value: YamlValue | undefined, path: string, issues: ValidationIssue[]): string[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected a list of globs' })
+    return undefined
+  }
+  const out: string[] = []
+  for (const [i, item] of value.entries()) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      issues.push({ path: `${path}[${i}]`, message: 'expected a non-empty glob' })
+      continue
+    }
+    const glob = item.trim()
+    if (glob.startsWith('/') || glob.includes('..')) {
+      issues.push({ path: `${path}[${i}]`, message: 'expected a repo-relative glob' })
+      continue
+    }
+    out.push(glob)
+  }
+  return out.length === 0 ? undefined : out
+}
 
 function resourceList(
   value: YamlValue | undefined,
@@ -246,13 +287,13 @@ function resourceList(
   issues: ValidationIssue[],
   extra: readonly string[] = [],
   requireUrl = true,
-): Array<Resource & Record<string, string>> {
+): Resource[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) {
     issues.push({ path, message: 'expected a list' })
     return []
   }
-  const out: Array<Resource & Record<string, string>> = []
+  const out: Resource[] = []
   for (const [i, item] of value.entries()) {
     const obj = issuesOn(item, `${path}[${i}]`, issues)
     checkKeys(obj, [...RESOURCE_KEYS, ...extra], `${path}[${i}]`, issues)
@@ -264,11 +305,13 @@ function resourceList(
     if (requireUrl && (typeof url !== 'string' || url === ''))
       issues.push({ path: `${path}[${i}].url`, message: 'required url' })
     if (typeof why !== 'string') issues.push({ path: `${path}[${i}].why`, message: 'required string' })
+    const satisfiedBy = satisfiedByList(obj.satisfiedBy, `${path}[${i}].satisfiedBy`, issues)
     out.push({
       label: typeof label === 'string' ? label : '',
       url: typeof url === 'string' ? url : '',
       why: typeof why === 'string' ? why.trim() : '',
       ...(typeof obj.install === 'string' ? { install: obj.install } : {}),
+      ...(satisfiedBy === undefined ? {} : { satisfiedBy }),
     })
   }
   return out
@@ -352,6 +395,7 @@ export function validatePlaybook(
           path: `community[${i}].stars`,
           message: 'expected a number',
         })
+      const satisfiedBy = satisfiedByList(obj.satisfiedBy, `community[${i}].satisfiedBy`, issues)
       community.push({
         repo: typeof repo === 'string' ? repo : '',
         stars,
@@ -359,6 +403,7 @@ export function validatePlaybook(
         url: typeof obj.url === 'string' ? obj.url : typeof repo === 'string' ? `https://github.com/${repo}` : '',
         why: typeof obj.why === 'string' ? obj.why.trim() : '',
         ...(typeof obj.install === 'string' ? { install: obj.install } : {}),
+        ...(satisfiedBy === undefined ? {} : { satisfiedBy }),
       })
     }
   } else if (communityRaw !== undefined && communityRaw !== null) {

@@ -120,24 +120,31 @@ describe('built-in registry', () => {
   test('covers every ecosystem the detectors emit, plus the file-only ones', () => {
     // The registry grew from 3 to 15, so this is now a coverage claim rather than a
     // snapshot. A new ecosystem with no playbook shows up in `plan` as a matched stack
-    // with no guidance at all, which is worse than not detecting it.
+    // with no guidance at all, which is worse than not detecting it. The QA playbooks are
+    // one per tool, because a repository that runs Playwright has no use for the Cypress
+    // documentation.
     const ids = playbooks.map((p) => p.id).sort()
     assert.deepEqual(ids, [
       'android',
       'ci',
+      'cypress',
       'docker',
       'dotnet',
       'elixir',
       'go',
       'jvm',
       'kubernetes',
+      'maestro',
       'node',
       'php',
+      'playwright',
       'python',
+      'qa',
       'ruby',
       'rust',
       'swift',
       'terraform',
+      'webdriverio',
     ])
   })
 
@@ -231,10 +238,14 @@ describe('built-in registry', () => {
     }
   })
 
-  test('every playbook declares verify commands', () => {
+  test('every playbook contributes something actionable', () => {
+    // A playbook that matches a repository has to say something about it. Most say how to
+    // verify it; the cross-cutting ones -- the `qa` playbook, which holds what every
+    // browser-test repository needs while the per-tool playbooks hold the command --
+    // say which paths are risky instead. A playbook that does neither is dead weight.
     for (const p of playbooks) {
-      const total = Object.values(p.verify).reduce((n, v) => n + v.length, 0)
-      assert.ok(total > 0, `${p.id} declares no verify commands`)
+      const verify = Object.values(p.verify).reduce((n, v) => n + v.length, 0)
+      assert.ok(verify > 0 || p.riskGlobs.length > 0, `${p.id} declares neither verify commands nor risk globs`)
     }
   })
 })
@@ -745,6 +756,177 @@ describe('plan', () => {
       },
     ])
     assert.equal(sorted[0]?.id, 'blocker')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The QA playbooks
+// ---------------------------------------------------------------------------
+
+describe('qa playbooks', () => {
+  /** A repository with the given files, which may live in subdirectories. */
+  function repoWith(files: Record<string, string>): ProjectProfile {
+    const dir = tempDir()
+    try {
+      for (const [name, body] of Object.entries(files)) {
+        const path = join(dir, name)
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, body)
+      }
+      return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  const PLAYWRIGHT_CONFIG = "export default { testDir: './e2e' }\n"
+
+  test('a repository with a playwright config matches the playwright and qa playbooks', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({ 'playwright.config.ts': PLAYWRIGHT_CONFIG, 'package.json': '{}' })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(ids.includes('playwright'), `expected playwright, saw ${ids.join(', ')}`)
+    assert.ok(ids.includes('qa'), `expected qa, saw ${ids.join(', ')}`)
+  })
+
+  test('a playwright repository is not offered the cypress documentation', () => {
+    // The rule that made the QA playbooks one per tool: guidance that does not apply to
+    // this repository is noise, and noise is what teaches a reader to skip the plan.
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({ 'playwright.config.ts': PLAYWRIGHT_CONFIG, 'package.json': '{}' })
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, playbooks))
+    const titles = plan.suggestions.map((s) => s.title)
+    assert.ok(!titles.some((t) => /cypress/i.test(t)), `unexpected Cypress guidance: ${titles.join(', ')}`)
+  })
+
+  test('a cypress repository is not offered the playwright documentation', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({ 'cypress.config.ts': PLAYWRIGHT_CONFIG, 'package.json': '{}' })
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, playbooks))
+    const titles = plan.suggestions.map((s) => s.title)
+    assert.ok(!titles.some((t) => /playwright/i.test(t)), `unexpected Playwright guidance: ${titles.join(', ')}`)
+  })
+
+  test('a maestro repository is recognised by its flow directory', () => {
+    // Maestro has no config file of its own beyond an optional `config.yaml`, and the
+    // documented home for the flows is `.maestro/`. The walk used to skip every hidden
+    // directory, so the playbook could never match and the risk glob could never fire.
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({ '.maestro/login.yaml': 'appId: com.example.app\n', 'package.json': '{}' })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(ids.includes('maestro'), `expected maestro, saw ${ids.join(', ')}`)
+    assert.ok(ids.includes('qa'), `expected qa, saw ${ids.join(', ')}`)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Satisfaction: guidance the repository already follows
+// ---------------------------------------------------------------------------
+
+describe('satisfiedBy', () => {
+  /** A playbook whose one resource is satisfied by a file the repo may or may not have. */
+  const PLAYBOOK = `
+id: toy
+title: Toy
+priority: 10
+match:
+  files: ['toy.toml']
+official:
+  docs:
+    - label: Toy docs
+      url: 'https://example.com/toy'
+      why: Because.
+      satisfiedBy: ['**/toy-rc.toml']
+`
+
+  test('accepts a resource that declares satisfiedBy globs', () => {
+    const { playbook, issues } = validatePlaybook(parseYamlSubset(PLAYBOOK))
+    assert.deepEqual(issues, [])
+    assert.deepEqual(playbook?.official.docs[0]?.satisfiedBy, ['**/toy-rc.toml'])
+  })
+
+  test('rejects satisfiedBy that is not a list', () => {
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${PLAYBOOK.replace("satisfiedBy: ['**/toy-rc.toml']", 'satisfiedBy: nope')}`),
+    )
+    assert.ok(issues.some((i) => i.path === 'official.docs[0].satisfiedBy'))
+  })
+
+  test('rejects a satisfiedBy glob that is not repo-relative', () => {
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${PLAYBOOK.replace("satisfiedBy: ['**/toy-rc.toml']", "satisfiedBy: ['/etc/passwd']")}`),
+    )
+    assert.ok(issues.some((i) => i.path === 'official.docs[0].satisfiedBy[0]'))
+  })
+
+  test('rejects an empty satisfiedBy glob', () => {
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${PLAYBOOK.replace("satisfiedBy: ['**/toy-rc.toml']", "satisfiedBy: ['']")}`),
+    )
+    assert.ok(issues.some((i) => i.path === 'official.docs[0].satisfiedBy[0]'))
+  })
+
+  /** A toy repo, with or without the file that satisfies the playbook's only resource. */
+  function toyProfile(withRc: boolean): ProjectProfile {
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'toy.toml'), 'name = "toy"\n')
+      if (withRc) writeFileSync(join(dir, 'toy-rc.toml'), 'mode = "strict"\n')
+      return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('a resource the repository already satisfies is left out of the plan', () => {
+    const profile = toyProfile(true)
+    const pb = parsePlaybook(PLAYBOOK, 'toy.yaml')
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, [pb]))
+    assert.equal(plan.suggestions.filter((s) => s.id.startsWith('official:')).length, 0)
+  })
+
+  test('the count of what was left out is reported', () => {
+    // The omission is a decision, and a decision the reader cannot see is one they cannot
+    // check. The count is part of the plan's contract.
+    const profile = toyProfile(true)
+    const pb = parsePlaybook(PLAYBOOK, 'toy.yaml')
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, [pb]))
+    assert.equal(plan.satisfied, 1)
+  })
+
+  test('the resource is offered when the repository does not satisfy it', () => {
+    const profile = toyProfile(false)
+    const pb = parsePlaybook(PLAYBOOK, 'toy.yaml')
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, [pb]))
+    assert.equal(plan.suggestions.filter((s) => s.id.startsWith('official:')).length, 1)
+    assert.equal(plan.satisfied, 0)
+  })
+
+  test('--include-satisfied keeps it, and names the file that satisfied it', () => {
+    const profile = toyProfile(true)
+    const pb = parsePlaybook(PLAYBOOK, 'toy.yaml')
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, [pb]), [], new Map(), {
+      includeSatisfied: true,
+    })
+    const kept = plan.suggestions.filter((s) => s.id.startsWith('official:'))
+    assert.equal(kept.length, 1)
+    assert.ok(
+      kept[0]?.evidence.includes('toy-rc.toml'),
+      `evidence should name the file, got ${JSON.stringify(kept[0]?.evidence)}`,
+    )
+  })
+
+  test('a community resource is satisfied the same way', () => {
+    const profile = toyProfile(true)
+    const pb = parsePlaybook(
+      `${PLAYBOOK}\ncommunity:\n  - repo: 'acme/thing'\n    why: Because.\n    satisfiedBy: ['**/toy-rc.toml']\n`,
+      'toy.yaml',
+    )
+    const plan = buildPlan(audit(profile), profile, matchPlaybooks(profile, [pb]))
+    // Filtered by id, not by tier: a derived fix can also have `community` as its origin,
+    // and this test is about the playbook's own community resource.
+    assert.equal(plan.suggestions.filter((s) => s.id.startsWith('community:')).length, 0)
+    assert.equal(plan.satisfied, 2)
   })
 })
 

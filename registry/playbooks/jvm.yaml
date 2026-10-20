@@ -34,6 +34,8 @@ official:
       why: >-
         The most widely adopted Java convention. Use it as the default when a repo has no
         stated style.
+      satisfiedBy: ['**/checkstyle.xml', '**/config/checkstyle/**', '**/.editorconfig']
+
   migrationGuides:
     - label: Gradle upgrade guide
       url: 'https://docs.gradle.org/current/userguide/compatibility.html'

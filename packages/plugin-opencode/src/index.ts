@@ -11,7 +11,7 @@
  * that, which is why it landed in M3 rather than M6.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Plugin } from '@opencode-ai/plugin'
 import { tool } from '@opencode-ai/plugin'
@@ -19,6 +19,14 @@ import { tool } from '@opencode-ai/plugin'
 /** Where a claim writes the ticket context inside its worktree. */
 const CONTEXT_FILE = join('.anvil', 'ticket.md')
 const OVERLAY_FILE = join('.anvil', 'AGENTS.md')
+/**
+ * Where the plugin records which session is running in this worktree.
+ *
+ * `anvil crew status --cost` reads it to ask the host's usage ledger what that session
+ * cost. The plugin writes it because the session id belongs to a conversation and the
+ * conversation belongs to a directory: this is the only place both are known.
+ */
+const SESSION_FILE = join('.anvil', 'session.json')
 
 function readIfPresent(path: string): string | null {
   if (!existsSync(path)) return null
@@ -77,7 +85,7 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
           "Ranked fixes for the current repository, in three tiers: derived (from this repo's own facts), " +
           "official (the technology's own documentation and skills) and community. Entries that " +
           '`anvil playbook discover` fetched are merged in as live, ranked below the curated ones and ' +
-          'marked with their provenance. Read-only.',
+          'marked with their provenance. Guidance this repository already follows is left out. Read-only.',
         args: {
           tier: tool.schema.enum(['derived', 'official', 'community']).optional().describe('Only this tier'),
           limit: tool.schema.number().optional().describe('Maximum suggestions to return'),
@@ -115,6 +123,44 @@ export const AnvilPlugin: Plugin = async ({ directory, worktree, $ }) => {
           return ok ? output : `anvil status failed: ${output}`
         },
       }),
+    },
+
+    /**
+     * Record which session is running in this worktree.
+     *
+     * The session id is the only thing that ties a conversation to a claim, and it is
+     * opencode that chooses it: anvil launches the agent and never sees the id. The
+     * plugin runs inside the session, so it is the one place both are known.
+     *
+     * Written once per session, and never overwritten: a second message in the same
+     * session has the same id, and a different id in the same worktree is a different
+     * session, which is exactly what the cost report should be about.
+     */
+    'chat.message': async (input) => {
+      if (input.sessionID === undefined || input.sessionID.trim() === '') return
+      const path = join(root, SESSION_FILE)
+      const existing = readIfPresent(path)
+      if (existing !== null) {
+        try {
+          const parsed: unknown = JSON.parse(existing)
+          if (typeof parsed === 'object' && parsed !== null) {
+            const sessionId = (parsed as { sessionId?: unknown }).sessionId
+            if (sessionId === input.sessionID) return
+          }
+        } catch {
+          // Unreadable: overwritten below.
+        }
+      }
+      try {
+        mkdirSync(join(root, '.anvil'), { recursive: true })
+        writeFileSync(
+          path,
+          `${JSON.stringify({ sessionId: input.sessionID, recordedAt: new Date().toISOString() }, null, 2)}\n`,
+          'utf8',
+        )
+      } catch {
+        // A plugin that cannot write a note is still a working plugin.
+      }
     },
 
     /**

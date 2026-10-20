@@ -39,6 +39,8 @@ official:
       why: >-
         The PHP-FIG standard. Use the project\'s own tooling when it has one; this is the
         fallback for an unconfigured repo.
+      satisfiedBy: ['**/.php-cs-fixer.php', '**/phpcs.xml', '**/phpcs.xml.dist', '**/.editorconfig']
+
   migrationGuides:
     - label: PHP migration guide
       url: 'https://www.php.net/manual/en/migration84.php'
@@ -57,6 +59,7 @@ community:
     why: >-
       The static analyser most PHP projects standardise on, and the level system documents
       which correctness guarantees you have actually bought.
+    satisfiedBy: ['**/phpstan.neon', '**/phpstan.neon.dist', '**/phpstan.dist.neon']
 
 verify:
   build: ['composer install --no-dev --optimize-autoloader']

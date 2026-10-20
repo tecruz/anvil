@@ -171,6 +171,20 @@ export function checkStructure(playbooks: readonly Playbook[]): Problem[] {
         if (r.label.trim() === '') {
           problems.push({ level: 'warn', where, message: 'resource has no `label`' })
         }
+        // A `satisfiedBy` glob that the playbook already matches on is a suggestion that
+        // can never appear: the resource is satisfied exactly when the playbook matches,
+        // and the plan drops resources the repository already satisfies. Reported rather
+        // than fixed silently, because the author meant to say something and this is not
+        // what they said.
+        const satisfiedBy = r.satisfiedBy ?? []
+        if (satisfiedBy.length > 0 && satisfiedBy.every((glob) => playbook.match.files.includes(glob))) {
+          problems.push({
+            level: 'warn',
+            where,
+            message: `satisfiedBy globs ${satisfiedBy.map((g) => JSON.stringify(g)).join(', ')} are all match.files`,
+            fix: 'This playbook only matches repositories that have these files, so the suggestion is dropped every time and never shown. Point satisfiedBy at a file the repository might not have.',
+          })
+        }
       })
     }
     if (resources === 0) {

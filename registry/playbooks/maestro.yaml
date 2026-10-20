@@ -1,0 +1,57 @@
+# Maestro playbook.
+#
+# Matched on the flow directory. Maestro's workspace config is always named `config.yaml`,
+# which is far too common to mean Maestro on its own; the documented home for the flows is
+# the `.maestro/` directory, and a flow file inside it is the signal. Maestro is the mobile
+# flow case, and its YAML flow format is small enough that an agent can write a realistic
+# test without a framework. The cross-cutting QA guidance lives in the `qa` playbook.
+
+id: maestro
+title: Maestro
+priority: 65
+
+match:
+  files:
+    - '**/.maestro/**'
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Maestro documentation
+      url: 'https://docs.maestro.dev/'
+      why: >-
+        The flow format and the command set. A flow is a list of commands, and the
+        commands are the vocabulary an agent needs before it can write one that a person
+        would recognise as a real user path.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+
+community: []
+
+verify:
+  build: []
+  test: ['maestro test']
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'flows in their own directory, one file per user path'
+  testNaming: 'one flow per user path, named after the path'
+  reviewFocus:
+    - 'a flow that assumes a device state no other flow set up'
+    - 'a flow that signs in with a real account'
+
+riskGlobs:
+  - '**/.maestro/**'
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['mobile-dev-inc']
+  keywords:
+    - 'maestro mobile testing'
+  mcp: ['maestro']

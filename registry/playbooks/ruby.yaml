@@ -54,6 +54,7 @@ community:
     why: >-
       The default Ruby linter and formatter. Its documentation explains which conventions
       are enforced and why, which is more useful than a bare lint error.
+    satisfiedBy: ['**/.rubocop.yml', '**/.rubocop_todo.yml']
 
 verify:
   build: ['bundle exec rake assets:precompile']

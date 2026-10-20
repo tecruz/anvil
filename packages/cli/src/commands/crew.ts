@@ -18,8 +18,9 @@ import {
 } from '@anvil/core'
 import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
 import { parseRef, type Ticket } from '@anvil/tickets'
-import { claimStatuses, readClaims } from '@anvil/worktrees'
+import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
+import { formatCost, lookupSessionCosts } from '../cost.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
@@ -51,6 +52,10 @@ export const crewCommand: Command = {
     '--runner <r>      agent binary, default `opencode`',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
     '--force-parallel  ignore the cache policy and use --jobs literally',
+    '--cost            with `status`, show what each agent session cost',
+    '',
+    'Cost is read from ccusage, which prices the usage logs the agents already wrote on',
+    'this machine. Nothing is uploaded, and a missing ccusage is a note, not a failure.',
   ].join('\n'),
   flags: {
     ...GLOBAL_ONLY,
@@ -62,6 +67,7 @@ export const crewCommand: Command = {
     base: { type: 'string' },
     jobs: { type: 'string' },
     'force-parallel': { type: 'boolean' },
+    cost: { type: 'boolean' },
     key: { type: 'string', multiple: true },
   },
 
@@ -81,7 +87,7 @@ export const crewCommand: Command = {
 
     if (sub === 'up') return crewUpFlow(ctx, repoRoot, provider, args)
     if (sub === 'verify') return crewVerifyFlow(ctx, repoRoot, args)
-    return crewStatusFlow(ctx, repoRoot)
+    return crewStatusFlow(ctx, repoRoot, args)
   },
 }
 
@@ -276,34 +282,61 @@ function renderVerify(ctx: CommandContext, result: CrewVerifyResult): string {
 // crew status
 // ---------------------------------------------------------------------------
 
-async function crewStatusFlow(ctx: CommandContext, repoRoot: string): Promise<number | undefined> {
+async function crewStatusFlow(
+  ctx: CommandContext,
+  repoRoot: string,
+  args: ReturnType<typeof parseCliArgs>,
+): Promise<number | undefined> {
   const statuses = await claimStatuses(repoRoot)
   const registry = readClaims(repoRoot)
 
   const rows = await mapWithConcurrency(statuses, 8, async (st) => {
     const claim = st.claim
-    const pid = claim.agent?.sessionId === undefined ? null : Number.parseInt(claim.agent.sessionId, 10)
-    const alive = pid !== null && Number.isFinite(pid) ? isProcessAlive(pid) : null
-    return { status: st, pid, alive }
+    const pid = claimAgentPid(claim)
+    const alive = pid !== null ? isProcessAlive(pid) : null
+    // The session the agent opened, as the opencode plugin recorded it in the worktree.
+    // Absent when the plugin is not installed, which is a fact about the machine rather
+    // than an error.
+    const session = readAgentSession(claim.worktreePath)
+    return { status: st, pid, alive, sessionId: session?.sessionId ?? null }
   })
+
+  // Cost is opt-in and read from the host's usage ledger, so it is only looked up when
+  // it is asked for.
+  const wantsCost = args.values.cost === true
+  const sessionIds = rows.map((r) => r.sessionId).filter((id): id is string => id !== null)
+  const cost = wantsCost
+    ? await lookupSessionCosts(sessionIds)
+    : { available: false, reason: 'cost was not requested', sessions: new Map() }
 
   const data = {
     schemaVersion: 1,
     active: registry.claims.filter((c) => c.state === 'active').length,
-    crew: rows.map((r) => ({
-      key: r.status.claim.key,
-      branch: r.status.claim.branch,
-      worktree: r.status.claim.worktreePath,
-      present: r.status.present,
-      uncommitted: r.status.uncommitted,
-      unpushed: r.status.unpushed,
-      lastCommitAgeSeconds: r.status.lastCommitAgeSeconds,
-      agentPid: r.pid,
-      agentAlive: r.alive,
-      state: r.status.claim.state,
-      orphaned: r.status.orphaned,
-      pr: r.status.claim.pr ?? null,
-    })),
+    crew: rows.map((r) => {
+      const sessionCost = r.sessionId === null ? undefined : cost.sessions.get(r.sessionId)
+      return {
+        key: r.status.claim.key,
+        branch: r.status.claim.branch,
+        worktree: r.status.claim.worktreePath,
+        present: r.status.present,
+        uncommitted: r.status.uncommitted,
+        unpushed: r.status.unpushed,
+        lastCommitAgeSeconds: r.status.lastCommitAgeSeconds,
+        agentPid: r.pid,
+        agentAlive: r.alive,
+        agentSessionId: r.sessionId,
+        costUsd: sessionCost?.costUsd ?? null,
+        costTokens: sessionCost?.tokens ?? null,
+        state: r.status.claim.state,
+        orphaned: r.status.orphaned,
+        pr: r.status.claim.pr ?? null,
+      }
+    }),
+    cost: {
+      requested: wantsCost,
+      available: cost.available,
+      ...(cost.reason === undefined ? {} : { reason: cost.reason }),
+    },
   }
 
   ctx.out(data, () => {
@@ -313,25 +346,47 @@ async function crewStatusFlow(ctx: CommandContext, repoRoot: string): Promise<nu
       out.push(s.dim('No claims. Run `anvil crew up` to start one.'))
       return out.join('\n')
     }
+    const columns = wantsCost
+      ? ['key', 'wt', 'uncom', 'unpush', 'last', 'agent', 'cost', 'state']
+      : ['key', 'wt', 'uncom', 'unpush', 'last', 'agent', 'state']
     out.push(
       renderTable(
-        ['key', 'wt', 'uncom', 'unpush', 'last', 'agent', 'state'],
-        rows.map((r) => [
-          r.status.claim.key,
-          r.status.present ? s.green('ok') : s.red('gone'),
-          r.status.uncommitted === 0 ? s.dim('0') : s.yellow(String(r.status.uncommitted)),
-          r.status.unpushed === null
-            ? s.dim('-')
-            : r.status.unpushed === 0
-              ? s.dim('0')
-              : s.yellow(String(r.status.unpushed)),
-          age(r.status.lastCommitAgeSeconds),
-          r.alive === null ? s.dim('-') : r.alive ? s.green(`pid ${r.pid}`) : s.red('dead'),
-          r.status.orphaned ? s.red('orphaned') : r.status.claim.state,
-        ]),
+        columns,
+        rows.map((r) => {
+          const base = [
+            r.status.claim.key,
+            r.status.present ? s.green('ok') : s.red('gone'),
+            r.status.uncommitted === 0 ? s.dim('0') : s.yellow(String(r.status.uncommitted)),
+            r.status.unpushed === null
+              ? s.dim('-')
+              : r.status.unpushed === 0
+                ? s.dim('0')
+                : s.yellow(String(r.status.unpushed)),
+            age(r.status.lastCommitAgeSeconds),
+            r.alive === null ? s.dim('-') : r.alive ? s.green(`pid ${r.pid}`) : s.red('dead'),
+          ]
+          const withCost = wantsCost
+            ? [...base, formatCost(r.sessionId === null ? undefined : cost.sessions.get(r.sessionId))]
+            : base
+          return [...withCost, r.status.orphaned ? s.red('orphaned') : r.status.claim.state]
+        }),
         s,
       ),
     )
+    if (wantsCost) {
+      const total = [...cost.sessions.values()].reduce((sum, c) => sum + (c.costUsd ?? 0), 0)
+      if (cost.available) {
+        out.push(s.dim(`  total ${total.toFixed(2)} across ${cost.sessions.size} session(s)`))
+      } else {
+        // A missing tool is a note, not a failure: the rest of the report is still true.
+        out.push(s.yellow(`  no cost data: ${cost.reason ?? 'unknown reason'}`))
+        // Only suggest installing ccusage when it was actually asked to price something;
+        // a claim with no recorded session needs no tool, it needs an agent that records one.
+        if (sessionIds.length > 0) {
+          out.push(s.dim('  install ccusage (npm i -g ccusage) to price agent sessions'))
+        }
+      }
+    }
     return out.join('\n')
   })
   return undefined

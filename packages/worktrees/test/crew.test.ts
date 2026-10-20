@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
-import { readClaims } from '@anvil/worktrees'
+import { claimAgentPid, readAgentSession, readClaims } from '@anvil/worktrees'
 import {
   agentPrompt,
   concurrencyFor,
@@ -313,7 +313,70 @@ describe('crew up', () => {
     })
     const claim = readClaims(dir).claims.find((c) => c.key === 'local-1')
     assert.equal(claim?.agent?.runner, 'opencode')
-    assert.equal(claim?.agent?.sessionId, '999')
+    // The pid, under its own name. It used to be written as `sessionId`, which is how a
+    // process id ended up in a field called "session".
+    assert.equal(claim?.agent?.pid, 999)
+    assert.equal(claim?.agent?.sessionId, undefined)
+  })
+
+  test('a registry written before the rename still reads its pid', () => {
+    // The claim registry is a file on disk, written by one version and read by the next.
+    // The old field was called `sessionId` and held the pid as a string.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-legacy-'))
+    temps.push(dir)
+    mkdirSync(join(dir, '.anvil'), { recursive: true })
+    writeFileSync(
+      join(dir, '.anvil', 'claims.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        claims: [
+          {
+            key: 'local-1',
+            ticket: { provider: 'local', id: '1' },
+            branch: 'feat/one',
+            baseBranch: 'main',
+            baseRef: 'main',
+            worktreePath: join(dir, 'wt'),
+            worktreeId: null,
+            state: 'active',
+            createdAt: new Date().toISOString(),
+            agent: { runner: 'opencode', sessionId: '4321' },
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const claim = readClaims(dir).claims[0]
+    assert.equal(claimAgentPid(claim!), 4321)
+  })
+})
+
+describe('readAgentSession', () => {
+  test('reads the session the plugin recorded in the worktree', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-session-'))
+    temps.push(dir)
+    mkdirSync(join(dir, '.anvil'), { recursive: true })
+    writeFileSync(
+      join(dir, '.anvil', 'session.json'),
+      JSON.stringify({ sessionId: 'ses_abc', recordedAt: '2026-01-01T00:00:00.000Z' }),
+      'utf8',
+    )
+    const session = readAgentSession(dir)
+    assert.equal(session?.sessionId, 'ses_abc')
+  })
+
+  test('a worktree with no recorded session is not an error', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-nosession-'))
+    temps.push(dir)
+    assert.equal(readAgentSession(dir), null)
+  })
+
+  test('a half-written session file is not a session', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-badsession-'))
+    temps.push(dir)
+    mkdirSync(join(dir, '.anvil'), { recursive: true })
+    writeFileSync(join(dir, '.anvil', 'session.json'), '{"sessionId":', 'utf8')
+    assert.equal(readAgentSession(dir), null)
   })
 })
 

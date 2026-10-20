@@ -1,0 +1,57 @@
+# Cypress playbook.
+#
+# Matched on the config file, so a repository that runs Playwright does not get Cypress
+# documentation. The cross-cutting QA guidance lives in the `qa` playbook.
+
+id: cypress
+title: Cypress
+priority: 65
+
+match:
+  files:
+    - '**/cypress.config.*'
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Cypress documentation
+      url: 'https://docs.cypress.io/app/get-started/why-cypress'
+      why: >-
+        Why Cypress runs the way it does: the runner model, the config file and the
+        command table. The command table is the part that matters to an agent, because
+        `cypress run` and `cypress open` are different programs with different exit
+        codes.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+
+community: []
+
+verify:
+  build: []
+  test: ['npx cypress run']
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'the config file at the repository root, specs under cypress/e2e'
+  testNaming: '*.cy.ts'
+  reviewFocus:
+    - 'a test that depends on the order the suite runs in'
+    - 'a fixture that writes to a shared database'
+
+riskGlobs:
+  - '**/cypress/**'
+  - '**/cypress/screenshots/**'
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['cypress-io']
+  keywords:
+    - 'cypress agent'
+    - 'cypress testing agent'
+  mcp: ['cypress']

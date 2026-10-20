@@ -1,0 +1,77 @@
+# QA playbook.
+#
+# The cross-cutting part: the guidance that applies to any repository that tests through
+# a browser or a device, whatever the tool.
+#
+# The tool-specific guidance lives in its own playbook -- `playwright`, `cypress`,
+# `webdriverio`, `maestro` -- because a repository that runs Playwright has no use for
+# Cypress documentation, and a plan that offers it is a plan that teaches the reader to
+# skip the plan. One playbook per tool is the same rule this project applies everywhere:
+# say what applies to this repository, and nothing else.
+#
+# This playbook is the first half of a QA story, and deliberately only that half. A full
+# QA product -- planning, generating, running and healing tests as its own product -- is a
+# separate project with its own dependencies (a browser, a runner, a service to test
+# against). The evidence that it is worth building is that repositories match this
+# playbook and ask the same questions; until then, what this playbook contributes is
+# free: the documentation that exists, the conventions the tools imply, and the paths
+# where a browser test does more damage than a unit test.
+
+id: qa
+title: QA and end-to-end testing
+priority: 44
+
+match:
+  files:
+    - '**/playwright.config.*'
+    - '**/cypress.config.*'
+    - '**/wdio.conf.*'
+    - '**/detox.config.*'
+    - '**/.maestro/**'
+  deps: []
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Testing Library documentation
+      url: 'https://testing-library.com/docs/'
+      why: >-
+        The layer below end-to-end. A component test is cheaper, faster and far easier
+        for an agent to write correctly than a browser test, and most of what a browser
+        test proves can be proved here. Reach for this before reaching for a browser.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+
+community: []
+
+verify:
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'end-to-end tests in their own directory, separate from the unit tests they sit beside'
+  testNaming: 'the framework convention: *.spec.ts for Playwright, *.cy.ts for Cypress'
+  reviewFocus:
+    - 'a wait for a fixed time instead of a wait for a state'
+    - 'a test that depends on the order the suite runs in'
+    - 'a fixture that writes to a shared database, or signs in as a real account'
+    - 'a selector that reads the implementation rather than the role'
+
+riskGlobs:
+  - '**/e2e/**'
+  - '**/screenshots/**'
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['microsoft', 'cypress-io']
+  keywords:
+    - 'playwright agent'
+    - 'end to end test agent'
+    - 'cypress agent'
+  mcp: ['playwright', 'cypress', 'webdriverio', 'maestro']

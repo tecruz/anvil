@@ -440,6 +440,148 @@ describe('cold-empty', () => {
   })
 })
 
+/**
+ * The instruction budget.
+ *
+ * An agent loads its instructions on every request, so their size is paid for on every
+ * request. A study of AGENTS.md files in real repositories (arXiv:2602.11988) found the
+ * files did not generally raise task success and raised inference cost by more than 20%;
+ * the guidance that paid for itself was the part a model could not infer from the repo.
+ * The rule below is that finding, made mechanical.
+ */
+describe('INSTRUCTION_BUDGET', () => {
+  /** A repo whose instructions are `bytes` long, with a runnable command at the top. */
+  function repoWithInstructions(bytes: number, opts: { commandAtTop?: boolean } = {}): string {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-budget-'))
+    const head = opts.commandAtTop === false ? '' : '# Repo\n\n- Test: `npm test`\n\n'
+    const filler = 'x'.repeat(Math.max(0, bytes - head.length))
+    writeFileSync(join(dir, 'AGENTS.md'), `${head}${filler}\n`)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'budget', scripts: { test: 'node --test' } }))
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'index.js'), 'export const a = 1\n')
+    return dir
+  }
+
+  test('is na when the repo ships no instructions', () => {
+    // AGENTS_FILE already reports the absence; saying it twice is noise.
+    assert.equal(findFinding(reportOf('node-npm'), 'INSTRUCTION_BUDGET').status, 'na')
+  })
+
+  test('passes for an instruction file inside the budget', () => {
+    const dir = repoWithInstructions(4_000)
+    try {
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'pass', f.detail)
+      assert.match(f.detail, /tokens/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('warns past the warning threshold and fails past the failing one', () => {
+    const warnDir = repoWithInstructions(20_000)
+    const failDir = repoWithInstructions(50_000)
+    try {
+      const warned = findFinding(auditDir(warnDir), 'INSTRUCTION_BUDGET')
+      assert.equal(warned.status, 'warn', warned.detail)
+      assert.equal(warned.severity, 'medium')
+      // The file puts `npm test` at the top, so only the size half of the rule applies.
+      assert.doesNotMatch(warned.detail, /runnable command/)
+
+      const failed = findFinding(auditDir(failDir), 'INSTRUCTION_BUDGET')
+      assert.equal(failed.status, 'fail', failed.detail)
+      assert.ok(failed.fix !== null, 'a failing finding must carry a fix')
+    } finally {
+      rmSync(warnDir, { recursive: true, force: true })
+      rmSync(failDir, { recursive: true, force: true })
+    }
+  })
+
+  test('measures the largest instruction file, not the sum', () => {
+    // Two tools, two files, and no agent loads both: axios ships 14.7 kB of AGENTS.md
+    // and 6.0 kB of Copilot instructions, and the sum warned on a repository whose
+    // guidance is under the line. The budget is what one tool reads.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-budget-two-'))
+    try {
+      const body = 'x'.repeat(12_000)
+      writeFileSync(join(dir, 'AGENTS.md'), body)
+      writeFileSync(join(dir, 'CLAUDE.md'), body)
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'budget', scripts: { test: 'node --test' } }))
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'index.js'), 'export const a = 1\n')
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'pass', f.detail)
+      assert.match(f.detail, /Largest of 2/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('says when the commands are not at the top', () => {
+    // The half of the rule that decides whether the guidance works: the commands are the
+    // part a model cannot infer, so burying them under prose spends the budget on the
+    // part that did not help (arXiv:2602.11988).
+    const dir = repoWithInstructions(20_000, { commandAtTop: false })
+    try {
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'warn', f.detail)
+      assert.match(f.detail, /runnable command/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the fix names the instruction file the repository actually ships', () => {
+    // A repo whose guidance lives in CLAUDE.md is not helped by a suggestion to edit an
+    // AGENTS.md it does not have.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-budget-claude-'))
+    try {
+      writeFileSync(join(dir, 'CLAUDE.md'), 'x'.repeat(50_000))
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'budget', scripts: { test: 'node --test' } }))
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'index.js'), 'export const a = 1\n')
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'fail', f.detail)
+      assert.equal(f.fix?.target, 'CLAUDE.md')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('measures a rules directory by the files inside it', () => {
+    // `.cursor/rules` is a directory, and the profile used to report it as zero bytes.
+    // The budget then said there was nothing to measure in a repo whose entire guidance
+    // lived there, which is the one answer a budget rule must not get wrong.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-budget-cursor-'))
+    try {
+      mkdirSync(join(dir, '.cursor', 'rules'), { recursive: true })
+      writeFileSync(join(dir, '.cursor', 'rules', 'style.mdc'), 'x'.repeat(50_000))
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'budget', scripts: { test: 'node --test' } }))
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'index.js'), 'export const a = 1\n')
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'fail', f.detail)
+      // A directory has no "first 80 lines", so the placement half must stay silent.
+      assert.doesNotMatch(f.detail, /runnable command/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('does not complain about command placement in a small file', () => {
+    // The check only runs once the file is over the threshold. A short file that lists
+    // its commands late is not a problem worth a finding.
+    const dir = repoWithInstructions(2_000, { commandAtTop: false })
+    try {
+      const f = findFinding(auditDir(dir), 'INSTRUCTION_BUDGET')
+      assert.equal(f.status, 'pass', f.detail)
+      assert.doesNotMatch(f.detail, /runnable command/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('documented-commands', () => {
   const p = profileOf('documented-commands')
 

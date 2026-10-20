@@ -14,6 +14,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# eval harness output (ANVIL_EVAL=1 npm run eval)
+eval-results/
+
 # editor
 .vscode/
 .idea/

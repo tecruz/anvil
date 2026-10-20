@@ -509,6 +509,31 @@ describe('artifact validation', () => {
     assert.equal(v.warnings.length, 0)
   })
 
+  test('warns when AGENTS.md is over the instruction budget', () => {
+    // The same threshold the audit rule fails on, so a file `anvil doctor` rejects cannot
+    // be written by `anvil init --apply` without the writer being told why.
+    const v = validateArtifact('AGENTS.md', 'x'.repeat(41_000))
+    assert.ok(
+      v.warnings.some((w) => w.includes('tokens') && w.includes('skill')),
+      `expected a budget warning, got ${JSON.stringify(v.warnings)}`,
+    )
+  })
+
+  test('measures the budget in bytes, so non-ASCII guidance gets the same verdict', () => {
+    // 20_500 `é` characters are 41_000 bytes: under the limit by character count, over it
+    // on disk, which is the number the audit sees.
+    const v = validateArtifact('AGENTS.md', 'é'.repeat(20_500))
+    assert.ok(
+      v.warnings.some((w) => w.includes('tokens') && w.includes('skill')),
+      `expected a budget warning, got ${JSON.stringify(v.warnings)}`,
+    )
+  })
+
+  test('does not warn about an AGENTS.md inside the budget', () => {
+    const v = validateArtifact('AGENTS.md', 'x'.repeat(4_000))
+    assert.equal(v.warnings.length, 0)
+  })
+
   test('classifies each artifact kind by path', () => {
     for (const [path, kind] of [
       ['.opencode/agents/a.md', 'agent'],

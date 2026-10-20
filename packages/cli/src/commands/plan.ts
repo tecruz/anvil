@@ -45,7 +45,8 @@ async function loadProfile(ctx: CommandContext, target: string | undefined): Pro
 export const planCommand: Command = {
   name: 'plan',
   summary: 'Rank fixes as derived / official / community.',
-  usage: 'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>] [--offline] [--refresh]',
+  usage:
+    'anvil plan [--json] [--profile <dir>] [--tier <t>] [--only <ids>] [--limit <n>] [--offline] [--refresh] [--include-satisfied]',
   details: [
     'Three tiers, ranked in this order:',
     '',
@@ -62,11 +63,16 @@ export const planCommand: Command = {
     'no network here; run `anvil playbook discover` to populate it, or --refresh to fetch it',
     'now.',
     '',
+    'A suggestion the repository already satisfies is left out, and the count of those is',
+    'printed. --include-satisfied keeps them.',
+    '',
     '--tier <t>     only suggestions from one tier (derived, official, community)',
     '--only <ids>   comma-separated suggestion ids, e.g. fix:AGENTS_FILE',
     '--limit <n>    show at most n suggestions',
     '--offline      ignore the discovery cache entirely',
     '--refresh      fetch live guidance now and cache it, instead of reading the cache',
+    '--include-satisfied',
+    '               keep suggestions this repository already satisfies',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -77,11 +83,13 @@ export const planCommand: Command = {
     limit: { type: 'string' },
     offline: { type: 'boolean' },
     refresh: { type: 'boolean' },
+    'include-satisfied': { type: 'boolean' },
   },
 
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, planCommand.flags)
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
+    const includeSatisfied = args.values['include-satisfied'] === true
     const profile = await loadProfile(ctx, target)
 
     const { playbooks, warnings } = loadPlaybooks(process.env)
@@ -103,7 +111,9 @@ export const planCommand: Command = {
       { offline, refresh, cwd: ctx.cwd },
     )
 
-    const plan = buildPlan(report, profile, matches, [...warnings, ...liveWarnings], live)
+    const plan = buildPlan(report, profile, matches, [...warnings, ...liveWarnings], live, {
+      includeSatisfied,
+    })
 
     const tiers = parseTiers(args.values.tier)
     const only = parseIds(args.values.only)
@@ -116,7 +126,7 @@ export const planCommand: Command = {
 
     const data = { ...plan, suggestions, counts: countTiers(suggestions) }
 
-    ctx.out(data, () => renderPlan(ctx, data))
+    ctx.out(data, () => renderPlan(ctx, data, includeSatisfied))
     return undefined
   },
 }
@@ -166,7 +176,7 @@ function parseLimit(value: unknown): number | null {
   return n
 }
 
-function renderPlan(ctx: CommandContext, plan: Plan): string {
+function renderPlan(ctx: CommandContext, plan: Plan, includeSatisfied: boolean): string {
   const s = ctx.style
   const out: string[] = []
 
@@ -174,6 +184,15 @@ function renderPlan(ctx: CommandContext, plan: Plan): string {
   out.push(
     `  ${String(plan.counts.derived).padStart(2)} derived   ${String(plan.counts.official).padStart(2)} official   ${String(plan.counts.community).padStart(2)} community`,
   )
+  if (plan.satisfied > 0) {
+    // Stated, not hidden: the list is short because some of it was left out, and a reader
+    // who cannot see that will assume the list is everything there is to know.
+    out.push(
+      s.dim(
+        `  ${String(plan.satisfied).padStart(2)} satisfied   already followed by this repository${includeSatisfied ? '; shown here' : '; --include-satisfied to see them'}`,
+      ),
+    )
+  }
 
   out.push('')
   out.push(s.bold('Matched playbooks'))
