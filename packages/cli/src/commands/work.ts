@@ -90,6 +90,9 @@ export const claimCommand: Command = {
     'Refuses rather than guesses: a colliding branch, an occupied path, a dirty target or',
     'a path over the Windows budget all stop the claim before anything is created.',
     '',
+    'The ticket text is marked untrusted in the bundle, and the worktree gets a pre-push',
+    'hook that only `anvil ship` can satisfy. Instruction-like ticket lines are reported.',
+    '',
     '--prefix <p>   branch prefix, default `feat` (try fix/, chore/, spike/)',
     '--base <b>     branch from this instead of the ticket or default branch',
     '--runner <r>   record which agent will work here, for `anvil status`',
@@ -136,9 +139,12 @@ export const claimCommand: Command = {
       baseBranch: result.claim.baseBranch,
       baseRef: result.claim.baseRef,
       worktree: result.claim.worktreePath,
+      agent: result.claim.agent ?? null,
       checks: result.checks,
       notes: result.notes,
       needsUpstream: result.needsUpstream,
+      injection: result.injection,
+      pushGuard: result.pushGuard,
     }
 
     ctx.out(data, () => {
@@ -147,11 +153,28 @@ export const claimCommand: Command = {
       out.push(`${s.green('claimed')} ${result.claim.key}`)
       out.push(`  branch    ${result.claim.branch}  ${s.dim(`(from ${result.claim.baseRef})`)}`)
       out.push(`  worktree  ${result.claim.worktreePath}`)
+      if (result.claim.agent !== undefined) {
+        const version = result.claim.agent.version === undefined ? '' : ` (${result.claim.agent.version})`
+        out.push(`  agent     ${result.claim.agent.runner}${version}`)
+      }
       out.push(`  context   ${CONTEXT_FILE}  ${AGENTS_OVERLAY}`)
+      out.push(
+        `  guard     ${result.pushGuard.installed ? s.green(result.pushGuard.detail) : s.yellow(result.pushGuard.detail)}`,
+      )
       if (result.notes.length > 0) {
         out.push('')
         out.push(s.yellow('note'))
         for (const n of result.notes) out.push(`  ${n}`)
+      }
+      if (result.injection.length > 0) {
+        out.push('')
+        out.push(
+          s.yellow(
+            `${result.injection.length} instruction-like line(s) in the ticket; the bundle quotes them as untrusted`,
+          ),
+        )
+        for (const f of result.injection.slice(0, 5)) out.push(`  ${f.field}:${f.line} (${f.kind}) '${f.excerpt}'`)
+        if (result.injection.length > 5) out.push(`  ... and ${result.injection.length - 5} more`)
       }
       if (result.needsUpstream) {
         out.push('')
@@ -535,13 +558,25 @@ export const issueCommand: Command = {
     writeFileSync(join(target, overlay.path), overlay.content, 'utf8')
     await excludeAnvilState(target)
 
-    ctx.out({ schemaVersion: 1, ref, written: [context.path, overlay.path] }, () =>
-      [
-        `${ctx.style.green('wrote')} ${context.path}`,
-        `${ctx.style.green('wrote')} ${overlay.path}`,
-        ctx.style.dim('The agent in this directory should read the context bundle first.'),
-      ].join('\n'),
-    )
+    ctx.out({ schemaVersion: 1, ref, written: [context.path, overlay.path], injection: context.injection }, () => {
+      const s = ctx.style
+      const lines = [
+        `${s.green('wrote')} ${context.path}`,
+        `${s.green('wrote')} ${overlay.path}`,
+        s.dim('The agent in this directory should read the context bundle first.'),
+      ]
+      if (context.injection.length > 0) {
+        lines.push('')
+        lines.push(
+          s.yellow(
+            `${context.injection.length} instruction-like line(s) in the ticket; they are quoted in the bundle as untrusted`,
+          ),
+        )
+        for (const f of context.injection.slice(0, 5)) lines.push(`  ${f.field}:${f.line} (${f.kind}) '${f.excerpt}'`)
+        if (context.injection.length > 5) lines.push(`  ... and ${context.injection.length - 5} more`)
+      }
+      return lines.join('\n')
+    })
     return undefined
   },
 }

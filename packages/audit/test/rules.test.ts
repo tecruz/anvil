@@ -95,3 +95,57 @@ describe('a probed MCP file is visible to the rule', () => {
     assert.deepEqual(mcp.evidence, ['.vscode/mcp.json'])
   })
 })
+
+describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
+  const scripts = JSON.stringify({ scripts: { test: 'node --test', lint: 'biome check' } })
+
+  test('commands, links and instruction globs that resolve are a pass', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'docs/README.md': '# Docs\n',
+      '.opencode/commands/check.md': 'Run `npm run test` and `npm run lint`.\n',
+      '.agents/skills/verify/SKILL.md': 'See [the docs](../../../docs/README.md).\n\n```bash\nnpm run test\n```\n',
+      'opencode.json': JSON.stringify({ instructions: ['AGENTS.md', 'docs/*.md'] }),
+    })
+    const config = finding(audit(profile), 'AGENT_CONFIG')
+    assert.equal(config.status, 'pass', config.detail)
+    assert.match(config.detail, /resolve/)
+  })
+
+  test('a deleted npm script, a moved link and an empty glob are reported together', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n',
+      '.opencode/commands/check.md': 'Run `npm run test:changed`.\n',
+      '.agents/skills/verify/SKILL.md': 'See [the missing doc](../../../docs/gone.md).\n',
+      'opencode.json': JSON.stringify({ instructions: ['AGENTS.md', 'docs/*.md'] }),
+    })
+    const config = finding(audit(profile), 'AGENT_CONFIG')
+    assert.equal(config.status, 'warn')
+    assert.match(config.detail, /test:changed/)
+    assert.match(config.detail, /gone\.md/)
+    assert.match(config.detail, /matches no tracked file/)
+    assert.ok(config.evidence.some((e) => e.startsWith('.opencode/commands/check.md:')))
+    assert.ok(config.evidence.some((e) => e.startsWith('.agents/skills/verify/SKILL.md:')))
+    assert.ok(config.evidence.some((e) => e.startsWith('opencode.json:')))
+  })
+
+  test('a bare npm test with no test script is stale', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { lint: 'biome check' } }),
+      '.opencode/commands/check.md': 'Run `npm test` first.\n',
+    })
+    const config = finding(audit(profile), 'AGENT_CONFIG')
+    assert.equal(config.status, 'warn')
+    assert.match(config.detail, /test/)
+  })
+
+  test('nothing to check is na, not a warning', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'AGENT_CONFIG').status, 'na')
+  })
+})

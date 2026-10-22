@@ -1,0 +1,6 @@
+{
+  "models": [
+    { "id": "opencode/deepseek-v4.1-flash-free", "role": "small" },
+    { "id": "openrouter/anthropic/claude-sonnet-5.5", "role": "frontier" }
+  ]
+}

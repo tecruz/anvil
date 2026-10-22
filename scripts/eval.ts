@@ -15,16 +15,19 @@
  * code, and the cost is read from a file another tool wrote. That is what makes the
  * comparison worth running more than once.
  *
- * It is not part of `npm test`, and it needs an agent and a model to run at all, so it
- * is behind `ANVIL_EVAL=1`. `--dry-run` prints what it would do and stops, which is how
- * the harness itself is tested without spending a token.
+ * The harness covers a small matrix on purpose: two repository sizes, and two ways to
+ * spend a turn. A code-change scenario asks the agent to write something a hidden test
+ * grades; a verify-only scenario asks it to run the repository's own checks and report.
+ * Both halves matter, because context that helps a model write code can still fail to
+ * help it understand a repository it is only reading.
+ *
+ * A real run is behind `ANVIL_EVAL=1`, because it spends tokens. Three modes are not:
+ * `--list` prints the matrix, `--dry-run` prints what a run would do, and `--check`
+ * compares the latest summary with the checked-in baseline. `--fake-agent` is the
+ * hermetic path: it applies a canned answer instead of calling a model, which is how the
+ * harness and the gate are tested without a network or a quota.
  *
  * Run with: `ANVIL_EVAL=1 npm run eval`
- *
- * The model is opencode's configured default unless `ANVIL_EVAL_MODEL` names one
- * (`provider/model`). The default on a machine can be an image model or an exhausted
- * free tier, neither of which runs this scenario, and a harness that cannot say which
- * model produced a result cannot compare two runs.
  */
 
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
@@ -33,34 +36,31 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
+import {
+  checkEvalGate,
+  type EvalBaseline,
+  type EvalBaselineScenario,
+  type EvalModel,
+  type EvalModelRole,
+  type EvalResultSummary,
+  type EvalScenario,
+  hashScenario,
+  hashScenarioSource,
+  parseBaseline,
+  parseLatest,
+  readJsonFile,
+  validateScenarioMatrix,
+} from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
-import { spawnArgv } from '../packages/core/src/exec.ts'
+import { probeCommandVersion, spawnArgv } from '../packages/core/src/exec.ts'
 import { readAgentSession } from '../packages/worktrees/src/index.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const resultsDir = join(repoRoot, 'eval-results')
-
-interface Scenario {
-  id: string
-  /** Repository the task runs in, relative to the repository root. */
-  repo: string
-  /** What the agent is asked to do. */
-  task: string
-  /** Commands that must pass after the agent finishes. */
-  verify: string[]
-  /** Files copied in after the agent finishes, to grade the work itself. */
-  hidden?: Array<{
-    /** Where the file lives in this repository. */
-    from: string
-    /** Where it goes in the prepared repository. */
-    to: string
-  }>
-  /** Commands that grade the work, run after the hidden files are in place. */
-  hiddenVerify?: string[]
-  /** How long the agent gets. */
-  timeoutMinutes?: number
-}
+const rawDir = join(resultsDir, 'raw')
+const latestPath = join(resultsDir, 'latest.json')
+const baselinePath = join(resultsDir, 'baseline.json')
 
 /** The two things being compared: the same repository, with and without the artifacts. */
 const VARIANTS = ['bare', 'anvil'] as const
@@ -79,13 +79,7 @@ interface RunResult {
   output: string
 }
 
-interface ScenarioResult {
-  scenario: string
-  variant: Variant
-  /** The visible verifier passed. */
-  verified: boolean
-  /** The hidden verifier passed. */
-  hiddenVerified: boolean | null
+interface ScenarioResult extends EvalResultSummary {
   /** What the work cost, when the ledger knows. */
   costUsd: number | null
   tokens: number | null
@@ -99,64 +93,117 @@ interface ScenarioResult {
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
+const listOnly = args.includes('--list')
+const checkOnly = args.includes('--check')
+const fakeAgent = args.includes('--fake-agent')
+const writeBaselineAfterRun = args.includes('--write-baseline')
 const only = flagValue('--scenario')
-const model = process.env.ANVIL_EVAL_MODEL
 const enabled = process.env.ANVIL_EVAL === '1'
 
-// A dry run costs nothing, so it is not gated. Everything else is.
-if (!enabled && !dryRun) {
+if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
+  console.error('--write-baseline writes the result of a run; it cannot be combined with --dry-run, --list or --check')
+  process.exit(1)
+}
+
+// A dry run, a listing, a gate check and the fake agent cost no tokens. Everything that
+// can spend money stays opt-in.
+if (!enabled && !dryRun && !listOnly && !checkOnly && !fakeAgent) {
   console.log('The eval harness is opt-in: it runs an agent against a model.')
   console.log('Run it with: ANVIL_EVAL=1 npm run eval')
   console.log('Preview what it would do with: npm run eval -- --dry-run')
+  console.log('List the matrix with: npm run eval -- --list')
+  console.log('Check the last run with: npm run eval:check')
   process.exit(0)
 }
 
 const scenarios = loadScenarios()
-const selected = only === null ? scenarios : scenarios.filter((s) => s.id === only)
-if (selected.length === 0) {
+const selectedScenarios = only === null ? scenarios : scenarios.filter((s) => s.id === only)
+if (selectedScenarios.length === 0) {
   console.error(`No scenario matched ${only ?? '(nothing)'}`)
   process.exit(1)
 }
 
+const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels()
+if (models.length === 0) {
+  console.error('No model matched the requested role. Use --models small, --models frontier or --models all.')
+  process.exit(1)
+}
+
+if (listOnly) {
+  printScenarios(selectedScenarios, models)
+  process.exit(0)
+}
+
 if (dryRun) {
-  for (const scenario of selected) {
+  for (const scenario of selectedScenarios) {
     console.log(`${scenario.id}`)
+    console.log(`  size      ${scenario.size}`)
+    console.log(`  kind      ${scenario.kind}`)
     console.log(`  repo      ${scenario.repo}`)
     console.log(`  task      ${scenario.task}`)
     console.log(`  verify    ${scenario.verify.join('; ')}`)
     console.log(`  hidden    ${(scenario.hidden ?? []).map((h) => `${h.from} -> ${h.to}`).join('; ') || '(none)'}`)
+    console.log(`  expect    ${JSON.stringify(scenario.expect)}`)
     console.log(`  variants  ${VARIANTS.join(', ')}`)
-    console.log(`  model     ${model ?? '(opencode default)'}`)
+    console.log(`  models    ${models.map((m) => `${m.id} (${m.role})`).join(', ')}`)
+    if (fakeAgent) console.log('  agent     fake (a canned answer, no model is called)')
   }
   process.exit(0)
 }
 
+if (checkOnly) {
+  process.exit(runCheck())
+}
+
+const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
+
 const results: ScenarioResult[] = []
-for (const scenario of selected) {
-  for (const variant of VARIANTS) {
-    results.push(await runScenario(scenario, variant))
+for (const model of models) {
+  for (const scenario of selectedScenarios) {
+    const scenarioHash = hashScenario(scenario)
+    const sourceHash = hashScenarioSource(repoRoot, scenario)
+    for (const variant of VARIANTS) {
+      results.push(await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent))
+    }
   }
 }
 
 writeReport(results)
 printSummary(results)
+if (writeBaselineAfterRun) writeBaseline(scenarios)
 
-// The exit code is the verdict: if the harness itself ran, the agent's work is not the
-// harness's exit code. A failed run is reported, not hidden.
+// The exit code is the verdict of the harness, not of the agent: a failed run is
+// reported in the summary, and `--check` is the command that turns it into a failure.
 process.exit(0)
 
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
 
-async function runScenario(scenario: Scenario, variant: Variant): Promise<ScenarioResult> {
+async function runScenario(
+  scenario: EvalScenario,
+  variant: Variant,
+  model: EvalModel,
+  scenarioHash: string,
+  sourceHash: string,
+  opencodeVersion: string | null,
+  fake: boolean,
+): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-`))
   const started = Date.now()
   const result: ScenarioResult = {
     scenario: scenario.id,
+    size: scenario.size,
+    kind: scenario.kind,
     variant,
+    model: fake ? 'fake-agent' : model.id,
+    modelRole: fake ? null : model.role,
+    opencodeVersion,
+    scenarioHash,
+    sourceHash,
     verified: false,
     hiddenVerified: null,
+    verifyExitCodes: [],
     costUsd: null,
     tokens: null,
     durationMs: 0,
@@ -188,39 +235,55 @@ async function runScenario(scenario: Scenario, variant: Variant): Promise<Scenar
     // behaviour for anvil's safety check, and the answer is not to pass prose as argv.
     const taskFile = join(workdir, TASK_FILE)
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
-    // `--auto` because the run is unattended and the workdir is a throwaway copy: a
-    // permission prompt is a hang, and a hang is not a result.
-    const agentArgs = ['run', '--dir', workdir, '--auto']
-    if (model !== undefined && model !== '') agentArgs.push('--model', model)
-    agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
-    const agent = await run('opencode', agentArgs, workdir, {
-      timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
-    })
-    result.transcript = `${agent.stdout}\n${agent.stderr}`.trim()
-    if (agent.timedOut) {
-      result.error = 'the agent timed out'
-    } else if (!agent.ok) {
-      result.error = `the agent exited with code ${agent.code ?? '?'}`
+
+    if (fake) {
+      if (scenario.solution !== undefined) {
+        cpSync(join(repoRoot, scenario.solution.from), join(workdir, ...scenario.solution.to.split('/')))
+        result.transcript = `[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`
+      } else if (scenario.kind === 'code-change') {
+        result.error = 'a code-change scenario needs a solution for --fake-agent'
+        return result
+      } else {
+        result.transcript = '[fake-agent] ran the verifier'
+      }
+    } else {
+      // `--auto` because the run is unattended and the workdir is a throwaway copy: a
+      // permission prompt is a hang, and a hang is not a result.
+      const agentArgs = ['run', '--dir', workdir, '--auto', '--model', model.id]
+      agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
+      const agent = await run('opencode', agentArgs, workdir, {
+        timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
+      })
+      result.transcript = `${agent.stdout}\n${agent.stderr}`.trim()
+      if (agent.timedOut) {
+        result.error = 'the agent timed out'
+      } else if (!agent.ok) {
+        result.error = `the agent exited with code ${agent.code ?? '?'}`
+      }
     }
 
     const visible = await runAll(scenario.verify, workdir)
     result.verified = visible.every((r) => r.ok)
+    result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
     if (scenario.hidden !== undefined && scenario.hidden.length > 0) {
       for (const file of scenario.hidden) {
-        cpSync(join(repoRoot, file.from), join(workdir, file.to), { recursive: true })
+        cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
       }
       const hidden = await runAll(scenario.hiddenVerify ?? [], workdir)
       result.hiddenVerified = hidden.every((r) => r.ok)
+      result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
     }
 
-    const session = readAgentSession(workdir)
-    if (session !== null) {
-      const cost = await lookupSessionCosts([session.sessionId])
-      const entry = cost.sessions.get(session.sessionId)
-      result.costUsd = entry?.costUsd ?? null
-      result.tokens = entry?.tokens ?? null
+    if (!fake) {
+      const session = readAgentSession(workdir)
+      if (session !== null) {
+        const cost = await lookupSessionCosts([session.sessionId])
+        const entry = cost.sessions.get(session.sessionId)
+        result.costUsd = entry?.costUsd ?? null
+        result.tokens = entry?.tokens ?? null
+      }
     }
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err)
@@ -243,8 +306,8 @@ async function runScenario(scenario: Scenario, variant: Variant): Promise<Scenar
 }
 
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */
-function prepareRepo(scenario: Scenario, workdir: string): void {
-  const source = join(repoRoot, scenario.repo)
+function prepareRepo(scenario: EvalScenario, workdir: string): void {
+  const source = join(repoRoot, ...scenario.repo.split('/'))
   if (!existsSync(source)) throw new Error(`scenario repository not found: ${scenario.repo}`)
   cpSync(source, workdir, { recursive: true })
   runSync('git', ['init', '--initial-branch=main'], workdir)
@@ -364,22 +427,95 @@ function runSync(bin: string, args: string[], cwd: string): void {
 // ---------------------------------------------------------------------------
 
 function writeReport(results: ScenarioResult[]): void {
-  mkdirSync(resultsDir, { recursive: true })
+  mkdirSync(rawDir, { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const path = join(resultsDir, `eval-${stamp}.json`)
-  writeFileSync(path, `${JSON.stringify({ generatedAt: new Date().toISOString(), results }, null, 2)}\n`, 'utf8')
-  console.log(`\nReport written to ${path}`)
+  const rawPath = join(rawDir, `eval-${stamp}.json`)
+  writeFileSync(rawPath, `${formatJson({ generatedAt: new Date().toISOString(), results })}\n`, 'utf8')
+  console.log(`\nReport written to ${rawPath}`)
+
+  const latest: { schemaVersion: 1; generatedAt: string; results: EvalResultSummary[] } = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    results: results.map(summaryOf),
+  }
+  writeFileSync(latestPath, `${formatJson(latest)}\n`, 'utf8')
+  console.log(`Summary written to ${latestPath}`)
+}
+
+function summaryOf(result: ScenarioResult): EvalResultSummary {
+  return {
+    scenario: result.scenario,
+    size: result.size,
+    kind: result.kind,
+    variant: result.variant,
+    model: result.model,
+    modelRole: result.modelRole,
+    opencodeVersion: result.opencodeVersion,
+    scenarioHash: result.scenarioHash,
+    sourceHash: result.sourceHash,
+    verified: result.verified,
+    hiddenVerified: result.hiddenVerified,
+    verifyExitCodes: result.verifyExitCodes,
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }
+}
+
+function writeBaseline(scenarios: readonly EvalScenario[]): void {
+  const baseline: EvalBaseline = {
+    schemaVersion: 1,
+    scenarios: scenarios.map((scenario) => ({
+      id: scenario.id,
+      size: scenario.size,
+      kind: scenario.kind,
+      scenarioHash: hashScenario(scenario),
+      sourceHash: hashScenarioSource(repoRoot, scenario),
+      expect: scenario.expect,
+    })),
+  }
+  writeFileSync(baselinePath, `${formatJson(baseline)}\n`, 'utf8')
+  console.log(`Baseline written to ${baselinePath}`)
+}
+
+/**
+ * JSON in the shape the repository's formatter prints.
+ *
+ * `JSON.stringify(..., null, 2)` puts a one-line array of exit codes on three lines, and
+ * the checked-in summary then fails `biome check` until somebody formats it by hand. The
+ * difference is not worth a formatter dependency in the harness, so the two rules that
+ * matter are implemented here: two-space indentation, and primitive arrays stay inline.
+ */
+function formatJson(value: unknown, level = 0): string {
+  const indent = '  '.repeat(level)
+  const childIndent = '  '.repeat(level + 1)
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]'
+    const primitive = (item: unknown): boolean => item === null || ['string', 'number', 'boolean'].includes(typeof item)
+    if (value.every(primitive)) return `[${value.map((item) => JSON.stringify(item)).join(', ')}]`
+    return `[\n${value.map((item) => `${childIndent}${formatJson(item, level + 1)}`).join(',\n')}\n${indent}]`
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined)
+    if (entries.length === 0) return '{}'
+    return `{\n${entries
+      .map(([key, item]) => `${childIndent}${JSON.stringify(key)}: ${formatJson(item, level + 1)}`)
+      .join(',\n')}\n${indent}}`
+  }
+
+  return JSON.stringify(value) ?? 'null'
 }
 
 function printSummary(results: ScenarioResult[]): void {
   console.log('')
-  console.log('scenario              variant  verified  hidden  cost      time')
-  console.log('--------------------  -------  --------  ------  --------  ------')
+  console.log('scenario              model                             variant  verified  hidden  cost      time')
+  console.log('--------------------  --------------------------------  -------  --------  ------  --------  ------')
   for (const r of results) {
     const cost = r.costUsd === null ? '-' : `$${r.costUsd.toFixed(2)}`
     console.log(
       [
         r.scenario.padEnd(20),
+        (r.model ?? '-').padEnd(32),
         r.variant.padEnd(7),
         (r.verified ? 'yes' : 'no').padEnd(8),
         (r.hiddenVerified === null ? '-' : r.hiddenVerified ? 'yes' : 'no').padEnd(6),
@@ -391,18 +527,145 @@ function printSummary(results: ScenarioResult[]): void {
   }
   console.log('')
   console.log('The comparison that matters is the same row twice: `bare` against `anvil`.')
+  console.log('Run `npm run eval:check` to compare this run with the baseline.')
+}
+
+function printScenarios(scenarios: readonly EvalScenario[], models: readonly EvalModel[]): void {
+  console.log('Scenarios')
+  console.log('---------')
+  for (const scenario of scenarios) {
+    console.log(`${scenario.id} (${scenario.size} / ${scenario.kind})`)
+    console.log(`  repo    ${scenario.repo}`)
+    console.log(`  task    ${scenario.task}`)
+    console.log(`  verify  ${scenario.verify.join('; ')}`)
+    console.log(`  expect  ${JSON.stringify(scenario.expect)}`)
+  }
+  console.log('')
+  console.log('Models')
+  console.log('------')
+  for (const model of models) {
+    console.log(`${model.id} (${model.role})`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The gate
+// ---------------------------------------------------------------------------
+
+function runCheck(): number {
+  if (!existsSync(baselinePath)) {
+    console.log('No eval baseline exists yet; the gate bootstraps as a pass.')
+    console.log('Run `npm run eval -- --fake-agent --write-baseline` to create one.')
+    return 0
+  }
+  const baselineRaw = readJsonFile(baselinePath)
+  const baseline = parseBaseline(baselineRaw)
+  if (typeof baseline === 'string') {
+    console.error(baseline)
+    return 1
+  }
+  if (!existsSync(latestPath)) {
+    console.error('No latest eval summary exists. Run the harness, then commit eval-results/latest.json.')
+    return 1
+  }
+  const latestRaw = readJsonFile(latestPath)
+  const latest = parseLatest(latestRaw)
+  if (typeof latest === 'string') {
+    console.error(latest)
+    return 1
+  }
+
+  // The baseline has to describe the matrix on disk, not only the last run. Without this
+  // half, editing a fixture after `--write-baseline` and never running the harness again
+  // would pass, because `latest.json` and `baseline.json` would still agree with each other.
+  const current: EvalBaselineScenario[] = scenarios.map((scenario) => ({
+    id: scenario.id,
+    size: scenario.size,
+    kind: scenario.kind,
+    scenarioHash: hashScenario(scenario),
+    sourceHash: hashScenarioSource(repoRoot, scenario),
+    expect: scenario.expect,
+  }))
+  const gate = checkEvalGate(baseline, latest, current)
+  if (!gate.ok) {
+    console.error(gate.message)
+    return 1
+  }
+  console.log(gate.message)
+  return 0
 }
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-function loadScenarios(): Scenario[] {
+function loadScenarios(): EvalScenario[] {
   const path = join(repoRoot, 'eval', 'scenarios.json')
   const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
   const list = (parsed as { scenarios?: unknown }).scenarios
   if (!Array.isArray(list)) throw new Error('eval/scenarios.json has no `scenarios` list')
-  return list as Scenario[]
+  const scenarios = list as EvalScenario[]
+  const error = validateScenarioMatrix(scenarios)
+  if (error !== null) throw new Error(error)
+  return scenarios
+}
+
+function loadModels(): EvalModel[] {
+  const path = join(repoRoot, 'eval', 'models.json')
+  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+  const list = (parsed as { models?: unknown }).models
+  if (!Array.isArray(list)) throw new Error('eval/models.json has no `models` list')
+  const models = list
+    .map((raw): EvalModel | null => {
+      if (typeof raw !== 'object' || raw === null) return null
+      const record = raw as { id?: unknown; role?: unknown }
+      if (typeof record.id !== 'string' || record.id === '') return null
+      if (record.role !== 'small' && record.role !== 'frontier') return null
+      return { id: record.id, role: record.role }
+    })
+    .filter((model): model is EvalModel => model !== null)
+  if (models.length === 0) throw new Error('eval/models.json has no usable models')
+  return models
+}
+
+function selectedModels(): EvalModel[] {
+  let models = loadModels()
+
+  // `ANVIL_EVAL_MODELS` replaces the pair, in small,frontier order.
+  const envModels = process.env.ANVIL_EVAL_MODELS
+  if (typeof envModels === 'string' && envModels.trim() !== '') {
+    models = envModels
+      .split(',')
+      .map((id, index): EvalModel | null => {
+        const trimmed = id.trim()
+        if (trimmed === '') return null
+        return { id: trimmed, role: index === 0 ? 'small' : 'frontier' }
+      })
+      .filter((model): model is EvalModel => model !== null)
+    if (models.length === 0) throw new Error('ANVIL_EVAL_MODELS is not a comma-separated model list')
+  }
+
+  // `ANVIL_EVAL_MODEL` stays supported: it names one model, which is the small slot.
+  const single = process.env.ANVIL_EVAL_MODEL
+  if (typeof single === 'string' && single !== '') {
+    models = [{ id: single, role: 'small' }]
+  }
+
+  const requested = modelRoles()
+  return models.filter((model) => requested.has('all') || requested.has(model.role))
+}
+
+function modelRoles(): Set<EvalModelRole | 'all'> {
+  const raw = flagValue('--models') ?? 'small'
+  const out = new Set<EvalModelRole | 'all'>()
+  for (const part of raw.split(',').map((p) => p.trim().toLowerCase())) {
+    if (part !== 'small' && part !== 'frontier' && part !== 'all') {
+      throw new Error(`Unknown model role: ${part}. Expected small, frontier or all.`)
+    }
+    out.add(part)
+  }
+  if (out.size === 0) out.add('small')
+  return out
 }
 
 function flagValue(flag: string): string | null {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 
-import { isUnsafeArgument, quoteForCmd, resolveCommand, runProcess } from '@anvil/core'
+import { isUnsafeArgument, probeCommandVersion, quoteForCmd, resolveCommand, runProcess } from '@anvil/core'
 
 /**
  * Windows process execution.
@@ -191,5 +191,17 @@ describe('runProcess', () => {
         return true
       },
     )
+  })
+})
+
+describe('probeCommandVersion', () => {
+  test('reads the semver a real executable reports', async () => {
+    // Node itself is always present in this suite, so the probe needs no fixture binary.
+    const version = await probeCommandVersion(process.execPath)
+    assert.match(version ?? '', /^\d+\.\d+\.\d+/)
+  })
+
+  test('a missing binary is unknown, not a failed claim', async () => {
+    assert.equal(await probeCommandVersion('definitely-not-a-real-binary-xyz'), null)
   })
 })

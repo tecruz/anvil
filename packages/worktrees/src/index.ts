@@ -19,7 +19,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { AnvilError, ErrorCode } from '@anvil/core'
+import { AnvilError, ErrorCode, probeCommandVersion } from '@anvil/core'
 import {
   addWorktree,
   branchExists,
@@ -38,7 +38,8 @@ import {
 } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
-import { renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import { type InjectionFinding, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import { installPushGuard, type PushGuardResult } from './hooks.ts'
 
 export type ClaimState = 'active' | 'shipped' | 'released' | 'stale'
 
@@ -60,6 +61,14 @@ export interface Claim {
   createdAt: string
   agent?: {
     runner: string
+    /**
+     * The version the runner reported when the claim was made.
+     *
+     * The path proves *which* binary; the version proves *what* produced the branch, which
+     * is the difference between a reproducible claim and a story about one. Absent when the
+     * runner could not be asked -- a broken binary must not block the claim.
+     */
+    version?: string
     /** The agent process id, when one was launched. */
     pid?: number
     /**
@@ -190,6 +199,8 @@ export interface ClaimOptions {
   /** Fetch before branching, serialized by a lock. */
   fetch?: boolean
   runner?: string
+  /** Environment for the version probe; tests point PATHEXT/PATH at a stub runner. */
+  env?: NodeJS.ProcessEnv
 }
 
 export interface ClaimResult {
@@ -200,6 +211,10 @@ export interface ClaimResult {
   notes: string[]
   /** True when the worktree has no upstream yet. */
   needsUpstream: boolean
+  /** Instruction-like lines found in the ticket text, reported not removed. */
+  injection: InjectionFinding[]
+  /** Whether the worktree's pre-push guard was installed. */
+  pushGuard: PushGuardResult
 }
 
 export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
@@ -283,8 +298,26 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
   writeFileSync(join(worktreePath, overlay.path), overlay.content, 'utf8')
   const _excluded = await excludeAnvilState(repoRoot)
 
+  // 7. Enforce "agents commit, humans ship" in git rather than in the prompt. A failure
+  //    here is reported, not fatal: a claim on an old git is still a useful worktree.
+  const pushGuard = await installPushGuard({ worktreePath, key: ticket.ref.key })
+
   const worktrees = await listWorktrees(repoRoot)
   const entry = worktrees.find((w) => w.branch === branch)
+
+  // The path says which binary; the version says what produced the work. Only opencode is
+  // probed, because that is the runner whose version the claim is later trying to reproduce;
+  // probing arbitrary user commands on every claim would be a surprise side effect.
+  const resolvedVersion =
+    options.runner !== undefined &&
+    basename(options.runner)
+      .replace(/\.(?:cmd|bat|exe)$/i, '')
+      .toLowerCase() === 'opencode'
+      ? await probeCommandVersion(options.runner, {
+          cwd: repoRoot,
+          ...(options.env === undefined ? {} : { env: options.env }),
+        })
+      : null
 
   const claim: Claim = {
     key: ticket.ref.key,
@@ -296,7 +329,9 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
     worktreeId: entry?.id ?? null,
     state: 'active',
     createdAt: new Date().toISOString(),
-    ...(options.runner === undefined ? {} : { agent: { runner: options.runner } }),
+    ...(options.runner === undefined
+      ? {}
+      : { agent: { runner: options.runner, ...(resolvedVersion === null ? {} : { version: resolvedVersion }) } }),
   }
 
   const registry = readClaims(repoRoot)
@@ -308,6 +343,8 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
     checks: pre.checks,
     notes: await environmentNotes(repoRoot),
     needsUpstream: !(await hasUpstream(worktreePath, branch)),
+    injection: context.injection,
+    pushGuard,
   }
 }
 

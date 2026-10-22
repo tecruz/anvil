@@ -15,7 +15,7 @@
  * makes people give up on a tool.
  */
 
-import { AnvilError, ErrorCode, runProcess } from '@anvil/core'
+import { AnvilError, ErrorCode, runProcess, SHIP_GUARD_ENV } from '@anvil/core'
 import type {
   AuthStatus,
   NormalizedState,
@@ -41,6 +41,8 @@ export interface GhOptions {
   host?: string
   /** Injected for tests, so no test ever shells out to gh. */
   run?: (args: string[], cwd: string) => Promise<RunResult>
+  /** Injected for tests, so the push marker can be asserted without a remote. */
+  runGit?: (args: string[], options: { cwd: string; env: NodeJS.ProcessEnv }) => Promise<RunResult>
 }
 
 /**
@@ -404,8 +406,13 @@ export class GhForgeTransport implements ForgeTransport {
    * the shared runner, with an argument array and never a shell.
    */
   async pushBranch({ cwd, branch }: { cwd: string; branch: string }): Promise<{ ok: boolean; detail: string }> {
-    const res = await runProcess('git', ['push', '-u', 'origin', branch], {
+    // The claimed worktree installs a pre-push hook that refuses every push. This marker
+    // is the one thing that opens it, and it lives only in this process: no file is left
+    // behind for a later agent to reuse.
+    const runGit = this.options.runGit ?? ((args, options) => runProcess('git', args, options))
+    const res = await runGit(['push', '-u', 'origin', branch], {
       cwd,
+      env: { ...process.env, [SHIP_GUARD_ENV]: '1' },
     })
     if (res.exitCode === 0) {
       return {

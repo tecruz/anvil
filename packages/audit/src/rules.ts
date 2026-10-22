@@ -12,10 +12,10 @@
  *     the reader to ignore the report.
  */
 
-import { readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, posix } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
-import { mentionsRunner } from '@anvil/profile'
+import { globToRegExp, mentionsRunner, normalizeRelPath, parseJsonc } from '@anvil/profile'
 import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes, WARN_INSTRUCTION_BYTES } from './budget.ts'
 import type { Fix, Layer, PlaybookMatchInfo, Severity, Status } from './types.ts'
 
@@ -993,6 +993,246 @@ const STYLE_GUIDE: Rule = {
   },
 }
 
+/**
+ * Agent configuration goes stale silently.
+ *
+ * A command file naming an npm script that was deleted, an `instructions[]` glob that
+ * matches nothing, a skill linking to a document that moved -- none of these fail loudly.
+ * The agent loads the config, follows the instruction, and discovers the truth only when
+ * the command fails. That is the same class of bug as a stale `AGENTS.md` command, and it
+ * belongs in the same report rather than in a quarterly cleanup.
+ *
+ * The scan reads `.opencode` directly because the profile walker deliberately skips hidden
+ * config directories. It only reports references that can be resolved: a missing
+ * `package.json` under a `cd` target proves nothing about the script, so that case is left
+ * alone rather than turned into a guess.
+ */
+const AGENT_CONFIG: Rule = {
+  id: 'AGENT_CONFIG',
+  layer: 'context',
+  severity: 'medium',
+  title: 'Agent config references resolve',
+  order: 43,
+  evaluate(ctx) {
+    const root = ctx.profile.root
+    const commands = filesUnder(root, '.opencode/commands').filter((f) => f.endsWith('.md'))
+    const opencodeFiles = filesUnder(root, '.opencode')
+    const skills = [
+      ...new Set([
+        ...filesUnder(root, '.agents/skills'),
+        ...filesUnder(root, '.claude/skills'),
+        ...filesUnder(root, '.opencode/skills'),
+      ]),
+    ].filter((f) => f.endsWith('/SKILL.md'))
+    const config = readInstructionsConfig(root)
+
+    if (commands.length === 0 && skills.length === 0 && config.patterns.length === 0) {
+      return na('No agent commands, skills or instruction globs to check')
+    }
+
+    const issues: string[] = []
+    const evidence: string[] = []
+    const note = (path: string, line: number | null, what: string): void => {
+      const at = line === null ? path : `${path}:${line}`
+      issues.push(`${at} ${what}`)
+      evidence.push(at)
+    }
+
+    for (const file of [...commands, ...skills]) {
+      const text = readRepoText(root, file)
+      // A file that was listed and then disappeared between walk and read is not evidence
+      // of a stale reference; it is evidence that the tree moved while we looked at it.
+      if (text === null) continue
+
+      const rows = text.split('\n')
+      for (let index = 0; index < rows.length; index++) {
+        const row = (rows[index] ?? '').replace(/`/g, '').trim().replace(/^!/, '')
+        if (row === '') continue
+
+        // A command that runs in another package resolves its scripts from that directory.
+        // Absolute and parent-traversing `cd`s are skipped: the target is outside the tree
+        // this rule can make a claim about.
+        const cd = row.match(/\bcd\s+([^\s;&|]+)\s*&&/)
+        let dir = ''
+        let skip = false
+        if (cd !== null) {
+          const target = (cd[1] ?? '').replace(/^["']|["']$/g, '')
+          if (target === '' || target.startsWith('/') || target.startsWith('~') || target.split('/').includes('..')) {
+            skip = true
+          } else {
+            dir = posix.normalize(target).replace(/^\.\//, '').replace(/\/$/, '')
+            if (dir === '.') dir = ''
+          }
+        }
+        if (skip) continue
+
+        const scripts = scriptsIn(root, dir)
+        if (scripts === null) continue
+        for (const match of row.matchAll(/\b(?:npm|pnpm|yarn|bun)\s+(?:run|run-script)\s+([A-Za-z0-9:._-]+)/g)) {
+          // A script name can contain dots, but the full stop ending the sentence is not
+          // part of it: `npm run lint.` names `lint`.
+          const name = (match[1] as string).replace(/\.+$/, '')
+          if (!(name in scripts)) {
+            note(file, index + 1, `names npm script "${name}", which ${packageJsonPath(dir)} does not define`)
+          }
+        }
+
+        // `npm test` and `pnpm test` are script shorthand, not built-ins. Bun's `test` is
+        // its own runner, so it is not checked against package.json.
+        if (/\b(?:npm|pnpm|yarn)\s+test(?:\s|$)/.test(row) && !('test' in scripts)) {
+          note(
+            file,
+            index + 1,
+            `runs \`${row.match(/\b(?:npm|pnpm|yarn)\s+test/)?.at(0) ?? 'test'}\`, but ${packageJsonPath(dir)} defines no test script`,
+          )
+        }
+      }
+
+      // Markdown links are the explicit file references in these files. Bare prose paths
+      // are not checked: they are usually examples, and a false stale-reference finding
+      // teaches the reader to ignore the rule.
+      for (const match of text.matchAll(/\]\(\s*([^)\s]+)\s*\)/g)) {
+        const raw = match[1] ?? ''
+        if (/^(?:https?:|mailto:|#|\/\/)/i.test(raw) || raw.includes('%')) continue
+        const target = raw.split('#')[0] ?? ''
+        if (target === '' || /[*?{}[\]$]/.test(target)) continue
+        const resolved = target.startsWith('/')
+          ? normalizeRelPath(target)
+          : posix.normalize(posix.join(posix.dirname(file), target))
+        if (resolved.startsWith('..') || resolved === '') continue
+        if (!existsSync(join(root, ...resolved.split('/')))) {
+          note(file, lineAt(text, match.index ?? 0), `links to "${target}", which does not exist`)
+        }
+      }
+    }
+
+    if (config.path !== '') {
+      const localFiles = [...new Set([...ctx.profile.files, ...opencodeFiles])]
+      for (const pattern of config.patterns) {
+        if (/^(?:https?:|~\/|\/|[A-Za-z]:[\\/])/i.test(pattern) || pattern.startsWith('!')) continue
+        const normalized = normalizeRelPath(pattern)
+        const line = lineContaining(config.text, pattern)
+        if (!/[*?{}[\]]/.test(normalized)) {
+          if (!existsSync(join(root, ...normalized.split('/')))) {
+            note(config.path, line, `instructions entry "${pattern}" does not exist`)
+          }
+          continue
+        }
+        // A truncated walk cannot prove that a glob matched nothing.
+        if (ctx.profile.diagnostics.truncated) continue
+        const re = globToRegExp(normalized)
+        if (!localFiles.some((f) => re.test(f))) {
+          note(config.path, line, `instructions entry "${pattern}" matches no tracked file`)
+        }
+      }
+    }
+
+    if (issues.length > 0) {
+      const target = (evidence[0] ?? 'opencode.json').replace(/:\d+$/, '')
+      return warn(
+        `${issues.length} stale agent-config reference(s): ${issues.slice(0, 3).join('; ')}${issues.length > 3 ? '; ...' : ''}. The agent will follow instructions for a layout that no longer exists.`,
+        [...new Set(evidence)].slice(0, 6),
+        {
+          kind: 'manual',
+          origin: 'derived',
+          target,
+          summary: 'Update or remove the stale references, or restore what they name',
+          confidence: 0.75,
+        },
+      )
+    }
+
+    const scanned = commands.length + skills.length + (config.path === '' ? 0 : 1)
+    const sources = [...commands, ...skills, ...(config.path === '' ? [] : [config.path])]
+    return pass(`${scanned} agent-config source(s) resolve`, sources.slice(0, 6))
+  },
+}
+
+/** Files under a repo-relative directory, bounded so a pathological config tree cannot hang the audit. */
+const CONFIG_SCAN_LIMIT = 500
+
+function filesUnder(root: string, relDir: string): string[] {
+  const out: string[] = []
+  const walk = (rel: string, depth: number): void => {
+    if (depth > 8 || out.length >= CONFIG_SCAN_LIMIT) return
+    let entries: Array<import('node:fs').Dirent>
+    try {
+      entries = readdirSync(join(root, ...rel.split('/')), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (out.length >= CONFIG_SCAN_LIMIT) return
+      const child = `${rel}/${entry.name}`
+      if (entry.isDirectory()) walk(child, depth + 1)
+      else if (entry.isFile()) out.push(child)
+    }
+  }
+  walk(relDir, 0)
+  return out
+}
+
+function readRepoText(root: string, rel: string): string | null {
+  try {
+    return readFileSync(join(root, ...rel.split('/')), 'utf8')
+  } catch {
+    return null
+  }
+}
+
+/** The scripts block of the package.json in `dir`, or null when there is nothing to judge. */
+function scriptsIn(root: string, dir: string): Record<string, string> | null {
+  const text = readRepoText(root, packageJsonPath(dir))
+  if (text === null) return null
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const scripts = (parsed as { scripts?: unknown }).scripts
+    if (typeof scripts !== 'object' || scripts === null) return {}
+    const out: Record<string, string> = {}
+    for (const [name, body] of Object.entries(scripts as Record<string, unknown>)) {
+      if (typeof body === 'string') out[name] = body
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+
+function packageJsonPath(dir: string): string {
+  return dir === '' ? 'package.json' : `${dir}/package.json`
+}
+
+function lineAt(text: string, index: number): number {
+  return text.slice(0, index).split('\n').length
+}
+
+function lineContaining(text: string, needle: string): number | null {
+  const index = text.split('\n').findIndex((line) => line.includes(needle))
+  return index === -1 ? null : index + 1
+}
+
+interface InstructionsConfig {
+  path: string
+  text: string
+  patterns: string[]
+}
+
+function readInstructionsConfig(root: string): InstructionsConfig {
+  for (const rel of ['opencode.json', 'opencode.jsonc']) {
+    const text = readRepoText(root, rel)
+    if (text === null) continue
+    const parsed = parseJsonc(text)
+    if (parsed === null) continue
+    const raw = parsed.instructions
+    const patterns = Array.isArray(raw)
+      ? raw.filter((value): value is string => typeof value === 'string' && value !== '')
+      : []
+    return { path: rel, text, patterns }
+  }
+  return { path: '', text: '', patterns: [] }
+}
+
 // ---------------------------------------------------------------------------
 // Governance
 // ---------------------------------------------------------------------------
@@ -1544,6 +1784,7 @@ export const RULES: readonly Rule[] = [
   PLAYBOOK,
   MCP,
   STYLE_GUIDE,
+  AGENT_CONFIG,
   CODEOWNERS,
   PR_TEMPLATE,
   ISSUE_TEMPLATE,

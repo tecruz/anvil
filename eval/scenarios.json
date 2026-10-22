@@ -1,10 +1,12 @@
 {
   "scenarios": [
     {
-      "id": "node-tiny-slugify",
+      "id": "tiny-code-change",
+      "size": "tiny",
+      "kind": "code-change",
       "repo": "eval/repos/node-tiny",
-      "task": "Implement `slugify` in `src/slug.js`: lowercase the title, replace runs of spaces with a single dash, and trim any dashes at the ends. Add tests for it in `test/slug.test.js`, following the conventions in README.md.",
-      "verify": ["npm test", "node --test test/slug.test.js"],
+      "task": "Implement `slugify` in `src/slug.js`: lowercase the title, replace runs of spaces with a single dash, and trim any dashes at the ends. Add tests for it in `test/slug.test.js`.",
+      "verify": ["npm test"],
       "hidden": [
         {
           "from": "eval/hidden/node-tiny-slugify.test.js",
@@ -12,7 +14,49 @@
         }
       ],
       "hiddenVerify": ["node --test test/hidden-slugify.test.js"],
-      "timeoutMinutes": 10
+      "solution": {
+        "from": "eval/solutions/tiny-code-change.js",
+        "to": "src/slug.js"
+      },
+      "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "tiny-verify-only",
+      "size": "tiny",
+      "kind": "verify-only",
+      "repo": "eval/repos/node-tiny",
+      "task": "Run the test suite and report whether it passes.",
+      "verify": ["npm test"],
+      "expect": { "verified": true }
+    },
+    {
+      "id": "medium-code-change",
+      "size": "medium",
+      "kind": "code-change",
+      "repo": "eval/repos/node-medium",
+      "task": "Implement `median` in `src/stats.js`: return the middle value of a sorted list, or the average of the two middle values when the count is even. Add tests for it in `test/stats.test.js`.",
+      "verify": ["npm test"],
+      "hidden": [
+        {
+          "from": "eval/hidden/node-medium-median.test.js",
+          "to": "test/hidden-median.test.js"
+        }
+      ],
+      "hiddenVerify": ["node --test test/hidden-median.test.js"],
+      "solution": {
+        "from": "eval/solutions/medium-code-change.js",
+        "to": "src/stats.js"
+      },
+      "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "medium-verify-only",
+      "size": "medium",
+      "kind": "verify-only",
+      "repo": "eval/repos/node-medium",
+      "task": "Run the test suite and report whether it passes.",
+      "verify": ["npm test"],
+      "expect": { "verified": true }
     }
   ]
 }

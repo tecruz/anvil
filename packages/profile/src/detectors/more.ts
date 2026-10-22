@@ -1,6 +1,6 @@
 /**
- * Six further ecosystem detectors: Ruby, PHP, Elixir, frontend frameworks,
- * Swift and Terraform.
+ * Further ecosystem detectors: Ruby, PHP, Elixir, frontend frameworks, browser test
+ * runners, Swift and Terraform.
  *
  * Chosen for the "any company, any project" premise rather than for any ranking of
  * importance. Each follows the same rules as the first six: never execute, label
@@ -333,6 +333,70 @@ export const frontendDetector: Detector = {
 }
 
 // ---------------------------------------------------------------------------
+// Browser test runners
+// ---------------------------------------------------------------------------
+
+const PLAYWRIGHT_CONFIGS = [
+  'playwright.config.ts',
+  'playwright.config.js',
+  'playwright.config.mjs',
+  'playwright.config.cjs',
+  'playwright.config.mts',
+] as const
+
+const CYPRESS_CONFIGS = [
+  'cypress.config.ts',
+  'cypress.config.js',
+  'cypress.config.mjs',
+  'cypress.config.cjs',
+  'cypress.json',
+] as const
+
+/**
+ * Playwright and Cypress are test commands in their own right, whether or not a package
+ * script wraps them.
+ *
+ * The node detector already classifies a `test:e2e` script, but a .NET or Python repository
+ * with a Playwright suite has no npm script to classify -- and the suite was then invisible.
+ * On a polyglot repo the primary test command remains whatever the repository documents;
+ * these are appended as lower-priority candidates, which is exactly what
+ * `ProjectProfile.commands` keeps.
+ *
+ * Priority 55 puts this after the ecosystem detectors, so a real `npm test` script wins the
+ * primary slot over a runner anvil found by itself.
+ */
+export const browserTestDetector: Detector = {
+  id: 'browser-tests',
+  title: 'Playwright / Cypress',
+  priority: 55,
+  matches(ctx) {
+    return PLAYWRIGHT_CONFIGS.some((f) => hasFile(ctx, f)) || CYPRESS_CONFIGS.some((f) => hasFile(ctx, f))
+  },
+  detect(ctx, draft) {
+    const playwright = PLAYWRIGHT_CONFIGS.find((f) => hasFile(ctx, f))
+    if (playwright !== undefined) {
+      addStack(draft, { id: 'playwright', version: null, evidence: [playwright] })
+      addTool(draft, 'test', 'playwright')
+      addCommand(draft, 'test', {
+        cmd: 'npx playwright test',
+        source: 'detected',
+        evidence: playwright,
+      })
+    }
+    const cypress = CYPRESS_CONFIGS.find((f) => hasFile(ctx, f))
+    if (cypress !== undefined) {
+      addStack(draft, { id: 'cypress', version: null, evidence: [cypress] })
+      addTool(draft, 'test', 'cypress')
+      addCommand(draft, 'test', {
+        cmd: 'npx cypress run',
+        source: 'detected',
+        evidence: cypress,
+      })
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Swift / iOS
 // ---------------------------------------------------------------------------
 
@@ -536,5 +600,6 @@ export const additionalDetectors: readonly Detector[] = [
   elixirDetector,
   swiftDetector,
   frontendDetector,
+  browserTestDetector,
   bazelDetector,
 ]

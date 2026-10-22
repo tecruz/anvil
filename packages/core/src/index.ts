@@ -32,6 +32,7 @@ export {
   starterConfigJson,
   stateDir,
 } from './config.ts'
+export { SHIP_GUARD_ENV } from './constants.ts'
 export {
   AnvilError,
   type AnvilErrorOptions,
@@ -47,6 +48,7 @@ export {
   isUnsafeArgument,
   needsVerbatimArguments,
   type ProcessResult,
+  probeCommandVersion,
   quoteForCmd,
   type ResolvedCommand,
   type RunProcessOptions,

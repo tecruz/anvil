@@ -21,7 +21,7 @@ import {
 import { AnvilError, ErrorCode, parseCliArgs, renderTable, type Style } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
 import { loadPlaybooks, matchPlaybooks } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile, profileWarnings, type VcsHost } from '@anvil/profile'
+import { buildProfile, type CommandEntry, type ProjectProfile, profileWarnings, type VcsHost } from '@anvil/profile'
 import { toPlaybookMatchInfo } from './matches.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -174,14 +174,18 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
     out.push('')
     out.push(s.bold('Commands'))
     for (const kind of kinds) {
-      for (const entry of p.commands[kind as keyof typeof p.commands] ?? []) {
+      for (const [index, entry] of (p.commands[kind as keyof typeof p.commands] ?? []).entries()) {
         const tag =
           entry.source === 'documented'
             ? s.green('documented')
             : entry.source === 'detected'
               ? s.cyan('detected')
               : s.yellow('inferred')
-        out.push(`  ${kind.padEnd(10)} ${entry.cmd.padEnd(32)} ${tag} ${s.dim(entry.evidence ?? '')}`)
+        // A polyglot repo has several real runners for one kind. The first is what anvil
+        // and its artifacts use; the rest are still true, and hiding them is how a
+        // Playwright suite became invisible on a .NET repository.
+        const role = index === 0 ? s.bold('primary') : s.dim('candidate')
+        out.push(`  ${kind.padEnd(10)} ${entry.cmd.padEnd(32)} ${role} ${tag} ${s.dim(entry.evidence ?? '')}`)
       }
     }
   }
@@ -270,6 +274,10 @@ export const doctorCommand: Command = {
     })
 
     const failOn = parseSeverity(args.values['fail-on']) ?? (args.values.strict === true ? 'high' : null)
+    const runners = runnersOf(profile)
+    // Additive to the readiness report, not a new contract: a caller that only knows the
+    // report fields is unaffected, and a caller that wants the candidates now gets them.
+    const payload = { ...report, runners }
     const breach =
       failOn === null
         ? null
@@ -294,7 +302,7 @@ export const doctorCommand: Command = {
       // branching on `ok` is the documented contract, and this is the only payload-bearing
       // failure that was still reporting success. The report travels as the failure's payload,
       // so a consumer parsing the envelope still gets the full findings either way.
-      ctx.outFailure(report, err, () => `${renderReport(ctx, report)}\n\n${renderErrorText(err, ctx.style)}`)
+      ctx.outFailure(payload, err, () => `${renderReport(ctx, report, runners)}\n\n${renderErrorText(err, ctx.style)}`)
       return err.exitCode
     }
 
@@ -311,14 +319,38 @@ export const doctorCommand: Command = {
           details: { degraded: reasons, score: report.score, grade: report.grade },
         },
       )
-      ctx.outFailure(report, err, () => `${renderReport(ctx, report)}\n\n${renderErrorText(err, ctx.style)}`)
+      ctx.outFailure(payload, err, () => `${renderReport(ctx, report, runners)}\n\n${renderErrorText(err, ctx.style)}`)
       return err.exitCode
     }
 
     // The report is the answer; the exit code is the verdict.
-    ctx.out(report, () => renderReport(ctx, report))
+    ctx.out(payload, () => renderReport(ctx, report, runners))
     return undefined
   },
+}
+
+/**
+ * Every kind with more than one real runner, primary first.
+ *
+ * `ProjectProfile.commands` already keeps the lower-priority candidates in order; this is
+ * the render boundary, not a second source of truth. The doctor carries it so a reader can
+ * see the suite anvil did *not* choose and the evidence that it exists.
+ */
+interface RunnerSummary {
+  kind: string
+  primary: CommandEntry
+  candidates: CommandEntry[]
+}
+
+function runnersOf(profile: ProjectProfile): RunnerSummary[] {
+  const out: RunnerSummary[] = []
+  for (const kind of Object.keys(profile.commands).sort()) {
+    const entries = profile.commands[kind as keyof typeof profile.commands] ?? []
+    if (entries.length <= 1) continue
+    const [primary, ...candidates] = entries
+    if (primary !== undefined) out.push({ kind, primary, candidates })
+  }
+  return out
 }
 
 function parseLayers(value: unknown): Layer[] | null {
@@ -368,7 +400,7 @@ function barFor(score: number, s: Style): string {
   return score >= 70 ? s.green(bar) : score >= 40 ? s.yellow(bar) : s.red(bar)
 }
 
-function renderReport(ctx: CommandContext, report: ReadinessReport): string {
+function renderReport(ctx: CommandContext, report: ReadinessReport, runners: readonly RunnerSummary[] = []): string {
   const s = ctx.style
   const out: string[] = []
 
@@ -399,6 +431,19 @@ function renderReport(ctx: CommandContext, report: ReadinessReport): string {
         s,
       ),
     )
+  }
+
+  if (runners.length > 0) {
+    out.push('')
+    out.push(s.bold('Detected runners'))
+    for (const runner of runners) {
+      for (const [index, entry] of [runner.primary, ...runner.candidates].entries()) {
+        const role = index === 0 ? s.bold('primary  ') : s.dim('candidate')
+        out.push(
+          `  ${(index === 0 ? runner.kind : '').padEnd(10)} ${role} ${entry.cmd} ${s.dim(`[${entry.source}] ${entry.evidence ?? ''}`)}`,
+        )
+      }
+    }
   }
 
   const withFix = report.findings.filter((f) => f.fix !== null && f.status !== 'pass')

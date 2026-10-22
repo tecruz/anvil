@@ -808,6 +808,31 @@ describe('anvil profile / doctor with --profile', () => {
       'scoring the fixture must differ from scoring the enclosing repository',
     )
   })
+
+  test('profile and doctor name every runner, not only the primary', () => {
+    const dir = tempDir('anvil-runners-')
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'polyglot', scripts: { test: 'node --test' } }))
+    writeFileSync(join(dir, 'playwright.config.ts'), 'export default {}\n')
+    mkdirSync(join(dir, 'src'), { recursive: true })
+    writeFileSync(join(dir, 'src', 'app.ts'), 'export const app = 1\n')
+
+    const profile = runAnvil(['profile', '--profile', dir])
+    assert.equal(profile.code, 0, profile.stderr)
+    assert.match(profile.stdout, /npm run test\s+primary/)
+    assert.match(profile.stdout, /npx playwright test\s+candidate/)
+
+    const doctor = runAnvil(['doctor', '--profile', dir, '--json'])
+    assert.equal(doctor.code, 0, doctor.stderr)
+    const data = jsonOf(doctor).data as {
+      runners: Array<{ kind: string; primary: { cmd: string }; candidates: Array<{ cmd: string; evidence?: string }> }>
+    }
+    const testRunner = data.runners.find((r) => r.kind === 'test')
+    assert.ok(testRunner !== undefined, 'the test kind has more than one runner')
+    assert.equal(testRunner.primary.cmd, 'npm run test')
+    assert.ok(
+      testRunner.candidates.some((c) => c.cmd === 'npx playwright test' && c.evidence === 'playwright.config.ts'),
+    )
+  })
 })
 
 describe('a threshold failure is reported as a failure', () => {

@@ -25,6 +25,8 @@ export interface BriefCommand {
   kind: string
   cmd: string
   source: CommandEntry['source']
+  /** The first command of a kind is the one anvil uses; the rest are real candidates. */
+  primary: boolean
   evidence: string | null
 }
 
@@ -148,11 +150,12 @@ export function buildBrief(options: BuildBriefOptions): Brief {
 
   const commands: BriefCommand[] = []
   for (const kind of Object.keys(profile.commands).sort()) {
-    for (const entry of profile.commands[kind as keyof typeof profile.commands] ?? []) {
+    for (const [index, entry] of (profile.commands[kind as keyof typeof profile.commands] ?? []).entries()) {
       commands.push({
         kind,
         cmd: entry.cmd,
         source: entry.source,
+        primary: index === 0,
         evidence: entry.evidence ?? null,
       })
     }

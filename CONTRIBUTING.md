@@ -162,23 +162,36 @@ reports it.
 ## The harness that runs an agent
 
 ```bash
-npm run eval -- --dry-run   # what it would do, and it costs nothing
-ANVIL_EVAL=1 npm run eval   # what it would do, with an agent and a model
-ANVIL_EVAL=1 ANVIL_EVAL_MODEL=provider/model npm run eval   # when the default cannot run it
+npm run eval -- --list                     # the scenario matrix and the model pair
+npm run eval -- --dry-run                  # what a run would do, and it costs nothing
+ANVIL_EVAL=1 npm run eval                  # what it would do, with an agent and a model
+ANVIL_EVAL=1 npm run eval -- --models all  # small and frontier in one comparison
+npm run eval -- --fake-agent --write-baseline  # hermetic bootstrap, no model is called
+npm run eval:check                         # compare the last summary with the baseline
 ```
 
-The report prints the model used. Set `ANVIL_EVAL_MODEL` when the configured default is an
-image model, an exhausted free tier or anything else that cannot do the task: a run that
-cannot name its model is not comparable with the next one.
+The matrix is four scenarios on purpose: `tiny` and `medium`, each once as a code change
+and once as a verify-only task. A code-change scenario is graded by a hidden test copied
+in after the agent finishes; a verify-only scenario is graded by the repository's own
+verify command. Both matter, because context that helps a model write code can still fail
+to help it read a repository.
 
-The eval harness runs the same task twice in the same repository — once with the artifacts
-`anvil init --apply` writes, once without — and grades both the same way: the repository's
-own verify command, a hidden test copied in after the agent finishes, and the cost read
-from the host's ledger. It is not part of `npm test`, because it needs an agent, a model
-and a network, and because a slow suite is a suite people stop running.
+The report records what a run cannot be understood without: the model, the opencode
+version, the scenario and fixture hashes, the verify exit codes, and what the work cost.
+Set `ANVIL_EVAL_MODEL` when the configured default is an image model, an exhausted free
+tier or anything else that cannot do the task: a run that cannot name its model is not
+comparable with the next one. `ANVIL_EVAL_MODELS` replaces the model pair, in
+`small,frontier` order.
 
 A scenario that fails is a finding, not a nuisance: read the transcript in
-`eval-results/` before changing the harness.
+`eval-results/raw/` before changing the harness. `eval-results/latest.json` is the
+summary the gate reads, `eval-results/baseline.json` is the checked-in expectation, and
+both are committed; when the fixture, the scenario or the result changes, rerun the
+harness with `--write-baseline` and review the diff like any other file.
+
+`npm run check` runs the gate. When no baseline exists it passes and says so, because the
+first run is a measurement; once a baseline is committed, a changed hash or a missed
+expectation fails the check.
 
 ## The one suite that needs `gh`
 

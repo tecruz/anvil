@@ -325,6 +325,8 @@ async function crewStatusFlow(
         agentPid: r.pid,
         agentAlive: r.alive,
         agentSessionId: r.sessionId,
+        agentRunner: r.status.claim.agent?.runner ?? null,
+        agentVersion: r.status.claim.agent?.version ?? null,
         costUsd: sessionCost?.costUsd ?? null,
         costTokens: sessionCost?.tokens ?? null,
         state: r.status.claim.state,

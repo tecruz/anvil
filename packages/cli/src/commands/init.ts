@@ -175,7 +175,10 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
     brief.commands.length === 0
       ? s.dim('  (none)')
       : brief.commands
-          .map((c) => `  ${c.kind.padEnd(10)} ${c.cmd.padEnd(32)} ${c.source.padEnd(11)} ${s.dim(c.evidence ?? '')}`)
+          .map(
+            (c) =>
+              `  ${c.kind.padEnd(10)} ${c.cmd.padEnd(32)} ${c.primary ? 'primary  ' : 'candidate'} ${c.source.padEnd(11)} ${s.dim(c.evidence ?? '')}`,
+          )
           .join('\n'),
   )
   if (brief.playbooks.length > 0) {

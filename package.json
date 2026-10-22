@@ -51,9 +51,10 @@
     "test:changed": "node scripts/test-changed.mjs",
     "test:watch": "node --test --watch \"packages/*/test/**/*.test.ts\"",
     "eval": "node scripts/eval.ts",
+    "eval:check": "node scripts/eval-check.mjs",
     "check:generated": "node scripts/gen-playbooks.ts --check",
     "check:docs": "node scripts/check-docs.mjs",
-    "check": "npm run check:generated && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:docs",
+    "check": "npm run check:generated && npm run lint && npm run typecheck && npm run test && npm run build && npm run check:docs && npm run eval:check",
     "ci:local": "npm ci && npm run check",
     "clean": "node scripts/clean.mjs",
     "setup:hooks": "git config core.hooksPath .githooks"

@@ -62,7 +62,10 @@ anvil doctor
 ```
 
 Every finding carries file:line evidence and a concrete fix, and the rules that cannot
-decide report `na` rather than failing. If a finding is wrong, that is a bug worth
+decide report `na` rather than failing. The audit covers the files an agent reads as well
+as the repository itself: a command file naming a deleted npm script, a skill linking to a
+moved document, or an `opencode.json` instructions glob that matches nothing is reported
+with the line that went stale. If a finding is wrong, that is a bug worth
 reporting — the tool was calibrated against real repositories, and its own false
 positives are the interesting part.
 
@@ -122,14 +125,23 @@ What each step does:
   worktree *outside* the repository, in a short sibling directory so Windows path lengths
   stay inside the budget. The worktree comes warm: the ticket, the acceptance criteria,
   the repository's real verify commands and the high-risk paths are written to
-  `.anvil/ticket.md` for the agent to read first. A claim that cannot succeed is
-  refused before anything is created — a colliding branch, an occupied path, a dirty
-  base or a path over the Windows budget all stop it.
+  `.anvil/ticket.md` for the agent to read first. The ticket text is fenced as untrusted
+  data there: it describes the work, but it is not an instruction channel and cannot
+  override the repository's `AGENTS.md`. Lines that look like instructions are quoted in
+  the bundle and reported by `claim` and `issue pull` rather than silently removed. A
+  claim that cannot succeed is refused before anything is created — a colliding branch,
+  an occupied path, a dirty base or a path over the Windows budget all stop it.
+- **The claim installs a `pre-push` hook** in its worktree that refuses every push unless
+  `ANVIL_SHIP=1`, which only `anvil ship` sets. This is what makes "agents commit, humans
+  ship" a control rather than a request: the hook is per worktree, so the main worktree is
+  unaffected, and any hooks the repository already had are chained rather than replaced.
+  `git push --no-verify` bypasses any hook, and the refusal says so instead of pretending
+  otherwise.
 - **`crew up --tickets 1,2,3 --launch`** claims several tickets and starts an agent in
   each. Claims are created one at a time (`git worktree add` mutates shared
   administrative state) and agents then start in parallel, because each one only touches
-  its own worktree. Agents launched this way are forbidden from pushing: shipping is a
-  human decision.
+  its own worktree. Agents launched this way cannot push: each claim's `pre-push` hook
+  permits only the push `anvil ship` performs, because shipping is a human decision.
 - **`crew verify`** runs each worktree's verify commands. The concurrency is chosen from
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
@@ -168,12 +180,25 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil auth` | Check ticket-provider access and print the command that fixes it. |
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
+| `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
 | `anvil version` | The anvil version and the JSON schema version. |
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
 `fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
 reasons under `degraded`, and `--strict` fails when the profile is incomplete. Raise
 `--max-files` when a real repository exceeds the default 20,000-file cap.
+
+A repository can have more than one real runner for the same kind — `npm test` and
+`npx playwright test`, for example. `anvil profile` and `anvil doctor` label every runner
+`primary` or `candidate`, and the doctor's JSON carries the full list under `runners`, so
+the suite anvil did not choose is visible instead of silently dropped.
+
+`anvil mcp` is the same control surface for an MCP client. It speaks newline-delimited
+JSON-RPC 2.0 over stdio and exposes three read-only tools: `anvil_doctor`, `anvil_plan`
+and `anvil_crew_status`. Each tool call runs the corresponding CLI command with `--json`
+and returns the command's payload as the tool result, so a tool result and a terminal
+result are built from the same report rather than two implementations of it. stdout
+belongs to the protocol; anything diagnostic goes to stderr.
 
 ## Configuration
 
@@ -303,6 +328,7 @@ which is the command whose whole job is to write three of them.
 | `<repo>/.anvil/claims.json` | the claim registry, in the main worktree | no |
 | `<worktree>/.anvil/ticket.md` | the ticket context bundle for the agent | no |
 | `<worktree>/.anvil/AGENTS.md` | the worktree's rule overlay | no |
+| `<worktree>/.anvil/hooks/` | the worktree's `pre-push` guard, and wrappers for the repository's own hooks | no |
 | `<worktree>/.anvil/session.json` | the agent session id, written by the opencode plugin | no |
 | `~/.anvil/config.json` | the global configuration | your machine |
 | `~/.anvil/playbooks/` | your installed playbooks | your machine |
@@ -326,6 +352,11 @@ directory that already has one.
 **`Cannot ship: gh is not authenticated`.** `ship` needs the GitHub CLI. `anvil auth
 github` prints the exact login command for the host your remote actually points at,
 which is the detail that matters on GitHub Enterprise.
+
+**`anvil: refusing to push from the claimed worktree`.** That is the push guard doing its
+job. Commit in the worktree and let a human run `anvil ship <key>`; do not use
+`git push --no-verify` to get around it. If the claim also reported that the guard could
+not be installed, the git in use does not support `extensions.worktreeConfig`.
 
 **`The staging bundle is stale`.** The repository changed between `anvil init` and
 `anvil init --apply`. Re-run `anvil init`, review the new diff, and apply again.
