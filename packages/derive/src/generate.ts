@@ -40,6 +40,24 @@ function bullet(label: string, entry: CommandEntry | null, fallback: string | nu
   return `- **${label}:** \`${entry.cmd}\`${source}${evidence}`
 }
 
+/**
+ * A command row whose evidence points at this file has a line number from the *previous*
+ * AGENTS.md -- the profile reads the file on disk before this template lays out the new
+ * one. Left alone, every edit above the command block makes the citation point at the
+ * wrong line, which is the one kind of stale evidence this project must not ship.
+ *
+ * The final line is known only after the document is assembled, so the fix is a second
+ * pass over the finished text: each self-citing command row cites its own current line.
+ */
+const SELF_CITATION = / `AGENTS\.md:\d+`$/
+
+function retargetSelfCitations(content: string): string {
+  const lines = content.split('\n')
+  return lines
+    .map((line, index) => (line.startsWith('- **') ? line.replace(SELF_CITATION, ` \`AGENTS.md:${index + 1}\``) : line))
+    .join('\n')
+}
+
 export interface GenerateOptions {
   profile: ProjectProfile
   matches: readonly MatchResult[]
@@ -178,7 +196,7 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
 
   return {
     path: 'AGENTS.md',
-    content: lines.join('\n').replace(/\n{3,}/g, '\n\n'),
+    content: retargetSelfCitations(lines.join('\n').replace(/\n{3,}/g, '\n\n')),
     reason: 'Root agent instructions, built from detected commands and structure',
   }
 }

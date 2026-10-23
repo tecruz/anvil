@@ -230,6 +230,57 @@ describe('idempotence', () => {
     assert.equal(sha256(a.content), sha256(b.content))
   })
 
+  test('self-citations point at the row that carries them, even after the layout moves', () => {
+    // The command evidence is read from the AGENTS.md on disk before the template lays out
+    // the new file, so a citation like `AGENTS.md:8` describes the *old* layout. Without a
+    // second pass, adding a section above the command table makes every self-citation lie.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-self-cite-'))
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        `${JSON.stringify(
+          { name: 'self-cite', version: '1.0.0', scripts: { test: 'node --test', lint: 'eslint .' } },
+          null,
+          2,
+        )}\n`,
+      )
+      writeFileSync(
+        join(dir, 'AGENTS.md'),
+        [
+          '# Local notes',
+          '',
+          'Some prose that will not survive regeneration.',
+          '',
+          'Run `npm test` before sending a change.',
+          '',
+          'Run `npm run lint` before sending a change.',
+          '',
+        ].join('\n'),
+      )
+
+      const first = generateAgentsFile({ profile: profileIn(dir), matches: matchesFor(profileIn(dir)) })
+      const cited = [...first.content.matchAll(/^- \*\*.*`AGENTS\.md:(\d+)`$/gm)]
+      assert.ok(cited.length >= 2, first.content)
+      const lines = first.content.split('\n')
+      for (const match of cited) {
+        const line = lines[Number(match[1]) - 1]
+        assert.ok(line?.startsWith('- **'), `AGENTS.md:${match[1]} does not point at a command row`)
+        assert.ok(line?.endsWith(`\`AGENTS.md:${match[1]}\``), 'the row must cite itself')
+      }
+
+      // The generated file is now the input. Regenerating must be byte-identical: the
+      // citations describe the file being read, not a layout that no longer exists.
+      writeFileSync(join(dir, 'AGENTS.md'), first.content, 'utf8')
+      const second = generateAgentsFile({
+        profile: profileIn(dir),
+        matches: matchesFor(profileIn(dir)),
+      })
+      assert.equal(second.content, first.content)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('the input hash is stable across runs', () => {
     const dir = materialize('node-workspace')
     const h1 = hashInputsFrom(dir)

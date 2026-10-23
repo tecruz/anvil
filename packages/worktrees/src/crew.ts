@@ -363,7 +363,8 @@ export function agentPrompt(claim: Claim, repoRoot: string): string {
     'When you finish:',
     '- Run the verify commands from .anvil/ticket.md until they pass. An unverified change is not a proposal.',
     '- Commit your work with a clear message.',
-    '- Do NOT push, do NOT open a pull request, and do NOT release the worktree. A human runs `anvil ship`.',
+    '- Do NOT push, do NOT open a pull request, and do NOT release the worktree. A pre-push hook in this',
+    '  worktree refuses pushes; `anvil ship` is the only path to the remote, and a human runs it.',
     '- If you are blocked, say so in your final message rather than guessing.',
   ].join('\n')
 }

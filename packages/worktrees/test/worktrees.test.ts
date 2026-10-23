@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -584,6 +584,46 @@ describe('claims', () => {
     const registry = readClaims(repo)
     assert.equal(registry.claims.length, 1)
     assert.equal(registry.claims[0]?.key, 'local-1')
+  })
+
+  test('a claim records the runner version, so the state is reproducible later', async () => {
+    const repo = makeRepo()
+    const bin = temp('anvil-m3-runner-')
+    if (process.platform === 'win32') {
+      writeFileSync(join(bin, 'opencode.cmd'), '@echo off\r\necho 1.2.3\r\n', 'utf8')
+    } else {
+      const stub = join(bin, 'opencode')
+      writeFileSync(stub, '#!/bin/sh\necho 1.2.3\n', 'utf8')
+      chmodSync(stub, 0o755)
+    }
+
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-cwv-'), 'wt'),
+      runner: 'opencode',
+      env: { ...process.env, PATH: `${bin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH ?? ''}` },
+    })
+
+    assert.equal(result.claim.agent?.runner, 'opencode')
+    assert.equal(result.claim.agent?.version, '1.2.3')
+    const stored = readClaims(repo).claims[0]
+    assert.equal(stored?.agent?.version, '1.2.3')
+  })
+
+  test('an unreadable version is omitted rather than failing the claim', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-cwv2-'), 'wt'),
+      runner: 'opencode',
+      // An empty PATH means the probe cannot resolve the runner; the claim still succeeds.
+      env: { ...process.env, PATH: '' },
+    })
+
+    assert.equal(result.claim.agent?.runner, 'opencode')
+    assert.equal(result.claim.agent?.version, undefined)
   })
 
   test('claiming twice for the same ticket is refused, not renamed', async () => {

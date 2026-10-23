@@ -6,6 +6,7 @@
   "description": "Claims, the claim registry, the ship pipeline, and crews.",
   "exports": {
     ".": "./src/index.ts",
+    "./hooks": "./src/hooks.ts",
     "./ship": "./src/ship.ts",
     "./crew": "./src/crew.ts"
   },

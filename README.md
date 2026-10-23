@@ -52,6 +52,7 @@ anvil doctor            # audit this repository, with a score and the reasoning
 anvil init              # derive AGENTS.md, a verify skill and a review command
 anvil playbook check    # check the playbook registry for dead links
 anvil playbook discover # find agent tooling the curated registry does not know yet
+anvil mcp               # serve doctor, plan and crew status to an MCP client over stdio
 ```
 
 Working a ticket is four commands: `anvil issue create`, `anvil claim` (branch, worktree and
@@ -101,7 +102,7 @@ compacted.
 
 ```bash
 npm ci                  # install, and build the bundle (prepare runs on install)
-npm run check           # lint, typecheck, the whole suite, the build, the docs check
+npm run check           # lint, typecheck, the suite, the build, docs, and the eval gate
 npm run test:changed    # only the packages your change affects, and their dependents
 npm run setup:hooks     # once per clone: enable the pre-commit hook
 ```

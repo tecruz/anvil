@@ -290,6 +290,35 @@ export async function runProcess(
   }
 }
 
+/**
+ * Resolve the version a command reports for `--version`, or null when it cannot be read.
+ *
+ * Version output is for provenance, never for a decision, so every failure -- missing tool,
+ * non-zero exit, timeout, unparseable text -- is silence rather than an error. A claim on a
+ * machine with a broken agent binary is still a useful claim; the version field is how a
+ * later reader knows what produced the work.
+ */
+export async function probeCommandVersion(
+  bin: string,
+  options: Pick<RunProcessOptions, 'cwd' | 'env' | 'timeoutMs' | 'platform'> = {},
+): Promise<string | null> {
+  try {
+    const result = await runProcess(bin, ['--version'], {
+      maxBuffer: 64 * 1024,
+      timeoutMs: 3_000,
+      ...options,
+    })
+    if (result.exitCode !== 0) return null
+    const output = `${result.stdout}\n${result.stderr}`
+    const match = output.match(/\bv?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/)
+    return match?.[1] ?? null
+  } catch {
+    // A missing binary or a spawn failure is not a claim failure. The runner path is still
+    // recorded; the version is simply unknown.
+    return null
+  }
+}
+
 function hintFor(bin: string, platform: NodeJS.Platform): string {
   if (platform !== 'win32') return `Is ${bin} installed and on PATH?`
   const base = bin.replace(/\.(cmd|bat|exe)$/i, '')

@@ -26,7 +26,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
 
@@ -188,6 +188,50 @@ export async function mainWorktreeRoot(cwd: string): Promise<string | null> {
   // The common dir is `<main>/.git`; be defensive about a bare repository or a custom
   // layout rather than returning a path that does not exist.
   return basename(commonDir) === '.git' ? parent : null
+}
+
+/** The common git directory (`<main>/.git`), shared by every worktree. */
+export async function commonGitDir(cwd: string): Promise<string | null> {
+  const res = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd })
+  if (res.exitCode !== 0) return null
+  const trimmed = res.stdout.trim()
+  return trimmed === '' ? null : normalizeGitPath(trimmed)
+}
+
+/**
+ * The directory git runs hooks from, before anvil overrides it for a worktree.
+ *
+ * `core.hooksPath` may be relative, and git resolves a relative hooks path against the
+ * top level of the working tree for a non-bare repository -- so that is what this does.
+ * When the key is unset, git's default is `<common git dir>/hooks`, shared by every
+ * worktree; the claim installs a per-worktree path instead of writing into that one.
+ */
+export async function effectiveHooksDir(cwd: string): Promise<string | null> {
+  const configured = await git(['config', '--get', 'core.hooksPath'], { cwd })
+  const value = configured.exitCode === 0 ? configured.stdout.trim() : ''
+  if (value !== '') return normalizeGitPath(isAbsolute(value) ? value : join(cwd, value))
+  const common = await commonGitDir(cwd)
+  return common === null ? null : join(common, 'hooks')
+}
+
+/**
+ * Enable `config.worktree`, the mechanism that lets one worktree carry configuration the
+ * others do not. Without it, `core.hooksPath` is repository-wide and a hook installed for
+ * a claim would refuse pushes from the main worktree too.
+ */
+export async function enableWorktreeConfig(cwd: string): Promise<RunResult> {
+  return git(['config', 'extensions.worktreeConfig', 'true'], { cwd })
+}
+
+/**
+ * Set a worktree-local config value.
+ *
+ * Forward slashes are deliberate: git accepts them on every platform, and a backslash in a
+ * config value is an escape character in some parsers. The value itself is absolute, so a
+ * relative `core.hooksPath` cannot resolve differently depending on where the hook runs.
+ */
+export async function setWorktreeHooksPath(cwd: string, hooksPath: string): Promise<RunResult> {
+  return git(['config', '--worktree', 'core.hooksPath', hooksPath.replace(/\\/g, '/')], { cwd })
 }
 
 // ---------------------------------------------------------------------------

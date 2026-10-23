@@ -19,6 +19,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0008](0008-live-discovery-keeps-registry-curated.md) | Live discovery enriches the plan; the registry stays curated | accepted |
 | [0009](0009-guidance-has-to-earn-its-place.md) | Guidance has to earn its place: an instruction budget, and resources that can be satisfied | accepted |
 | [0010](0010-cost-is-read-from-the-hosts-ledger.md) | Cost is read from the host's ledger; anvil records nothing | accepted |
+| [0011](0011-mcp-for-the-control-surface.md) | The MCP control surface runs the CLI, not a second contract | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

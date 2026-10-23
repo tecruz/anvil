@@ -1450,12 +1450,32 @@ describe('the six additional detectors', () => {
     assert.equal(p.commands.build?.[0]?.source, 'detected')
   })
 
-  test('detector count reaches thirteen', () => {
-    // Twelve plus Bazel, which was missing entirely until a MODULE.bazel tree was audited
-    // and scored 22/100 for it. The `Set` also asserts every id is unique: two detectors
-    // sharing an id would silently shadow one another.
+  test('a Playwright config is a runner even when a package script is primary', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-browser-'))
+    try {
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'polyglot', scripts: { test: 'node --test' } }))
+      writeFileSync(join(dir, 'playwright.config.ts'), 'export default {}\n')
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'app.ts'), 'export const app = 1\n')
+
+      const profile = buildProfile(dir, { ...VCS, root: dir }).profile
+      const tests = profile.commands.test ?? []
+      assert.equal(tests[0]?.cmd, 'npm run test', 'the repository script stays primary')
+      assert.ok(
+        tests.some((c) => c.cmd === 'npx playwright test' && c.evidence === 'playwright.config.ts'),
+        'the browser suite must be visible as a candidate',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('detector count reaches fourteen', () => {
+    // Thirteen plus the browser-test detector: a Playwright suite with no package script was
+    // invisible on a polyglot repository. The `Set` also asserts every id is unique: two
+    // detectors sharing an id would silently shadow one another.
     const ids = new Set([...ecosystemDetectors, ...additionalDetectors].map((d) => d.id))
-    assert.equal(ids.size, 13)
+    assert.equal(ids.size, 14)
   })
 })
 

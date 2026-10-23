@@ -31,6 +31,7 @@ import { configCommand } from './commands/config.ts'
 import { crewCommand } from './commands/crew.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { briefCommand, initCommand } from './commands/init.ts'
+import { mcpCommand } from './commands/mcp.ts'
 import { planCommand } from './commands/plan.ts'
 import { playbookCommand } from './commands/playbook.ts'
 import { shipCommand } from './commands/ship.ts'
@@ -48,6 +49,7 @@ const COMMANDS: Command[] = [
   doctorCommand,
   initCommand,
   issueCommand,
+  mcpCommand,
   planCommand,
   playbookCommand,
   profileCommand,
