@@ -59,11 +59,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The checked-in summary describes an earlier, hermetic run. Remove it before any
-      # setup step can fail, so the always() summary below cannot publish stale results
-      # as this run's evidence.
+      # The checked-in summary and run record describe an earlier, hermetic run. Remove
+      # them before any setup step can fail, so the always() upload below cannot publish
+      # stale results as this run's evidence.
       - name: discard the checked-out summary
-        run: rm -f eval-results/latest.json
+        run: rm -f eval-results/latest.json eval-results/run.json
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

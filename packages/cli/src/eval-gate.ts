@@ -122,6 +122,22 @@ export interface EvalRunRecordResult {
   /** Every attempt at this key, newest last. A key is complete only when the last
    *  attempt finished in `completed` state. */
   attempts: EvalRunRecordAttempt[]
+  /** Whether the visible verifier passed on the last completed attempt. */
+  verified: boolean
+  /** Whether the hidden verifier passed on the last completed attempt. */
+  hiddenVerified: boolean | null
+  /** Exit codes from every verifier run on the last completed attempt. */
+  verifyExitCodes: number[]
+  /** What the run cost, when the ledger knows. */
+  costUsd: number | null
+  /** Total tokens, including cache reads and writes when the ledger counts them. */
+  tokens: number | null
+  /** How long the last completed attempt took, in milliseconds. */
+  durationMs: number
+  /** The agent's transcript from the last completed attempt. */
+  transcript: string
+  /** Any agent error from the last completed attempt. */
+  error?: string
 }
 
 /** The latest attempt's state, or `null` when no attempt exists yet. */
@@ -432,6 +448,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
     schemaVersion: 1,
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
+    ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
     results,
   }
 }
@@ -488,6 +505,16 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
       modelRole: typeof raw.modelRole === 'string' ? raw.modelRole : null,
       scenarioHash: raw.scenarioHash,
       sourceHash: raw.sourceHash,
+      verified: typeof raw.verified === 'boolean' ? raw.verified : false,
+      hiddenVerified: typeof raw.hiddenVerified === 'boolean' ? raw.hiddenVerified : null,
+      verifyExitCodes: Array.isArray(raw.verifyExitCodes)
+        ? raw.verifyExitCodes.filter((code): code is number => typeof code === 'number')
+        : [],
+      costUsd: typeof raw.costUsd === 'number' && Number.isFinite(raw.costUsd) ? raw.costUsd : null,
+      tokens: typeof raw.tokens === 'number' && Number.isFinite(raw.tokens) ? raw.tokens : null,
+      durationMs: typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs) ? raw.durationMs : 0,
+      transcript: typeof raw.transcript === 'string' ? raw.transcript : '',
+      ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
       attempts,
     })
   }
@@ -556,12 +583,25 @@ export function checkRunRecord(
   }
   const completed = record.results
     .filter((r) => latestAttemptState(r) === 'completed')
-    .map((r) => `${r.scenario}/${r.variant}`)
+    .map((r) => `${r.scenario}/${r.variant}/${r.model}`)
   const missing = requiredKeys.filter((key) => !completed.includes(key))
   if (missing.length > 0) {
     return {
       ok: false,
       message: `run ${record.runId} did not complete ${missing.join(', ')}; the run record is incomplete`,
+    }
+  }
+  const keys = record.results.map((r) => `${r.scenario}/${r.variant}/${r.model}`)
+  if (new Set(keys).size !== keys.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} records duplicate results; the run record is corrupt`,
+    }
+  }
+  if (record.results.length !== record.executionOrder.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} execution order does not match recorded results; the run record is corrupt`,
     }
   }
   return {
@@ -582,6 +622,7 @@ export function checkRunRecordCompatibility(
   currentImplementation: string,
   currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
   currentModels: Array<{ id: string; role: string }>,
+  currentBundleDigest: string | null,
 ): EvalGateResult {
   if (record === null || record === undefined) {
     return {
@@ -595,12 +636,40 @@ export function checkRunRecordCompatibility(
       message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${currentImplementation.slice(0, 12)}; cannot resume`,
     }
   }
+  if (record.bundleDigest !== currentBundleDigest) {
+    return {
+      ok: false,
+      message: `run ${record.runId} built bundle ${record.bundleDigest?.slice(0, 12) ?? 'none'} but the current bundle hashes to ${currentBundleDigest?.slice(0, 12) ?? 'none'}; cannot resume`,
+    }
+  }
   const recordModels = JSON.stringify(record.models)
   const currentModelsJson = JSON.stringify(currentModels)
   if (recordModels !== currentModelsJson) {
     return {
       ok: false,
       message: `run ${record.runId} used models ${recordModels} but the requested models are ${currentModelsJson}; cannot resume`,
+    }
+  }
+  const recordKeys = new Set(record.runKeys)
+  const currentKeys = new Set(
+    currentModels.flatMap((m) =>
+      Object.keys(currentScenarioHashes).flatMap((s) => ['bare', 'anvil'].map((v) => `${s}/${v}/${m.id}`)),
+    ),
+  )
+  for (const key of currentKeys) {
+    if (!recordKeys.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} did not declare ${key}; cannot resume with a different key set`,
+      }
+    }
+  }
+  for (const key of recordKeys) {
+    if (!currentKeys.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} declared ${key} which is not in the requested keys; cannot resume`,
+      }
     }
   }
   for (const result of record.results) {
@@ -625,9 +694,9 @@ export function checkRunRecordCompatibility(
   }
 }
 
-/** The declared run keys implied by a latest summary: `scenario/variant` per result. */
+/** The declared run keys implied by a latest summary: `scenario/variant/model` per result. */
 function latestRunKeys(latest: EvalLatest): string[] {
-  return latest.results.map((result) => `${result.scenario}/${result.variant}`)
+  return latest.results.map((result) => `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`)
 }
 
 /**
@@ -656,15 +725,28 @@ export function checkEvalGate(
   // not pass the gate. The check only runs when a run record is explicitly supplied;
   // callers that do not pass one keep the previous behaviour.
   if (currentImplementation !== undefined && latest.results.length > 0 && runRecord !== undefined) {
-    const recordCheck = checkRunRecord(runRecord ?? null, currentImplementation, latestRunKeys(latest))
+    const record = runRecord ?? null
+    const recordCheck = checkRunRecord(record, currentImplementation, latestRunKeys(latest))
     if (!recordCheck.ok) failures.push(recordCheck.message)
-    else if (
-      latest.runId !== undefined &&
-      runRecord !== null &&
-      runRecord !== undefined &&
-      runRecord.runId !== latest.runId
-    ) {
-      failures.push(`latest summary references run ${latest.runId} but the run record is ${runRecord.runId}`)
+    else if (record !== null && latest.runId !== undefined && record.runId !== latest.runId) {
+      failures.push(`latest summary references run ${latest.runId} but the run record is ${record.runId}`)
+    } else if (record !== null) {
+      const summaryKeys = new Set(latest.results.map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`))
+      const recordKeys = new Set(
+        record.results
+          .filter((r) => latestAttemptState(r) === 'completed')
+          .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
+      )
+      for (const key of summaryKeys) {
+        if (!recordKeys.has(key)) {
+          failures.push(`latest summary reports ${key} but the run record has no completed result for it`)
+        }
+      }
+      for (const key of recordKeys) {
+        if (!summaryKeys.has(key)) {
+          failures.push(`run record completed ${key} but the latest summary does not report it`)
+        }
+      }
     }
   }
 

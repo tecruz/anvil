@@ -83,11 +83,11 @@ const checkpointsDir = join(resultsDir, 'checkpoints')
 const MAX_TRANSCRIPT_BYTES = 64 * 1024
 /** Secret-shaped markers that must never appear in a persisted transcript. */
 const SECRET_MARKERS = [
-  /sk-[A-Za-z0-9]{20,}/, // OpenAI-style keys
-  /sk-or-[A-Za-z0-9]{20,}/, // OpenRouter keys
-  /ghp_[A-Za-z0-9]{36,}/, // GitHub personal access tokens
-  /github_pat_[A-Za-z0-9_]{20,}/, // GitHub fine-grained tokens
-  /[A-Za-z0-9+/]{40,}/, // long base64 blobs (catches provider ledgers)
+  /sk-[A-Za-z0-9]{20,}/g, // OpenAI-style keys
+  /sk-or-[A-Za-z0-9]{20,}/g, // OpenRouter keys
+  /ghp_[A-Za-z0-9]{36,}/g, // GitHub personal access tokens
+  /github_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained tokens
+  /[A-Za-z0-9+/]{40,}/g, // long base64 blobs (catches provider ledgers)
 ]
 
 /** Redact secret-shaped content from a transcript before it is persisted or uploaded. */
@@ -223,10 +223,14 @@ async function main(): Promise<void> {
   for (const _model of models) {
     for (const scenario of selectedScenarios) {
       for (const variant of VARIANTS) {
-        declaredKeys.push(`${scenario.id}/${variant}`)
+        declaredKeys.push(`${scenario.id}/${variant}/${_model.id}`)
       }
     }
   }
+  const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+  const bundleDigest = existsSync(bundlePath)
+    ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
+    : null
   if (resume && existsSync(runRecordPath)) {
     const raw = readJsonFile(runRecordPath)
     const parsed = parseRunRecord(raw)
@@ -244,6 +248,7 @@ async function main(): Promise<void> {
         ]),
       ),
       models,
+      bundleDigest,
     )
     if (!compatibility.ok) {
       console.error(compatibility.message)
@@ -272,10 +277,6 @@ async function main(): Promise<void> {
     startedAt = new Date().toISOString()
     const commitSha = readCommitSha()
     const implementationBefore = hashImplementation(repoRoot)
-    const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
-    const bundleDigest = existsSync(bundlePath)
-      ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
-      : null
     runRecord = {
       schemaVersion: 1,
       runId,
@@ -300,14 +301,41 @@ async function main(): Promise<void> {
   const results: ScenarioResult[] = []
   let allCompleted = true
   const completedKeys = new Set(
-    runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map((r) => `${r.scenario}/${r.variant}`),
+    runRecord.results
+      .filter((r) => latestAttemptState(r) === 'completed')
+      .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
   )
+  // Rehydrate completed results from the run record so a resume promotes every
+  // previously completed result, not only the ones this invocation runs.
+  for (const prior of runRecord.results) {
+    if (latestAttemptState(prior) !== 'completed') continue
+    const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
+    results.push({
+      scenario: prior.scenario,
+      size: scenario?.size ?? 'tiny',
+      kind: scenario?.kind ?? 'code-change',
+      variant: prior.variant,
+      model: prior.model,
+      modelRole: prior.modelRole as EvalModelRole | null,
+      opencodeVersion: runRecord.opencodeVersion,
+      scenarioHash: prior.scenarioHash,
+      sourceHash: prior.sourceHash,
+      verified: prior.verified,
+      hiddenVerified: prior.hiddenVerified,
+      verifyExitCodes: prior.verifyExitCodes,
+      costUsd: prior.costUsd,
+      tokens: prior.tokens,
+      durationMs: prior.durationMs,
+      transcript: prior.transcript,
+      ...(prior.error === undefined ? {} : { error: prior.error }),
+    })
+  }
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
       const sourceHash = hashScenarioSource(repoRoot, scenario)
       for (const variant of VARIANTS) {
-        const key = `${scenario.id}/${variant}`
+        const key = `${scenario.id}/${variant}/${model.id}`
         // A key that already completed is not re-run: resume picks up incomplete work,
         // it does not silently rerun finished results until they pass.
         if (completedKeys.has(key)) continue
@@ -333,7 +361,9 @@ async function main(): Promise<void> {
           state: result.error === undefined ? 'completed' : 'failed',
           ...(result.error === undefined ? {} : { error: result.error }),
         }
-        const existing = runRecord.results.find((r) => r.scenario === scenario.id && r.variant === variant)
+        const existing = runRecord.results.find(
+          (r) => r.scenario === scenario.id && r.variant === variant && r.model === model.id,
+        )
         if (existing === undefined) {
           const checkpoint: EvalRunRecordResult = {
             scenario: result.scenario,
@@ -342,6 +372,14 @@ async function main(): Promise<void> {
             modelRole: result.modelRole,
             scenarioHash,
             sourceHash,
+            verified: result.verified,
+            hiddenVerified: result.hiddenVerified,
+            verifyExitCodes: result.verifyExitCodes,
+            costUsd: result.costUsd,
+            tokens: result.tokens,
+            durationMs: result.durationMs,
+            transcript: result.transcript,
+            ...(result.error === undefined ? {} : { error: result.error }),
             attempts: [attempt],
           }
           writeCheckpoint(runId, checkpoint)
@@ -356,6 +394,14 @@ async function main(): Promise<void> {
             modelRole: result.modelRole,
             scenarioHash,
             sourceHash,
+            verified: result.verified,
+            hiddenVerified: result.hiddenVerified,
+            verifyExitCodes: result.verifyExitCodes,
+            costUsd: result.costUsd,
+            tokens: result.tokens,
+            durationMs: result.durationMs,
+            transcript: result.transcript,
+            ...(result.error === undefined ? {} : { error: result.error }),
             attempts: existing.attempts,
           })
         }
@@ -365,17 +411,37 @@ async function main(): Promise<void> {
     }
   }
 
-  // The implementation is hashed again after the run: if the sources changed under the
-  // run, the results were produced by a different binary than the one committed.
+  // The implementation and bundle are hashed again after the run: if either changed under
+  // the run, the results were produced by a different binary than the one committed.
   const implementationAfter = hashImplementation(repoRoot)
+  const bundlePathAfter = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+  const bundleDigestAfter = existsSync(bundlePathAfter)
+    ? createHash('sha256').update(readFileSync(bundlePathAfter)).digest('hex')
+    : null
 
   let completionState: EvalRunRecord['completionState']
-  if (implementationBefore !== implementationAfter) {
+  if (implementationBefore !== implementationAfter || bundleDigest !== bundleDigestAfter) {
     completionState = 'failed'
   } else if (!allCompleted) {
     completionState = 'partial'
   } else {
-    completionState = 'completed'
+    // Recheck every completed result's scenario and source hashes against the current
+    // fixtures. A fixture that changed mid-run invalidates its evidence.
+    let fixtureChanged = false
+    for (const prior of runRecord.results) {
+      if (latestAttemptState(prior) !== 'completed') continue
+      const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
+      if (scenario === undefined) continue
+      const expected = {
+        scenarioHash: hashScenario(scenario),
+        sourceHash: hashScenarioSource(repoRoot, scenario),
+      }
+      if (prior.scenarioHash !== expected.scenarioHash || prior.sourceHash !== expected.sourceHash) {
+        fixtureChanged = true
+        break
+      }
+    }
+    completionState = fixtureChanged ? 'failed' : 'completed'
   }
 
   runRecord.completedAt = new Date().toISOString()
@@ -688,7 +754,15 @@ function writeReport(results: ScenarioResult[], runId?: string): void {
   const implementation = hashImplementation(repoRoot)
   const stamp = generatedAt.replace(/[:.]/g, '-')
   const rawPath = join(rawDir, `eval-${stamp}.json`)
-  atomicWriteJson(rawPath, { generatedAt, implementation, results })
+  // Sanitize every result before it lands in the raw report: transcripts and verifier
+  // output can carry secrets, and the raw upload is world-readable.
+  const sanitized = results.map((result) => ({
+    ...result,
+    transcript: redactTranscript(result.transcript),
+    verifyOutput: result.verifyOutput === undefined ? undefined : redactTranscript(result.verifyOutput),
+    error: result.error === undefined ? undefined : redactTranscript(result.error),
+  }))
+  atomicWriteJson(rawPath, { generatedAt, implementation, results: sanitized })
   console.log(`\nReport written to ${rawPath}`)
 
   const latest: {
