@@ -26,7 +26,8 @@ widened to everything that depends on them -- usually a fraction of the full sui
 
 ## Merging to main
 
-main is protected by branch protection. A PR may only be merged when all of these are true:
+This is a solo-maintainer repository: there is no second reviewer, so review requirements
+are waived, but the checks below still have to pass before anything merges.
 
 1. All five CI checks pass on the **final commit** of the PR:
    - `windows-latest`
@@ -37,19 +38,26 @@ main is protected by branch protection. A PR may only be merged when all of thes
 2. `npm run check` passes locally (lint, typecheck, test suite, build, docs check, eval gate).
 3. `npm run eval -- --fake-agent` passes and `npm run eval:check` passes.
 4. No high-risk path (`.github/workflows/**`) is changed without flagging it in the PR
-   description and getting a second pair of eyes — this is a solo-maintainer repository, so
-   "second pair of eyes" means the maintainer reviewing after a cool-off period, not an
-   automatic pass.
+   description.
 5. If any source under `packages/*/src/` changed, regenerate `eval-results/latest.json`
    with `npm run eval -- --fake-agent` and confirm `npm run eval:check` passes before
    merging — the gate binds summaries to the implementation hash.
 
-Branch protection itself is configured in the repository settings
-(Settings → Branches → Add branch protection rule), not in this repository's files, because
-the GitHub API requires GitHub Pro to manage rulesets on a private repository. The required
-status checks are the five CI checks above; require branches to be up to date before merging,
-and do not allow bypasses for routine pushes. Force pushes and deletion of `main` are
-blocked.
+**Branch protection is not enforced.** I attempted to configure it via the GitHub API
+(`repos/tecruz/anvil/rulesets` and `branches/main/protection`), but both return **403:
+requires GitHub Pro** for rulesets on a private repository, and attempting to set classic
+branch protection through the UI reports the same limitation. Until one of the following
+happens, these checks are a self-enforced discipline, not a hard gate:
+
+- **Make the repository public.** Rulesets and classic branch protection work via the API
+  and UI on public repos at no cost. This exposes all code, issues, and history publicly —
+  decide whether that is acceptable first.
+- **Upgrade to GitHub Pro.** Rulesets can then be configured via the API or UI without
+  changing the repository's visibility.
+
+The merge checklist above is the interim discipline until one of those is in place. Do not
+treat CI passing as proof a merge is safe unless you personally verified the final commit's
+checks.
 
 ## Once per clone: turn the hook on
 

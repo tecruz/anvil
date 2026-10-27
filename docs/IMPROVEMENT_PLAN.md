@@ -39,8 +39,16 @@ until benchmark or release work is finished.
 ## Phase 0 — Enforce the merge policy
 
 **Outcome:** a green result for an earlier commit cannot authorize merging a newer one.
-**Status:** documentation complete; GitHub settings configuration requires manual setup
-(API returns 403 — rulesets require GitHub Pro for this private repository).
+**Status:** documentation complete; enforcement cannot be configured automatically.
+Attempts to configure rulesets or classic branch protection via the GitHub API return
+**403: requires GitHub Pro** on this private repository. The merge checklist in
+[CONTRIBUTING.md](../CONTRIBUTING.md) is self-enforced until one of the following:
+
+- **Make the repository public.** Rulesets and classic branch protection work via the API
+  and UI on public repos at no cost. This exposes all code, issues, and history publicly —
+  decide whether that is acceptable first.
+- **Upgrade to GitHub Pro.** Rulesets can then be configured via the API or UI without
+  changing the repository's visibility.
 
 ### Work
 
