@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -501,10 +502,8 @@ describe('staging lifecycle', () => {
   })
 
   test('a symlinked parent directory cannot be used to read outside the repository', (t) => {
-    // `readStaged` checks only the final segment with `lstatSync`. A symlinked *parent*
-    // directory still resolves to content outside the repository: `files/linked-parent/
-    // synthetic-secret.txt` reads the secret through the link even though the final
-    // component is not itself a symlink.
+    // Prove that the attack path exists before checking the guarded reader. Omitting
+    // `files/` here used to test a missing path instead of traversing the actual link.
     const dir = materialize('node-npm')
     const outside = mkdtempSync(join(tmpdir(), 'anvil-secret-parent-'))
     temps.push(outside)
@@ -525,13 +524,120 @@ describe('staging lifecycle', () => {
     const entry = manifest.files.find((f) => f.path === 'AGENTS.md')
     assert.ok(entry !== undefined, 'AGENTS.md is staged')
     // Repoint the entry at a file that only exists through the symlinked parent.
-    entry!.stagedPath = 'linked-parent/synthetic-secret.txt'
-    entry!.path = 'AGENTS.md'
+    entry.stagedPath = 'files/linked-parent/synthetic-secret.txt'
+    writeFileSync(join(dir, '.anvil', 'staging', 'manifest.json'), JSON.stringify(manifest), 'utf8')
+    assert.equal(readFileSync(join(dir, '.anvil', 'staging', entry.stagedPath), 'utf8'), 'do not exfiltrate\n')
 
     const content = readStaged(dir, entry)
     assert.equal(content, null, 'content reached through a symlinked parent must not be read')
+    assert.deepEqual(inspectStaging(dir).tampered, ['AGENTS.md'])
     assert.throws(() => applyStaging(dir, manifest), /disappeared/)
     assert.doesNotMatch(readRepoFile(dir, 'AGENTS.md') ?? '', /do not exfiltrate/)
+  })
+
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    test(`a symlinked ${linkedDirectory} cannot become a trusted staging root`, (t) => {
+      const dir = materialize('node-npm')
+      stageOnce(dir)
+      const manifest = readManifest(dir)
+      assert.ok(manifest !== null)
+      const entry = manifest.files[0]
+      assert.ok(entry !== undefined)
+
+      const outside = mkdtempSync(join(tmpdir(), 'anvil-linked-staging-'))
+      temps.push(outside)
+      const original = join(dir, ...linkedDirectory.split('/'))
+      const relocated = join(outside, 'relocated')
+      renameSync(original, relocated)
+      try {
+        symlinkSync(relocated, original, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        t.skip(`symlinks are unavailable here: ${String(error)}`)
+        return
+      }
+
+      const stagedPath = join(dir, '.anvil', 'staging', entry.stagedPath)
+      writeFileSync(stagedPath, 'do not exfiltrate\n', 'utf8')
+      assert.equal(readFileSync(stagedPath, 'utf8'), 'do not exfiltrate\n', 'the attack path must exist')
+      assert.equal(readManifest(dir), null, 'a manifest behind a staging-root symlink is not trusted')
+      assert.equal(readStaged(dir, entry), null, 'the repository, not the linked directory, is the trust root')
+      assert.equal(inspectStaging(dir).exists, false)
+      assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+      assert.equal(readRepoFile(dir, 'AGENTS.md'), null, 'external content must never be copied into the repo')
+    })
+  }
+
+  test('a missing staging directory is an unreadable staged file, not an exception', () => {
+    const dir = materialize('node-npm')
+    const manifest = writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    rmSync(join(dir, '.anvil', 'staging'), { recursive: true })
+    assert.equal(readStaged(dir, entry), null)
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+  })
+
+  test('a dangling parent link is unreadable without throwing during inspection', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-dangling-staging-'))
+    temps.push(outside)
+    const link = join(dir, '.anvil', 'staging', 'files', 'dangling-parent')
+    try {
+      symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    rmSync(outside, { recursive: true })
+    entry.stagedPath = 'files/dangling-parent/AGENTS.md'
+    writeFileSync(join(dir, '.anvil', 'staging', 'manifest.json'), JSON.stringify(manifest))
+    assert.equal(readStaged(dir, entry), null)
+    assert.deepEqual(inspectStaging(dir).tampered, ['AGENTS.md'])
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+  })
+
+  test('a symlinked manifest is ignored rather than read outside the repository', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-linked-manifest-'))
+    temps.push(outside)
+    const manifestPath = join(dir, '.anvil', 'staging', 'manifest.json')
+    const relocated = join(outside, 'manifest.json')
+    renameSync(manifestPath, relocated)
+    try {
+      symlinkSync(relocated, manifestPath)
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    assert.equal(readManifest(dir), null)
+    assert.equal(inspectStaging(dir).exists, false)
+  })
+
+  test('a repository reached through a directory alias can still read its own staging', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const parent = mkdtempSync(join(tmpdir(), 'anvil-repo-alias-'))
+    temps.push(parent)
+    const alias = join(parent, 'repo')
+    try {
+      symlinkSync(dir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    assert.deepEqual(readManifest(alias), manifest)
+    assert.equal(readStaged(alias, entry), readStaged(dir, entry))
+    assert.deepEqual(inspectStaging(alias).tampered, [])
   })
 
   test('a missing bundle is a clear error, not a crash', () => {

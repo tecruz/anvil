@@ -147,10 +147,10 @@ export function writeStaging(
 }
 
 export function readManifest(repoRoot: string): StagingManifest | null {
-  const path = manifestPath(repoRoot)
-  if (!existsSync(path)) return null
+  const content = readStagingFile(repoRoot, MANIFEST_NAME)
+  if (content === null) return null
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const parsed: unknown = JSON.parse(content)
     if (typeof parsed !== 'object' || parsed === null) return null
     const manifest = parsed as StagingManifest
     if (!Array.isArray(manifest.files)) return null
@@ -185,67 +185,36 @@ function isSafeRepoRelativePath(p: string): boolean {
 }
 
 /** Read the staged content for a manifest entry. */
-export function readStaged(repoRoot: string, file: StagedFile): string | null {
-  const path = resolveSafeStagedPath(repoRoot, file.stagedPath)
-  if (!existsSync(path)) return null
+export function readStaged(repoRoot: string, file: Pick<StagedFile, 'stagedPath'>): string | null {
+  return readStagingFile(repoRoot, file.stagedPath)
+}
+
+/**
+ * Read a regular staging file without following symlinks anywhere inside the repository.
+ *
+ * The repository is the trust root, not `realpath(stagingRoot)`: `.anvil` and `staging`
+ * can themselves be symlinks. Check every component, including the manifest, before
+ * reading any bytes. Resolving only the repository also tolerates caller paths through
+ * system aliases such as macOS's `/var` -> `/private/var`.
+ *
+ * Missing, dangling, symlinked and unreadable paths all follow the same nullable-reader
+ * contract, so inspecting an unsafe bundle reports it without throwing.
+ */
+function readStagingFile(repoRoot: string, stagedPath: string): string | null {
+  if (!isSafeRepoRelativePath(stagedPath)) return null
   try {
-    // A committed staging bundle can contain symlinks. Following one would copy a file
-    // from outside the repository (for example `~/.ssh/id_rsa`) into the project, where a
-    // later commit would publish it. Staged content must be a regular file.
-    const stat = lstatSync(path)
-    if (!stat.isFile()) return null
+    let path = realpathSync.native(repoRoot)
+    const segments = [STATE_DIR, 'staging', ...stagedPath.split('/')]
+    for (const [index, segment] of segments.entries()) {
+      path = join(path, segment)
+      const stat = lstatSync(path)
+      if (stat.isSymbolicLink()) return null
+      if (index === segments.length - 1 ? !stat.isFile() : !stat.isDirectory()) return null
+    }
     return readFileSync(path, 'utf8')
   } catch {
     return null
   }
-}
-
-/**
- * Resolve a path beneath the staging root, refusing to follow any symlink that would
- * read outside the repository.
- *
- * `isSafeRepoRelativePath` rejects `..`, absolute paths and backslashes in the manifest,
- * but it says nothing about symlinks: a committed bundle can stage `linked-parent/
- * secret.txt` where `linked-parent` is a symlink to `~/.ssh`. Walking the path one segment
- * at a time and rejecting any link whose target leaves the staging root closes that gap,
- * including dangling links (whose target cannot be resolved at all).
- */
-function resolveSafeStagedPath(repoRoot: string, stagedPath: string): string {
-  const root = realpathSync.native(stagingRoot(repoRoot))
-  let resolved = root
-  for (const segment of stagedPath.split(/[\\/]/)) {
-    if (segment === '' || segment === '.') continue
-    const next = join(resolved, segment)
-    let stat: ReturnType<typeof lstatSync> | null = null
-    try {
-      stat = lstatSync(next)
-    } catch {
-      // Nothing exists at this segment yet; resolve it as a plain name and keep walking.
-      resolved = next
-      continue
-    }
-    if (stat.isSymbolicLink()) {
-      let target: string
-      try {
-        target = realpathSync.native(next)
-      } catch {
-        throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to follow a dangling symlink: ${stagedPath}`, {
-          hint: 'Staged files must be regular files inside the repository.',
-        })
-      }
-      if (!isInside(root, target)) {
-        throw new AnvilError(
-          ErrorCode.PreflightFailed,
-          `Refusing to read through a symlink outside the repository: ${stagedPath}`,
-          {
-            hint: 'Staged files must not traverse outside the repository via symlinks.',
-          },
-        )
-      }
-    }
-    resolved = next
-  }
-  return resolved
 }
 
 /** Read a repo-relative file, or null when absent. */

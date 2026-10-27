@@ -11,8 +11,7 @@
  * it.
  */
 
-import { readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { audit, type ReadinessReport } from '@anvil/audit'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import {
@@ -32,6 +31,7 @@ import {
   inspectStaging,
   readManifest,
   readRepoFile,
+  readStaged,
   renderUnifiedDiff,
   summarize,
   validateAll,
@@ -335,13 +335,8 @@ function buildArtifacts(
 function computeDiffs(root: string, files: ReadonlyArray<{ path: string; stagedPath: string }>): FileDiff[] {
   const out: FileDiff[] = []
   for (const f of files) {
-    const stagedPath = join(root, '.anvil', 'staging', f.stagedPath)
-    let content: string
-    try {
-      content = readFileSync(stagedPath, 'utf8')
-    } catch {
-      continue
-    }
+    const content = readStaged(root, f)
+    if (content === null) continue
     const before = readRepoFile(root, f.path)
     const diff = diffFile({ path: f.path, before, after: content })
     if (diff !== null) out.push(diff)
@@ -363,16 +358,7 @@ function applyFlow(
   // says "inspect the diff above", so a diff has to actually be above it. On a stale
   // bundle that diff is also the most useful thing to show -- it is what changed under
   // the bundle.
-  const artifacts = (manifest?.files ?? []).map((f) => {
-    const staged = join(root, '.anvil', 'staging', f.stagedPath)
-    let content = ''
-    try {
-      content = readFileSync(staged, 'utf8')
-    } catch {
-      content = ''
-    }
-    return { path: f.path, content }
-  })
+  const artifacts = (manifest?.files ?? []).map((f) => ({ path: f.path, content: readStaged(root, f) ?? '' }))
   const diffs = computeDiffs(
     root,
     (manifest?.files ?? []).map((f) => ({
