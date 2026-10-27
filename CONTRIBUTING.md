@@ -43,21 +43,13 @@ are waived, but the checks below still have to pass before anything merges.
    with `npm run eval -- --fake-agent` and confirm `npm run eval:check` passes before
    merging — the gate binds summaries to the implementation hash.
 
-**Branch protection is not enforced.** I attempted to configure it via the GitHub API
-(`repos/tecruz/anvil/rulesets` and `branches/main/protection`), but both return **403:
-requires GitHub Pro** for rulesets on a private repository, and attempting to set classic
-branch protection through the UI reports the same limitation. Until one of the following
-happens, these checks are a self-enforced discipline, not a hard gate:
+**Branch protection is enforced.** Branch protection rules on `main` require all five CI
+checks above to pass before a merge, and branches must be up to date (strict mode).
+Force pushes and deletion of `main` are blocked. No pull-request review is required —
+this is a solo-maintainer repository, so review requirements are waived.
 
-- **Make the repository public.** Rulesets and classic branch protection work via the API
-  and UI on public repos at no cost. This exposes all code, issues, and history publicly —
-  decide whether that is acceptable first.
-- **Upgrade to GitHub Pro.** Rulesets can then be configured via the API or UI without
-  changing the repository's visibility.
-
-The merge checklist above is the interim discipline until one of those is in place. Do not
-treat CI passing as proof a merge is safe unless you personally verified the final commit's
-checks.
+Configuration was applied via the GitHub API after making the repository public, since
+rulesets require GitHub Pro on private repositories. The repository is now public.
 
 ## Once per clone: turn the hook on
 
