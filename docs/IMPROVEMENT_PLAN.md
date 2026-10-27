@@ -39,6 +39,8 @@ until benchmark or release work is finished.
 ## Phase 0 — Enforce the merge policy
 
 **Outcome:** a green result for an earlier commit cannot authorize merging a newer one.
+**Status:** documentation complete; GitHub settings configuration requires manual setup
+(API returns 403 — rulesets require GitHub Pro for this private repository).
 
 ### Work
 
