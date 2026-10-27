@@ -2,10 +2,12 @@ import assert from 'node:assert/strict'
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -19,6 +21,7 @@ import {
   applyStaging,
   buildBrief,
   checkApplyPreconditions,
+  clearStaging,
   type GeneratedArtifact,
   generateAgentsFile,
   generateReviewCommand,
@@ -501,10 +504,8 @@ describe('staging lifecycle', () => {
   })
 
   test('a symlinked parent directory cannot be used to read outside the repository', (t) => {
-    // `readStaged` checks only the final segment with `lstatSync`. A symlinked *parent*
-    // directory still resolves to content outside the repository: `files/linked-parent/
-    // synthetic-secret.txt` reads the secret through the link even though the final
-    // component is not itself a symlink.
+    // Prove that the attack path exists before checking the guarded reader. Omitting
+    // `files/` here used to test a missing path instead of traversing the actual link.
     const dir = materialize('node-npm')
     const outside = mkdtempSync(join(tmpdir(), 'anvil-secret-parent-'))
     temps.push(outside)
@@ -525,13 +526,120 @@ describe('staging lifecycle', () => {
     const entry = manifest.files.find((f) => f.path === 'AGENTS.md')
     assert.ok(entry !== undefined, 'AGENTS.md is staged')
     // Repoint the entry at a file that only exists through the symlinked parent.
-    entry!.stagedPath = 'linked-parent/synthetic-secret.txt'
-    entry!.path = 'AGENTS.md'
+    entry.stagedPath = 'files/linked-parent/synthetic-secret.txt'
+    writeFileSync(join(dir, '.anvil', 'staging', 'manifest.json'), JSON.stringify(manifest), 'utf8')
+    assert.equal(readFileSync(join(dir, '.anvil', 'staging', entry.stagedPath), 'utf8'), 'do not exfiltrate\n')
 
     const content = readStaged(dir, entry)
     assert.equal(content, null, 'content reached through a symlinked parent must not be read')
+    assert.deepEqual(inspectStaging(dir).tampered, ['AGENTS.md'])
     assert.throws(() => applyStaging(dir, manifest), /disappeared/)
     assert.doesNotMatch(readRepoFile(dir, 'AGENTS.md') ?? '', /do not exfiltrate/)
+  })
+
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    test(`a symlinked ${linkedDirectory} cannot become a trusted staging root`, (t) => {
+      const dir = materialize('node-npm')
+      stageOnce(dir)
+      const manifest = readManifest(dir)
+      assert.ok(manifest !== null)
+      const entry = manifest.files[0]
+      assert.ok(entry !== undefined)
+
+      const outside = mkdtempSync(join(tmpdir(), 'anvil-linked-staging-'))
+      temps.push(outside)
+      const original = join(dir, ...linkedDirectory.split('/'))
+      const relocated = join(outside, 'relocated')
+      renameSync(original, relocated)
+      try {
+        symlinkSync(relocated, original, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        t.skip(`symlinks are unavailable here: ${String(error)}`)
+        return
+      }
+
+      const stagedPath = join(dir, '.anvil', 'staging', entry.stagedPath)
+      writeFileSync(stagedPath, 'do not exfiltrate\n', 'utf8')
+      assert.equal(readFileSync(stagedPath, 'utf8'), 'do not exfiltrate\n', 'the attack path must exist')
+      assert.equal(readManifest(dir), null, 'a manifest behind a staging-root symlink is not trusted')
+      assert.equal(readStaged(dir, entry), null, 'the repository, not the linked directory, is the trust root')
+      assert.equal(inspectStaging(dir).exists, false)
+      assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+      assert.equal(readRepoFile(dir, 'AGENTS.md'), null, 'external content must never be copied into the repo')
+    })
+  }
+
+  test('a missing staging directory is an unreadable staged file, not an exception', () => {
+    const dir = materialize('node-npm')
+    const manifest = writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    rmSync(join(dir, '.anvil', 'staging'), { recursive: true })
+    assert.equal(readStaged(dir, entry), null)
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+  })
+
+  test('a dangling parent link is unreadable without throwing during inspection', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-dangling-staging-'))
+    temps.push(outside)
+    const link = join(dir, '.anvil', 'staging', 'files', 'dangling-parent')
+    try {
+      symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    rmSync(outside, { recursive: true })
+    entry.stagedPath = 'files/dangling-parent/AGENTS.md'
+    writeFileSync(join(dir, '.anvil', 'staging', 'manifest.json'), JSON.stringify(manifest))
+    assert.equal(readStaged(dir, entry), null)
+    assert.deepEqual(inspectStaging(dir).tampered, ['AGENTS.md'])
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+  })
+
+  test('a symlinked manifest is ignored rather than read outside the repository', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-linked-manifest-'))
+    temps.push(outside)
+    const manifestPath = join(dir, '.anvil', 'staging', 'manifest.json')
+    const relocated = join(outside, 'manifest.json')
+    renameSync(manifestPath, relocated)
+    try {
+      symlinkSync(relocated, manifestPath)
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    assert.equal(readManifest(dir), null)
+    assert.equal(inspectStaging(dir).exists, false)
+  })
+
+  test('a repository reached through a directory alias can still read its own staging', (t) => {
+    const dir = materialize('node-npm')
+    stageOnce(dir)
+    const parent = mkdtempSync(join(tmpdir(), 'anvil-repo-alias-'))
+    temps.push(parent)
+    const alias = join(parent, 'repo')
+    try {
+      symlinkSync(dir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files[0]
+    assert.ok(entry !== undefined)
+    assert.deepEqual(readManifest(alias), manifest)
+    assert.equal(readStaged(alias, entry), readStaged(dir, entry))
+    assert.deepEqual(inspectStaging(alias).tampered, [])
   })
 
   test('a missing bundle is a clear error, not a crash', () => {
@@ -571,6 +679,136 @@ describe('staging lifecycle', () => {
     assert.ok(onDisk !== null)
     assert.match(onDisk, /Improved by the agent/, "the agent's version must be what lands")
     assert.match(onDisk, /## Commands/, 'and the verified baseline must survive')
+  })
+})
+
+describe('staging mutation containment', () => {
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const location of ['external', 'internal', 'dangling']) {
+      for (const operation of ['write', 'clear']) {
+        test(`${operation} refuses ${location} links at ${linkedDirectory} before mutating anything`, (t) => {
+          const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-mutation-'))
+          const outside = mkdtempSync(join(tmpdir(), 'anvil-staging-external-'))
+          temps.push(dir, outside)
+          const target = join(location === 'internal' ? dir : outside, 'linked-target')
+          const targetStaging = linkedDirectory === '.anvil' ? join(target, 'staging') : target
+          mkdirSync(join(targetStaging, 'files'), { recursive: true })
+          const sentinel = join(targetStaging, 'sentinel.txt')
+          const marker = 'synthetic data that must survive\n'
+          writeFileSync(sentinel, marker)
+          writeFileSync(join(outside, 'neighbor.txt'), marker)
+          const link = join(dir, ...linkedDirectory.split('/'))
+          mkdirSync(dirname(link), { recursive: true })
+          try {
+            symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+          } catch (error) {
+            t.skip(`symlinks are unavailable here: ${String(error)}`)
+            return
+          }
+          if (location === 'dangling') rmSync(target, { recursive: true })
+          assert.equal(lstatSync(link).isSymbolicLink(), true, 'the attack must use an actual link')
+          if (location !== 'dangling') {
+            assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'sentinel.txt'), 'utf8'), marker)
+          }
+
+          assert.throws(
+            () =>
+              operation === 'write'
+                ? writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+                : clearStaging(dir),
+            { code: 'PREFLIGHT_FAILED' },
+          )
+          assert.equal(lstatSync(link).isSymbolicLink(), true, 'refusal must leave the link untouched')
+          assert.equal(readFileSync(join(outside, 'neighbor.txt'), 'utf8'), marker)
+          if (location === 'dangling') {
+            assert.equal(existsSync(target), false, 'a dangling target must not be created')
+          } else {
+            assert.equal(readFileSync(sentinel, 'utf8'), marker, 'existing target data must not be removed')
+            assert.deepEqual(readdirSync(targetStaging).sort(), ['files', 'sentinel.txt'])
+            assert.deepEqual(readdirSync(join(targetStaging, 'files')), [], 'no artifacts may be written to the target')
+          }
+        })
+      }
+    }
+  }
+
+  for (const blockedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const operation of ['write', 'clear']) {
+      test(`${operation} refuses a non-directory at ${blockedDirectory} without deleting it`, () => {
+        const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-file-'))
+        temps.push(dir)
+        const blocked = join(dir, ...blockedDirectory.split('/'))
+        mkdirSync(dirname(blocked), { recursive: true })
+        writeFileSync(blocked, 'preserve this file\n')
+        assert.throws(
+          () =>
+            operation === 'write'
+              ? writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+              : clearStaging(dir),
+          { code: 'PREFLIGHT_FAILED' },
+        )
+        assert.equal(readFileSync(blocked, 'utf8'), 'preserve this file\n')
+      })
+    }
+  }
+
+  test('normal creation, replacement and idempotent cleanup still work with missing directories', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-normal-'))
+    temps.push(dir)
+    clearStaging(dir)
+    assert.equal(existsSync(join(dir, '.anvil')), false, 'cleanup must not create missing directories')
+    writeStaging(dir, { inputHash: 'first', generator: 'test' }, new Map([['AGENTS.md', '# First\n']]))
+    writeStaging(dir, { inputHash: 'second', generator: 'test' }, new Map([['AGENTS.md', '# Second\n']]))
+    assert.equal(readManifest(dir)?.inputHash, 'second')
+    assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'files', 'AGENTS.md'), 'utf8'), '# Second\n')
+    clearStaging(dir)
+    clearStaging(dir)
+    assert.equal(existsSync(join(dir, '.anvil', 'staging')), false)
+  })
+
+  for (const operation of ['write', 'clear']) {
+    test(`${operation} removes links inside a real staging directory without following their targets`, (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-child-link-'))
+      const outside = mkdtempSync(join(tmpdir(), 'anvil-staging-child-target-'))
+      temps.push(dir, outside)
+      writeStaging(dir, { inputHash: 'first', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+      const marker = 'external target must survive\n'
+      writeFileSync(join(outside, 'sentinel.txt'), marker)
+      const link = join(dir, '.anvil', 'staging', 'files', 'linked-child')
+      try {
+        symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        t.skip(`symlinks are unavailable here: ${String(error)}`)
+        return
+      }
+      assert.equal(readFileSync(join(link, 'sentinel.txt'), 'utf8'), marker)
+      if (operation === 'write') {
+        writeStaging(dir, { inputHash: 'second', generator: 'test' }, new Map([['AGENTS.md', '# Updated\n']]))
+      } else {
+        clearStaging(dir)
+      }
+      assert.equal(existsSync(link), false)
+      assert.equal(readFileSync(join(outside, 'sentinel.txt'), 'utf8'), marker)
+      assert.deepEqual(readdirSync(outside), ['sentinel.txt'])
+    })
+  }
+
+  test('a repository directory alias supports staging creation and cleanup', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-alias-target-'))
+    const parent = mkdtempSync(join(tmpdir(), 'anvil-staging-alias-'))
+    temps.push(dir, parent)
+    const alias = join(parent, 'repo')
+    try {
+      symlinkSync(dir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    writeStaging(alias, { inputHash: 'alias', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+    assert.equal(readManifest(dir)?.inputHash, 'alias')
+    clearStaging(alias)
+    assert.equal(existsSync(join(dir, '.anvil', 'staging')), false)
+    assert.equal(lstatSync(alias).isSymbolicLink(), true, 'the caller alias itself remains supported')
   })
 })
 

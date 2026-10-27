@@ -613,6 +613,45 @@ describe('crew verify', () => {
     })
   }
 
+  for (const selection of ['no claims', 'no selected claims', 'all worktrees missing']) {
+    test(`reports finite concurrency with ${selection}`, async () => {
+      const dir = makeRepo({ go: true })
+      if (selection !== 'no claims') {
+        writeClaims(dir, {
+          schemaVersion: 1,
+          claims: [
+            {
+              key: 'local-1',
+              ticket: ticket(1).ref,
+              branch: 'feat/task-1',
+              baseBranch: 'main',
+              baseRef: 'main',
+              worktreePath: join(dir, 'missing-worktree'),
+              worktreeId: null,
+              state: 'active',
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        })
+      }
+      const jobs = selection === 'no claims' ? undefined : 3
+      const result = await crewVerify({
+        repoRoot: dir,
+        ...(jobs === undefined ? {} : { jobs }),
+        ...(selection === 'no selected claims' ? { keys: ['local-2'] } : {}),
+        run: async () => {
+          throw new Error('an empty crew must not execute commands')
+        },
+      })
+      assert.deepEqual(result.results, [])
+      assert.equal(result.ok, true)
+      assert.equal(result.skipped.length, selection === 'all worktrees missing' ? 1 : 0)
+      assert.equal(result.concurrency.jobs, jobs ?? defaultJobs())
+      assert.ok(Number.isFinite(result.concurrency.jobs))
+      assert.deepEqual(JSON.parse(JSON.stringify(result.concurrency)), result.concurrency)
+    })
+  }
+
   test('verifies every worktree and aggregates pass', async () => {
     const dir = makeRepo({ go: true })
     const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v1-'))
@@ -799,6 +838,7 @@ describe('crew verify', () => {
     assert.equal(result.concurrency.jobs, 1, 'a Gradle worktree anywhere serializes the crew')
     assert.equal(peak, 1, 'no two Gradle builds run at once')
     assert.match(result.concurrency.reason, /Gradle/)
+    assert.equal(new Set(result.concurrency.rules.map((rule) => rule.match)).size, result.concurrency.rules.length)
   })
 
   test('--force-parallel overrides the cache policy', async () => {

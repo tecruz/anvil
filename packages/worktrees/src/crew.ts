@@ -136,7 +136,10 @@ export function defaultJobs(): number {
 }
 
 /** Work out how parallel verification may safely be for a repository. */
-export function concurrencyFor(profile: ProjectProfile, requested: number | null): ConcurrencyDecision {
+export function concurrencyFor(
+  profile: Pick<ProjectProfile, 'stacks' | 'languages'>,
+  requested: number | null,
+): ConcurrencyDecision {
   const ids = new Set([...profile.stacks.map((s) => s.id), ...profile.languages.map((l) => l.id)])
   const triggered: IsolationRule[] = []
   for (const rule of ISOLATION_RULES) {
@@ -537,8 +540,11 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
   // the caches are shared across all of them. A crew is only as parallel as its most
   // restricted stack -- one Gradle worktree serializes the whole crew, even when another
   // worktree is a content-addressed Go module.
-  const decisions = runnable.map((claim) => concurrencyFor(buildProfileFor(claim.worktreePath), options.jobs ?? null))
-  const forcedByCaches = decisions.some((decision) => decision.forcedByCaches)
+  const profiled = runnable.map((claim) => ({ claim, profile: buildProfileFor(claim.worktreePath) }))
+  const combined = {
+    stacks: profiled.flatMap(({ profile }) => profile.stacks),
+    languages: profiled.flatMap(({ profile }) => profile.languages),
+  }
   const decision =
     options.forceParallel === true && options.jobs != null
       ? {
@@ -547,20 +553,9 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
           forcedByCaches: false,
           rules: [],
         }
-      : {
-          jobs: forcedByCaches ? 1 : Math.min(...decisions.map((decision) => decision.jobs)),
-          reason: forcedByCaches
-            ? `serialized: ${decisions
-                .flatMap((decision) => decision.rules)
-                .map((rule) => rule.reason)
-                .join('; ')}`
-            : `${decisions[0]?.jobs ?? defaultJobs()} concurrent runs`,
-          forcedByCaches,
-          rules: decisions.flatMap((decision) => decision.rules),
-        }
+      : concurrencyFor(combined, options.jobs ?? null)
 
-  const results = await mapWithConcurrency(runnable, decision.jobs, async (claim) => {
-    const profile = buildProfileFor(claim.worktreePath)
+  const results = await mapWithConcurrency(profiled, decision.jobs, async ({ claim, profile }) => {
     const verifyCwd = profile.projectDir === '' ? claim.worktreePath : join(claim.worktreePath, profile.projectDir)
     const commands = verifyCommandsFor(profile)
     if (commands.length === 0) {

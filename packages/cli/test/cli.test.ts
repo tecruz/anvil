@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
+import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
@@ -95,6 +106,110 @@ function runAnvil(args: string[], opts: RunOptions = {}): RunResult {
 function jsonOf(result: RunResult): Record<string, unknown> {
   return JSON.parse(result.stdout) as Record<string, unknown>
 }
+
+describe('anvil init staging containment', () => {
+  for (const attack of ['parent', 'staging root', 'state root']) {
+    for (const stale of [false, true]) {
+      test(`refuses a linked ${attack} without leaking content (${stale ? 'stale' : 'current'} bundle)`, (t) => {
+        const dir = tempDir('anvil-cli-staging-')
+        execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'staging-fixture', scripts: { test: 'true' } }))
+        const staged = runAnvil(['init', '--only', 'agents-file', '--json'], { cwd: dir })
+        assert.equal(staged.code, 0, staged.stderr)
+        const manifest = readManifest(dir)
+        assert.ok(manifest !== null)
+        const entry = manifest.files[0]
+        assert.ok(entry !== undefined)
+        const outside = tempDir('anvil-cli-private-')
+        const marker = 'SYNTHETIC_PRIVATE_STAGING_MARKER'
+        const content = `# Agent notes\n\n${marker}\n`
+        if (stale) manifest.inputHash = 'stale-input'
+        const stagingRoot = join(dir, '.anvil', 'staging')
+        if (attack === 'parent') {
+          writeFileSync(join(outside, 'secret.md'), content)
+          entry.stagedPath = 'files/linked-parent/secret.md'
+        } else {
+          writeFileSync(join(stagingRoot, entry.stagedPath), content)
+        }
+        writeFileSync(join(stagingRoot, 'manifest.json'), JSON.stringify(manifest))
+
+        const link =
+          attack === 'parent'
+            ? join(stagingRoot, 'files', 'linked-parent')
+            : attack === 'staging root'
+              ? stagingRoot
+              : join(dir, '.anvil')
+        const target = attack === 'parent' ? outside : join(outside, 'relocated')
+        if (attack !== 'parent') renameSync(link, target)
+        try {
+          symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+        } catch (error) {
+          t.skip(`symlinks are unavailable here: ${String(error)}`)
+          return
+        }
+        assert.equal(readFileSync(join(stagingRoot, entry.stagedPath), 'utf8'), content, 'the attack path must exist')
+
+        const result = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+        assert.notEqual(result.code, 0, 'unsafe staged content must not be applied')
+        assert.equal(jsonOf(result).ok, false)
+        assert.ok(
+          !`${result.stdout}\n${result.stderr}`.includes(marker),
+          'even a refusal diff must not leak private content',
+        )
+        assert.equal(existsSync(join(dir, 'AGENTS.md')), false)
+        assert.equal(
+          readFileSync(join(stagingRoot, entry.stagedPath), 'utf8'),
+          content,
+          'the outside file stays unchanged',
+        )
+      })
+    }
+  }
+})
+
+describe('anvil init staging creation containment', () => {
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const populated of [false, true]) {
+      test(`plain init refuses a linked ${linkedDirectory} (${populated ? 'populated' : 'empty'} target)`, (t) => {
+        const dir = tempDir('anvil-cli-create-staging-')
+        const outside = tempDir('anvil-cli-create-outside-')
+        execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'staging-fixture' }))
+        const externalStaging = linkedDirectory === '.anvil' ? join(outside, 'staging') : outside
+        const marker = 'synthetic external data\n'
+        writeFileSync(join(outside, 'neighbor.txt'), marker)
+        if (populated) {
+          mkdirSync(externalStaging, { recursive: true })
+          writeFileSync(join(externalStaging, 'sentinel.txt'), marker)
+        }
+        const link = join(dir, ...linkedDirectory.split('/'))
+        mkdirSync(join(link, '..'), { recursive: true })
+        try {
+          symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+        } catch (error) {
+          t.skip(`symlinks are unavailable here: ${String(error)}`)
+          return
+        }
+        assert.equal(lstatSync(link).isSymbolicLink(), true)
+        if (populated) assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'sentinel.txt'), 'utf8'), marker)
+
+        // No --apply: staging creation itself must be refused before deleting/replacing
+        // any existing bundle or creating artifacts through the link.
+        const result = runAnvil(['init', '--only', 'agents-file', '--json'], { cwd: dir })
+        assert.equal(result.code, 5, result.stderr)
+        const body = jsonOf(result)
+        assert.equal(body.ok, false)
+        assert.equal((body.error as { code: string }).code, 'PREFLIGHT_FAILED')
+        assert.equal(lstatSync(link).isSymbolicLink(), true)
+        assert.equal(readFileSync(join(outside, 'neighbor.txt'), 'utf8'), marker)
+        if (populated) assert.equal(readFileSync(join(externalStaging, 'sentinel.txt'), 'utf8'), marker)
+        assert.equal(existsSync(join(externalStaging, 'files')), false, 'no outside artifacts may be created')
+        assert.equal(existsSync(join(externalStaging, 'manifest.json')), false)
+        assert.equal(existsSync(join(dir, 'AGENTS.md')), false)
+      })
+    }
+  }
+})
 
 describe('anvil (no args)', () => {
   test('prints help and exits 0', () => {
