@@ -32,7 +32,17 @@
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -174,6 +184,9 @@ async function main(): Promise<void> {
     console.error(`No scenario matched ${only ?? '(nothing)'}`)
     process.exit(1)
   }
+  // A subset selection (--scenario) remains explicitly partial: it must not overwrite
+  // valid complete evidence with a success-looking report covering only part of the matrix.
+  const isSubset = selectedScenarios.length !== scenarios.length
 
   const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
   if (models.length === 0) {
@@ -249,6 +262,7 @@ async function main(): Promise<void> {
       ),
       models,
       bundleDigest,
+      fakeAgent ? null : await probeCommandVersion('opencode'),
     )
     if (!compatibility.ok) {
       console.error(compatibility.message)
@@ -257,8 +271,49 @@ async function main(): Promise<void> {
     runRecord = parsed
     runId = runRecord.runId
     startedAt = runRecord.startedAt
+    // Recover any completed checkpoints that were never recorded in run.json (for example
+    // because the run.json write failed after a checkpoint was written). A checkpoint file
+    // is authoritative evidence that a result completed, even if run.json does not yet know
+    // about it.
+    const checkpointDir = join(checkpointsDir, runId)
+    if (existsSync(checkpointDir)) {
+      for (const file of readdirSync(checkpointDir)) {
+        if (!file.endsWith('.json')) continue
+        const checkpointRaw = readJsonFile(join(checkpointDir, file))
+        if (typeof checkpointRaw !== 'object' || checkpointRaw === null) continue
+        const checkpoint = checkpointRaw as EvalRunRecordResult
+        if (!checkpoint.scenario || !checkpoint.variant || !checkpoint.model) continue
+        const key = `${checkpoint.scenario}/${checkpoint.variant}/${checkpoint.model}`
+        const alreadyRecorded = runRecord.results.some(
+          (r) => r.scenario === checkpoint.scenario && r.variant === checkpoint.variant && r.model === checkpoint.model,
+        )
+        if (alreadyRecorded) continue
+        const completedState: EvalRunRecordResult = {
+          scenario: checkpoint.scenario,
+          variant: checkpoint.variant,
+          model: checkpoint.model,
+          modelRole: checkpoint.modelRole,
+          scenarioHash: checkpoint.scenarioHash,
+          sourceHash: checkpoint.sourceHash,
+          verified: checkpoint.verified,
+          hiddenVerified: checkpoint.hiddenVerified,
+          verifyExitCodes: checkpoint.verifyExitCodes,
+          costUsd: checkpoint.costUsd,
+          tokens: checkpoint.tokens,
+          durationMs: checkpoint.durationMs,
+          transcript: checkpoint.transcript,
+          ...(checkpoint.error === undefined ? {} : { error: checkpoint.error }),
+          attempts: checkpoint.attempts,
+        }
+        runRecord.results.push(completedState)
+        runRecord.executionOrder.push(key)
+        console.log(`Recovered completed checkpoint for ${key} from a previous interrupted run.`)
+      }
+    }
     const completed = new Set(
-      runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map((r) => `${r.scenario}/${r.variant}`),
+      runRecord.results
+        .filter((r) => latestAttemptState(r) === 'completed')
+        .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
     )
     for (const key of declaredKeys) {
       if (!completed.has(key)) incompleteKeys.push(key)
@@ -352,6 +407,18 @@ async function main(): Promise<void> {
         )
         results.push(result)
 
+        // Redact secrets before checkpointing: errors and verifier output can carry
+        // credentials, and checkpoints are uploaded as artifacts.
+        const sanitizedResult: ScenarioResult = {
+          ...result,
+        }
+        if (result.error !== undefined) {
+          sanitizedResult.error = redactTranscript(result.error)
+        }
+        if (result.verifyOutput !== undefined) {
+          sanitizedResult.verifyOutput = redactTranscript(result.verifyOutput)
+        }
+
         // Checkpoint the attempt immediately, before the next scenario starts. A crash
         // or timeout after this point leaves this attempt readable, and latest.json is
         // never overwritten by an incomplete run.
@@ -366,44 +433,41 @@ async function main(): Promise<void> {
         )
         if (existing === undefined) {
           const checkpoint: EvalRunRecordResult = {
-            scenario: result.scenario,
-            variant: result.variant,
-            model: result.model,
-            modelRole: result.modelRole,
+            scenario: sanitizedResult.scenario,
+            variant: sanitizedResult.variant,
+            model: sanitizedResult.model,
+            modelRole: sanitizedResult.modelRole,
             scenarioHash,
             sourceHash,
-            verified: result.verified,
-            hiddenVerified: result.hiddenVerified,
-            verifyExitCodes: result.verifyExitCodes,
-            costUsd: result.costUsd,
-            tokens: result.tokens,
-            durationMs: result.durationMs,
-            transcript: result.transcript,
-            ...(result.error === undefined ? {} : { error: result.error }),
+            verified: sanitizedResult.verified,
+            hiddenVerified: sanitizedResult.hiddenVerified,
+            verifyExitCodes: sanitizedResult.verifyExitCodes,
+            costUsd: sanitizedResult.costUsd,
+            tokens: sanitizedResult.tokens,
+            durationMs: sanitizedResult.durationMs,
+            transcript: sanitizedResult.transcript,
+            ...(sanitizedResult.error === undefined ? {} : { error: sanitizedResult.error }),
             attempts: [attempt],
           }
           writeCheckpoint(runId, checkpoint)
           runRecord.executionOrder.push(key)
           runRecord.results.push(checkpoint)
         } else {
+          // A retry replaces the previous attempt's verdicts and metadata with the latest
+          // attempt's, so the run record never mixes a failed attempt's verdict with a
+          // completed attempt's metadata.
           existing.attempts.push(attempt)
-          writeCheckpoint(runId, {
-            scenario: result.scenario,
-            variant: result.variant,
-            model: result.model,
-            modelRole: result.modelRole,
-            scenarioHash,
-            sourceHash,
-            verified: result.verified,
-            hiddenVerified: result.hiddenVerified,
-            verifyExitCodes: result.verifyExitCodes,
-            costUsd: result.costUsd,
-            tokens: result.tokens,
-            durationMs: result.durationMs,
-            transcript: result.transcript,
-            ...(result.error === undefined ? {} : { error: result.error }),
-            attempts: existing.attempts,
-          })
+          existing.verified = sanitizedResult.verified
+          existing.hiddenVerified = sanitizedResult.hiddenVerified
+          existing.verifyExitCodes = sanitizedResult.verifyExitCodes
+          existing.costUsd = sanitizedResult.costUsd
+          existing.tokens = sanitizedResult.tokens
+          existing.durationMs = sanitizedResult.durationMs
+          existing.transcript = sanitizedResult.transcript
+          if (sanitizedResult.error !== undefined) {
+            existing.error = sanitizedResult.error
+          }
+          writeCheckpoint(runId, existing)
         }
         if (attempt.state !== 'completed') allCompleted = false
         writeRunRecord(runRecord)
@@ -424,13 +488,19 @@ async function main(): Promise<void> {
     completionState = 'failed'
   } else if (!allCompleted) {
     completionState = 'partial'
+  } else if (isSubset) {
+    // A subset selection is explicitly partial: it promotes only the keys it ran and must
+    // not overwrite valid complete evidence with a success-looking partial report.
+    completionState = 'partial'
   } else {
     // Recheck every completed result's scenario and source hashes against the current
-    // fixtures. A fixture that changed mid-run invalidates its evidence.
+    // fixtures. Reload the scenario matrix from disk so a definition that changed mid-run
+    // is detected, not the in-memory object captured before the run started.
+    const currentScenarios = loadScenarios()
     let fixtureChanged = false
     for (const prior of runRecord.results) {
       if (latestAttemptState(prior) !== 'completed') continue
-      const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
+      const scenario = currentScenarios.find((s) => s.id === prior.scenario)
       if (scenario === undefined) continue
       const expected = {
         scenarioHash: hashScenario(scenario),

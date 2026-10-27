@@ -445,7 +445,7 @@ describe('run record compatibility for resume', () => {
   const models = [{ id: 'fake-agent', role: 'small' }]
 
   test('passes when implementation, fixtures, models, and keys all match', () => {
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', scenarios, models, 'bundle-hash')
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', scenarios, models, 'bundle-hash', null)
     assert.equal(gate.ok, true, gate.message)
   })
 
@@ -456,6 +456,7 @@ describe('run record compatibility for resume', () => {
       scenarios,
       models,
       'bundle-hash',
+      null,
     )
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
@@ -468,6 +469,7 @@ describe('run record compatibility for resume', () => {
       scenarios,
       [{ id: 'other-model', role: 'small' }],
       'bundle-hash',
+      null,
     )
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
@@ -475,20 +477,20 @@ describe('run record compatibility for resume', () => {
 
   test('fails when a fixture scenario hash changed', () => {
     const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'new-sc-hash', sourceHash: 'src-hash' } }
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash')
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash', null)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /fixture changed, cannot resume/)
   })
 
   test('fails when a source hash changed', () => {
     const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'new-src-hash' } }
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash')
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash', null)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
   })
 
   test('fails when there is no run record', () => {
-    const gate = checkRunRecordCompatibility(null, 'impl-hash', scenarios, models, 'bundle-hash')
+    const gate = checkRunRecordCompatibility(null, 'impl-hash', scenarios, models, 'bundle-hash', null)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /no run record exists to resume/)
   })

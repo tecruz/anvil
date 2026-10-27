@@ -623,6 +623,7 @@ export function checkRunRecordCompatibility(
   currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
   currentModels: Array<{ id: string; role: string }>,
   currentBundleDigest: string | null,
+  currentOpencodeVersion: string | null = null,
 ): EvalGateResult {
   if (record === null || record === undefined) {
     return {
@@ -640,6 +641,22 @@ export function checkRunRecordCompatibility(
     return {
       ok: false,
       message: `run ${record.runId} built bundle ${record.bundleDigest?.slice(0, 12) ?? 'none'} but the current bundle hashes to ${currentBundleDigest?.slice(0, 12) ?? 'none'}; cannot resume`,
+    }
+  }
+  if (record.nodeVersion !== null && process.version !== null && record.nodeVersion !== process.version) {
+    return {
+      ok: false,
+      message: `run ${record.runId} used Node ${record.nodeVersion} but the current Node is ${process.version}; cannot resume`,
+    }
+  }
+  if (
+    record.opencodeVersion !== null &&
+    currentOpencodeVersion !== null &&
+    record.opencodeVersion !== currentOpencodeVersion
+  ) {
+    return {
+      ok: false,
+      message: `run ${record.runId} used OpenCode ${record.opencodeVersion} but the current OpenCode is ${currentOpencodeVersion}; cannot resume`,
     }
   }
   const recordModels = JSON.stringify(record.models)
@@ -730,6 +747,8 @@ export function checkEvalGate(
     if (!recordCheck.ok) failures.push(recordCheck.message)
     else if (record !== null && latest.runId !== undefined && record.runId !== latest.runId) {
       failures.push(`latest summary references run ${latest.runId} but the run record is ${record.runId}`)
+    } else if (record !== null && latest.runId === undefined) {
+      failures.push(`latest summary does not reference a run but the run record is ${record.runId}`)
     } else if (record !== null) {
       const summaryKeys = new Set(latest.results.map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`))
       const recordKeys = new Set(
@@ -746,6 +765,43 @@ export function checkEvalGate(
         if (!summaryKeys.has(key)) {
           failures.push(`run record completed ${key} but the latest summary does not report it`)
         }
+      }
+      // The summary and run record must agree on verdicts and hashes for every completed result.
+      const byRecordKey = new Map(
+        record.results
+          .filter((r) => latestAttemptState(r) === 'completed')
+          .map((r) => [`${r.scenario}/${r.variant}/${r.model}`, r]),
+      )
+      for (const summaryResult of latest.results) {
+        const recordResult = byRecordKey.get(
+          `${summaryResult.scenario}/${summaryResult.variant}/${summaryResult.model ?? 'unknown'}`,
+        )
+        if (recordResult === undefined) continue
+        if (summaryResult.verified !== recordResult.verified) {
+          failures.push(
+            `${summaryResult.scenario}: summary verified=${summaryResult.verified} but run record verified=${recordResult.verified}`,
+          )
+        }
+        if (summaryResult.hiddenVerified !== recordResult.hiddenVerified) {
+          failures.push(
+            `${summaryResult.scenario}: summary hiddenVerified=${summaryResult.hiddenVerified} but run record hiddenVerified=${recordResult.hiddenVerified}`,
+          )
+        }
+        if (
+          JSON.stringify(summaryResult.verifyExitCodes.sort()) !== JSON.stringify(recordResult.verifyExitCodes.sort())
+        ) {
+          failures.push(`${summaryResult.scenario}: summary verifyExitCodes disagree with run record`)
+        }
+        if (summaryResult.scenarioHash !== recordResult.scenarioHash) {
+          failures.push(`${summaryResult.scenario}: summary scenarioHash disagrees with run record`)
+        }
+        if (summaryResult.sourceHash !== recordResult.sourceHash) {
+          failures.push(`${summaryResult.scenario}: summary sourceHash disagrees with run record`)
+        }
+      }
+      const summaryResultKeys = new Set(latest.results.map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`))
+      if (summaryResultKeys.size !== latest.results.length) {
+        failures.push(`latest summary records duplicate scenario/variant/model results`)
       }
     }
   }
