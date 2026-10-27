@@ -854,7 +854,7 @@ function writeRunRecord(record: EvalRunRecord): void {
 function writeCheckpoint(runId: string, result: EvalRunRecordResult): void {
   const dir = join(checkpointsDir, runId)
   mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${result.scenario}-${result.variant}.json`)
+  const path = join(dir, `${result.scenario}-${result.variant}-${result.model}.json`)
   atomicWriteJson(path, result)
 }
 
