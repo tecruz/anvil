@@ -9,6 +9,7 @@
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | contributors | the conventions, and exactly what CI runs |
 | [SECURITY.md](../SECURITY.md) | reporters | how to report a vulnerability, and what is out of scope |
 | [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) | maintainers | the design, the milestones, and the defects each one found |
+| [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) | maintainers | the proposed next cycle: merge gates, benchmark evidence, failure recovery, and prebuilt releases |
 | [the opencode plugin](../packages/plugin-opencode/README.md) | plugin users | the same tools, registered inside the agent |
 
 **Start here:** [USAGE.md](USAGE.md). The [README](../README.md) is the argument for why

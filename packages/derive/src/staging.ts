@@ -401,9 +401,15 @@ function resolveSafeTarget(repoRoot: string, relPath: string): string {
   return target
 }
 
-/** Write the bundle into the repository. Only called after preconditions pass. */
-export function applyStaging(repoRoot: string, manifest: StagingManifest): string[] {
-  const written: string[] = []
+/**
+ * Read every staged file's content before writing anything.
+ *
+ * The old loop read and wrote one file at a time, so if the second file's staged content
+ * had disappeared, the first file was already on disk -- a partial apply with no rollback.
+ * Reading all of it first means a missing or unsafe file refuses before any bytes land.
+ */
+function readAllStaged(repoRoot: string, manifest: StagingManifest): Map<string, string> {
+  const contents = new Map<string, string>()
   for (const file of manifest.files) {
     const content = readStaged(repoRoot, file)
     if (content === null) {
@@ -411,7 +417,29 @@ export function applyStaging(repoRoot: string, manifest: StagingManifest): strin
         hint: 'Re-run `anvil init` to rebuild the staging bundle.',
       })
     }
-    const target = resolveSafeTarget(repoRoot, file.path)
+    contents.set(file.path, content)
+  }
+  return contents
+}
+
+/** Resolve every write target before writing anything, so an unsafe path refuses early. */
+function resolveAllTargets(repoRoot: string, manifest: StagingManifest): Map<string, string> {
+  const targets = new Map<string, string>()
+  for (const file of manifest.files) {
+    targets.set(file.path, resolveSafeTarget(repoRoot, file.path))
+  }
+  return targets
+}
+
+/** Write the bundle into the repository. Only called after preconditions pass. */
+export function applyStaging(repoRoot: string, manifest: StagingManifest): string[] {
+  const contents = readAllStaged(repoRoot, manifest)
+  const targets = resolveAllTargets(repoRoot, manifest)
+
+  const written: string[] = []
+  for (const file of manifest.files) {
+    const target = targets.get(file.path)!
+    const content = contents.get(file.path)!
     mkdirSync(join(target, '..'), { recursive: true })
     writeFileSync(target, content, 'utf8')
     written.push(file.path)

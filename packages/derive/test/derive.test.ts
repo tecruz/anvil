@@ -680,6 +680,31 @@ describe('staging lifecycle', () => {
     assert.match(onDisk, /Improved by the agent/, "the agent's version must be what lands")
     assert.match(onDisk, /## Commands/, 'and the verified baseline must survive')
   })
+
+  test('apply validates every staged file before writing any of them', () => {
+    // A partial apply is worse than no apply: file 1 on disk with file 2 missing leaves
+    // the repo in an unreviewable half-state. applyStaging must read all content and
+    // resolve all targets before writing the first byte.
+    const dir = materialize('node-npm')
+    const manifest = writeStaging(
+      dir,
+      { inputHash: 'test', generator: 'test' },
+      new Map([
+        ['AGENTS.md', '# Agents\n'],
+        ['src/keep.js', 'export const keep = 1\n'],
+      ]),
+    )
+    assert.ok(manifest !== null)
+
+    // Remove the staged content of the second file after staging.
+    rmSync(join(dir, '.anvil', 'staging', 'files', 'src', 'keep.js'))
+
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+
+    // Nothing may have been written: neither the good file nor the missing one.
+    assert.equal(readRepoFile(dir, 'AGENTS.md'), null)
+    assert.equal(readRepoFile(dir, 'src/keep.js'), null)
+  })
 })
 
 describe('staging mutation containment', () => {

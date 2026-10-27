@@ -24,6 +24,34 @@ anyway. The lockfile is committed, so a stale one is a real defect, not a local 
 While iterating, `npm run test:changed` runs the tests of the packages whose source changed,
 widened to everything that depends on them -- usually a fraction of the full suite.
 
+## Merging to main
+
+This is a solo-maintainer repository: there is no second reviewer, so review requirements
+are waived, but the checks below still have to pass before anything merges.
+
+1. All five CI checks pass on the **final commit** of the PR:
+   - `windows-latest`
+   - `ubuntu-latest`
+   - `macos-latest`
+   - `playbook registry (rot check)`
+   - `gh contract (live)`
+2. `npm run check` passes locally (lint, typecheck, test suite, build, docs check, eval gate).
+3. `npm run eval -- --fake-agent` passes and `npm run eval:check` passes.
+4. No high-risk path (`.github/workflows/**`) is changed without flagging it in the PR
+   description.
+5. If any source under `packages/*/src/` changed, regenerate `eval-results/latest.json`
+   with `npm run eval -- --fake-agent` and confirm `npm run eval:check` passes before
+   merging — the gate binds summaries to the implementation hash.
+
+**Branch protection is enforced.** Branch protection rules on `main` require all five CI
+checks above to pass before a merge, branches must be up to date (strict mode), and
+administrators cannot bypass the checks. Pull requests are required but need zero
+approving reviewers — this is a solo-maintainer repository, so review requirements are
+waived. Force pushes and deletion of `main` are blocked.
+
+Configuration was applied via the GitHub API after making the repository public, since
+rulesets require GitHub Pro on private repositories. The repository is now public.
+
 ## Once per clone: turn the hook on
 
 ```bash
