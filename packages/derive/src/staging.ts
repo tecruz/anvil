@@ -106,13 +106,39 @@ export function manifestPath(repoRoot: string): string {
   return join(stagingRoot(repoRoot), MANIFEST_NAME)
 }
 
+/**
+ * Anchor staging at the physical repository and check both directory components before
+ * any creation or recursive removal. `existsSync` is insufficient: it follows symlinks
+ * and treats dangling links as absent. Missing directories are fine, but existing links
+ * (even back into the repository) and non-directories must be left untouched.
+ *
+ * Resolving only the caller's repository path preserves support for repository aliases
+ * and macOS's `/var` alias without trusting a linked `.anvil` or `staging` directory.
+ */
+function checkedStagingRoot(repoRoot: string): string {
+  const root = realpathSync.native(repoRoot)
+  let path = root
+  for (const segment of [STATE_DIR, 'staging']) {
+    path = join(path, segment)
+    const stat = lstatSync(path, { throwIfNoEntry: false })
+    if (stat !== undefined && (stat.isSymbolicLink() || !stat.isDirectory())) {
+      throw new AnvilError(
+        ErrorCode.PreflightFailed,
+        `Refusing unsafe staging directory: ${relative(root, path)} is a symlink or not a directory`,
+        { hint: 'Use real .anvil/staging directories inside the repository; existing paths were left untouched.' },
+      )
+    }
+  }
+  return path
+}
+
 /** Write a staging bundle, replacing any previous one. `files` is derived from `contents`. */
 export function writeStaging(
   repoRoot: string,
   manifest: Pick<StagingManifest, 'inputHash' | 'generator'>,
   contents: ReadonlyMap<string, string>,
 ): StagingManifest {
-  const root = stagingRoot(repoRoot)
+  const root = checkedStagingRoot(repoRoot)
   rmSync(root, { recursive: true, force: true })
   mkdirSync(join(root, FILES_SUBDIR), { recursive: true })
 
@@ -203,8 +229,8 @@ export function readStaged(repoRoot: string, file: Pick<StagedFile, 'stagedPath'
 function readStagingFile(repoRoot: string, stagedPath: string): string | null {
   if (!isSafeRepoRelativePath(stagedPath)) return null
   try {
-    let path = realpathSync.native(repoRoot)
-    const segments = [STATE_DIR, 'staging', ...stagedPath.split('/')]
+    let path = checkedStagingRoot(repoRoot)
+    const segments = stagedPath.split('/')
     for (const [index, segment] of segments.entries()) {
       path = join(path, segment)
       const stat = lstatSync(path)
@@ -395,7 +421,8 @@ export function applyStaging(repoRoot: string, manifest: StagingManifest): strin
 
 /** Remove the staging bundle. */
 export function clearStaging(repoRoot: string): void {
-  rmSync(stagingRoot(repoRoot), { recursive: true, force: true })
+  const root = checkedStagingRoot(repoRoot)
+  rmSync(root, { recursive: true, force: true })
 }
 
 /** Entries anvil writes that must never be committed. */

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -20,6 +21,7 @@ import {
   applyStaging,
   buildBrief,
   checkApplyPreconditions,
+  clearStaging,
   type GeneratedArtifact,
   generateAgentsFile,
   generateReviewCommand,
@@ -677,6 +679,136 @@ describe('staging lifecycle', () => {
     assert.ok(onDisk !== null)
     assert.match(onDisk, /Improved by the agent/, "the agent's version must be what lands")
     assert.match(onDisk, /## Commands/, 'and the verified baseline must survive')
+  })
+})
+
+describe('staging mutation containment', () => {
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const location of ['external', 'internal', 'dangling']) {
+      for (const operation of ['write', 'clear']) {
+        test(`${operation} refuses ${location} links at ${linkedDirectory} before mutating anything`, (t) => {
+          const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-mutation-'))
+          const outside = mkdtempSync(join(tmpdir(), 'anvil-staging-external-'))
+          temps.push(dir, outside)
+          const target = join(location === 'internal' ? dir : outside, 'linked-target')
+          const targetStaging = linkedDirectory === '.anvil' ? join(target, 'staging') : target
+          mkdirSync(join(targetStaging, 'files'), { recursive: true })
+          const sentinel = join(targetStaging, 'sentinel.txt')
+          const marker = 'synthetic data that must survive\n'
+          writeFileSync(sentinel, marker)
+          writeFileSync(join(outside, 'neighbor.txt'), marker)
+          const link = join(dir, ...linkedDirectory.split('/'))
+          mkdirSync(dirname(link), { recursive: true })
+          try {
+            symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir')
+          } catch (error) {
+            t.skip(`symlinks are unavailable here: ${String(error)}`)
+            return
+          }
+          if (location === 'dangling') rmSync(target, { recursive: true })
+          assert.equal(lstatSync(link).isSymbolicLink(), true, 'the attack must use an actual link')
+          if (location !== 'dangling') {
+            assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'sentinel.txt'), 'utf8'), marker)
+          }
+
+          assert.throws(
+            () =>
+              operation === 'write'
+                ? writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+                : clearStaging(dir),
+            { code: 'PREFLIGHT_FAILED' },
+          )
+          assert.equal(lstatSync(link).isSymbolicLink(), true, 'refusal must leave the link untouched')
+          assert.equal(readFileSync(join(outside, 'neighbor.txt'), 'utf8'), marker)
+          if (location === 'dangling') {
+            assert.equal(existsSync(target), false, 'a dangling target must not be created')
+          } else {
+            assert.equal(readFileSync(sentinel, 'utf8'), marker, 'existing target data must not be removed')
+            assert.deepEqual(readdirSync(targetStaging).sort(), ['files', 'sentinel.txt'])
+            assert.deepEqual(readdirSync(join(targetStaging, 'files')), [], 'no artifacts may be written to the target')
+          }
+        })
+      }
+    }
+  }
+
+  for (const blockedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const operation of ['write', 'clear']) {
+      test(`${operation} refuses a non-directory at ${blockedDirectory} without deleting it`, () => {
+        const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-file-'))
+        temps.push(dir)
+        const blocked = join(dir, ...blockedDirectory.split('/'))
+        mkdirSync(dirname(blocked), { recursive: true })
+        writeFileSync(blocked, 'preserve this file\n')
+        assert.throws(
+          () =>
+            operation === 'write'
+              ? writeStaging(dir, { inputHash: 'test', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+              : clearStaging(dir),
+          { code: 'PREFLIGHT_FAILED' },
+        )
+        assert.equal(readFileSync(blocked, 'utf8'), 'preserve this file\n')
+      })
+    }
+  }
+
+  test('normal creation, replacement and idempotent cleanup still work with missing directories', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-normal-'))
+    temps.push(dir)
+    clearStaging(dir)
+    assert.equal(existsSync(join(dir, '.anvil')), false, 'cleanup must not create missing directories')
+    writeStaging(dir, { inputHash: 'first', generator: 'test' }, new Map([['AGENTS.md', '# First\n']]))
+    writeStaging(dir, { inputHash: 'second', generator: 'test' }, new Map([['AGENTS.md', '# Second\n']]))
+    assert.equal(readManifest(dir)?.inputHash, 'second')
+    assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'files', 'AGENTS.md'), 'utf8'), '# Second\n')
+    clearStaging(dir)
+    clearStaging(dir)
+    assert.equal(existsSync(join(dir, '.anvil', 'staging')), false)
+  })
+
+  for (const operation of ['write', 'clear']) {
+    test(`${operation} removes links inside a real staging directory without following their targets`, (t) => {
+      const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-child-link-'))
+      const outside = mkdtempSync(join(tmpdir(), 'anvil-staging-child-target-'))
+      temps.push(dir, outside)
+      writeStaging(dir, { inputHash: 'first', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+      const marker = 'external target must survive\n'
+      writeFileSync(join(outside, 'sentinel.txt'), marker)
+      const link = join(dir, '.anvil', 'staging', 'files', 'linked-child')
+      try {
+        symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        t.skip(`symlinks are unavailable here: ${String(error)}`)
+        return
+      }
+      assert.equal(readFileSync(join(link, 'sentinel.txt'), 'utf8'), marker)
+      if (operation === 'write') {
+        writeStaging(dir, { inputHash: 'second', generator: 'test' }, new Map([['AGENTS.md', '# Updated\n']]))
+      } else {
+        clearStaging(dir)
+      }
+      assert.equal(existsSync(link), false)
+      assert.equal(readFileSync(join(outside, 'sentinel.txt'), 'utf8'), marker)
+      assert.deepEqual(readdirSync(outside), ['sentinel.txt'])
+    })
+  }
+
+  test('a repository directory alias supports staging creation and cleanup', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-staging-alias-target-'))
+    const parent = mkdtempSync(join(tmpdir(), 'anvil-staging-alias-'))
+    temps.push(dir, parent)
+    const alias = join(parent, 'repo')
+    try {
+      symlinkSync(dir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    writeStaging(alias, { inputHash: 'alias', generator: 'test' }, new Map([['AGENTS.md', '# Agents\n']]))
+    assert.equal(readManifest(dir)?.inputHash, 'alias')
+    clearStaging(alias)
+    assert.equal(existsSync(join(dir, '.anvil', 'staging')), false)
+    assert.equal(lstatSync(alias).isSymbolicLink(), true, 'the caller alias itself remains supported')
   })
 })
 

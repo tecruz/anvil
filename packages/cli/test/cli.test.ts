@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -161,6 +162,50 @@ describe('anvil init staging containment', () => {
           content,
           'the outside file stays unchanged',
         )
+      })
+    }
+  }
+})
+
+describe('anvil init staging creation containment', () => {
+  for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
+    for (const populated of [false, true]) {
+      test(`plain init refuses a linked ${linkedDirectory} (${populated ? 'populated' : 'empty'} target)`, (t) => {
+        const dir = tempDir('anvil-cli-create-staging-')
+        const outside = tempDir('anvil-cli-create-outside-')
+        execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'staging-fixture' }))
+        const externalStaging = linkedDirectory === '.anvil' ? join(outside, 'staging') : outside
+        const marker = 'synthetic external data\n'
+        writeFileSync(join(outside, 'neighbor.txt'), marker)
+        if (populated) {
+          mkdirSync(externalStaging, { recursive: true })
+          writeFileSync(join(externalStaging, 'sentinel.txt'), marker)
+        }
+        const link = join(dir, ...linkedDirectory.split('/'))
+        mkdirSync(join(link, '..'), { recursive: true })
+        try {
+          symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+        } catch (error) {
+          t.skip(`symlinks are unavailable here: ${String(error)}`)
+          return
+        }
+        assert.equal(lstatSync(link).isSymbolicLink(), true)
+        if (populated) assert.equal(readFileSync(join(dir, '.anvil', 'staging', 'sentinel.txt'), 'utf8'), marker)
+
+        // No --apply: staging creation itself must be refused before deleting/replacing
+        // any existing bundle or creating artifacts through the link.
+        const result = runAnvil(['init', '--only', 'agents-file', '--json'], { cwd: dir })
+        assert.equal(result.code, 5, result.stderr)
+        const body = jsonOf(result)
+        assert.equal(body.ok, false)
+        assert.equal((body.error as { code: string }).code, 'PREFLIGHT_FAILED')
+        assert.equal(lstatSync(link).isSymbolicLink(), true)
+        assert.equal(readFileSync(join(outside, 'neighbor.txt'), 'utf8'), marker)
+        if (populated) assert.equal(readFileSync(join(externalStaging, 'sentinel.txt'), 'utf8'), marker)
+        assert.equal(existsSync(join(externalStaging, 'files')), false, 'no outside artifacts may be created')
+        assert.equal(existsSync(join(externalStaging, 'manifest.json')), false)
+        assert.equal(existsSync(join(dir, 'AGENTS.md')), false)
       })
     }
   }
