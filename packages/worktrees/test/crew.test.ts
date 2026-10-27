@@ -632,6 +632,40 @@ describe('crew verify', () => {
     assert.ok(ran.length >= 3, 'each worktree ran its own verify commands')
   })
 
+  test('runs verify commands from the detected project directory', async () => {
+    // A monorepo keeps its manifest in `app/`. Verify commands are written relative to
+    // that directory, so running them from the worktree root either fails to find the
+    // scripts or silently runs a different project.
+    const dir = makeRepo()
+    mkdirSync(join(dir, 'app'), { recursive: true })
+    writeFileSync(
+      join(dir, 'app', 'package.json'),
+      JSON.stringify({ name: 'app', scripts: { test: 'true', lint: 'true' } }),
+      'utf8',
+    )
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-m', 'nested app')
+    const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v-dir-'))
+    temps.push(wtRoot)
+    await crew(dir, 1, wtRoot)
+
+    const cwds: string[] = []
+    const result = await crewVerify({
+      repoRoot: dir,
+      run: async (_command, cwd) => {
+        cwds.push(cwd)
+        return { ok: true, code: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.ok(cwds.length >= 1, 'the worktree ran at least one verify command')
+    assert.ok(
+      cwds.every((cwd) => cwd.replace(/\\/g, '/').endsWith('/app')),
+      `every command ran from the project directory: ${cwds.join(', ')}`,
+    )
+  })
+
   test('one failing worktree fails the whole crew', async () => {
     const dir = makeRepo({ go: true })
     const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v2-'))
