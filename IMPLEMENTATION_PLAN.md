@@ -12,6 +12,11 @@
 > ([ADR-0008](docs/adr/0008-live-discovery-keeps-registry-curated.md)).
 > Deviation from plan: [ADR-0006](docs/adr/0006-single-file-bundle-location.md).
 
+The proposed next implementation cycle is in
+[docs/IMPROVEMENT_PLAN.md](docs/IMPROVEMENT_PLAN.md). This document retains the original
+milestones and audit history; the new plan covers merge enforcement, benchmark evidence,
+lifecycle recovery, and versioned prebuilt distribution.
+
 ## The problem
 
 Working at any company, on any project, with any technology, using AI agents. Three
