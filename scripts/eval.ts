@@ -39,17 +39,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
   checkEvalGate,
+  checkRunRecordCompatibility,
   type EvalBaseline,
   type EvalBaselineScenario,
   type EvalModel,
   type EvalModelRole,
   type EvalResultSummary,
   type EvalRunRecord,
+  type EvalRunRecordAttempt,
   type EvalRunRecordResult,
   type EvalScenario,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
+  latestAttemptState,
   parseBaseline,
   parseLatest,
   parseRunRecord,
@@ -68,6 +71,43 @@ const latestPath = join(resultsDir, 'latest.json')
 const baselinePath = join(resultsDir, 'baseline.json')
 const runRecordPath = join(resultsDir, 'run.json')
 const checkpointsDir = join(resultsDir, 'checkpoints')
+
+/** Transcript publication policy.
+ *
+ * Transcripts are never published by default: the checked-in `latest.json` carries
+ * structured metadata and verdicts only. `--publish-transcripts` opts in, and even then
+ * transcripts are redacted and size-limited before they touch disk or an artifact.
+ */
+/** Maximum transcript bytes retained per scenario/variant. Larger transcripts are
+ *  truncated, not dropped, so a failure still shows its tail. */
+const MAX_TRANSCRIPT_BYTES = 64 * 1024
+/** Secret-shaped markers that must never appear in a persisted transcript. */
+const SECRET_MARKERS = [
+  /sk-[A-Za-z0-9]{20,}/, // OpenAI-style keys
+  /sk-or-[A-Za-z0-9]{20,}/, // OpenRouter keys
+  /ghp_[A-Za-z0-9]{36,}/, // GitHub personal access tokens
+  /github_pat_[A-Za-z0-9_]{20,}/, // GitHub fine-grained tokens
+  /[A-Za-z0-9+/]{40,}/, // long base64 blobs (catches provider ledgers)
+]
+
+/** Redact secret-shaped content from a transcript before it is persisted or uploaded. */
+export function redactTranscript(text: string): string {
+  let redacted = text
+  for (const marker of SECRET_MARKERS) {
+    redacted = redacted.replace(marker, '[redacted]')
+  }
+  return redacted
+}
+
+/** Size-limit a transcript, keeping the head and tail so failures remain readable. */
+export function limitTranscript(text: string): string {
+  const bytes = Buffer.byteLength(text, 'utf8')
+  if (bytes <= MAX_TRANSCRIPT_BYTES) return text
+  const half = Math.floor(MAX_TRANSCRIPT_BYTES / 2)
+  const head = Buffer.from(text, 'utf8').subarray(0, half).toString('utf8')
+  const tail = Buffer.from(text, 'utf8').subarray(-half).toString('utf8')
+  return `${head}\n\n... [transcript truncated, ${bytes} bytes total] ...\n\n${tail}`
+}
 
 /** The two things being compared: the same repository, with and without the artifacts. */
 const VARIANTS = ['bare', 'anvil'] as const
@@ -105,6 +145,8 @@ async function main(): Promise<void> {
   const checkOnly = args.includes('--check')
   const fakeAgent = args.includes('--fake-agent')
   const writeBaselineAfterRun = args.includes('--write-baseline')
+  const resume = args.includes('--resume')
+  const publishTranscripts = args.includes('--publish-transcripts')
   const only = flagValue('--scenario', args)
   const enabled = process.env.ANVIL_EVAL === '1'
 
@@ -169,21 +211,14 @@ async function main(): Promise<void> {
   // checked-in bundle. Rebuild the CLI before evaluating so what executes is what is hashed.
   ensureCliBuilt()
 
-  const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
-
-  // A run record is written separately from latest.json so an interrupted run cannot
-  // overwrite an earlier complete summary. Capture the implementation and bundle digest
-  // before the first scenario, then compare at the end: if either changed mid-run the
-  // evidence is invalidated.
-  const runId = randomUUID()
-  const startedAt = new Date().toISOString()
-  const commitSha = readCommitSha()
-  const implementationBefore = hashImplementation(repoRoot)
-  const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
-  const bundleDigest = existsSync(bundlePath)
-    ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
-    : null
-
+  // `--resume` continues an existing run: it validates that the implementation, fixtures,
+  // models, and requested run keys still match, skips keys that already completed, and
+  // retries only the incomplete ones. Each attempt is recorded explicitly; a failure is
+  // never silently retried until it passes.
+  let runRecord: EvalRunRecord
+  let runId: string
+  let startedAt: string
+  const incompleteKeys: string[] = []
   const declaredKeys: string[] = []
   for (const _model of models) {
     for (const scenario of selectedScenarios) {
@@ -192,55 +227,139 @@ async function main(): Promise<void> {
       }
     }
   }
-
-  const runRecord: EvalRunRecord = {
-    schemaVersion: 1,
-    runId,
-    startedAt,
-    completedAt: null,
-    completionState: 'in-progress',
-    commitSha,
-    implementation: implementationBefore,
-    bundleDigest,
-    models,
-    opencodeVersion,
-    nodeVersion: process.version,
-    runKeys: declaredKeys,
-    executionOrder: [],
-    results: [],
+  if (resume && existsSync(runRecordPath)) {
+    const raw = readJsonFile(runRecordPath)
+    const parsed = parseRunRecord(raw)
+    if (typeof parsed === 'string') {
+      console.error(`Cannot resume: ${parsed}`)
+      process.exit(1)
+    }
+    const compatibility = checkRunRecordCompatibility(
+      parsed,
+      hashImplementation(repoRoot),
+      Object.fromEntries(
+        selectedScenarios.map((s) => [
+          s.id,
+          { scenarioHash: hashScenario(s), sourceHash: hashScenarioSource(repoRoot, s) },
+        ]),
+      ),
+      models,
+    )
+    if (!compatibility.ok) {
+      console.error(compatibility.message)
+      process.exit(1)
+    }
+    runRecord = parsed
+    runId = runRecord.runId
+    startedAt = runRecord.startedAt
+    const completed = new Set(
+      runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map((r) => `${r.scenario}/${r.variant}`),
+    )
+    for (const key of declaredKeys) {
+      if (!completed.has(key)) incompleteKeys.push(key)
+    }
+    if (incompleteKeys.length === 0) {
+      console.log(`Run ${runId} already completed all ${declaredKeys.length} keys; nothing to resume.`)
+      runRecord.completedAt = new Date().toISOString()
+      runRecord.completionState = 'completed'
+      writeRunRecord(runRecord)
+      printSummary([])
+      process.exit(0)
+    }
+    console.log(`Resuming run ${runId}: ${incompleteKeys.length} of ${declaredKeys.length} keys remain.`)
+  } else {
+    runId = randomUUID()
+    startedAt = new Date().toISOString()
+    const commitSha = readCommitSha()
+    const implementationBefore = hashImplementation(repoRoot)
+    const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+    const bundleDigest = existsSync(bundlePath)
+      ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
+      : null
+    runRecord = {
+      schemaVersion: 1,
+      runId,
+      startedAt,
+      completedAt: null,
+      completionState: 'in-progress',
+      commitSha,
+      implementation: implementationBefore,
+      bundleDigest,
+      models,
+      opencodeVersion: fakeAgent ? null : await probeCommandVersion('opencode'),
+      nodeVersion: process.version,
+      runKeys: declaredKeys,
+      executionOrder: [],
+      results: [],
+    }
+    writeRunRecord(runRecord)
   }
-  writeRunRecord(runRecord)
+  const implementationBefore = runRecord.implementation
+  const opencodeVersion = runRecord.opencodeVersion
 
   const results: ScenarioResult[] = []
   let allCompleted = true
+  const completedKeys = new Set(
+    runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map((r) => `${r.scenario}/${r.variant}`),
+  )
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
       const sourceHash = hashScenarioSource(repoRoot, scenario)
       for (const variant of VARIANTS) {
-        const result = await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent)
+        const key = `${scenario.id}/${variant}`
+        // A key that already completed is not re-run: resume picks up incomplete work,
+        // it does not silently rerun finished results until they pass.
+        if (completedKeys.has(key)) continue
+
+        const result = await runScenario(
+          scenario,
+          variant,
+          model,
+          scenarioHash,
+          sourceHash,
+          opencodeVersion,
+          fakeAgent,
+          publishTranscripts,
+        )
         results.push(result)
 
-        // Checkpoint the result immediately, before the next scenario starts. A crash or
-        // timeout after this point leaves this result readable, and latest.json is never
-        // overwritten by an incomplete run.
-        const completedAt = new Date().toISOString()
-        const state: EvalRunRecordResult['state'] = result.error === undefined ? 'completed' : 'failed'
-        const checkpoint: EvalRunRecordResult = {
-          scenario: result.scenario,
-          variant: result.variant,
-          model: result.model,
-          modelRole: result.modelRole,
-          completedAt,
-          state,
+        // Checkpoint the attempt immediately, before the next scenario starts. A crash
+        // or timeout after this point leaves this attempt readable, and latest.json is
+        // never overwritten by an incomplete run.
+        const attempt: EvalRunRecordAttempt = {
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          state: result.error === undefined ? 'completed' : 'failed',
           ...(result.error === undefined ? {} : { error: result.error }),
         }
-        writeCheckpoint(runId, checkpoint)
-
-        const key = `${result.scenario}/${result.variant}`
-        runRecord.executionOrder.push(key)
-        runRecord.results.push(checkpoint)
-        if (state !== 'completed') allCompleted = false
+        const existing = runRecord.results.find((r) => r.scenario === scenario.id && r.variant === variant)
+        if (existing === undefined) {
+          const checkpoint: EvalRunRecordResult = {
+            scenario: result.scenario,
+            variant: result.variant,
+            model: result.model,
+            modelRole: result.modelRole,
+            scenarioHash,
+            sourceHash,
+            attempts: [attempt],
+          }
+          writeCheckpoint(runId, checkpoint)
+          runRecord.executionOrder.push(key)
+          runRecord.results.push(checkpoint)
+        } else {
+          existing.attempts.push(attempt)
+          writeCheckpoint(runId, {
+            scenario: result.scenario,
+            variant: result.variant,
+            model: result.model,
+            modelRole: result.modelRole,
+            scenarioHash,
+            sourceHash,
+            attempts: existing.attempts,
+          })
+        }
+        if (attempt.state !== 'completed') allCompleted = false
         writeRunRecord(runRecord)
       }
     }
@@ -303,6 +422,7 @@ async function runScenario(
   sourceHash: string,
   opencodeVersion: string | null,
   fake: boolean,
+  publishTranscripts: boolean,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-`))
   const started = Date.now()
@@ -354,12 +474,16 @@ async function runScenario(
     if (fake) {
       if (scenario.solution !== undefined) {
         cpSync(join(repoRoot, scenario.solution.from), join(workdir, ...scenario.solution.to.split('/')))
-        result.transcript = `[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`
+        result.transcript = publishTranscripts
+          ? limitTranscript(
+              redactTranscript(`[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`),
+            )
+          : ''
       } else if (scenario.kind === 'code-change') {
         result.error = 'a code-change scenario needs a solution for --fake-agent'
         return result
       } else {
-        result.transcript = '[fake-agent] ran the verifier'
+        result.transcript = publishTranscripts ? limitTranscript(redactTranscript('[fake-agent] ran the verifier')) : ''
       }
     } else {
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
@@ -372,7 +496,9 @@ async function runScenario(
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
       })
-      result.transcript = `${agent.stdout}\n${agent.stderr}`.trim()
+      result.transcript = publishTranscripts
+        ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
+        : ''
       if (agent.timedOut) {
         result.error = 'the agent timed out'
       } else if (!agent.ok) {

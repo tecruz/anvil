@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "runId": "31eda520-e275-4639-8985-6cdcda85cc90",
-  "startedAt": "2026-10-27T20:13:44.832Z",
-  "completedAt": "2026-10-27T20:14:05.014Z",
+  "runId": "e0bd8303-5a47-4693-acff-26f4b64cdfbe",
+  "startedAt": "2026-10-27T20:37:09.878Z",
+  "completedAt": "2026-10-27T20:37:29.672Z",
   "completionState": "completed",
-  "commitSha": "1bef238aa87e4164f27a9250761cc1d179598da1",
-  "implementation": "581bbcbea97bc413453a3ac9d07b08817c9eb62f67b9814c04d6b5d9455f6543",
+  "commitSha": "e4b529bb2b394809460f32e360ef9841c9e73fc5",
+  "implementation": "9a0449b75f193b2cad68049530535fe5ffdabee96fc052aaddfc651db1fdd5d8",
   "bundleDigest": "3fd1cad4adcac0170f4a57e2f298e2e66bbd55c84d9809d3013036648d8d6a76",
   "models": [
     {
@@ -41,64 +41,120 @@
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:13:46.896Z",
-      "state": "completed"
+      "scenarioHash": "5ad884910c28d85842006a5e1a8dc9f146dd6d6011fc8c1d4f0a3788ee8a79f7",
+      "sourceHash": "3d2e98d105abce7280532ba0b132ff6d3d42241f8145831faaa1d23d3e668a4d",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:11.876Z",
+          "completedAt": "2026-10-27T20:37:11.876Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "tiny-code-change",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:13:50.125Z",
-      "state": "completed"
+      "scenarioHash": "5ad884910c28d85842006a5e1a8dc9f146dd6d6011fc8c1d4f0a3788ee8a79f7",
+      "sourceHash": "3d2e98d105abce7280532ba0b132ff6d3d42241f8145831faaa1d23d3e668a4d",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:15.115Z",
+          "completedAt": "2026-10-27T20:37:15.115Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "tiny-verify-only",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:13:51.697Z",
-      "state": "completed"
+      "scenarioHash": "784d50a9537d935e8597f9503f27c7ebab3a94055f56d3d4f7f9c23c96c7571b",
+      "sourceHash": "2533ec559159e7ff5c4c1c3ff31592edadbbd3bbef87e4337bed566c70f145d0",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:16.669Z",
+          "completedAt": "2026-10-27T20:37:16.669Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "tiny-verify-only",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:13:54.617Z",
-      "state": "completed"
+      "scenarioHash": "784d50a9537d935e8597f9503f27c7ebab3a94055f56d3d4f7f9c23c96c7571b",
+      "sourceHash": "2533ec559159e7ff5c4c1c3ff31592edadbbd3bbef87e4337bed566c70f145d0",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:19.658Z",
+          "completedAt": "2026-10-27T20:37:19.658Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "medium-code-change",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:13:56.667Z",
-      "state": "completed"
+      "scenarioHash": "f22f6b7acfffeba5042a41672980c24a373b2e68169a96b10764b2778039c187",
+      "sourceHash": "97c95ff93985341364aa86a7a53009cbcf524d74b546aea79b2dc4e688a1442e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:21.658Z",
+          "completedAt": "2026-10-27T20:37:21.658Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "medium-code-change",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:14:00.113Z",
-      "state": "completed"
+      "scenarioHash": "f22f6b7acfffeba5042a41672980c24a373b2e68169a96b10764b2778039c187",
+      "sourceHash": "97c95ff93985341364aa86a7a53009cbcf524d74b546aea79b2dc4e688a1442e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:24.970Z",
+          "completedAt": "2026-10-27T20:37:24.970Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "medium-verify-only",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:14:01.825Z",
-      "state": "completed"
+      "scenarioHash": "789fb123b2d32361a6a9e4c434d619902519c056275825b3754077cb82311b0d",
+      "sourceHash": "7b9b37f9ffd9303c2a8e231e433e41e62aee8a27ac9330e6cb14e5e6e38fea6e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:26.629Z",
+          "completedAt": "2026-10-27T20:37:26.629Z",
+          "state": "completed"
+        }
+      ]
     },
     {
       "scenario": "medium-verify-only",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "completedAt": "2026-10-27T20:14:04.976Z",
-      "state": "completed"
+      "scenarioHash": "789fb123b2d32361a6a9e4c434d619902519c056275825b3754077cb82311b0d",
+      "sourceHash": "7b9b37f9ffd9303c2a8e231e433e41e62aee8a27ac9330e6cb14e5e6e38fea6e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-27T20:37:29.635Z",
+          "completedAt": "2026-10-27T20:37:29.635Z",
+          "state": "completed"
+        }
+      ]
     }
   ]
 }

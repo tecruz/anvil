@@ -7,12 +7,15 @@ import { after, describe, test } from 'node:test'
 import {
   checkEvalGate,
   checkRunRecord,
+  checkRunRecordCompatibility,
   type EvalBaseline,
   type EvalLatest,
   type EvalRunRecord,
+  type EvalRunRecordResult,
   type EvalScenario,
   hashDirectory,
   hashScenario,
+  latestAttemptState,
   parseBaseline,
   parseLatest,
   parseRunRecord,
@@ -304,16 +307,30 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
         variant: 'bare',
         model: 'fake-agent',
         modelRole: 'small',
-        completedAt: '2026-10-27T00:02:00.000Z',
-        state: 'completed',
+        scenarioHash: 'sc-hash',
+        sourceHash: 'src-hash',
+        attempts: [
+          {
+            startedAt: '2026-10-27T00:02:00.000Z',
+            completedAt: '2026-10-27T00:02:30.000Z',
+            state: 'completed',
+          },
+        ],
       },
       {
         scenario: 'tiny-code-change',
         variant: 'anvil',
         model: 'fake-agent',
         modelRole: 'small',
-        completedAt: '2026-10-27T00:03:00.000Z',
-        state: 'completed',
+        scenarioHash: 'sc-hash',
+        sourceHash: 'src-hash',
+        attempts: [
+          {
+            startedAt: '2026-10-27T00:03:00.000Z',
+            completedAt: '2026-10-27T00:03:30.000Z',
+            state: 'completed',
+          },
+        ],
       },
     ],
     ...over,
@@ -372,5 +389,78 @@ describe('run record contract', () => {
     const gate = checkRunRecord(runRecord(), 'impl-hash', ['tiny-code-change/bare', 'medium-code-change/anvil'])
     assert.equal(gate.ok, false)
     assert.match(gate.message, /never executed/)
+  })
+})
+
+describe('latest attempt state', () => {
+  test('returns completed when the last attempt completed', () => {
+    const result = runRecord().results[0]!
+    assert.equal(latestAttemptState(result), 'completed')
+  })
+
+  test('returns failed when the last attempt failed', () => {
+    const result: EvalRunRecordResult = {
+      ...runRecord().results[0]!,
+      attempts: [
+        { startedAt: 't1', completedAt: 't2', state: 'completed' },
+        { startedAt: 't3', completedAt: 't4', state: 'failed', error: 'boom' },
+      ],
+    }
+    assert.equal(latestAttemptState(result), 'failed')
+  })
+
+  test('returns null when no attempts exist', () => {
+    const result: EvalRunRecordResult = {
+      ...runRecord().results[0]!,
+      attempts: [],
+    }
+    assert.equal(latestAttemptState(result), null)
+  })
+})
+
+describe('run record compatibility for resume', () => {
+  const scenarios = {
+    'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'src-hash' },
+    'tiny-verify-only': { scenarioHash: 'sc2-hash', sourceHash: 'src2-hash' },
+  }
+  const models = [{ id: 'fake-agent', role: 'small' }]
+
+  test('passes when implementation, fixtures, models, and keys all match', () => {
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', scenarios, models)
+    assert.equal(gate.ok, true, gate.message)
+  })
+
+  test('fails when the implementation changed', () => {
+    const gate = checkRunRecordCompatibility(runRecord({ implementation: 'old-impl' }), 'new-impl', scenarios, models)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /cannot resume/)
+  })
+
+  test('fails when the models changed', () => {
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', scenarios, [
+      { id: 'other-model', role: 'small' },
+    ])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /cannot resume/)
+  })
+
+  test('fails when a fixture scenario hash changed', () => {
+    const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'new-sc-hash', sourceHash: 'src-hash' } }
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /fixture changed, cannot resume/)
+  })
+
+  test('fails when a source hash changed', () => {
+    const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'new-src-hash' } }
+    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /cannot resume/)
+  })
+
+  test('fails when there is no run record', () => {
+    const gate = checkRunRecordCompatibility(null, 'impl-hash', scenarios, models)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /no run record exists to resume/)
   })
 })

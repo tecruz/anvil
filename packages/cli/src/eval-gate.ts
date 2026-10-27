@@ -99,16 +99,41 @@ export interface EvalLatest {
   results: EvalResultSummary[]
 }
 
+/** One attempt at a scenario/variant, recorded explicitly so a resume can tell
+ *  completed work from work that must be retried. */
+export interface EvalRunRecordAttempt {
+  startedAt: string
+  completedAt: string | null
+  /** `completed` when the result is trustworthy; `failed` or `timed-out` otherwise. */
+  state: 'completed' | 'failed' | 'timed-out'
+  error?: string
+}
+
 /** One completed scenario/variant result inside a run record. */
 export interface EvalRunRecordResult {
   scenario: string
   variant: 'bare' | 'anvil'
   model: string | null
   modelRole: string | null
-  completedAt: string
-  /** `completed` when the result is trustworthy; `failed` or `timed-out` otherwise. */
-  state: 'completed' | 'failed' | 'timed-out'
-  error?: string
+  /** Hash of the scenario definition this result was produced against. */
+  scenarioHash: string
+  /** Hash of the fixture/verifier sources this result was produced against. */
+  sourceHash: string
+  /** Every attempt at this key, newest last. A key is complete only when the last
+   *  attempt finished in `completed` state. */
+  attempts: EvalRunRecordAttempt[]
+}
+
+/** The latest attempt's state, or `null` when no attempt exists yet. */
+export function latestAttemptState(result: EvalRunRecordResult): 'completed' | 'failed' | 'timed-out' | null {
+  const last = result.attempts[result.attempts.length - 1]
+  if (last === undefined) return null
+  return last.state
+}
+
+/** The number of attempts made for a run key. */
+export function attemptCount(result: EvalRunRecordResult): number {
+  return result.attempts.length
 }
 
 /**
@@ -436,17 +461,34 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
     if (!isObject(raw)) return 'run record result is not an object'
     if (typeof raw.scenario !== 'string') return 'run record result has no scenario'
     if (raw.variant !== 'bare' && raw.variant !== 'anvil') return 'run record result variant is invalid'
-    if (raw.state !== 'completed' && raw.state !== 'failed' && raw.state !== 'timed-out') {
-      return 'run record result state is invalid'
+    if (typeof raw.scenarioHash !== 'string')
+      return `run record result ${raw.scenario}/${raw.variant} scenarioHash is missing`
+    if (typeof raw.sourceHash !== 'string')
+      return `run record result ${raw.scenario}/${raw.variant} sourceHash is missing`
+    if (!Array.isArray(raw.attempts)) return `run record result ${raw.scenario}/${raw.variant} has no attempts list`
+    const attempts: EvalRunRecordAttempt[] = []
+    for (const attempt of raw.attempts) {
+      if (!isObject(attempt)) return `run record result ${raw.scenario}/${raw.variant} attempt is not an object`
+      if (typeof attempt.startedAt !== 'string')
+        return `run record result ${raw.scenario}/${raw.variant} attempt startedAt is missing`
+      if (attempt.state !== 'completed' && attempt.state !== 'failed' && attempt.state !== 'timed-out') {
+        return `run record result ${raw.scenario}/${raw.variant} attempt state is invalid`
+      }
+      attempts.push({
+        startedAt: attempt.startedAt,
+        completedAt: typeof attempt.completedAt === 'string' ? attempt.completedAt : null,
+        state: attempt.state,
+        ...(typeof attempt.error === 'string' ? { error: attempt.error } : {}),
+      })
     }
     results.push({
       scenario: raw.scenario,
       variant: raw.variant,
       model: typeof raw.model === 'string' ? raw.model : null,
       modelRole: typeof raw.modelRole === 'string' ? raw.modelRole : null,
-      completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : '',
-      state: raw.state,
-      ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+      scenarioHash: raw.scenarioHash,
+      sourceHash: raw.sourceHash,
+      attempts,
     })
   }
   return {
@@ -512,7 +554,9 @@ export function checkRunRecord(
       }
     }
   }
-  const completed = record.results.filter((r) => r.state === 'completed').map((r) => `${r.scenario}/${r.variant}`)
+  const completed = record.results
+    .filter((r) => latestAttemptState(r) === 'completed')
+    .map((r) => `${r.scenario}/${r.variant}`)
   const missing = requiredKeys.filter((key) => !completed.includes(key))
   if (missing.length > 0) {
     return {
@@ -523,6 +567,61 @@ export function checkRunRecord(
   return {
     ok: true,
     message: `run ${record.runId} completed all ${requiredKeys.length} declared run keys`,
+  }
+}
+
+/**
+ * Check whether resuming this run record is compatible with the current source.
+ *
+ * Resume must match the implementation, fixtures (scenario and source hashes),
+ * models, and requested run keys exactly. A mismatch means the completed results
+ * were produced under different inputs and must not be reused.
+ */
+export function checkRunRecordCompatibility(
+  record: EvalRunRecord | null | undefined,
+  currentImplementation: string,
+  currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
+  currentModels: Array<{ id: string; role: string }>,
+): EvalGateResult {
+  if (record === null || record === undefined) {
+    return {
+      ok: false,
+      message: 'no run record exists to resume',
+    }
+  }
+  if (record.implementation !== currentImplementation) {
+    return {
+      ok: false,
+      message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${currentImplementation.slice(0, 12)}; cannot resume`,
+    }
+  }
+  const recordModels = JSON.stringify(record.models)
+  const currentModelsJson = JSON.stringify(currentModels)
+  if (recordModels !== currentModelsJson) {
+    return {
+      ok: false,
+      message: `run ${record.runId} used models ${recordModels} but the requested models are ${currentModelsJson}; cannot resume`,
+    }
+  }
+  for (const result of record.results) {
+    const expected = currentScenarioHashes[result.scenario]
+    if (expected === undefined) continue
+    if (result.scenarioHash !== expected.scenarioHash) {
+      return {
+        ok: false,
+        message: `run ${record.runId} scenario ${result.scenario} hashes to ${result.scenarioHash.slice(0, 12)} but the current fixture hashes to ${expected.scenarioHash.slice(0, 12)}; the fixture changed, cannot resume`,
+      }
+    }
+    if (result.sourceHash !== expected.sourceHash) {
+      return {
+        ok: false,
+        message: `run ${record.runId} scenario ${result.scenario} source hashes to ${result.sourceHash.slice(0, 12)} but the current source hashes to ${expected.sourceHash.slice(0, 12)}; cannot resume`,
+      }
+    }
+  }
+  return {
+    ok: true,
+    message: `run ${record.runId} is compatible with the current source and models`,
   }
 }
 
