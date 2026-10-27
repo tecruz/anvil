@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
-import { claimAgentPid, readAgentSession, readClaims } from '@anvil/worktrees'
+import { claimAgentPid, readAgentSession, readClaims, writeClaims } from '@anvil/worktrees'
 import {
   agentPrompt,
   concurrencyFor,
@@ -632,6 +632,40 @@ describe('crew verify', () => {
     assert.ok(ran.length >= 3, 'each worktree ran its own verify commands')
   })
 
+  test('runs verify commands from the detected project directory', async () => {
+    // A monorepo keeps its manifest in `app/`. Verify commands are written relative to
+    // that directory, so running them from the worktree root either fails to find the
+    // scripts or silently runs a different project.
+    const dir = makeRepo()
+    mkdirSync(join(dir, 'app'), { recursive: true })
+    writeFileSync(
+      join(dir, 'app', 'package.json'),
+      JSON.stringify({ name: 'app', scripts: { test: 'true', lint: 'true' } }),
+      'utf8',
+    )
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-m', 'nested app')
+    const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v-dir-'))
+    temps.push(wtRoot)
+    await crew(dir, 1, wtRoot)
+
+    const cwds: string[] = []
+    const result = await crewVerify({
+      repoRoot: dir,
+      run: async (_command, cwd) => {
+        cwds.push(cwd)
+        return { ok: true, code: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.ok(cwds.length >= 1, 'the worktree ran at least one verify command')
+    assert.ok(
+      cwds.every((cwd) => cwd.replace(/\\/g, '/').endsWith('/app')),
+      `every command ran from the project directory: ${cwds.join(', ')}`,
+    )
+  })
+
   test('one failing worktree fails the whole crew', async () => {
     const dir = makeRepo({ go: true })
     const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v2-'))
@@ -705,6 +739,66 @@ describe('crew verify', () => {
     })
     assert.equal(result.concurrency.jobs, 1)
     assert.equal(peak, 1, 'a Gradle crew must not run two builds at once')
+  })
+
+  test('mixed stacks serialize the whole crew, not just the first worktree', async () => {
+    // The first worktree is Go (safe, content-addressed cache) but the later ones are
+    // Gradle (shared mutable cache). The concurrency decision must account for every
+    // worktree, so the crew serializes even though runnable[0] is safe.
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-m5v-mixed-'))
+    temps.push(dir)
+    git(dir, 'init', '--initial-branch=main')
+    git(dir, 'config', 'user.email', 't@e.com')
+    git(dir, 'config', 'user.name', 'T')
+    writeFileSync(join(dir, 'README.md'), '# repo\n', 'utf8')
+    git(dir, 'add', '.')
+    git(dir, 'commit', '-m', 'init')
+
+    const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v-mixed-wt-'))
+    temps.push(wtRoot)
+    const goDir = join(wtRoot, 'go')
+    const gradleA = join(wtRoot, 'gradle-a')
+    const gradleB = join(wtRoot, 'gradle-b')
+    mkdirSync(goDir, { recursive: true })
+    mkdirSync(gradleA, { recursive: true })
+    mkdirSync(gradleB, { recursive: true })
+    writeFileSync(join(goDir, 'go.mod'), 'module acme/r\n\ngo 1.22\n', 'utf8')
+    writeFileSync(join(gradleA, 'build.gradle.kts'), 'plugins { }\n', 'utf8')
+    writeFileSync(join(gradleB, 'build.gradle.kts'), 'plugins { }\n', 'utf8')
+
+    const now = new Date().toISOString()
+    writeClaims(dir, {
+      schemaVersion: 1,
+      claims: [1, 2, 3].map((n) => ({
+        key: `local-${n}`,
+        ticket: { provider: 'local', id: String(n), key: `local-${n}` },
+        branch: `feat/task-${n}`,
+        baseBranch: 'main',
+        baseRef: 'main',
+        worktreePath: n === 1 ? goDir : n === 2 ? gradleA : gradleB,
+        worktreeId: null,
+        state: 'active',
+        createdAt: now,
+      })),
+    })
+
+    let inFlight = 0
+    let peak = 0
+    const result = await crewVerify({
+      repoRoot: dir,
+      jobs: 3,
+      run: async () => {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await new Promise((r) => setTimeout(r, 20))
+        inFlight--
+        return { ok: true, code: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    assert.equal(result.concurrency.jobs, 1, 'a Gradle worktree anywhere serializes the crew')
+    assert.equal(peak, 1, 'no two Gradle builds run at once')
+    assert.match(result.concurrency.reason, /Gradle/)
   })
 
   test('--force-parallel overrides the cache policy', async () => {

@@ -137,7 +137,9 @@ npm run check           # lint, typecheck, the whole suite, the build, the docs 
 ```
 
 `eval:check` reads `eval-results/latest.json` against `eval-results/baseline.json`; the
-raw transcripts live under `eval-results/raw/` and are not committed.
+raw transcripts live under `eval-results/raw/` and are not committed. The summary also
+records a hash of the anvil sources that produced it, so a stale run cannot vouch for a
+newer implementation.
 
 `gen:playbooks` exists because a single-file CLI cannot read a directory of YAML at
 runtime, so the registry is compiled in. The authoring format stays

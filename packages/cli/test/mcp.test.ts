@@ -166,3 +166,42 @@ test('an unknown tool is an argument error, not a successful empty result', asyn
   assert.equal(responses[0]?.error?.code, -32602)
   assert.equal(calls.length, 0)
 })
+
+test('an unknown argument is rejected instead of silently ignored', async () => {
+  // A schema with `additionalProperties: false` is a promise to the client. Ignoring a
+  // misspelled flag means the caller believes an option was honoured and it never was.
+  const { invoke, calls } = recordingInvoke(() => envelope({}))
+  const responses = await send(
+    [
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'anvil_doctor', arguments: { cwd: '.', verbose: true } },
+      }),
+    ],
+    invoke,
+  )
+
+  assert.equal(responses[0]?.error?.code, -32602)
+  assert.match(responses[0]?.error?.message ?? '', /Unknown property: verbose/)
+  assert.equal(calls.length, 0)
+})
+
+test('non-object call arguments are an argument error', async () => {
+  const { invoke, calls } = recordingInvoke(() => envelope({}))
+  const responses = await send(
+    [
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'anvil_doctor', arguments: 'nope' },
+      }),
+    ],
+    invoke,
+  )
+
+  assert.equal(responses[0]?.error?.code, -32602)
+  assert.equal(calls.length, 0)
+})

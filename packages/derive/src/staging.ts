@@ -19,8 +19,18 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 
 export const STATE_DIR = '.anvil'
@@ -176,13 +186,66 @@ function isSafeRepoRelativePath(p: string): boolean {
 
 /** Read the staged content for a manifest entry. */
 export function readStaged(repoRoot: string, file: StagedFile): string | null {
-  const path = join(stagingRoot(repoRoot), file.stagedPath)
+  const path = resolveSafeStagedPath(repoRoot, file.stagedPath)
   if (!existsSync(path)) return null
   try {
+    // A committed staging bundle can contain symlinks. Following one would copy a file
+    // from outside the repository (for example `~/.ssh/id_rsa`) into the project, where a
+    // later commit would publish it. Staged content must be a regular file.
+    const stat = lstatSync(path)
+    if (!stat.isFile()) return null
     return readFileSync(path, 'utf8')
   } catch {
     return null
   }
+}
+
+/**
+ * Resolve a path beneath the staging root, refusing to follow any symlink that would
+ * read outside the repository.
+ *
+ * `isSafeRepoRelativePath` rejects `..`, absolute paths and backslashes in the manifest,
+ * but it says nothing about symlinks: a committed bundle can stage `linked-parent/
+ * secret.txt` where `linked-parent` is a symlink to `~/.ssh`. Walking the path one segment
+ * at a time and rejecting any link whose target leaves the staging root closes that gap,
+ * including dangling links (whose target cannot be resolved at all).
+ */
+function resolveSafeStagedPath(repoRoot: string, stagedPath: string): string {
+  const root = realpathSync.native(stagingRoot(repoRoot))
+  let resolved = root
+  for (const segment of stagedPath.split(/[\\/]/)) {
+    if (segment === '' || segment === '.') continue
+    const next = join(resolved, segment)
+    let stat: ReturnType<typeof lstatSync> | null = null
+    try {
+      stat = lstatSync(next)
+    } catch {
+      // Nothing exists at this segment yet; resolve it as a plain name and keep walking.
+      resolved = next
+      continue
+    }
+    if (stat.isSymbolicLink()) {
+      let target: string
+      try {
+        target = realpathSync.native(next)
+      } catch {
+        throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to follow a dangling symlink: ${stagedPath}`, {
+          hint: 'Staged files must be regular files inside the repository.',
+        })
+      }
+      if (!isInside(root, target)) {
+        throw new AnvilError(
+          ErrorCode.PreflightFailed,
+          `Refusing to read through a symlink outside the repository: ${stagedPath}`,
+          {
+            hint: 'Staged files must not traverse outside the repository via symlinks.',
+          },
+        )
+      }
+    }
+    resolved = next
+  }
+  return resolved
 }
 
 /** Read a repo-relative file, or null when absent. */
@@ -291,6 +354,58 @@ export function checkApplyPreconditions(
   return { ok: true }
 }
 
+/** True when `target` is `root` itself or lies beneath it, after both are resolved. */
+function isInside(root: string, target: string): boolean {
+  const rel = relative(root, target)
+  if (rel === '') return true
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
+/**
+ * Resolve where a write to `relPath` will actually land.
+ *
+ * `isSafeRepoRelativePath` already rejects `..`, absolute paths and backslashes, so the
+ * manifest itself cannot name a target outside the repository. It says nothing about
+ * symlinks: a checked-out repository can commit `docs -> /etc` and a manifest entry of
+ * `docs/passwd` is both relative and a write outside the repository. The deepest existing
+ * ancestor is resolved so containment is judged against the real location, and a dangling
+ * file symlink is rejected explicitly because `existsSync` follows links and would report
+ * the link as absent while `writeFileSync` still creates the outside target.
+ */
+function resolveSafeTarget(repoRoot: string, relPath: string): string {
+  const resolvedRoot = realpathSync.native(repoRoot)
+  const target = resolve(repoRoot, relPath)
+
+  let ancestor = target
+  while (!existsSync(ancestor)) {
+    // A dangling symlink is reported as absent by `existsSync` (it follows links), but
+    // `writeFileSync` would still follow it and create the link's target -- which may be
+    // outside the repository. Refuse before treating the link as a plain file name.
+    try {
+      if (lstatSync(ancestor).isSymbolicLink()) {
+        throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to write through a dangling symlink: ${relPath}`, {
+          hint: 'Staging manifest paths must resolve to a real location inside the repository.',
+        })
+      }
+    } catch (error) {
+      if (error instanceof AnvilError) throw error
+      // Nothing exists at this path; walk up to the nearest existing ancestor.
+    }
+    const parent = dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
+  const resolvedAncestor = realpathSync.native(ancestor)
+  const resolvedTarget = resolve(resolvedAncestor, relative(ancestor, target))
+
+  if (!isInside(resolvedRoot, resolvedTarget)) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to write outside repository: ${relPath}`, {
+      hint: 'Staging manifest paths must not traverse outside the repository via symlinks.',
+    })
+  }
+  return target
+}
+
 /** Write the bundle into the repository. Only called after preconditions pass. */
 export function applyStaging(repoRoot: string, manifest: StagingManifest): string[] {
   const written: string[] = []
@@ -301,7 +416,7 @@ export function applyStaging(repoRoot: string, manifest: StagingManifest): strin
         hint: 'Re-run `anvil init` to rebuild the staging bundle.',
       })
     }
-    const target = join(repoRoot, file.path)
+    const target = resolveSafeTarget(repoRoot, file.path)
     mkdirSync(join(target, '..'), { recursive: true })
     writeFileSync(target, content, 'utf8')
     written.push(file.path)

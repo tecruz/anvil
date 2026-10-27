@@ -732,6 +732,26 @@ describe('claims', () => {
     assert.ok(existsSync(result.claim.worktreePath), 'the worktree must survive')
   })
 
+  test('release refuses to discard a commit on a branch with no upstream', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel4-'), 'wt'),
+    })
+    const path = result.claim.worktreePath
+    writeFileSync(join(path, 'work.txt'), 'committed but not pushed', 'utf8')
+    git(path, 'add', 'work.txt')
+    git(path, 'commit', '-m', 'work')
+
+    // No upstream exists, so `git rev-list @{upstream}..HEAD` cannot report the commit.
+    // Releasing here would delete the branch's only copy of the work.
+    const rel = await releaseClaim({ repoRoot: repo, key: 'local-1' })
+    assert.equal(rel.worktreeRemoved, false)
+    assert.match(rel.retainedBecause ?? '', /1 unpushed commit/)
+    assert.ok(existsSync(path), 'the worktree must survive')
+  })
+
   test('release --force discards and removes', async () => {
     const repo = makeRepo()
     const result = await claimTicket({

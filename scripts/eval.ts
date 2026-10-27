@@ -30,7 +30,7 @@
  * Run with: `ANVIL_EVAL=1 npm run eval`
  */
 
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
+import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -44,6 +44,7 @@ import {
   type EvalModelRole,
   type EvalResultSummary,
   type EvalScenario,
+  hashImplementation,
   hashScenario,
   hashScenarioSource,
   parseBaseline,
@@ -157,6 +158,10 @@ async function main(): Promise<void> {
   if (checkOnly) {
     process.exit(runCheck(scenarios))
   }
+
+  // The gate hashes the source, so the harness must run that same source -- not a stale
+  // checked-in bundle. Rebuild the CLI before evaluating so what executes is what is hashed.
+  ensureCliBuilt()
 
   const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
 
@@ -343,6 +348,11 @@ function anvilCli(): string {
   return join(repoRoot, 'packages', 'cli', 'src', 'main.ts')
 }
 
+/** Build the CLI bundle before evaluating, so the code that runs is the code that is hashed. */
+function ensureCliBuilt(): void {
+  execFileSync(process.execPath, ['scripts/build.mjs'], { cwd: repoRoot, stdio: 'inherit' })
+}
+
 // ---------------------------------------------------------------------------
 // Process helpers
 // ---------------------------------------------------------------------------
@@ -452,14 +462,17 @@ function runSync(bin: string, args: string[], cwd: string): void {
 
 function writeReport(results: ScenarioResult[]): void {
   mkdirSync(rawDir, { recursive: true })
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const generatedAt = new Date().toISOString()
+  const implementation = hashImplementation(repoRoot)
+  const stamp = generatedAt.replace(/[:.]/g, '-')
   const rawPath = join(rawDir, `eval-${stamp}.json`)
-  writeFileSync(rawPath, `${formatJson({ generatedAt: new Date().toISOString(), results })}\n`, 'utf8')
+  writeFileSync(rawPath, `${formatJson({ generatedAt, implementation, results })}\n`, 'utf8')
   console.log(`\nReport written to ${rawPath}`)
 
-  const latest: { schemaVersion: 1; generatedAt: string; results: EvalResultSummary[] } = {
+  const latest: { schemaVersion: 1; generatedAt: string; implementation: string; results: EvalResultSummary[] } = {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
+    implementation,
     results: results.map(summaryOf),
   }
   writeFileSync(latestPath, `${formatJson(latest)}\n`, 'utf8')
@@ -610,7 +623,7 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     sourceHash: hashScenarioSource(repoRoot, scenario),
     expect: scenario.expect,
   }))
-  const gate = checkEvalGate(baseline, latest, current)
+  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot))
   if (!gate.ok) {
     console.error(gate.message)
     return 1

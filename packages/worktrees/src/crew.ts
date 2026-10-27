@@ -533,10 +533,12 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
     runnable.push(claim)
   }
 
-  // The policy comes from the *repository's* profile, not one worktree's: they are the
-  // same project, and the caches are shared across all of them.
-  const profileDir = runnable[0]?.worktreePath ?? options.repoRoot
-  const profile = buildProfileFor(profileDir)
+  // The cache policy comes from *every* worktree's profile: they are the same project and
+  // the caches are shared across all of them. A crew is only as parallel as its most
+  // restricted stack -- one Gradle worktree serializes the whole crew, even when another
+  // worktree is a content-addressed Go module.
+  const decisions = runnable.map((claim) => concurrencyFor(buildProfileFor(claim.worktreePath), options.jobs ?? null))
+  const forcedByCaches = decisions.some((decision) => decision.forcedByCaches)
   const decision =
     options.forceParallel === true && options.jobs != null
       ? {
@@ -545,10 +547,22 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
           forcedByCaches: false,
           rules: [],
         }
-      : concurrencyFor(profile, options.jobs ?? null)
+      : {
+          jobs: forcedByCaches ? 1 : Math.min(...decisions.map((decision) => decision.jobs)),
+          reason: forcedByCaches
+            ? `serialized: ${decisions
+                .flatMap((decision) => decision.rules)
+                .map((rule) => rule.reason)
+                .join('; ')}`
+            : `${decisions[0]?.jobs ?? defaultJobs()} concurrent runs`,
+          forcedByCaches,
+          rules: decisions.flatMap((decision) => decision.rules),
+        }
 
   const results = await mapWithConcurrency(runnable, decision.jobs, async (claim) => {
-    const commands = verifyCommandsFor(claim, profile)
+    const profile = buildProfileFor(claim.worktreePath)
+    const verifyCwd = profile.projectDir === '' ? claim.worktreePath : join(claim.worktreePath, profile.projectDir)
+    const commands = verifyCommandsFor(profile)
     if (commands.length === 0) {
       return {
         key: claim.key,
@@ -560,7 +574,7 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
     }
     const perCommand: VerifyResult['commands'] = []
     for (const command of commands) {
-      const outcome = await options.run(command, claim.worktreePath)
+      const outcome = await options.run(command, verifyCwd)
       perCommand.push({
         command,
         ok: outcome.ok,
@@ -587,8 +601,7 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
   }
 }
 
-function verifyCommandsFor(claim: Claim, profile: ProjectProfile): string[] {
-  void claim
+function verifyCommandsFor(profile: ProjectProfile): string[] {
   const order: Array<keyof ProjectProfile['commands']> = ['testFast', 'test', 'typecheck', 'lint', 'build']
   const out: string[] = []
   for (const kind of order) {

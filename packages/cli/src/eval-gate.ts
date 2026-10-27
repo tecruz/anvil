@@ -14,8 +14,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, relative } from 'node:path'
 
 /** The two repository sizes the matrix is required to cover. */
 export type EvalScenarioSize = 'tiny' | 'medium'
@@ -86,6 +86,11 @@ export interface EvalResultSummary {
 export interface EvalLatest {
   schemaVersion: 1
   generatedAt: string
+  /**
+   * Hash of the implementation that produced these results. Optional only so older
+   * summaries still parse; the gate refuses a summary that does not carry one.
+   */
+  implementation?: string
   results: EvalResultSummary[]
 }
 
@@ -147,6 +152,45 @@ export function hashDirectory(dir: string): string {
     hash.update('\0')
     hash.update(hashFile(path))
     hash.update('\0')
+  }
+  return hash.digest('hex')
+}
+
+/**
+ * Hash the implementation under evaluation: anvil's sources and the package metadata that
+ * decides what `anvil init` emits.
+ *
+ * Results have to be bound to this, because a checked-in `latest.json` outlives the run
+ * that produced it. Comparing results with a baseline tells you the scenarios did not
+ * change; it says nothing about the code that executed them. Without this hash, a change
+ * to the CLI passes the gate on evidence gathered from a different binary.
+ */
+export function hashImplementation(repoRoot: string): string {
+  const hash = createHash('sha256')
+  const add = (path: string, label: string): void => {
+    hash.update(label.replace(/\\/g, '/'))
+    hash.update('\0')
+    hash.update(hashFile(path))
+    hash.update('\0')
+  }
+
+  for (const rel of ['package.json', 'package-lock.json']) {
+    const path = join(repoRoot, ...rel.split('/'))
+    if (existsSync(path)) add(path, rel)
+  }
+
+  const packagesDir = join(repoRoot, 'packages')
+  if (!existsSync(packagesDir)) return hash.digest('hex')
+  const packageDirs = readdirSync(packagesDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(packagesDir, entry.name))
+    .sort()
+  for (const dir of packageDirs) {
+    const manifest = join(dir, 'package.json')
+    if (existsSync(manifest)) add(manifest, relative(repoRoot, manifest))
+    const src = join(dir, 'src')
+    if (!existsSync(src)) continue
+    for (const path of filesUnder(src)) add(path, relative(repoRoot, path))
   }
   return hash.digest('hex')
 }
@@ -269,6 +313,9 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
   if (value.schemaVersion !== 1) return 'latest summary schemaVersion must be 1'
+  if (value.implementation !== undefined && typeof value.implementation !== 'string') {
+    return 'latest summary implementation is invalid'
+  }
   if (!Array.isArray(value.results)) return 'latest summary has no results list'
   const results: EvalResultSummary[] = []
   for (const raw of value.results) {
@@ -305,7 +352,12 @@ export function parseLatest(value: unknown): EvalLatest | string {
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
     })
   }
-  return { schemaVersion: 1, generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '', results }
+  return {
+    schemaVersion: 1,
+    generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
+    ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
+    results,
+  }
 }
 
 /**
@@ -324,8 +376,19 @@ export function checkEvalGate(
   baseline: EvalBaseline,
   latest: EvalLatest,
   current?: readonly EvalBaselineScenario[],
+  currentImplementation?: string,
 ): EvalGateResult {
   const failures: string[] = []
+
+  if (currentImplementation !== undefined) {
+    if (latest.implementation === undefined) {
+      failures.push('the latest run does not record which implementation it evaluated')
+    } else if (latest.implementation !== currentImplementation) {
+      failures.push(
+        'the latest run evaluated a different implementation; re-run the eval harness and commit the new summary',
+      )
+    }
+  }
 
   if (current !== undefined) {
     const byId = new Map(current.map((scenario) => [scenario.id, scenario]))

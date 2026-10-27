@@ -14,6 +14,7 @@
  *     last.
  */
 
+import { join } from 'node:path'
 import { git, type WorktreeStatus, worktreeStatus } from '@anvil/git'
 import {
   analyzeRisk,
@@ -118,6 +119,11 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   }
 
   // ---- 2. Verify -----------------------------------------------------------
+  // A project can live in a subdirectory of the repository (a monorepo, a Gradle module,
+  // `services/api`). Verify commands are written relative to that directory, so they run
+  // from it, not from the worktree root.
+  const verifyCwd =
+    options.profile.projectDir === '' ? options.worktreePath : join(options.worktreePath, options.profile.projectDir)
   const verification: PrBodyInput['verification'] = []
   if (options.skipVerify) {
     stages.push({
@@ -129,7 +135,7 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
     const entries = verifyCommandEntries(options.profile)
     for (const entry of entries) {
       commandsRun.push(entry.cmd)
-      const result = await options.run(entry.cmd, options.worktreePath)
+      const result = await options.run(entry.cmd, verifyCwd)
       verification.push({
         command: entry.cmd,
         ok: result.ok,
