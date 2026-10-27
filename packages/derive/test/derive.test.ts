@@ -27,6 +27,7 @@ import {
   inspectStaging,
   readManifest,
   readRepoFile,
+  readStaged,
   sha256,
   validateAll,
   validateArtifact,
@@ -495,6 +496,40 @@ describe('staging lifecycle', () => {
     assert.ok(state.tampered.includes('AGENTS.md'), 'a symlinked staged file is not trusted')
     const manifest = state.manifest
     assert.ok(manifest !== null)
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+    assert.doesNotMatch(readRepoFile(dir, 'AGENTS.md') ?? '', /do not exfiltrate/)
+  })
+
+  test('a symlinked parent directory cannot be used to read outside the repository', (t) => {
+    // `readStaged` checks only the final segment with `lstatSync`. A symlinked *parent*
+    // directory still resolves to content outside the repository: `files/linked-parent/
+    // synthetic-secret.txt` reads the secret through the link even though the final
+    // component is not itself a symlink.
+    const dir = materialize('node-npm')
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-secret-parent-'))
+    temps.push(outside)
+    const secret = join(outside, 'synthetic-secret.txt')
+    writeFileSync(secret, 'do not exfiltrate\n', 'utf8')
+    stageOnce(dir)
+    const stagingFiles = join(dir, '.anvil', 'staging', 'files')
+    const linkDir = join(stagingFiles, 'linked-parent')
+    try {
+      symlinkSync(outside, linkDir, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+
+    const manifest = inspectStaging(dir).manifest
+    assert.ok(manifest !== null)
+    const entry = manifest.files.find((f) => f.path === 'AGENTS.md')
+    assert.ok(entry !== undefined, 'AGENTS.md is staged')
+    // Repoint the entry at a file that only exists through the symlinked parent.
+    entry!.stagedPath = 'linked-parent/synthetic-secret.txt'
+    entry!.path = 'AGENTS.md'
+
+    const content = readStaged(dir, entry)
+    assert.equal(content, null, 'content reached through a symlinked parent must not be read')
     assert.throws(() => applyStaging(dir, manifest), /disappeared/)
     assert.doesNotMatch(readRepoFile(dir, 'AGENTS.md') ?? '', /do not exfiltrate/)
   })

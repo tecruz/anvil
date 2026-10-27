@@ -30,7 +30,7 @@
  * Run with: `ANVIL_EVAL=1 npm run eval`
  */
 
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
+import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -158,6 +158,10 @@ async function main(): Promise<void> {
   if (checkOnly) {
     process.exit(runCheck(scenarios))
   }
+
+  // The gate hashes the source, so the harness must run that same source -- not a stale
+  // checked-in bundle. Rebuild the CLI before evaluating so what executes is what is hashed.
+  ensureCliBuilt()
 
   const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
 
@@ -342,6 +346,11 @@ function anvilCli(): string {
   const bundle = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
   if (existsSync(bundle)) return bundle
   return join(repoRoot, 'packages', 'cli', 'src', 'main.ts')
+}
+
+/** Build the CLI bundle before evaluating, so the code that runs is the code that is hashed. */
+function ensureCliBuilt(): void {
+  execFileSync(process.execPath, ['scripts/build.mjs'], { cwd: repoRoot, stdio: 'inherit' })
 }
 
 // ---------------------------------------------------------------------------
