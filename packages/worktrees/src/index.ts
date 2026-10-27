@@ -421,10 +421,27 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
   let status: WorktreeStatus | null = null
   if (exists) status = await worktreeStatus(claim.worktreePath)
 
+  let unpushedCount = status?.unpushed ?? 0
+  let unpushedUnknown = false
+  if (status !== null && !status.hasUpstream && exists) {
+    const ahead = await git(['rev-list', '--count', `${claim.baseRef}..HEAD`], { cwd: claim.worktreePath })
+    if (ahead.exitCode === 0) {
+      const n = Number.parseInt(ahead.stdout.trim(), 10)
+      if (Number.isFinite(n)) unpushedCount = n
+    } else {
+      // Without an upstream there is no `@{upstream}..HEAD` to count, and the base ref can
+      // itself be gone (a deleted remote branch). Refusing to remove is the safe answer:
+      // `--force` is the explicit way to say the commits do not matter.
+      unpushedUnknown = true
+    }
+  }
+
   const losing: string[] = []
   if (status?.dirty === true) losing.push(`${status.changes.length} uncommitted change(s)`)
-  if (status !== null && status.unpushed !== null && status.unpushed > 0) {
-    losing.push(`${status.unpushed} unpushed commit(s)`)
+  if (unpushedCount > 0) {
+    losing.push(`${unpushedCount} unpushed commit(s)`)
+  } else if (unpushedUnknown) {
+    losing.push(`commits that could not be counted against ${claim.baseRef}`)
   }
 
   let worktreeRemoved = false
