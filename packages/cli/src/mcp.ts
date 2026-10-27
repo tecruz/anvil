@@ -232,6 +232,16 @@ async function callTool(
     throw new McpArgumentError(`Unknown tool: ${name}`)
   }
 
+  const schema = tool.inputSchema as { properties?: Record<string, unknown>; additionalProperties?: boolean }
+  if (schema.additionalProperties === false && schema.properties !== undefined) {
+    const allowed = new Set(Object.keys(schema.properties))
+    for (const key of Object.keys(input)) {
+      if (!allowed.has(key)) {
+        throw new McpArgumentError(`Unknown property: ${key}`)
+      }
+    }
+  }
+
   const { args, cwd } = tool.build(input, context)
   let result: McpInvokeResult
   try {
@@ -319,6 +329,9 @@ async function handleMessage(
         const params = isRecord(request.params) ? request.params : {}
         if (typeof params.name !== 'string') {
           return rpcError(id, -32602, 'tools/call requires a tool name')
+        }
+        if (params.arguments !== undefined && !isRecord(params.arguments)) {
+          return rpcError(id, -32602, 'tools/call arguments must be an object')
         }
         const args = isRecord(params.arguments) ? params.arguments : {}
         try {
