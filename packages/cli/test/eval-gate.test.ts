@@ -158,6 +158,39 @@ describe('the eval gate', () => {
     assert.equal(result.ok, true, result.message)
   })
 
+  test('fails when the latest run does not record the implementation it evaluated', () => {
+    const expected = baseline(matrix())
+    const gate = checkEvalGate(expected, latest(matrix()), expected.scenarios, 'impl-hash')
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /does not record which implementation/)
+  })
+
+  test('fails when the latest run was produced by a different implementation', () => {
+    const expected = baseline(matrix())
+    const run = latest(matrix())
+    run.implementation = 'old-impl'
+    const gate = checkEvalGate(expected, run, expected.scenarios, 'new-impl')
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /different implementation/)
+  })
+
+  test('passes when the implementation matches', () => {
+    const expected = baseline(matrix())
+    const run = latest(matrix())
+    run.implementation = 'impl-hash'
+    const gate = checkEvalGate(expected, run, expected.scenarios, 'impl-hash')
+    assert.equal(gate.ok, true, gate.message)
+  })
+
+  test('fails when a run recorded an agent error', () => {
+    const scenarios = matrix()
+    const run = latest(scenarios)
+    run.results[0]!.error = 'agent timed out'
+    const gate = checkEvalGate(baseline(scenarios), run)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /agent error/)
+  })
+
   test('fails when the scenario changed after the baseline was written', () => {
     const expected = baseline(matrix())
     const changed = expected.scenarios.map((scenario) =>
@@ -222,15 +255,6 @@ describe('the eval gate', () => {
     const gate = checkEvalGate(baseline(scenarios), run)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /visible verifier/)
-  })
-
-  test('fails when a run recorded an agent error', () => {
-    const scenarios = matrix()
-    const run = latest(scenarios)
-    run.results[0]!.error = 'agent timed out'
-    const gate = checkEvalGate(baseline(scenarios), run)
-    assert.equal(gate.ok, false)
-    assert.match(gate.message, /agent error/)
   })
 
   test('fails when the latest run has a scenario the baseline does not', () => {

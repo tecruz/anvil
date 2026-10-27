@@ -44,6 +44,7 @@ import {
   type EvalModelRole,
   type EvalResultSummary,
   type EvalScenario,
+  hashImplementation,
   hashScenario,
   hashScenarioSource,
   parseBaseline,
@@ -452,14 +453,17 @@ function runSync(bin: string, args: string[], cwd: string): void {
 
 function writeReport(results: ScenarioResult[]): void {
   mkdirSync(rawDir, { recursive: true })
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const generatedAt = new Date().toISOString()
+  const implementation = hashImplementation(repoRoot)
+  const stamp = generatedAt.replace(/[:.]/g, '-')
   const rawPath = join(rawDir, `eval-${stamp}.json`)
-  writeFileSync(rawPath, `${formatJson({ generatedAt: new Date().toISOString(), results })}\n`, 'utf8')
+  writeFileSync(rawPath, `${formatJson({ generatedAt, implementation, results })}\n`, 'utf8')
   console.log(`\nReport written to ${rawPath}`)
 
-  const latest: { schemaVersion: 1; generatedAt: string; results: EvalResultSummary[] } = {
+  const latest: { schemaVersion: 1; generatedAt: string; implementation: string; results: EvalResultSummary[] } = {
     schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
+    implementation,
     results: results.map(summaryOf),
   }
   writeFileSync(latestPath, `${formatJson(latest)}\n`, 'utf8')
@@ -610,7 +614,7 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     sourceHash: hashScenarioSource(repoRoot, scenario),
     expect: scenario.expect,
   }))
-  const gate = checkEvalGate(baseline, latest, current)
+  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot))
   if (!gate.ok) {
     console.error(gate.message)
     return 1
