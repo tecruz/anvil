@@ -34,7 +34,7 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
   checkEvalGate,
@@ -91,90 +91,104 @@ interface ScenarioResult extends EvalResultSummary {
   error?: string
 }
 
-const args = process.argv.slice(2)
-const dryRun = args.includes('--dry-run')
-const listOnly = args.includes('--list')
-const checkOnly = args.includes('--check')
-const fakeAgent = args.includes('--fake-agent')
-const writeBaselineAfterRun = args.includes('--write-baseline')
-const only = flagValue('--scenario')
-const enabled = process.env.ANVIL_EVAL === '1'
+async function main(): Promise<void> {
+  const args = process.argv.slice(2)
+  const dryRun = args.includes('--dry-run')
+  const listOnly = args.includes('--list')
+  const checkOnly = args.includes('--check')
+  const fakeAgent = args.includes('--fake-agent')
+  const writeBaselineAfterRun = args.includes('--write-baseline')
+  const only = flagValue('--scenario', args)
+  const enabled = process.env.ANVIL_EVAL === '1'
 
-if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
-  console.error('--write-baseline writes the result of a run; it cannot be combined with --dry-run, --list or --check')
-  process.exit(1)
-}
-
-// A dry run, a listing, a gate check and the fake agent cost no tokens. Everything that
-// can spend money stays opt-in.
-if (!enabled && !dryRun && !listOnly && !checkOnly && !fakeAgent) {
-  console.log('The eval harness is opt-in: it runs an agent against a model.')
-  console.log('Run it with: ANVIL_EVAL=1 npm run eval')
-  console.log('Preview what it would do with: npm run eval -- --dry-run')
-  console.log('List the matrix with: npm run eval -- --list')
-  console.log('Check the last run with: npm run eval:check')
-  process.exit(0)
-}
-
-const scenarios = loadScenarios()
-const selectedScenarios = only === null ? scenarios : scenarios.filter((s) => s.id === only)
-if (selectedScenarios.length === 0) {
-  console.error(`No scenario matched ${only ?? '(nothing)'}`)
-  process.exit(1)
-}
-
-const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels()
-if (models.length === 0) {
-  console.error('No model matched the requested role. Use --models small, --models frontier or --models all.')
-  process.exit(1)
-}
-
-if (listOnly) {
-  printScenarios(selectedScenarios, models)
-  process.exit(0)
-}
-
-if (dryRun) {
-  for (const scenario of selectedScenarios) {
-    console.log(`${scenario.id}`)
-    console.log(`  size      ${scenario.size}`)
-    console.log(`  kind      ${scenario.kind}`)
-    console.log(`  repo      ${scenario.repo}`)
-    console.log(`  task      ${scenario.task}`)
-    console.log(`  verify    ${scenario.verify.join('; ')}`)
-    console.log(`  hidden    ${(scenario.hidden ?? []).map((h) => `${h.from} -> ${h.to}`).join('; ') || '(none)'}`)
-    console.log(`  expect    ${JSON.stringify(scenario.expect)}`)
-    console.log(`  variants  ${VARIANTS.join(', ')}`)
-    console.log(`  models    ${models.map((m) => `${m.id} (${m.role})`).join(', ')}`)
-    if (fakeAgent) console.log('  agent     fake (a canned answer, no model is called)')
+  if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
+    console.error(
+      '--write-baseline writes the result of a run; it cannot be combined with --dry-run, --list or --check',
+    )
+    process.exit(1)
   }
-  process.exit(0)
-}
 
-if (checkOnly) {
-  process.exit(runCheck())
-}
+  // A dry run, a listing, a gate check and the fake agent cost no tokens. Everything that
+  // can spend money stays opt-in.
+  if (!enabled && !dryRun && !listOnly && !checkOnly && !fakeAgent) {
+    console.log('The eval harness is opt-in: it runs an agent against a model.')
+    console.log('Run it with: ANVIL_EVAL=1 npm run eval')
+    console.log('Preview what it would do with: npm run eval -- --dry-run')
+    console.log('List the matrix with: npm run eval -- --list')
+    console.log('Check the last run with: npm run eval:check')
+    process.exit(0)
+  }
 
-const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
+  const scenarios = loadScenarios()
+  const selectedScenarios = only === null ? scenarios : scenarios.filter((s) => s.id === only)
+  if (selectedScenarios.length === 0) {
+    console.error(`No scenario matched ${only ?? '(nothing)'}`)
+    process.exit(1)
+  }
 
-const results: ScenarioResult[] = []
-for (const model of models) {
-  for (const scenario of selectedScenarios) {
-    const scenarioHash = hashScenario(scenario)
-    const sourceHash = hashScenarioSource(repoRoot, scenario)
-    for (const variant of VARIANTS) {
-      results.push(await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent))
+  const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
+  if (models.length === 0) {
+    console.error('No model matched the requested role. Use --models small, --models frontier or --models all.')
+    process.exit(1)
+  }
+
+  if (listOnly) {
+    printScenarios(selectedScenarios, models)
+    process.exit(0)
+  }
+
+  if (dryRun) {
+    for (const scenario of selectedScenarios) {
+      console.log(`${scenario.id}`)
+      console.log(`  size      ${scenario.size}`)
+      console.log(`  kind      ${scenario.kind}`)
+      console.log(`  repo      ${scenario.repo}`)
+      console.log(`  task      ${scenario.task}`)
+      console.log(`  verify    ${scenario.verify.join('; ')}`)
+      console.log(`  hidden    ${(scenario.hidden ?? []).map((h) => `${h.from} -> ${h.to}`).join('; ') || '(none)'}`)
+      console.log(`  expect    ${JSON.stringify(scenario.expect)}`)
+      console.log(`  variants  ${VARIANTS.join(', ')}`)
+      console.log(`  models    ${models.map((m) => `${m.id} (${m.role})`).join(', ')}`)
+      if (fakeAgent) console.log('  agent     fake (a canned answer, no model is called)')
+    }
+    process.exit(0)
+  }
+
+  if (checkOnly) {
+    process.exit(runCheck(scenarios))
+  }
+
+  const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
+
+  const results: ScenarioResult[] = []
+  for (const model of models) {
+    for (const scenario of selectedScenarios) {
+      const scenarioHash = hashScenario(scenario)
+      const sourceHash = hashScenarioSource(repoRoot, scenario)
+      for (const variant of VARIANTS) {
+        results.push(await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent))
+      }
     }
   }
+
+  writeReport(results)
+  printSummary(results)
+  if (writeBaselineAfterRun) writeBaseline(scenarios)
+
+  // The exit code is the verdict of the harness, not of the agent: a failed run is
+  // reported in the summary, and `--check` is the command that turns it into a failure.
+  process.exit(0)
 }
 
-writeReport(results)
-printSummary(results)
-if (writeBaselineAfterRun) writeBaseline(scenarios)
-
-// The exit code is the verdict of the harness, not of the agent: a failed run is
-// reported in the summary, and `--check` is the command that turns it into a failure.
-process.exit(0)
+// Only run the harness when this file is executed directly, so `run` and the other
+// helpers can be imported by tests without launching a benchmark.
+const argv1 = process.argv[1]
+if (typeof argv1 === 'string' && import.meta.url === pathToFileURL(argv1).href) {
+  await main().catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
+}
 
 // ---------------------------------------------------------------------------
 // The run
@@ -345,7 +359,12 @@ async function runAll(commands: string[], cwd: string): Promise<RunResult[]> {
   return out
 }
 
-async function run(bin: string, args: string[], cwd: string, options: { timeoutMs?: number } = {}): Promise<RunResult> {
+export async function run(
+  bin: string,
+  args: string[],
+  cwd: string,
+  options: { timeoutMs?: number } = {},
+): Promise<RunResult> {
   // `spawnArgv` rather than `spawn(bin, ...)`: the npm-installed `opencode` is a `.CMD`
   // shim on Windows, and Node's spawn does not resolve PATHEXT.
   const { file, args: argv } = spawnArgv(bin, args, { env: process.env, platform: process.platform })
@@ -557,7 +576,7 @@ function printScenarios(scenarios: readonly EvalScenario[], models: readonly Eva
 // The gate
 // ---------------------------------------------------------------------------
 
-function runCheck(): number {
+function runCheck(scenarios: readonly EvalScenario[]): number {
   if (!existsSync(baselinePath)) {
     console.log('No eval baseline exists yet; the gate bootstraps as a pass.')
     console.log('Run `npm run eval -- --fake-agent --write-baseline` to create one.')
@@ -633,7 +652,7 @@ function loadModels(): EvalModel[] {
   return models
 }
 
-function selectedModels(): EvalModel[] {
+function selectedModels(args: string[]): EvalModel[] {
   let models = loadModels()
 
   // `ANVIL_EVAL_MODELS` replaces the pair, in small,frontier order.
@@ -656,12 +675,12 @@ function selectedModels(): EvalModel[] {
     models = [{ id: single, role: 'small' }]
   }
 
-  const requested = modelRoles()
+  const requested = modelRoles(args)
   return models.filter((model) => requested.has('all') || requested.has(model.role))
 }
 
-function modelRoles(): Set<EvalModelRole | 'all'> {
-  const raw = flagValue('--models') ?? 'small'
+function modelRoles(args: string[]): Set<EvalModelRole | 'all'> {
+  const raw = flagValue('--models', args) ?? 'small'
   const out = new Set<EvalModelRole | 'all'>()
   for (const part of raw.split(',').map((p) => p.trim().toLowerCase())) {
     if (part !== 'small' && part !== 'frontier' && part !== 'all') {
@@ -673,7 +692,7 @@ function modelRoles(): Set<EvalModelRole | 'all'> {
   return out
 }
 
-function flagValue(flag: string): string | null {
+function flagValue(flag: string, args: string[]): string | null {
   const index = args.indexOf(flag)
   if (index === -1) return null
   return args[index + 1] ?? null
