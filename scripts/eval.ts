@@ -352,9 +352,11 @@ async function run(bin: string, args: string[], cwd: string, options: { timeoutM
   const needsVerbatim = process.platform === 'win32' && file.toLowerCase().endsWith('cmd.exe')
 
   return await new Promise<RunResult>((resolvePromise) => {
+    // OpenCode 2 prefers inherited PWD over cwd. Point PWD at the scenario directory
+    // so the agent works in the fixture, not in the repo that launched the harness.
     const child = spawn(file, argv, {
       cwd,
-      env: process.env,
+      env: { ...process.env, PWD: cwd },
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(needsVerbatim ? { windowsVerbatimArguments: true } : {}),
     })
