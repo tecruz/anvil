@@ -224,6 +224,15 @@ describe('the eval gate', () => {
     assert.match(gate.message, /visible verifier/)
   })
 
+  test('fails when a run recorded an agent error', () => {
+    const scenarios = matrix()
+    const run = latest(scenarios)
+    run.results[0]!.error = 'agent timed out'
+    const gate = checkEvalGate(baseline(scenarios), run)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /agent error/)
+  })
+
   test('fails when the latest run has a scenario the baseline does not', () => {
     const scenarios = matrix()
     const extra = scenario({ id: 'unexpected' })

@@ -387,6 +387,11 @@ export function checkEvalGate(
     if (scenario.expect.hiddenVerified === true && results.some((r) => r.hiddenVerified !== true)) {
       failures.push(`${scenario.id}: a run did not pass the hidden verifier`)
     }
+    if (results.some((r) => r.error !== undefined)) {
+      failures.push(
+        `${scenario.id}: a run encountered an agent error: ${results.find((r) => r.error !== undefined)?.error}`,
+      )
+    }
   }
 
   const baselineIds = new Set(baseline.scenarios.map((s) => s.id))

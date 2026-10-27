@@ -59,6 +59,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The checked-in summary describes an earlier, hermetic run. Remove it before any
+      # setup step can fail, so the always() summary below cannot publish stale results
+      # as this run's evidence.
+      - name: discard the checked-out summary
+        run: rm -f eval-results/latest.json
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: package.json
@@ -107,11 +113,7 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           MODELS: ${{ inputs.models || 'small' }}
         shell: bash
-        run: |
-          # A summary left over from the checkout must not be mistaken for this run's
-          # result if the harness dies before writing one.
-          rm -f eval-results/latest.json
-          npm run eval -- --models "$MODELS"
+        run: npm run eval -- --models "$MODELS"
 
       # The harness itself always exits 0. The gate is the pass/fail verdict: every
       # scenario must meet its baseline expectation, and any recorded agent error fails.
