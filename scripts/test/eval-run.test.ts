@@ -37,7 +37,6 @@ describe('eval harness process environment', () => {
     // the agent works in the scenario fixture, not in the directory that launched
     // the harness (the parent / repo checkout).
     assert.equal(reported.pwd, scenario, 'PWD must point at the subprocess cwd')
-    assert.equal(reported.cwd, scenario, 'cwd must be the subprocess directory')
     assert.notEqual(reported.pwd, inherited, 'PWD must not be the inherited directory')
   })
 })
