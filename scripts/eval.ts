@@ -31,7 +31,8 @@
  */
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -43,12 +44,15 @@ import {
   type EvalModel,
   type EvalModelRole,
   type EvalResultSummary,
+  type EvalRunRecord,
+  type EvalRunRecordResult,
   type EvalScenario,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
   parseBaseline,
   parseLatest,
+  parseRunRecord,
   readJsonFile,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
@@ -62,6 +66,8 @@ const resultsDir = join(repoRoot, 'eval-results')
 const rawDir = join(resultsDir, 'raw')
 const latestPath = join(resultsDir, 'latest.json')
 const baselinePath = join(resultsDir, 'baseline.json')
+const runRecordPath = join(resultsDir, 'run.json')
+const checkpointsDir = join(resultsDir, 'checkpoints')
 
 /** The two things being compared: the same repository, with and without the artifacts. */
 const VARIANTS = ['bare', 'anvil'] as const
@@ -165,18 +171,108 @@ async function main(): Promise<void> {
 
   const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
 
+  // A run record is written separately from latest.json so an interrupted run cannot
+  // overwrite an earlier complete summary. Capture the implementation and bundle digest
+  // before the first scenario, then compare at the end: if either changed mid-run the
+  // evidence is invalidated.
+  const runId = randomUUID()
+  const startedAt = new Date().toISOString()
+  const commitSha = readCommitSha()
+  const implementationBefore = hashImplementation(repoRoot)
+  const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+  const bundleDigest = existsSync(bundlePath)
+    ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
+    : null
+
+  const declaredKeys: string[] = []
+  for (const _model of models) {
+    for (const scenario of selectedScenarios) {
+      for (const variant of VARIANTS) {
+        declaredKeys.push(`${scenario.id}/${variant}`)
+      }
+    }
+  }
+
+  const runRecord: EvalRunRecord = {
+    schemaVersion: 1,
+    runId,
+    startedAt,
+    completedAt: null,
+    completionState: 'in-progress',
+    commitSha,
+    implementation: implementationBefore,
+    bundleDigest,
+    models,
+    opencodeVersion,
+    nodeVersion: process.version,
+    runKeys: declaredKeys,
+    executionOrder: [],
+    results: [],
+  }
+  writeRunRecord(runRecord)
+
   const results: ScenarioResult[] = []
+  let allCompleted = true
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
       const sourceHash = hashScenarioSource(repoRoot, scenario)
       for (const variant of VARIANTS) {
-        results.push(await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent))
+        const result = await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent)
+        results.push(result)
+
+        // Checkpoint the result immediately, before the next scenario starts. A crash or
+        // timeout after this point leaves this result readable, and latest.json is never
+        // overwritten by an incomplete run.
+        const completedAt = new Date().toISOString()
+        const state: EvalRunRecordResult['state'] = result.error === undefined ? 'completed' : 'failed'
+        const checkpoint: EvalRunRecordResult = {
+          scenario: result.scenario,
+          variant: result.variant,
+          model: result.model,
+          modelRole: result.modelRole,
+          completedAt,
+          state,
+          ...(result.error === undefined ? {} : { error: result.error }),
+        }
+        writeCheckpoint(runId, checkpoint)
+
+        const key = `${result.scenario}/${result.variant}`
+        runRecord.executionOrder.push(key)
+        runRecord.results.push(checkpoint)
+        if (state !== 'completed') allCompleted = false
+        writeRunRecord(runRecord)
       }
     }
   }
 
-  writeReport(results)
+  // The implementation is hashed again after the run: if the sources changed under the
+  // run, the results were produced by a different binary than the one committed.
+  const implementationAfter = hashImplementation(repoRoot)
+
+  let completionState: EvalRunRecord['completionState']
+  if (implementationBefore !== implementationAfter) {
+    completionState = 'failed'
+  } else if (!allCompleted) {
+    completionState = 'partial'
+  } else {
+    completionState = 'completed'
+  }
+
+  runRecord.completedAt = new Date().toISOString()
+  runRecord.completionState = completionState
+  runRecord.implementation = implementationBefore
+  writeRunRecord(runRecord)
+
+  // Only promote latest.json when the full declared run completed without the
+  // implementation changing. An interrupted run leaves checkpoints and a partial run
+  // record, but latest.json keeps the last complete summary.
+  if (completionState === 'completed') {
+    writeReport(results, runId)
+  } else {
+    console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
+  }
+
   printSummary(results)
   if (writeBaselineAfterRun) writeBaseline(scenarios)
 
@@ -460,23 +556,50 @@ function runSync(bin: string, args: string[], cwd: string): void {
 // The report
 // ---------------------------------------------------------------------------
 
-function writeReport(results: ScenarioResult[]): void {
+function writeReport(results: ScenarioResult[], runId?: string): void {
   mkdirSync(rawDir, { recursive: true })
   const generatedAt = new Date().toISOString()
   const implementation = hashImplementation(repoRoot)
   const stamp = generatedAt.replace(/[:.]/g, '-')
   const rawPath = join(rawDir, `eval-${stamp}.json`)
-  writeFileSync(rawPath, `${formatJson({ generatedAt, implementation, results })}\n`, 'utf8')
+  atomicWriteJson(rawPath, { generatedAt, implementation, results })
   console.log(`\nReport written to ${rawPath}`)
 
-  const latest: { schemaVersion: 1; generatedAt: string; implementation: string; results: EvalResultSummary[] } = {
+  const latest: {
+    schemaVersion: 1
+    generatedAt: string
+    implementation: string
+    runId?: string
+    results: EvalResultSummary[]
+  } = {
     schemaVersion: 1,
     generatedAt,
     implementation,
+    ...(runId === undefined ? {} : { runId }),
     results: results.map(summaryOf),
   }
-  writeFileSync(latestPath, `${formatJson(latest)}\n`, 'utf8')
+  atomicWriteJson(latestPath, latest)
   console.log(`Summary written to ${latestPath}`)
+}
+
+/** Write JSON atomically: serialize to a temp file in the same directory, then rename. */
+function atomicWriteJson(path: string, value: unknown): void {
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const temp = join(dir, `.tmp-${randomUUID()}.json`)
+  try {
+    writeFileSync(temp, `${formatJson(value)}\n`, 'utf8')
+    renameSync(temp, path)
+  } catch (err) {
+    // Never leave a half-written file in place of the last good one: remove the temp
+    // and leave the existing file untouched.
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // best effort
+    }
+    throw err
+  }
 }
 
 function summaryOf(result: ScenarioResult): EvalResultSummary {
@@ -511,6 +634,28 @@ function writeBaseline(scenarios: readonly EvalScenario[]): void {
   }
   writeFileSync(baselinePath, `${formatJson(baseline)}\n`, 'utf8')
   console.log(`Baseline written to ${baselinePath}`)
+}
+
+/** HEAD of the repository the harness runs against, or null when git is unavailable. */
+function readCommitSha(): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim() || null
+  } catch {
+    return null
+  }
+}
+
+/** Atomically write the run record that tracks how a benchmark run is progressing. */
+function writeRunRecord(record: EvalRunRecord): void {
+  atomicWriteJson(runRecordPath, record)
+}
+
+/** Atomically checkpoint a single completed scenario/variant result. */
+function writeCheckpoint(runId: string, result: EvalRunRecordResult): void {
+  const dir = join(checkpointsDir, runId)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${result.scenario}-${result.variant}.json`)
+  atomicWriteJson(path, result)
 }
 
 /**
@@ -612,6 +757,15 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     return 1
   }
 
+  // A latest summary must be traceable to a completed run record. Read the run record
+  // so the gate can reject summaries promoted from partial or interrupted runs.
+  let runRecord: EvalRunRecord | null = null
+  if (existsSync(runRecordPath)) {
+    const runRecordRaw = readJsonFile(runRecordPath)
+    const parsed = parseRunRecord(runRecordRaw)
+    runRecord = typeof parsed === 'string' ? null : parsed
+  }
+
   // The baseline has to describe the matrix on disk, not only the last run. Without this
   // half, editing a fixture after `--write-baseline` and never running the harness again
   // would pass, because `latest.json` and `baseline.json` would still agree with each other.
@@ -623,7 +777,7 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     sourceHash: hashScenarioSource(repoRoot, scenario),
     expect: scenario.expect,
   }))
-  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot))
+  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord)
   if (!gate.ok) {
     console.error(gate.message)
     return 1

@@ -91,7 +91,58 @@ export interface EvalLatest {
    * summaries still parse; the gate refuses a summary that does not carry one.
    */
   implementation?: string
+  /**
+   * The run record this summary was promoted from. Present once the run completed; the
+   * gate uses it to reject summaries promoted from partial or interrupted runs.
+   */
+  runId?: string
   results: EvalResultSummary[]
+}
+
+/** One completed scenario/variant result inside a run record. */
+export interface EvalRunRecordResult {
+  scenario: string
+  variant: 'bare' | 'anvil'
+  model: string | null
+  modelRole: string | null
+  completedAt: string
+  /** `completed` when the result is trustworthy; `failed` or `timed-out` otherwise. */
+  state: 'completed' | 'failed' | 'timed-out'
+  error?: string
+}
+
+/**
+ * A benchmark run record, written separately from the checked-in `latest.json` summary.
+ *
+ * `latest.json` is the hermetic evidence the gate compares against a baseline. The run
+ * record is the account of how that evidence was produced: what ran, in what order, and
+ * whether every declared run key finished. A partial run leaves checkpoints and a run
+ * record marked `partial` or `failed`, but never touches `latest.json` -- so an earlier,
+ * complete run's evidence cannot be overwritten by an incomplete one.
+ */
+export interface EvalRunRecord {
+  schemaVersion: 1
+  /** Unique id for this run; checkpoint files and the summary reference it. */
+  runId: string
+  startedAt: string
+  completedAt: string | null
+  /** `completed` only when every declared run key finished; otherwise `partial` or `failed`. */
+  completionState: 'in-progress' | 'completed' | 'partial' | 'failed'
+  /** HEAD of the repository the run was executed against. */
+  commitSha: string | null
+  /** Hash of the anvil implementation that executed the run. */
+  implementation: string
+  /** Hash of the built CLI bundle, captured before the first scenario. */
+  bundleDigest: string | null
+  models: Array<{ id: string; role: string }>
+  opencodeVersion: string | null
+  nodeVersion: string | null
+  /** The run keys (scenario/variant/model) the run was asked to produce. */
+  runKeys: string[]
+  /** The run keys in the order they were executed. */
+  executionOrder: string[]
+  /** One entry per executed scenario/variant, in completion order. */
+  results: EvalRunRecordResult[]
 }
 
 export interface EvalGateResult {
@@ -360,6 +411,126 @@ export function parseLatest(value: unknown): EvalLatest | string {
   }
 }
 
+/** Parse a run record, or explain why the file cannot be one. */
+export function parseRunRecord(value: unknown): EvalRunRecord | string {
+  if (!isObject(value)) return 'run record is not an object'
+  if (value.schemaVersion !== 1) return 'run record schemaVersion must be 1'
+  if (typeof value.runId !== 'string' || value.runId === '') return 'run record has no runId'
+  if (typeof value.startedAt !== 'string') return 'run record startedAt is missing'
+  if (
+    value.completionState !== 'in-progress' &&
+    value.completionState !== 'completed' &&
+    value.completionState !== 'partial' &&
+    value.completionState !== 'failed'
+  ) {
+    return 'run record completionState is invalid'
+  }
+  if (typeof value.implementation !== 'string' || value.implementation === '') {
+    return 'run record implementation is missing'
+  }
+  if (!Array.isArray(value.runKeys)) return 'run record has no runKeys list'
+  if (!Array.isArray(value.executionOrder)) return 'run record has no executionOrder list'
+  if (!Array.isArray(value.results)) return 'run record has no results list'
+  const results: EvalRunRecordResult[] = []
+  for (const raw of value.results) {
+    if (!isObject(raw)) return 'run record result is not an object'
+    if (typeof raw.scenario !== 'string') return 'run record result has no scenario'
+    if (raw.variant !== 'bare' && raw.variant !== 'anvil') return 'run record result variant is invalid'
+    if (raw.state !== 'completed' && raw.state !== 'failed' && raw.state !== 'timed-out') {
+      return 'run record result state is invalid'
+    }
+    results.push({
+      scenario: raw.scenario,
+      variant: raw.variant,
+      model: typeof raw.model === 'string' ? raw.model : null,
+      modelRole: typeof raw.modelRole === 'string' ? raw.modelRole : null,
+      completedAt: typeof raw.completedAt === 'string' ? raw.completedAt : '',
+      state: raw.state,
+      ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+    })
+  }
+  return {
+    schemaVersion: 1,
+    runId: value.runId,
+    startedAt: value.startedAt,
+    completedAt: typeof value.completedAt === 'string' ? value.completedAt : null,
+    completionState: value.completionState,
+    commitSha: typeof value.commitSha === 'string' ? value.commitSha : null,
+    implementation: value.implementation,
+    bundleDigest: typeof value.bundleDigest === 'string' ? value.bundleDigest : null,
+    models: Array.isArray(value.models)
+      ? value.models.filter(
+          (m): m is { id: string; role: string } =>
+            isObject(m) && typeof m.id === 'string' && typeof m.role === 'string',
+        )
+      : [],
+    opencodeVersion: typeof value.opencodeVersion === 'string' ? value.opencodeVersion : null,
+    nodeVersion: typeof value.nodeVersion === 'string' ? value.nodeVersion : null,
+    runKeys: value.runKeys.filter((k): k is string => typeof k === 'string'),
+    executionOrder: value.executionOrder.filter((k): k is string => typeof k === 'string'),
+    results,
+  }
+}
+
+/**
+ * Validate that a run record is complete and compatible with the current implementation.
+ *
+ * A run record that is `partial` or `failed` means the run did not finish -- its checkpoints
+ * exist but they must not be promoted to `latest.json`. A record whose implementation does
+ * not match the current source means the code changed under the run and the evidence is
+ * invalidated.
+ */
+export function checkRunRecord(
+  record: EvalRunRecord | null | undefined,
+  currentImplementation: string,
+  requiredKeys: string[],
+): EvalGateResult {
+  if (record === null || record === undefined) {
+    return {
+      ok: false,
+      message: 'no run record exists; the latest summary cannot be trusted without one',
+    }
+  }
+  if (record.completionState !== 'completed') {
+    return {
+      ok: false,
+      message: `run ${record.runId} did not complete (state: ${record.completionState}); the latest summary must not be promoted from an incomplete run`,
+    }
+  }
+  if (record.implementation !== currentImplementation) {
+    return {
+      ok: false,
+      message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${currentImplementation.slice(0, 12)}; the implementation changed under the run`,
+    }
+  }
+  const executed = new Set(record.executionOrder)
+  for (const key of requiredKeys) {
+    if (!executed.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} never executed ${key}; the run record is incomplete`,
+      }
+    }
+  }
+  const completed = record.results.filter((r) => r.state === 'completed').map((r) => `${r.scenario}/${r.variant}`)
+  const missing = requiredKeys.filter((key) => !completed.includes(key))
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `run ${record.runId} did not complete ${missing.join(', ')}; the run record is incomplete`,
+    }
+  }
+  return {
+    ok: true,
+    message: `run ${record.runId} completed all ${requiredKeys.length} declared run keys`,
+  }
+}
+
+/** The declared run keys implied by a latest summary: `scenario/variant` per result. */
+function latestRunKeys(latest: EvalLatest): string[] {
+  return latest.results.map((result) => `${result.scenario}/${result.variant}`)
+}
+
 /**
  * Compare the latest summary with the baseline.
  *
@@ -377,8 +548,26 @@ export function checkEvalGate(
   latest: EvalLatest,
   current?: readonly EvalBaselineScenario[],
   currentImplementation?: string,
+  runRecord?: EvalRunRecord | null,
 ): EvalGateResult {
   const failures: string[] = []
+
+  // A latest summary must be traceable to a completed run record. An incomplete or
+  // missing run record means the evidence was produced by an interrupted run and must
+  // not pass the gate. The check only runs when a run record is explicitly supplied;
+  // callers that do not pass one keep the previous behaviour.
+  if (currentImplementation !== undefined && latest.results.length > 0 && runRecord !== undefined) {
+    const recordCheck = checkRunRecord(runRecord ?? null, currentImplementation, latestRunKeys(latest))
+    if (!recordCheck.ok) failures.push(recordCheck.message)
+    else if (
+      latest.runId !== undefined &&
+      runRecord !== null &&
+      runRecord !== undefined &&
+      runRecord.runId !== latest.runId
+    ) {
+      failures.push(`latest summary references run ${latest.runId} but the run record is ${runRecord.runId}`)
+    }
+  }
 
   if (currentImplementation !== undefined) {
     if (latest.implementation === undefined) {

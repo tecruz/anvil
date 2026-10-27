@@ -6,13 +6,16 @@ import { after, describe, test } from 'node:test'
 
 import {
   checkEvalGate,
+  checkRunRecord,
   type EvalBaseline,
   type EvalLatest,
+  type EvalRunRecord,
   type EvalScenario,
   hashDirectory,
   hashScenario,
   parseBaseline,
   parseLatest,
+  parseRunRecord,
   validateScenarioMatrix,
 } from '../src/eval-gate.ts'
 
@@ -277,5 +280,97 @@ describe('eval gate parsing', () => {
     run.results[0]!.verified = 'yes' as unknown as boolean
     const parsed = parseLatest(run)
     assert.match(parsed as string, /verified is not a boolean/)
+  })
+})
+
+function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
+  return {
+    schemaVersion: 1,
+    runId: 'run-1',
+    startedAt: '2026-10-27T00:00:00.000Z',
+    completedAt: '2026-10-27T00:05:00.000Z',
+    completionState: 'completed',
+    commitSha: 'abc123',
+    implementation: 'impl-hash',
+    bundleDigest: 'bundle-hash',
+    models: [{ id: 'fake-agent', role: 'small' }],
+    opencodeVersion: null,
+    nodeVersion: null,
+    runKeys: ['tiny-code-change/bare', 'tiny-code-change/anvil'],
+    executionOrder: ['tiny-code-change/bare', 'tiny-code-change/anvil'],
+    results: [
+      {
+        scenario: 'tiny-code-change',
+        variant: 'bare',
+        model: 'fake-agent',
+        modelRole: 'small',
+        completedAt: '2026-10-27T00:02:00.000Z',
+        state: 'completed',
+      },
+      {
+        scenario: 'tiny-code-change',
+        variant: 'anvil',
+        model: 'fake-agent',
+        modelRole: 'small',
+        completedAt: '2026-10-27T00:03:00.000Z',
+        state: 'completed',
+      },
+    ],
+    ...over,
+  }
+}
+
+describe('run record contract', () => {
+  test('parses a well-formed run record', () => {
+    const parsed = parseRunRecord(runRecord()) as EvalRunRecord
+    assert.equal(parsed.runId, 'run-1')
+    assert.equal(parsed.completionState, 'completed')
+  })
+
+  test('refuses a run record with the wrong schema version', () => {
+    const parsed = parseRunRecord({ ...runRecord(), schemaVersion: 2 })
+    assert.match(parsed as string, /schemaVersion must be 1/)
+  })
+
+  test('refuses a run record with no runId', () => {
+    const parsed = parseRunRecord({ ...runRecord(), runId: '' })
+    assert.match(parsed as string, /no runId/)
+  })
+
+  test('refuses a run record with an invalid completion state', () => {
+    const parsed = parseRunRecord({ ...runRecord(), completionState: 'unknown' as EvalRunRecord['completionState'] })
+    assert.match(parsed as string, /completionState is invalid/)
+  })
+
+  test('passes a completed run record with matching implementation and all keys', () => {
+    const gate = checkRunRecord(runRecord(), 'impl-hash', ['tiny-code-change/bare', 'tiny-code-change/anvil'])
+    assert.equal(gate.ok, true, gate.message)
+  })
+
+  test('fails when there is no run record', () => {
+    const gate = checkRunRecord(null, 'impl-hash', ['tiny-code-change/bare'])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /no run record exists/)
+  })
+
+  test('fails when the run did not complete', () => {
+    const gate = checkRunRecord(runRecord({ completionState: 'partial' }), 'impl-hash', [
+      'tiny-code-change/bare',
+      'tiny-code-change/anvil',
+    ])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /did not complete/)
+  })
+
+  test('fails when the implementation changed under the run', () => {
+    const gate = checkRunRecord(runRecord({ implementation: 'old-impl' }), 'new-impl', ['tiny-code-change/bare'])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /implementation changed under the run/)
+  })
+
+  test('fails when the run never executed a declared key', () => {
+    const gate = checkRunRecord(runRecord(), 'impl-hash', ['tiny-code-change/bare', 'medium-code-change/anvil'])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /never executed/)
   })
 })

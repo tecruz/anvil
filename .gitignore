@@ -17,6 +17,9 @@ Thumbs.db
 # eval harness raw output
 eval-results/raw/
 
+# eval harness per-run checkpoints (regenerated each run)
+eval-results/checkpoints/
+
 # editor
 .vscode/
 .idea/
