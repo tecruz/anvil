@@ -7,6 +7,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -431,6 +432,71 @@ describe('staging lifecycle', () => {
 
     assert.equal(readManifest(dir), null, 'a traversing manifest must not be usable')
     assert.equal(checkApplyPreconditions(dir, readManifest(dir), 'whatever').ok, false)
+  })
+
+  test('a symlinked directory cannot be used to write outside the repository', (t) => {
+    // `isSafeRepoRelativePath` stops `..` and absolute paths in the manifest, but a
+    // checked-out repository can commit `docs` as a symlink to another directory. The
+    // write target is then a valid relative path that still lands outside the repo.
+    const dir = materialize('node-npm')
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-outside-'))
+    temps.push(outside)
+    try {
+      symlinkSync(outside, join(dir, 'linkdir'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+
+    const staging = join(dir, '.anvil', 'staging')
+    mkdirSync(join(staging, 'files'), { recursive: true })
+    const content = 'attacker content\n'
+    writeFileSync(join(staging, 'files', 'payload.md'), content, 'utf8')
+    const manifest = {
+      schemaVersion: 1 as const,
+      inputHash: 'whatever',
+      createdAt: new Date().toISOString(),
+      generator: 'attacker',
+      files: [
+        {
+          path: 'linkdir/escaped.md',
+          stagedPath: 'files/payload.md',
+          sha256: sha256(content),
+          bytes: content.length,
+          repoSha256: null,
+        },
+      ],
+    }
+
+    writeFileSync(join(staging, 'manifest.json'), JSON.stringify(manifest), 'utf8')
+
+    assert.equal(readManifest(dir)?.files.length, 1, 'the manifest itself is well-formed')
+    assert.throws(() => applyStaging(dir, manifest), /outside repository/)
+    assert.equal(existsSync(join(outside, 'escaped.md')), false, 'nothing may be written outside the repo')
+  })
+
+  test('a staged symlink is not read as content', (t) => {
+    const dir = materialize('node-npm')
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-secret-'))
+    temps.push(outside)
+    const secret = join(outside, 'secret.txt')
+    writeFileSync(secret, 'do not exfiltrate\n', 'utf8')
+    stageOnce(dir)
+    const staged = join(dir, '.anvil', 'staging', 'files', 'AGENTS.md')
+    rmSync(staged)
+    try {
+      symlinkSync(secret, staged)
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+
+    const state = inspectStaging(dir)
+    assert.ok(state.tampered.includes('AGENTS.md'), 'a symlinked staged file is not trusted')
+    const manifest = state.manifest
+    assert.ok(manifest !== null)
+    assert.throws(() => applyStaging(dir, manifest), /disappeared/)
+    assert.doesNotMatch(readRepoFile(dir, 'AGENTS.md') ?? '', /do not exfiltrate/)
   })
 
   test('a missing bundle is a clear error, not a crash', () => {
