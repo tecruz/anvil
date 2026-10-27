@@ -42,7 +42,8 @@ until benchmark or release work is finished.
 **Status:** complete. The repository was made public (API PATCH `repos/tecruz/anvil` with
 `private=false`), and branch protection was configured via the GitHub API
 (`PUT branches/main/protection`) requiring all five CI checks in strict mode, with force
-pushes and deletions blocked and no PR review required (solo maintainer). The merge
+pushes and deletions blocked, administrator bypass disabled (`enforce_admins: true`), and
+pull requests required with zero approving reviewers (solo maintainer). The merge
 checklist in [CONTRIBUTING.md](../CONTRIBUTING.md) now describes an enforced gate.
 
 ### Work
