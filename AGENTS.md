@@ -56,7 +56,7 @@ See `docs/ARCHITECTURE.md`.
 - Linting is enforced by biome; run it before proposing a change.
 - Formatting is handled by biome.
 - Pre-commit hooks (githooks) run on every commit.
-- CI runs on 1 workflow file(s).
+- CI runs on 2 workflow file(s).
 
 ## For agents
 

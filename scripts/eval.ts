@@ -249,7 +249,10 @@ async function runScenario(
     } else {
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
       // permission prompt is a hang, and a hang is not a result.
-      const agentArgs = ['run', '--dir', workdir, '--auto', '--model', model.id]
+      // OpenCode 2's private server inherits this process's provider credentials and
+      // exits with the command instead of leaving work running in a shared service.
+      // `run` uses the subprocess cwd; it does not accept a `--dir` flag.
+      const agentArgs = ['run', '--standalone', '--auto', '--model', model.id]
       agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,

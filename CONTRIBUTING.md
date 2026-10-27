@@ -193,6 +193,28 @@ harness with `--write-baseline` and review the diff like any other file.
 first run is a measurement; once a baseline is committed, a changed hash or a missed
 expectation fails the check.
 
+### The scheduled real-model benchmark
+
+`.github/workflows/eval.yml` runs the small model over the same matrix every Monday, and on
+demand:
+
+```bash
+gh workflow run eval.yml -f models=frontier
+```
+
+It is separate from `ci.yml` because it spends tokens and needs credentials. Configure
+`OPENCODE_API_KEY` (the small, Zen model) and/or `OPENROUTER_API_KEY` (the frontier model)
+as repository secrets or on the `eval` environment, then trigger it once by hand to prove
+the setup. The job installs OpenCode 2 (`@opencode/cli@2.1.4`), removes the checked-out summary
+before it runs, and finishes with `npm run eval:check`: a scenario that misses its baseline
+expectation or records an agent error turns the run red. The complete summary is attached
+to the run page, so a red build has its evidence next to it. Bump the pinned agent version
+deliberately; the report is only comparable across runs that name the same agent.
+
+Real-model runs require OpenCode 2. The harness runs `opencode run --standalone --auto`
+from each scenario's directory so its private server receives the provider credentials
+from the environment, without depending on a shared background service.
+
 ## The one suite that needs `gh`
 
 ```bash

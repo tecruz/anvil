@@ -1,0 +1,135 @@
+# The real-model benchmark.
+#
+# This is deliberately not part of `ci.yml`. CI proves the code works; this answers a
+# different question over time: does the context anvil derives still help a model? It
+# spends tokens (unless the selected model is free) and needs provider credentials, so it
+# runs on a schedule rather than on every push, and it is not a required check.
+#
+# The weekly run uses the `small` role: the same four-scenario matrix, two variants each,
+# which is the cheapest signal that can still detect a regression. A manual dispatch can
+# run the frontier model when the spend is intended.
+#
+# `eval:check` is the verdict. The harness exits 0 even when a scenario fails, because a
+# failed run is a measurement; the gate is what turns a missed baseline expectation or a
+# recorded agent error into a red job. A run that nobody reads is not a benchmark.
+#
+# SECRETS: configure `OPENCODE_API_KEY` for the small (Zen) model and/or
+# `OPENROUTER_API_KEY` for the frontier model as repository secrets, or on the `eval`
+# environment. `--models all` needs both.
+#
+# COST: every scenario runs the agent twice (bare and anvil) under a 10-minute agent
+# timeout. One role is eight runs, so the 60-minute job ceiling is a hard spend bound
+# rather than a guarantee that `all` (sixteen runs) finishes. Dispatch `frontier` or `all`
+# only when that spend is wanted.
+#
+# PINNING: the OpenCode 2 package, `@opencode/cli`, is pinned to an exact version because
+# the harness records the version and two weeks have to be comparable. Bump it deliberately.
+name: Eval benchmark
+
+on:
+  schedule:
+    # Mondays at 04:17 UTC. The odd minute avoids the top-of-hour rush on hosted runners.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Which model role to run
+        type: choice
+        options: [small, frontier, all]
+        default: small
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: real-model benchmark
+    runs-on: ubuntu-latest
+    # Eight agent runs with a 10-minute per-run timeout, plus setup, is the realistic
+    # weekly case. The ceiling is what a hung provider cannot exceed; `all` can hit it and
+    # be cut short, which is the intended spend bound rather than a silent overrun.
+    timeout-minutes: 60
+    # Referencing an environment with no rules behaves like a plain job, so this costs
+    # nothing now and gives maintainers a place to add secrets or required reviewers.
+    environment: eval
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+
+      # The CLI the harness invokes is part of what is being measured, so it is installed
+      # explicitly rather than assumed to exist on the runner.
+      - name: install the agent
+        run: |
+          npm install --global @opencode/cli@2.1.4
+          opencode --version
+
+      # Check the credential the selected role actually needs, before spending setup time
+      # and failing halfway through the matrix with an opaque provider error.
+      - name: provider credentials are configured
+        env:
+          MODELS: ${{ inputs.models || 'small' }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          missing=0
+          case "$MODELS" in
+            small|all)
+              if [ -z "$OPENCODE_API_KEY" ]; then
+                echo '::error::OPENCODE_API_KEY is required for the small (Zen) model.'
+                missing=1
+              fi
+              ;;
+          esac
+          case "$MODELS" in
+            frontier|all)
+              if [ -z "$OPENROUTER_API_KEY" ]; then
+                echo '::error::OPENROUTER_API_KEY is required for the frontier model.'
+                missing=1
+              fi
+              ;;
+          esac
+          exit "$missing"
+
+      - name: run the matrix
+        env:
+          ANVIL_EVAL: '1'
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          MODELS: ${{ inputs.models || 'small' }}
+        shell: bash
+        run: |
+          # A summary left over from the checkout must not be mistaken for this run's
+          # result if the harness dies before writing one.
+          rm -f eval-results/latest.json
+          npm run eval -- --models "$MODELS"
+
+      # The harness itself always exits 0. The gate is the pass/fail verdict: every
+      # scenario must meet its baseline expectation, and any recorded agent error fails.
+      - name: gate the run against the baseline
+        run: npm run eval:check
+
+      # The record has to outlive the runner. The full summary goes to the run page; the
+      # job log keeps the matrix table the harness printed.
+      - name: publish the summary
+        if: always()
+        run: |
+          {
+            echo '## Real-model eval'
+            echo '```json'
+            if test -f eval-results/latest.json; then
+              cat eval-results/latest.json
+            else
+              echo '{"error":"the harness wrote no summary"}'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
