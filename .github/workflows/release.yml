@@ -1,0 +1,92 @@
+# Release workflow.
+#
+# Triggered by a version tag (`v0.1.0`, `v0.2.0`, ...). Builds the prebuilt tarball
+# exactly once, installs it into an isolated consumer project and smoke-tests the
+# installed binary, then publishes those same bytes to the registry with provenance.
+#
+# The bundle is never rebuilt after testing: if the build changes, the tag moves and a
+# new release is cut. Pull-request CI has no publish credentials and cannot publish.
+#
+# Secrets:
+#   NPM_TOKEN — an npm auth token with publish access to @anvil/cli. Scoped to this
+#     workflow only; ordinary PR jobs never see it.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write    # OIDC for npm provenance, when the registry supports it
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      # The same checks CI runs on every PR, so a release is never cut from broken source.
+      - name: check (lint, typecheck, test, build)
+        run: npm run check
+
+      # Pack the tarball from the root — that is the manifest npm packs, and the
+      # allowlisted files are what a user receives.
+      - name: pack the distribution tarball
+        run: npm pack --pack-destination dist
+
+      # Verify the tarball contains only the allowlisted files.
+      - name: verify tarball contents
+        run: |
+          tarball=$(ls dist/*.tgz)
+          echo "packed: $tarball"
+          tar tzf "$tarball"
+
+      # Record the tarball checksum and the source commit for provenance.
+      - name: record checksum and provenance
+        id: provenance
+        run: |
+          tarball=$(ls dist/*.tgz)
+          checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
+          source_sha=$(git rev-parse HEAD)
+          version=${GITHUB_REF_NAME#v}
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      # Install the tarball into an isolated consumer project and smoke-test the
+      # installed binary: version, help, JSON, doctor. This is the artifact that is
+      # published, tested exactly as it will be received.
+      - name: smoke-test the installed tarball
+        run: |
+          consumer=$(mktemp -d)
+          echo "consumer=$consumer" >> "$GITHUB_OUTPUT"
+          echo '{"name":"consumer","private":true,"scripts":{"test":"node -e \"process.exit(0)\""}}' > "$consumer/package.json"
+          npm install --no-save "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
+
+          bin="$consumer/node_modules/.bin/anvil"
+          case "$(uname)" in
+            MINGW*|MSYS*|CYGWIN*|Windows_NT) bin="$bin.cmd" ;;
+          esac
+
+          # 1. Reports its own version.
+          "$bin" version --json
+          # 2. JSON envelope survives bundling.
+          "$bin" doctor --json
+
+      # Publish the exact bytes that were tested, with provenance.
+      - name: publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

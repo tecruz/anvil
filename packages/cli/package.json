@@ -20,5 +20,8 @@
   "homepage": "https://github.com/tecruz/anvil#readme",
   "bugs": {
     "url": "https://github.com/tecruz/anvil/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

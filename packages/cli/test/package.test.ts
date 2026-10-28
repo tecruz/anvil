@@ -391,4 +391,56 @@ describe('the packed tarball installs and runs', () => {
     assert.equal(verified.status, 0, `crew verify failed: ${verified.stderr}\n${verified.stdout}`)
     assert.match(verified.stdout, /pass/)
   })
+
+  test('the packed tarball contains only the allowlisted files', {
+    timeout: 120_000,
+  }, async () => {
+    const packDir = tempDir('anvil-pack-contents-')
+    const packed = await runProcess('npm', ['pack', '--pack-destination', packDir], { cwd: REPO_ROOT })
+    assert.equal(packed.exitCode, 0, `npm pack failed: ${packed.stderr}`)
+
+    const tarball = join(packDir, `${String(ROOT_PKG.name)}-${String(ROOT_PKG.version)}.tgz`)
+    assert.ok(existsSync(tarball), `expected ${tarball} to exist`)
+
+    // List the tarball's contents. Every path must be inside the package root and match the
+    // `files` allowlist: the bundle, the licence, the README, and the manifest itself.
+    const listed = await runProcess('tar', ['tzf', tarball])
+    assert.equal(listed.exitCode, 0, `tar failed: ${listed.stderr}`)
+
+    const allowed = new Set([
+      'package/',
+      'package/package.json',
+      'package/README.md',
+      'package/LICENSE',
+      'package/packages/cli/dist/cli.js',
+    ])
+    const paths = listed.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+
+    for (const path of paths) {
+      assert.ok(
+        allowed.has(path) || path.startsWith('package/packages/cli/dist/'),
+        `tarball contains an unexpected path: ${path}`,
+      )
+    }
+
+    // No source, tests, fixtures, transcripts, credentials, or build-tool dependencies.
+    const forbidden = [
+      '/src/',
+      '/test/',
+      '/fixtures/',
+      '/eval-results/',
+      '/.anvil/',
+      'node_modules',
+      '.git',
+      '.tsbuildinfo',
+    ]
+    for (const path of paths) {
+      for (const bad of forbidden) {
+        assert.ok(!path.includes(bad), `tarball contains ${bad}: ${path}`)
+      }
+    }
+  })
 })
