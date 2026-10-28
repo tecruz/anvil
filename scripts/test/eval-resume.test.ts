@@ -46,6 +46,8 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     )
     const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime }
     delete env.ANVIL_EVAL
+    // The harness must run fixture test discovery, not inherit this parent's test context.
+    delete env.NODE_TEST_CONTEXT
     const invoke = (...args: string[]) => {
       const result = spawnSync(process.execPath, ['scripts/eval.ts', '--fake-agent', ...args], {
         cwd: root,
@@ -79,17 +81,16 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     )!
     assert.equal(original.verifyCount, 2)
     assert.deepEqual(original.verifyExitCodes, [0, 0])
+    const originalKey = `${original.scenario}/${original.variant}/${original.model}/${original.repetition}`
     const partial = structuredClone(complete)
     partial.results = partial.results.filter(
       (entry) => entry.scenario !== original.scenario || entry.variant !== original.variant,
     )
-    partial.executionOrder = partial.executionOrder.filter(
-      (key) => key !== `${original.scenario}/${original.variant}/${original.model}`,
-    )
+    partial.executionOrder = partial.executionOrder.filter((key) => key !== originalKey)
     partial.completionState = 'in-progress'
     partial.completedAt = null
     write('eval-results/run.json', partial)
-    write(checkpoint(original, complete.runId), { schemaVersion: 2, ...original, verifyCount: 1, verifyExitCodes: [0] })
+    write(checkpoint(original, complete.runId), { schemaVersion: 3, ...original, verifyCount: 1, verifyExitCodes: [0] })
     invocation = invoke('--resume')
     assert.equal(invocation.status, 0, invocation.output)
     assert.match(invocation.output, /Ignoring checkpoint.*reports 1 visible verifier commands.*defines 2/)
@@ -122,7 +123,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
 
     // Refusing a fixture mismatch must not persist an otherwise recoverable checkpoint.
     const unstarted = structuredClone(complete)
-    unstarted.results = unstarted.results.filter((entry) => entry.scenario !== 'medium-code-change')
+    unstarted.results = unstarted.results.filter((entry) => !entry.scenario.startsWith('medium-code-change/'))
     unstarted.executionOrder = unstarted.executionOrder.filter((key) => !key.startsWith('medium-code-change/'))
     unstarted.completionState = 'in-progress'
     unstarted.completedAt = null
@@ -134,7 +135,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     const scenario = scenarios.scenarios.find((entry) => entry.id === 'medium-code-change')!
     const recovered = complete.results.find((entry) => entry.scenario === scenario.id)!
     write(checkpoint(recovered, complete.runId), {
-      schemaVersion: 2,
+      schemaVersion: 3,
       ...recovered,
       sourceHash: hashScenarioSource(root, scenario),
     })

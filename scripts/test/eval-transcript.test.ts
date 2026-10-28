@@ -77,6 +77,7 @@ describe('transcript redaction', () => {
       verified: false,
       hiddenVerified: null,
       verifyExitCodes: [1],
+      repetition: 0,
       costUsd: null,
       tokens: null,
       durationMs: 1,

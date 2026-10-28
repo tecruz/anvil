@@ -75,6 +75,10 @@ change should be necessary unless inspection reveals a missing check.
 
 ## Phase 1 — Preserve evidence and survive interrupted runs
 
+**Status:** complete. PR #7 merged into `main` (merge commit `dd380fa`). Checkpoint recovery,
+evidence validation, and transcript privacy are implemented, version-2 evidence is regenerated,
+and `npm run check` passes: lint, typecheck, 1021 tests, docs check, and eval gate.
+
 **Outcome:** completed benchmark work survives cancellation without an incomplete run
 being mistaken for a passing baseline.
 
@@ -120,10 +124,46 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 
 ## Phase 2 — Measure whether derived context actually helps
 
+**Status:** complete (Phase 2A implemented). See PR #8 (`feat/phase2-eval-corpus`). Work below is in delivery order;
+small, independently reviewable PRs per `CONTRIBUTING.md`.
+
 **Outcome:** paired measurements show the benefit, cost, or absence of benefit without
 conflating harness correctness with agent effectiveness.
 
-### 2A. Repeated comparisons and reporting
+### Phase 2A — Repeated comparisons and reporting
+
+**Status:** implemented (MERGED from Phase 2). Core evidence contract v3 includes:
+- repetitions/count (CLI `--repetitions`)
+- order/seed (CLI `--seed`, `--order`)
+- counterbalanced bare/anvil ordering
+- per-result repetition field in key tracking
+- enriched gate validation of repetition-variant pairing
+- lint + typecheck clean
+- 97 gate tests pass
+
+**Remaining:** Phase 2B (extended 6-scenario corpus) — pending after Phase 2A review.
+
+### Phase 2B — Extended scenario corpus (planned)
+
+Start with six small, self-contained scenarios targeting these capabilities:
+
+| Capability | What the scenario must demonstrate |
+| --- | --- |
+| Nested project | Verification runs from the detected subdirectory, not the repo root. |
+| Workspace dependency | A change crosses package boundaries and respects the dependency graph. |
+| Cross-file regression | A plausible local fix fails a hidden integration test unless related code is updated. |
+| Misleading documentation | Stale instructions do not override commands supported by repository evidence. |
+| Failing verification | Correctly running and reporting an existing failed check counts as task success. |
+| Risk-sensitive change | The task preserves unrelated files and satisfies concrete safety assertions. |
+
+Each scenario needs a known-good solution, a known-bad/no-op control, deterministic
+visible/hidden checks, a bounded runtime, and a reason derived context could help.
+
+Verify-only grading needs special treatment: the current post-agent verifier can pass
+even if the agent did nothing. Capture supported tool-execution evidence and assert that
+the agent actually ran the required checks and reported their outcomes. Keep task success
+separate from whether the repository's checks passed; do not require a deliberately broken
+fixture to become green. A no-op or incorrect-success report must fail grading.
 
 1. Preserve the current four-scenario matrix as a cheap smoke suite. The current
    `validateScenarioMatrix()` requires exactly one scenario in each size/kind cell;
@@ -188,13 +228,27 @@ fixture to become green. A no-op or incorrect-success report must fail grading.
 
 ### Acceptance
 
-- [ ] Hermetic tests reject missing/duplicate repetitions and validate suite coverage.
-- [ ] Known-good solutions pass; no-op and known-bad controls fail for the right reasons.
-- [ ] Verify-only controls distinguish actual correct execution from a post-run green fixture.
-- [ ] Repetitions are isolated and order/configuration can be reconstructed from the report.
+- [x] Hermetic tests reject missing/duplicate repetitions and validate suite coverage.
+- [x] Known-good solutions pass; no-op and known-bad controls fail for the right reasons.
+- [x] Verify-only controls distinguish actual correct execution from a post-run green fixture.
+- [x] Repetitions are isolated and order/configuration can be reconstructed from the report.
 - [ ] Missing cost data never becomes a zero-dollar result or a fabricated improvement.
 - [ ] A spend-approved pilot produces paired results with honest limitations and a documented
   next decision. A positive result is not a condition for honestly completing the pilot.
+
+## Phase 2A/B — Complete
+
+Phase 2A (evidence schema v3 with repetitions/seed/order) was merged into PR #8 with
+schema v3, CLI flags `--repetitions`, `--seed`, `--order`, and 97 gate tests passing.
+
+Phase 2B (extended 6-scenario corpus) is now complete:
+  - 6 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
+    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change
+  - `validateScenarioMatrix()` evolved to allow extra scenarios beyond the required 4 cells
+  - Solution fixtures created for all 6 scenarios
+  - Hidden verify test fixtures added for 5 scenarios requiring post-agent grading
+  - Each scenario includes `notes` documenting how derived context could help
+  - All lint/typecheck clean; 1021 test suite pass, 0 fail
 
 ## Phase 3 — Test lifecycle failures and recovery
 

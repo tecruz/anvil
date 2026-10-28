@@ -26,9 +26,10 @@ export type EvalScenarioKind = 'code-change' | 'verify-only'
 /** The roles a model can play in a comparison. */
 export type EvalModelRole = 'small' | 'frontier'
 
-/** Version 1 remains readable; only version 2 carries the complete evidence contract. */
-export const EVAL_SCHEMA_VERSION = 2
-export type EvalSchemaVersion = 1 | 2
+/** Version 1 remains readable; version 2 adds verifier declarations; version 3 adds
+ *  repetition/counterbalancing for paired comparisons. */
+export const EVAL_SCHEMA_VERSION = 3
+export type EvalSchemaVersion = 1 | 2 | 3
 
 /** Authoritative verifier declarations, supplied from the selected scenario matrix. */
 export interface EvalVerifierScenario {
@@ -103,6 +104,8 @@ export interface EvalResultSummary {
   hiddenVerified: boolean | null
   verifyExitCodes: number[]
   error?: string
+  /** Which repetition of the scenario this result belongs to, starting at 0. */
+  repetition: number | null
 }
 
 export interface EvalLatest {
@@ -118,6 +121,12 @@ export interface EvalLatest {
    * gate uses it to reject summaries promoted from partial or interrupted runs.
    */
   runId?: string
+  /** How many repetitions of each scenario were run. */
+  repetitions: number
+  /** The seed used to determine repetition/counterbalancing order. */
+  seed: string | null
+  /** The variant ordering policy applied across repetitions. */
+  order: string | null
   results: EvalResultSummary[]
 }
 
@@ -165,6 +174,8 @@ export interface EvalRunRecordResult {
   transcript: string
   /** Any agent error from the last completed attempt. */
   error?: string
+  /** Which repetition of the scenario this result belongs to, starting at 0. */
+  repetition: number | null
 }
 
 /** The latest attempt's state, or `null` when no attempt exists yet. */
@@ -220,11 +231,17 @@ export interface EvalRunRecord {
   /** Fingerprints for every scenario in the run's matrix, captured before the first
    *  scenario. This covers not-yet-started scenarios that have no result to carry a hash. */
   scenarioHashes: EvalFixtureHashes | null
-  /** The run keys (scenario/variant/model) the run was asked to produce. */
+  /** How many repetitions of each scenario were run. */
+  repetitions: number
+  /** The seed used to determine repetition/counterbalancing order. */
+  seed: string | null
+  /** The variant ordering policy applied across repetitions. */
+  order: string | null
+  /** The run keys (scenario/variant/model/repetition) the run was asked to produce. */
   runKeys: string[]
   /** The run keys in the order they were executed. */
   executionOrder: string[]
-  /** One entry per executed scenario/variant, in completion order. */
+  /** One entry per executed scenario/variant/repetition, in completion order. */
   results: EvalRunRecordResult[]
 }
 
@@ -390,14 +407,19 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
     if (scenario.kind !== 'code-change' && scenario.kind !== 'verify-only') {
       return `${scenario.id}: kind must be code-change or verify-only`
     }
-    seen.add(`${scenario.size}:${scenario.kind}`)
+    const cell = `${scenario.size}:${scenario.kind}`
+    if (seen.has(cell)) {
+      return `${scenario.id}: the matrix allows exactly one scenario per cell; ${scenario.size} / ${scenario.kind} is already covered`
+    }
+    seen.add(cell)
   }
 
   for (const cell of expected) {
     if (!seen.has(cell)) return `the scenario matrix is missing ${cell.replace(':', ' / ')}`
   }
-  if (seen.size !== expected.size) return 'the scenario matrix has more cells than the four required ones'
-  if (scenarios.length !== expected.size) return 'the scenario matrix must have exactly one scenario per cell'
+  // Allow additional scenarios beyond the four required cells (Phase 2B).
+  // Extra scenarios must have a unique size/kind combination that is not already covered.
+  if (seen.size < expected.size) return 'the scenario matrix must cover all four required cells'
   return null
 }
 
@@ -417,7 +439,8 @@ export function readJsonFile(path: string): unknown {
 /** Parse a baseline, or explain why the file cannot be a baseline. */
 export function parseBaseline(value: unknown): EvalBaseline | string {
   if (!isObject(value)) return 'baseline is not an object'
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'baseline schemaVersion must be 1 or 2'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    return 'baseline schemaVersion must be 1, 2 or 3'
   if (!Array.isArray(value.scenarios)) return 'baseline has no scenarios list'
   const scenarios: EvalBaselineScenario[] = []
   for (const raw of value.scenarios) {
@@ -451,7 +474,9 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
       hiddenVerify,
       expect: {
         ...(raw.expect.verified === undefined ? {} : { verified: raw.expect.verified === true }),
-        ...(raw.expect.hiddenVerified === undefined ? {} : { hiddenVerified: raw.expect.hiddenVerified === true }),
+        ...(raw.expect.hiddenVerified === undefined || raw.expect.hiddenVerified === null
+          ? {}
+          : { hiddenVerified: raw.expect.hiddenVerified === true }),
       },
     })
   }
@@ -497,11 +522,22 @@ function parseFixtureHashes(value: unknown): EvalFixtureHashes | string {
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'latest summary schemaVersion must be 1 or 2'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    return 'latest summary schemaVersion must be 1, 2 or 3'
   if (value.implementation !== undefined && typeof value.implementation !== 'string') {
     return 'latest summary implementation is invalid'
   }
   if (!Array.isArray(value.results)) return 'latest summary has no results list'
+  const repetitions = parseCount(value.repetitions)
+  if (repetitions === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
+    return 'latest summary repetitions is invalid'
+  }
+  if (repetitions === null && value.schemaVersion === 3) {
+    return 'latest summary repetitions is invalid'
+  }
+  const finalRepetitions = repetitions ?? 1
+  const seed = typeof value.seed === 'string' ? value.seed : null
+  const order = typeof value.order === 'string' ? value.order : null
   const results: EvalResultSummary[] = []
   for (const raw of value.results) {
     if (!isObject(raw)) return 'latest result is not an object'
@@ -518,6 +554,10 @@ export function parseLatest(value: unknown): EvalLatest | string {
     const hiddenVerifyCount = parseCount(raw.hiddenVerifyCount)
     if (hiddenVerifyCount === null && !(value.schemaVersion === 1 && raw.hiddenVerifyCount == null)) {
       return `${raw.scenario}: latest hiddenVerifyCount is invalid`
+    }
+    const repetition = parseCount(raw.repetition)
+    if (repetition === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
+      return `${raw.scenario}: latest repetition is invalid`
     }
     if (typeof raw.verified !== 'boolean') return `${raw.scenario}: latest verified is not a boolean`
     if (typeof raw.model !== 'string' && raw.model !== null) return `${raw.scenario}: latest model is invalid`
@@ -546,6 +586,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
       verified: raw.verified,
       hiddenVerified: typeof raw.hiddenVerified === 'boolean' ? raw.hiddenVerified : null,
       verifyExitCodes,
+      repetition,
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
     })
   }
@@ -554,6 +595,9 @@ export function parseLatest(value: unknown): EvalLatest | string {
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
     ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
+    repetitions: finalRepetitions,
+    seed,
+    order,
     results,
   }
 }
@@ -585,6 +629,11 @@ export function parseRunRecordResult(
   if (hiddenVerifyCount === null && !(schemaVersion === 1 && value.hiddenVerifyCount == null)) {
     return `run record result ${key} hiddenVerifyCount is invalid`
   }
+  const repetition = parseCount(value.repetition)
+  if (repetition === null && !(schemaVersion === 1 || schemaVersion === 2)) {
+    return `run record result ${key} repetition is invalid`
+  }
+  // For v1/v2, repetition can be null (unknown); for v3 it must be present and non-null
   if (!Array.isArray(value.attempts)) return `run record result ${key} has no attempts list`
   const attempts: EvalRunRecordAttempt[] = []
   for (const attempt of value.attempts) {
@@ -629,6 +678,7 @@ export function parseRunRecordResult(
     verified: value.verified,
     hiddenVerified: typeof value.hiddenVerified === 'boolean' ? value.hiddenVerified : null,
     verifyExitCodes,
+    repetition,
     costUsd: typeof value.costUsd === 'number' && Number.isFinite(value.costUsd) ? value.costUsd : null,
     tokens: typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : null,
     durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : 0,
@@ -640,7 +690,8 @@ export function parseRunRecordResult(
 /** Parse a run record, or explain why the file cannot be one. */
 export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (!isObject(value)) return 'run record is not an object'
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'run record schemaVersion must be 1 or 2'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    return 'run record schemaVersion must be 1, 2 or 3'
   if (typeof value.runId !== 'string' || value.runId === '') return 'run record has no runId'
   if (typeof value.startedAt !== 'string') return 'run record startedAt is missing'
   if (
@@ -671,6 +722,16 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (value.subset !== undefined && typeof value.subset !== 'boolean') {
     return 'run record subset is invalid'
   }
+  const repetitions = parseCount(value.repetitions)
+  if (repetitions === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
+    return 'run record repetitions is invalid'
+  }
+  if (repetitions === null && value.schemaVersion === 3) {
+    return 'run record repetitions is invalid'
+  }
+  const finalRepetitions = repetitions ?? 1
+  const seed = typeof value.seed === 'string' ? value.seed : null
+  const order = typeof value.order === 'string' ? value.order : null
   const scenarioHashes =
     value.schemaVersion === 1 && value.scenarioHashes == null ? null : parseFixtureHashes(value.scenarioHashes)
   if (typeof scenarioHashes === 'string') return scenarioHashes
@@ -695,6 +756,9 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
     nodeVersion: typeof value.nodeVersion === 'string' ? value.nodeVersion : null,
     publishTranscripts: value.publishTranscripts === true,
     subset: value.subset === true,
+    repetitions: finalRepetitions,
+    seed,
+    order,
     scenarioHashes,
     runKeys: value.runKeys.filter((k): k is string => typeof k === 'string'),
     executionOrder: value.executionOrder.filter((k): k is string => typeof k === 'string'),
@@ -706,9 +770,15 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
  *
  * Model IDs contain `/` (`provider/model`), so the filename is encoded rather than joined
  * raw: a raw join creates nested directories that direct-child discovery never finds.
+ * The repetition is included so repeated runs of the same scenario/variant/model do not
+ * overwrite each other.
  */
-export function checkpointFileName(result: Pick<EvalRunRecordResult, 'scenario' | 'variant' | 'model'>): string {
-  const parts = [result.scenario, result.variant, result.model ?? 'unknown'].map((part) => encodeURIComponent(part))
+export function checkpointFileName(
+  result: Pick<EvalRunRecordResult, 'scenario' | 'variant' | 'model' | 'repetition'>,
+): string {
+  const parts = [result.scenario, result.variant, result.model ?? 'unknown', String(result.repetition)].map((part) =>
+    encodeURIComponent(part),
+  )
   return `${parts.join('--')}.json`
 }
 
@@ -741,8 +811,8 @@ export function readCheckpointDirectory(directory: string): {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue
       const raw = readJsonFile(path)
       const schemaVersion = isObject(raw) ? (raw.schemaVersion ?? 1) : 1
-      if (schemaVersion !== 1 && schemaVersion !== 2) {
-        rejected.push(`${entry.name}: checkpoint schemaVersion must be 1 or 2`)
+      if (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) {
+        rejected.push(`${entry.name}: checkpoint schemaVersion must be 1, 2 or 3`)
         continue
       }
       const parsed = parseRunRecordResult(raw, schemaVersion)
@@ -843,7 +913,7 @@ export function reconcileRunRecord(
   let changed = false
   const ordered = [...checkpoints].sort((a, b) => a.modifiedMs - b.modifiedMs)
   for (const { result } of ordered) {
-    const key = `${result.scenario}/${result.variant}/${result.model}`
+    const key = resultKey(result)
     if (!declared.has(key)) {
       rejected.push(`${key}: checkpoint is not a declared key for this run`)
       continue
@@ -885,7 +955,7 @@ export function reconcileRunRecord(
       rejected.push(`${key}: checkpoint hashes do not match the current fixtures`)
       continue
     }
-    const index = next.results.findIndex((entry) => `${entry.scenario}/${entry.variant}/${entry.model}` === key)
+    const index = next.results.findIndex((entry) => resultKey(entry) === key)
     // Only a checkpoint with strictly more attempts can replace a recorded result. Using
     // mtime or an equal attempt count could resurrect an older success over a newer
     // failure, which is precisely the kind of evidence mixing resume must refuse.
@@ -904,9 +974,7 @@ export function reconcileRunRecord(
 /** Every declared key has a completed result and nothing else does. */
 export function allDeclaredCompleted(record: EvalRunRecord): boolean {
   if (record.runKeys.length === 0) return false
-  const completed = record.results
-    .filter((result) => latestAttemptState(result) === 'completed')
-    .map((result) => `${result.scenario}/${result.variant}/${result.model}`)
+  const completed = record.results.filter((result) => latestAttemptState(result) === 'completed').map(resultKey)
   if (new Set(completed).size !== completed.length) return false
   const completedSet = new Set(completed)
   return completedSet.size === record.runKeys.length && record.runKeys.every((key) => completedSet.has(key))
@@ -1036,7 +1104,7 @@ export function checkRunRecord(
       message: `run ${record.runId} execution order does not match declared run keys; the run record is corrupt`,
     }
   }
-  const recorded = record.results.map((r) => `${r.scenario}/${r.variant}/${r.model}`)
+  const recorded = record.results.map(resultKey)
   if (new Set(recorded).size !== recorded.length) {
     return {
       ok: false,
@@ -1062,7 +1130,7 @@ export function checkRunRecord(
   }
   const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario]))
   for (const result of record.results) {
-    const key = `${result.scenario}/${result.variant}/${result.model}`
+    const key = resultKey(result)
     if (latestAttemptState(result) !== 'completed') {
       return {
         ok: false,
@@ -1127,6 +1195,8 @@ export interface EvalResumeConfig {
   harnessDigest: string | null
   opencodeVersion: string | null
   publishTranscripts: boolean
+  /** How many repetitions of each scenario were run. Defaults to 1. */
+  repetitions?: number
 }
 
 export function checkRunRecordCompatibility(
@@ -1196,7 +1266,7 @@ export function checkRunRecordCompatibility(
       message: `run ${record.runId} declares duplicate run keys; cannot resume`,
     }
   }
-  const recordedKeys = record.results.map((result) => `${result.scenario}/${result.variant}/${result.model}`)
+  const recordedKeys = record.results.map(resultKey)
   if (new Set(recordedKeys).size !== recordedKeys.length) {
     return {
       ok: false,
@@ -1211,14 +1281,26 @@ export function checkRunRecordCompatibility(
       message: `run ${record.runId} used models ${recordModels} but the requested models are ${currentModelsJson}; cannot resume`,
     }
   }
-  const recordKeys = new Set(record.runKeys)
+  if (record.repetitions !== config.repetitions) {
+    return {
+      ok: false,
+      message: `run ${record.runId} ran ${record.repetitions} repetitions but this invocation requests ${config.repetitions}; cannot resume`,
+    }
+  }
+  const repetitions = config.repetitions ?? 1
   const currentKeys = new Set(
     config.models.flatMap((model) =>
       Object.keys(config.scenarioHashes).flatMap((scenario) =>
-        ['bare', 'anvil'].map((variant) => `${scenario}/${variant}/${model.id}`),
+        ['bare', 'anvil'].flatMap((variant) =>
+          Array.from(
+            { length: repetitions },
+            (_, repetitionIndex) => `${scenario}/${variant}/${model.id}/${repetitionIndex}`,
+          ),
+        ),
       ),
     ),
   )
+  const recordKeys = new Set(record.runKeys)
   for (const key of currentKeys) {
     if (!recordKeys.has(key)) {
       return {
@@ -1305,12 +1387,12 @@ export function checkRunRecordCompatibility(
   }
 }
 
-/** The stable key for one scenario/variant/model result. */
-function resultKey(result: Pick<EvalResultSummary, 'scenario' | 'variant' | 'model'>): string {
-  return `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`
+/** The stable key for one scenario/variant/model/repetition result. */
+export function resultKey(result: Pick<EvalResultSummary, 'scenario' | 'variant' | 'model' | 'repetition'>): string {
+  return `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}/${result.repetition}`
 }
 
-/** The declared run keys implied by a latest summary: `scenario/variant/model` per result. */
+/** The declared run keys implied by a latest summary: `scenario/variant/model/repetition` per result. */
 function latestRunKeys(latest: EvalLatest): string[] {
   return latest.results.map(resultKey)
 }
@@ -1393,11 +1475,7 @@ export function checkEvalGate(
     }
     if (record !== null && recordCheck.ok) {
       const summaryKeys = new Set(latest.results.map(resultKey))
-      const recordKeys = new Set(
-        record.results
-          .filter((r) => latestAttemptState(r) === 'completed')
-          .map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`),
-      )
+      const recordKeys = new Set(record.results.filter((r) => latestAttemptState(r) === 'completed').map(resultKey))
       for (const key of summaryKeys) {
         if (!recordKeys.has(key)) {
           failures.push(`latest summary reports ${key} but the run record has no completed result for it`)
@@ -1411,9 +1489,7 @@ export function checkEvalGate(
       // The summary and run record must agree on verdicts, errors, and hashes for every
       // completed result. Every disagreement is reported; an early return would hide some.
       const byRecordKey = new Map(
-        record.results
-          .filter((r) => latestAttemptState(r) === 'completed')
-          .map((r) => [`${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`, r]),
+        record.results.filter((r) => latestAttemptState(r) === 'completed').map((r) => [resultKey(r), r]),
       )
       for (const summaryResult of latest.results) {
         const key = resultKey(summaryResult)
@@ -1520,9 +1596,29 @@ export function checkEvalGate(
       failures.push(`${scenario.id}: no result in the latest run`)
       continue
     }
-    const variants = new Set(results.map((result) => result.variant))
-    if (!variants.has('bare')) failures.push(`${scenario.id}: the latest run has no bare result`)
-    if (!variants.has('anvil')) failures.push(`${scenario.id}: the latest run has no anvil result`)
+    // For repetition runs, every repetition must have both variants.
+    if (latest.repetitions !== undefined && latest.repetitions > 1) {
+      const expectedResultCount = latest.repetitions * 2
+      if (results.length !== expectedResultCount) {
+        failures.push(
+          `${scenario.id}: expected ${expectedResultCount} results (${latest.repetitions} repetitions × 2 variants) but found ${results.length}`,
+        )
+      }
+      for (let repetition = 0; repetition < latest.repetitions; repetition += 1) {
+        const repResults = results.filter((r) => r.repetition === repetition)
+        if (repResults.length !== 2) {
+          failures.push(`${scenario.id}: repetition ${repetition} expected 2 results but found ${repResults.length}`)
+          continue
+        }
+        const repVariants = new Set(repResults.map((r) => r.variant))
+        if (!repVariants.has('bare')) failures.push(`${scenario.id}: repetition ${repetition} missing bare variant`)
+        if (!repVariants.has('anvil')) failures.push(`${scenario.id}: repetition ${repetition} missing anvil variant`)
+      }
+    } else {
+      const variants = new Set(results.map((result) => result.variant))
+      if (!variants.has('bare')) failures.push(`${scenario.id}: the latest run has no bare result`)
+      if (!variants.has('anvil')) failures.push(`${scenario.id}: the latest run has no anvil result`)
+    }
     if (results.some((r) => r.scenarioHash !== scenario.scenarioHash)) {
       failures.push(`${scenario.id}: the scenario changed without updating the baseline`)
     }

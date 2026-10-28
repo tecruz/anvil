@@ -65,6 +65,7 @@ import {
   readJsonFile,
   reconcileRunRecord,
   recordFixtureProblem,
+  resultKey,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
@@ -180,7 +181,26 @@ async function main(): Promise<void> {
   const resume = args.includes('--resume')
   const publishTranscripts = args.includes('--publish-transcripts')
   const only = flagValue('--scenario', args)
+  const repetitionsRaw = flagValue('--repetitions', args)
+  const repetitions = repetitionsRaw === null ? 1 : Number(repetitionsRaw)
+  const seedRaw = flagValue('--seed', args)
+  const seed = seedRaw === null ? randomUUID() : seedRaw
+  const orderRaw = flagValue('--order', args)
+  const order = orderRaw === null ? 'alternate' : orderRaw
   const enabled = process.env.ANVIL_EVAL === '1'
+
+  if (repetitionsRaw !== null && (!Number.isInteger(repetitions) || repetitions < 1)) {
+    console.error(`--repetitions must be a positive integer, got ${repetitionsRaw}`)
+    process.exit(1)
+  }
+  if (repetitions < 1) {
+    console.error(`--repetitions must be at least 1, got ${repetitions}`)
+    process.exit(1)
+  }
+  if (!['alternate', 'fixed'].includes(order)) {
+    console.error(`--order must be 'alternate' or 'fixed', got ${order}`)
+    process.exit(1)
+  }
 
   if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
     console.error(
@@ -255,8 +275,10 @@ async function main(): Promise<void> {
   const declaredKeys: string[] = []
   for (const model of models) {
     for (const scenario of selectedScenarios) {
-      for (const variant of VARIANTS) {
-        declaredKeys.push(`${scenario.id}/${variant}/${model.id}`)
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        for (const variant of counterbalanceOrder(repetition, order)) {
+          declaredKeys.push(`${scenario.id}/${variant}/${model.id}/${repetition}`)
+        }
       }
     }
   }
@@ -314,6 +336,7 @@ async function main(): Promise<void> {
       harnessDigest,
       opencodeVersion,
       publishTranscripts,
+      repetitions,
     })
     if (!compatibility.ok) {
       console.error(compatibility.message)
@@ -327,11 +350,7 @@ async function main(): Promise<void> {
       console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
     }
     runId = runRecord.runId
-    const completed = new Set(
-      runRecord.results
-        .filter((r) => latestAttemptState(r) === 'completed')
-        .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
-    )
+    const completed = new Set(runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map(resultKey))
     const remaining = declaredKeys.filter((key) => !completed.has(key))
     console.log(
       remaining.length === 0
@@ -376,6 +395,9 @@ async function main(): Promise<void> {
       nodeVersion: process.version,
       publishTranscripts,
       subset: isSubset,
+      repetitions,
+      seed,
+      order,
       scenarioHashes: currentScenarioHashes,
       runKeys: declaredKeys,
       executionOrder: [],
@@ -388,10 +410,8 @@ async function main(): Promise<void> {
   const completedKeys = new Set(
     runRecord.results
       .filter((r) => latestAttemptState(r) === 'completed')
-      .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
+      .map((r) => `${r.scenario}/${r.variant}/${r.model}/${r.repetition}`),
   )
-  // Rehydrate completed results from the run record so a resume promotes every
-  // previously completed result, not only the ones this invocation runs.
   for (const prior of runRecord.results) {
     if (latestAttemptState(prior) !== 'completed') continue
     const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
@@ -411,6 +431,7 @@ async function main(): Promise<void> {
         verified: prior.verified,
         hiddenVerified: prior.hiddenVerified,
         verifyExitCodes: [...prior.verifyExitCodes],
+        repetition: prior.repetition,
         costUsd: prior.costUsd,
         tokens: prior.tokens,
         durationMs: prior.durationMs,
@@ -423,57 +444,64 @@ async function main(): Promise<void> {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
       const sourceHash = hashScenarioSource(repoRoot, scenario)
-      for (const variant of VARIANTS) {
-        const key = `${scenario.id}/${variant}/${model.id}`
-        // A key that already completed is not re-run: resume picks up incomplete work,
-        // it does not silently rerun finished results until they pass.
-        if (completedKeys.has(key)) continue
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        for (const variant of counterbalanceOrder(repetition, order)) {
+          const key = `${scenario.id}/${variant}/${model.id}/${repetition}`
+          // A key that already completed is not re-run: resume picks up incomplete work,
+          // it does not silently rerun finished results until they pass.
+          if (completedKeys.has(key)) continue
 
-        const attemptStartedAt = new Date().toISOString()
-        const rawResult = await runScenario(
-          scenario,
-          variant,
-          model,
-          scenarioHash,
-          sourceHash,
-          opencodeVersion,
-          fakeAgent,
-          publishTranscripts,
-        )
-        // Sanitize before anything persists it: the checkpoint, the run record, and the
-        // console table are all sinks, and a secret in an error string reaches all three.
-        const result = sanitizeResult(rawResult)
-        results.push(result)
+          const attemptStartedAt = new Date().toISOString()
+          const rawResult = await runScenario(
+            scenario,
+            variant,
+            model,
+            scenarioHash,
+            sourceHash,
+            opencodeVersion,
+            fakeAgent,
+            publishTranscripts,
+            repetition,
+          )
+          // Sanitize before anything persists it: the checkpoint, the run record, and the
+          // console table are all sinks, and a secret in an error string reaches all three.
+          const result = sanitizeResult(rawResult)
+          results.push(result)
 
-        // Checkpoint the attempt immediately, before the next scenario starts. A crash
-        // or timeout after this point leaves this attempt readable, and latest.json is
-        // never overwritten by an incomplete run.
-        const attempt: EvalRunRecordAttempt = {
-          startedAt: attemptStartedAt,
-          completedAt: new Date().toISOString(),
-          state: result.error === undefined ? 'completed' : 'failed',
-          ...(result.error === undefined ? {} : { error: result.error }),
+          // Checkpoint the attempt immediately, before the next scenario starts. A crash
+          // or timeout after this point leaves this attempt readable, and latest.json is
+          // never overwritten by an incomplete run.
+          const attempt: EvalRunRecordAttempt = {
+            startedAt: attemptStartedAt,
+            completedAt: new Date().toISOString(),
+            state: result.error === undefined ? 'completed' : 'failed',
+            ...(result.error === undefined ? {} : { error: result.error }),
+          }
+          const index = runRecord.results.findIndex(
+            (r) =>
+              r.scenario === scenario.id &&
+              r.variant === variant &&
+              r.model === model.id &&
+              r.repetition === repetition,
+          )
+          if (index === -1) {
+            const checkpoint = recordResultFrom(result, scenarioHash, sourceHash, [attempt])
+            writeCheckpoint(runId, checkpoint)
+            runRecord.executionOrder.push(key)
+            runRecord.results.push(checkpoint)
+          } else {
+            // A retry replaces the previous attempt's verdicts and metadata with the latest
+            // attempt's, so the run record never mixes a failed attempt's verdict with a
+            // completed attempt's metadata. In particular, a successful retry must clear the
+            // previous attempt's error rather than leave a contradiction behind.
+            const existing = runRecord.results[index]!
+            const updated = recordResultFrom(result, scenarioHash, sourceHash, [...existing.attempts, attempt])
+            runRecord.results[index] = updated
+            if (!runRecord.executionOrder.includes(key)) runRecord.executionOrder.push(key)
+            writeCheckpoint(runId, updated)
+          }
+          writeRunRecord(runRecord)
         }
-        const index = runRecord.results.findIndex(
-          (r) => r.scenario === scenario.id && r.variant === variant && r.model === model.id,
-        )
-        if (index === -1) {
-          const checkpoint = recordResultFrom(result, scenarioHash, sourceHash, [attempt])
-          writeCheckpoint(runId, checkpoint)
-          runRecord.executionOrder.push(key)
-          runRecord.results.push(checkpoint)
-        } else {
-          // A retry replaces the previous attempt's verdicts and metadata with the latest
-          // attempt's, so the run record never mixes a failed attempt's verdict with a
-          // completed attempt's metadata. In particular, a successful retry must clear the
-          // previous attempt's error rather than leave a contradiction behind.
-          const existing = runRecord.results[index]!
-          const updated = recordResultFrom(result, scenarioHash, sourceHash, [...existing.attempts, attempt])
-          runRecord.results[index] = updated
-          if (!runRecord.executionOrder.includes(key)) runRecord.executionOrder.push(key)
-          writeCheckpoint(runId, updated)
-        }
-        writeRunRecord(runRecord)
       }
     }
   }
@@ -576,8 +604,9 @@ async function runScenario(
   opencodeVersion: string | null,
   fake: boolean,
   publishTranscripts: boolean,
+  repetition: number,
 ): Promise<ScenarioResult> {
-  const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-`))
+  const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-r${repetition}`))
   const started = Date.now()
   const result: ScenarioResult = {
     scenario: scenario.id,
@@ -598,6 +627,7 @@ async function runScenario(
     tokens: null,
     durationMs: 0,
     transcript: '',
+    repetition,
   }
 
   try {
@@ -866,6 +896,9 @@ function writeReport(results: ScenarioResult[], runRecord: EvalRunRecord): void 
     generatedAt,
     implementation,
     runId: runRecord.runId,
+    repetitions: runRecord.repetitions,
+    seed: runRecord.seed,
+    order: runRecord.order,
     results: results.map(summaryOf),
   }
   atomicWriteJson(latestPath, latest)
@@ -908,6 +941,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     verified: result.verified,
     hiddenVerified: result.hiddenVerified,
     verifyExitCodes: result.verifyExitCodes,
+    repetition: result.repetition ?? null,
     ...(result.error === undefined ? {} : { error: result.error }),
   }
 }
@@ -928,6 +962,17 @@ function writeBaseline(scenarios: readonly EvalScenario[]): void {
   }
   writeFileSync(baselinePath, `${formatJson(baseline)}\n`, 'utf8')
   console.log(`Baseline written to ${baselinePath}`)
+}
+
+/** Variant ordering within a repetition.
+ *
+ * `alternate` swaps bare/anvil order each repetition so neither variant always runs first.
+ * `fixed` always runs bare before anvil. The order does not change results, but alternating
+ * keeps variant order from confounding repetition comparisons.
+ */
+function counterbalanceOrder(repetition: number, order: string): ('bare' | 'anvil')[] {
+  if (order === 'fixed') return ['bare', 'anvil']
+  return repetition % 2 === 0 ? ['bare', 'anvil'] : ['anvil', 'bare']
 }
 
 /** HEAD of the repository the harness runs against, or null when git is unavailable. */
@@ -994,6 +1039,7 @@ function recordResultFrom(
     verified: result.verified,
     hiddenVerified: result.hiddenVerified,
     verifyExitCodes: [...result.verifyExitCodes],
+    repetition: result.repetition,
     costUsd: result.costUsd,
     tokens: result.tokens,
     durationMs: result.durationMs,
