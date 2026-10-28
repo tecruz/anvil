@@ -20,7 +20,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0009](0009-guidance-has-to-earn-its-place.md) | Guidance has to earn its place: an instruction budget, and resources that can be satisfied | accepted |
 | [0010](0010-cost-is-read-from-the-hosts-ledger.md) | Cost is read from the host's ledger; anvil records nothing | accepted |
 | [0011](0011-mcp-for-the-control-surface.md) | The MCP control surface runs the CLI, not a second contract | accepted |
-| [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | proposed |
+| [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

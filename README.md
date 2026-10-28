@@ -10,7 +10,15 @@ rather than guessing.
 
 ## Install
 
-There is no npm release yet. Install from GitHub:
+Two channels:
+
+```bash
+npm install -g @anvil/cli
+```
+
+installs a prebuilt, versioned tarball from the npm registry — no build toolchain needed, zero runtime dependencies.
+
+Or install directly from GitHub, which builds from source:
 
 ```bash
 npm install -g github:tecruz/anvil
@@ -23,7 +31,7 @@ npx github:tecruz/anvil doctor
 ```
 
 **Not `npm install -g anvil`.** That name belongs to an unrelated package on npm, and
-the install path above is the one that works.
+the scoped `@anvil/cli` above is the one that works.
 
 **Pin a tag if you care what you get.** A git install with no ref tracks the default branch,
 so a breaking change reaches you on someone else's schedule — the same reason a lockfile
@@ -31,6 +39,12 @@ exists:
 
 ```bash
 npm install -g github:tecruz/anvil#v0.1.0
+```
+
+The registry install is versioned by the package version itself:
+
+```bash
+npm install -g @anvil/cli@0.1.0
 ```
 
 Three things worth knowing before you install:

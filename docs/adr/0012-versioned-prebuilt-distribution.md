@@ -1,6 +1,6 @@
 # ADR-0012: Versioned prebuilt distribution via a scoped registry package
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-28
 - Milestone: Phase 4
 - Supersedes: none — extends [ADR-0007](0007-distribution-git-install.md)
