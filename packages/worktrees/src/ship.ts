@@ -133,6 +133,20 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
     })
   } else if (options.probe) {
     const entries = verifyCommandEntries(options.profile)
+    if (entries.length === 0) {
+      stages.push({
+        name: 'verify',
+        ok: false,
+        detail: 'no verify command detected',
+      })
+      return {
+        ok: false,
+        stages,
+        risk: { touched: [], highPaths: [], mediumPaths: [], level: null },
+        reviewers: [],
+        commandsRun,
+      }
+    }
     for (const entry of entries) {
       commandsRun.push(entry.cmd)
       const result = await options.run(entry.cmd, verifyCwd)

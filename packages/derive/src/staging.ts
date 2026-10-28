@@ -436,15 +436,49 @@ export function applyStaging(repoRoot: string, manifest: StagingManifest): strin
   const contents = readAllStaged(repoRoot, manifest)
   const targets = resolveAllTargets(repoRoot, manifest)
 
+  // Original repo-side content for every file, captured before any write so a failed
+  // batch can be rolled back. `null` means the file did not exist before this apply.
+  const originals = new Map<string, string | null>()
   const written: string[] = []
-  for (const file of manifest.files) {
-    const target = targets.get(file.path)!
-    const content = contents.get(file.path)!
-    mkdirSync(join(target, '..'), { recursive: true })
-    writeFileSync(target, content, 'utf8')
-    written.push(file.path)
+  try {
+    for (const file of manifest.files) {
+      const target = targets.get(file.path)!
+      const content = contents.get(file.path)!
+      originals.set(file.path, readRepoFile(repoRoot, file.path))
+      mkdirSync(join(target, '..'), { recursive: true })
+      writeFileSync(target, content, 'utf8')
+      written.push(file.path)
+    }
+    return written
+  } catch (err) {
+    // A failure partway through a batch leaves previously written files behind. Restore
+    // each one to its pre-apply content so the repository is left as close to its original
+    // state as possible. Rollback is best-effort: if it fails too, the file is in an
+    // unknown state and the error below names the original failure.
+    for (const path of written) {
+      const target = targets.get(path)!
+      const original = originals.get(path)
+      try {
+        if (original === undefined || original === null) {
+          // Did not exist before as a file. Only remove it if we created a regular file.
+          try {
+            if (statSync(target).isFile()) rmSync(target, { force: true })
+          } catch {
+            // Does not exist, or is a directory that predated the apply; leave it.
+          }
+        } else {
+          writeFileSync(target, original, 'utf8')
+        }
+      } catch {
+        // Rollback for this file failed too; continue with the rest.
+      }
+    }
+    throw new AnvilError(
+      ErrorCode.Internal,
+      `Staging apply failed after writing ${written.length} file(s); rollback attempted`,
+      { cause: err as Error },
+    )
   }
-  return written
 }
 
 /** Remove the staging bundle. */
