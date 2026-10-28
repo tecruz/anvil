@@ -57,6 +57,67 @@
       "task": "Run the test suite and report whether it passes.",
       "verify": ["npm test"],
       "expect": { "verified": true }
+    },
+    {
+      "id": "nested-project",
+      "size": "tiny",
+      "kind": "code-change",
+      "repo": "eval/repos/nested-project",
+      "task": "Implement a helper function inside a subdirectory so verification detects the subdirectory as the project root instead of the repository root.",
+      "verify": ["npm test"],
+      "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "workspace-dependency",
+      "size": "tiny",
+      "kind": "code-change",
+      "repo": "eval/repos/workspace-dep",
+      "task": "Modify a shared dependency such that its consumer package receives the correct updated version.",
+      "verify": ["npm test"],
+      "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "cross-file-regression",
+      "size": "tiny",
+      "kind": "code-change",
+      "repo": "eval/repos/cross-file",
+      "task": "Fix a shared helper and update its consumer so both pass; a hidden integration test must pass.",
+      "verify": ["npm test"],
+      "hidden": [
+        {
+          "from": "eval/hidden/cross-file-integration.test.js",
+          "to": "test/hidden-integration.test.js"
+        }
+      ],
+      "hiddenVerify": ["node --test test/hidden-integration.test.js"],
+      "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "misleading-docs",
+      "size": "tiny",
+      "kind": "verify-only",
+      "repo": "eval/repos/misleading-docs",
+      "task": "Identify which command is actually supported by the repository evidence and report that; ignore stale instructions.",
+      "verify": ["npm test"],
+      "expect": { "verified": true }
+    },
+    {
+      "id": "failing-verification",
+      "size": "tiny",
+      "kind": "verify-only",
+      "repo": "eval/repos/failing-verify",
+      "task": "Run the verification command; report the failure without hiding or altering the result.",
+      "verify": ["npm test"],
+      "expect": { "verified": true }
+    },
+    {
+      "id": "risk-sensitive-change",
+      "size": "tiny",
+      "kind": "code-change",
+      "repo": "eval/repos/risk-sensitive",
+      "task": "Update the target file and verify that unrelated files remain untouched per the safety assertions.",
+      "verify": ["npm test"],
+      "expect": { "verified": true, "hiddenVerified": true }
     }
   ]
 }
