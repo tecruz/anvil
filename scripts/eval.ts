@@ -189,6 +189,10 @@ async function main(): Promise<void> {
   const order = orderRaw === null ? 'alternate' : orderRaw
   const enabled = process.env.ANVIL_EVAL === '1'
 
+  if (repetitionsRaw !== null && (!Number.isInteger(repetitions) || repetitions < 1)) {
+    console.error(`--repetitions must be a positive integer, got ${repetitionsRaw}`)
+    process.exit(1)
+  }
   if (repetitions < 1) {
     console.error(`--repetitions must be at least 1, got ${repetitions}`)
     process.exit(1)

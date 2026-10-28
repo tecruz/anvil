@@ -46,6 +46,8 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     )
     const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime }
     delete env.ANVIL_EVAL
+    // The harness must run fixture test discovery, not inherit this parent's test context.
+    delete env.NODE_TEST_CONTEXT
     const invoke = (...args: string[]) => {
       const result = spawnSync(process.execPath, ['scripts/eval.ts', '--fake-agent', ...args], {
         cwd: root,

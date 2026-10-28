@@ -24,3 +24,11 @@ test('slugify trims the dashes at the ends', () => {
 test('slugify leaves an already-slugged title alone', () => {
   assert.equal(slugify('hello-world'), 'hello-world')
 })
+
+test('slugify handles empty string', () => {
+  assert.equal(slugify(''), '')
+})
+
+test('slugify handles numbers', () => {
+  assert.equal(slugify('Hello World 42'), 'hello-world-42')
+})

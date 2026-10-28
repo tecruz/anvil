@@ -407,7 +407,11 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
     if (scenario.kind !== 'code-change' && scenario.kind !== 'verify-only') {
       return `${scenario.id}: kind must be code-change or verify-only`
     }
-    seen.add(`${scenario.size}:${scenario.kind}`)
+    const cell = `${scenario.size}:${scenario.kind}`
+    if (seen.has(cell)) {
+      return `${scenario.id}: the matrix allows exactly one scenario per cell; ${scenario.size} / ${scenario.kind} is already covered`
+    }
+    seen.add(cell)
   }
 
   for (const cell of expected) {
@@ -470,7 +474,9 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
       hiddenVerify,
       expect: {
         ...(raw.expect.verified === undefined ? {} : { verified: raw.expect.verified === true }),
-        ...(raw.expect.hiddenVerified === undefined ? {} : { hiddenVerified: raw.expect.hiddenVerified === true }),
+        ...(raw.expect.hiddenVerified === undefined || raw.expect.hiddenVerified === null
+          ? {}
+          : { hiddenVerified: raw.expect.hiddenVerified === true }),
       },
     })
   }
@@ -526,7 +532,10 @@ export function parseLatest(value: unknown): EvalLatest | string {
   if (repetitions === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
     return 'latest summary repetitions is invalid'
   }
-  if (repetitions === null) return 'latest summary repetitions is invalid'
+  if (repetitions === null && value.schemaVersion === 3) {
+    return 'latest summary repetitions is invalid'
+  }
+  const finalRepetitions = repetitions ?? 1
   const seed = typeof value.seed === 'string' ? value.seed : null
   const order = typeof value.order === 'string' ? value.order : null
   const results: EvalResultSummary[] = []
@@ -550,7 +559,6 @@ export function parseLatest(value: unknown): EvalLatest | string {
     if (repetition === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
       return `${raw.scenario}: latest repetition is invalid`
     }
-    if (repetition === null) return `${raw.scenario}: latest repetition is invalid`
     if (typeof raw.verified !== 'boolean') return `${raw.scenario}: latest verified is not a boolean`
     if (typeof raw.model !== 'string' && raw.model !== null) return `${raw.scenario}: latest model is invalid`
     if (typeof raw.opencodeVersion !== 'string' && raw.opencodeVersion !== null) {
@@ -587,7 +595,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
     ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
-    repetitions,
+    repetitions: finalRepetitions,
     seed,
     order,
     results,
@@ -625,7 +633,7 @@ export function parseRunRecordResult(
   if (repetition === null && !(schemaVersion === 1 || schemaVersion === 2)) {
     return `run record result ${key} repetition is invalid`
   }
-  if (repetition === null) return `run record result ${key} repetition is invalid`
+  // For v1/v2, repetition can be null (unknown); for v3 it must be present and non-null
   if (!Array.isArray(value.attempts)) return `run record result ${key} has no attempts list`
   const attempts: EvalRunRecordAttempt[] = []
   for (const attempt of value.attempts) {
@@ -718,7 +726,10 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (repetitions === null && !(value.schemaVersion === 1 || value.schemaVersion === 2)) {
     return 'run record repetitions is invalid'
   }
-  if (repetitions === null) return 'run record repetitions is invalid'
+  if (repetitions === null && value.schemaVersion === 3) {
+    return 'run record repetitions is invalid'
+  }
+  const finalRepetitions = repetitions ?? 1
   const seed = typeof value.seed === 'string' ? value.seed : null
   const order = typeof value.order === 'string' ? value.order : null
   const scenarioHashes =
@@ -745,7 +756,7 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
     nodeVersion: typeof value.nodeVersion === 'string' ? value.nodeVersion : null,
     publishTranscripts: value.publishTranscripts === true,
     subset: value.subset === true,
-    repetitions,
+    repetitions: finalRepetitions,
     seed,
     order,
     scenarioHashes,

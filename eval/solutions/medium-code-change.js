@@ -12,6 +12,11 @@ export function mean(numbers) {
 }
 
 /**
+ * The arithmetic mean of a list of numbers (alias for compatibility).
+ */
+export const calcMean = mean
+
+/**
  * The median of a list of numbers: the middle value of the sorted list, or the mean
  * of the two middle values when the count is even.
  */
