@@ -59,11 +59,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The checked-in summary and run record describe an earlier, hermetic run. Remove
-      # them before any setup step can fail, so the always() upload below cannot publish
-      # stale results as this run's evidence.
+      # The checked-in summary, run record, and promoted-record archive describe an earlier,
+      # hermetic run. Remove them before any setup step can fail, so the always() upload
+      # below cannot publish stale results as this run's evidence.
       - name: discard the checked-out summary
-        run: rm -f eval-results/latest.json eval-results/run.json
+        run: rm -rf eval-results/latest.json eval-results/run.json eval-results/runs
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -136,9 +136,9 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Retain benchmark artifacts even after failure: checkpoints, the run record, and
-      # the raw transcripts. `latest.json` is deliberately not uploaded -- it is the
-      # checked-in hermetic evidence, not per-run output.
+      # Retain benchmark artifacts even after failure: checkpoints, the run record, the
+      # promoted-record archive, and the raw transcripts. `latest.json` is deliberately not
+      # uploaded -- it is the checked-in hermetic evidence, not per-run output.
       - name: upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.3
@@ -146,6 +146,7 @@ jobs:
           name: eval-artifacts-${{ github.run_id }}-attempt${{ github.run_attempt }}
           path: |
             eval-results/run.json
+            eval-results/runs/**/*.json
             eval-results/checkpoints/**/*.json
             eval-results/raw/*.json
           retention-days: 30

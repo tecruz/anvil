@@ -136,10 +136,22 @@ npm run build           # esbuild -> packages/cli/dist/cli.js, and the plugin bu
 npm run check           # lint, typecheck, the whole suite, the build, the docs check, the eval gate
 ```
 
-`eval:check` reads `eval-results/latest.json` against `eval-results/baseline.json`; the
-raw transcripts live under `eval-results/raw/` and are not committed. The summary also
-records a hash of the anvil sources that produced it, so a stale run cannot vouch for a
-newer implementation.
+`eval:check` reads `eval-results/latest.json` against `eval-results/baseline.json`. The
+summary names the run that produced it; the gate reads that run's full record from
+`eval-results/runs/<runId>.json` and falls back to `eval-results/run.json` only when it is
+the same run. A later partial or `--scenario` subset run may therefore overwrite
+`run.json` without taking away the provenance of the last complete summary. Per-run
+checkpoints live under `eval-results/checkpoints/` and raw output under
+`eval-results/raw/`; both are ignored and uploaded only as bounded CI artifacts. Promoted
+run records are committed with the summary.
+
+The summary records a hash of the anvil sources that produced it, so a stale run cannot
+vouch for a newer implementation. The run record also records the harness digest, Node and
+OpenCode versions, transcript policy, model set, and whether the run was a subset.
+`--resume` refuses any run whose inputs differ, validates every checkpoint before
+recovering it, and never promotes a subset or partial run. Transcripts are empty by
+default; `--publish-transcripts` opts in, and every persisted transcript, error, and
+verifier output is redacted and size-limited first.
 
 `gen:playbooks` exists because a single-file CLI cannot read a directory of YAML at
 runtime, so the registry is compiled in. The authoring format stays

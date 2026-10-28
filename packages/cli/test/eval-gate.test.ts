@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
 import {
+  allDeclaredCompleted,
   checkEvalGate,
+  checkpointFileName,
   checkRunRecord,
   checkRunRecordCompatibility,
   type EvalBaseline,
@@ -19,6 +21,9 @@ import {
   parseBaseline,
   parseLatest,
   parseRunRecord,
+  readCheckpointDirectory,
+  reconcileRunRecord,
+  recordFixtureProblem,
   validateScenarioMatrix,
 } from '../src/eval-gate.ts'
 
@@ -296,9 +301,12 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
     commitSha: 'abc123',
     implementation: 'impl-hash',
     bundleDigest: 'bundle-hash',
+    harnessDigest: 'harness-hash',
     models: [{ id: 'fake-agent', role: 'small' }],
     opencodeVersion: null,
-    nodeVersion: null,
+    nodeVersion: process.version,
+    publishTranscripts: false,
+    subset: false,
     runKeys: ['tiny-code-change/bare/fake-agent', 'tiny-code-change/anvil/fake-agent'],
     executionOrder: ['tiny-code-change/bare/fake-agent', 'tiny-code-change/anvil/fake-agent'],
     results: [
@@ -349,6 +357,38 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
     ],
     ...over,
   }
+}
+
+function runRecordFor(run: EvalLatest): EvalRunRecord {
+  const keys = run.results.map((result) => `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`)
+  return runRecord({
+    runId: run.runId ?? 'run-1',
+    runKeys: keys,
+    executionOrder: keys,
+    results: run.results.map((result) => ({
+      scenario: result.scenario,
+      variant: result.variant,
+      model: result.model,
+      modelRole: result.modelRole,
+      scenarioHash: result.scenarioHash,
+      sourceHash: result.sourceHash,
+      verified: result.verified,
+      hiddenVerified: result.hiddenVerified,
+      verifyExitCodes: [...result.verifyExitCodes],
+      costUsd: null,
+      tokens: null,
+      durationMs: 0,
+      transcript: '',
+      ...(result.error === undefined ? {} : { error: result.error }),
+      attempts: [
+        {
+          startedAt: '2026-10-27T00:02:00.000Z',
+          completedAt: '2026-10-27T00:02:30.000Z',
+          state: 'completed',
+        },
+      ],
+    })),
+  })
 }
 
 describe('run record contract', () => {
@@ -410,6 +450,100 @@ describe('run record contract', () => {
     assert.equal(gate.ok, false)
     assert.match(gate.message, /never executed/)
   })
+
+  test('fails when the record declares a key it never executed', () => {
+    const record = runRecord()
+    const extra = 'medium-code-change/anvil/fake-agent'
+    record.runKeys.push(extra)
+    record.executionOrder.push(extra)
+    const gate = checkRunRecord(record, 'impl-hash', record.runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /did not execute/)
+  })
+
+  test('fails when the record executed a key it never declared', () => {
+    const record = runRecord()
+    record.results.push({
+      ...record.results[1]!,
+      scenario: 'medium-code-change',
+    })
+    const gate = checkRunRecord(record, 'impl-hash', [
+      'tiny-code-change/bare/fake-agent',
+      'tiny-code-change/anvil/fake-agent',
+    ])
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /never declared/)
+  })
+
+  test('fails when a completed result still carries an error', () => {
+    const record = runRecord()
+    record.results[0] = { ...record.results[0]!, error: 'agent failed' }
+    const gate = checkRunRecord(record, 'impl-hash', record.runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /recorded an error/)
+  })
+
+  test('fails when the last attempt completed but carries an error', () => {
+    const record = runRecord()
+    const result = record.results[0]!
+    result.attempts = [
+      ...result.attempts,
+      {
+        startedAt: '2026-10-27T00:04:00.000Z',
+        completedAt: '2026-10-27T00:04:30.000Z',
+        state: 'completed',
+        error: 'agent failed',
+      },
+    ]
+    const gate = checkRunRecord(record, 'impl-hash', record.runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /recorded an error/)
+  })
+
+  test('fails when a completed attempt has no completion timestamp', () => {
+    const record = runRecord()
+    const result = record.results[0]!
+    result.attempts = [{ ...result.attempts[0]!, completedAt: null }]
+    const gate = checkRunRecord(record, 'impl-hash', record.runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /without a completion timestamp/)
+  })
+
+  test('fails when a verified result reports a failing verifier exit code', () => {
+    const record = runRecord()
+    record.results[0] = { ...record.results[0]!, verified: true, verifyExitCodes: [1] }
+    const gate = checkRunRecord(record, 'impl-hash', record.runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /verified with a failing visible verifier/)
+  })
+
+  test('fails when a completed run has no completion timestamp', () => {
+    const gate = checkRunRecord(runRecord({ completedAt: null }), 'impl-hash', runRecord().runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /no completion timestamp/)
+  })
+
+  test('fails when a completed run does not record its harness', () => {
+    const gate = checkRunRecord(runRecord({ harnessDigest: null }), 'impl-hash', runRecord().runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /does not record the harness/)
+  })
+
+  test('fails when a subset run is offered as complete evidence', () => {
+    const gate = checkRunRecord(runRecord({ subset: true }), 'impl-hash', runRecord().runKeys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /subset run/)
+  })
+
+  test('refuses a run record with an invalid verifier exit code', () => {
+    const record = runRecord()
+    record.results[0] = {
+      ...record.results[0]!,
+      verifyExitCodes: [0, 'nope'] as unknown as number[],
+    }
+    const parsed = parseRunRecord(record)
+    assert.match(parsed as string, /verifyExitCodes is invalid/)
+  })
 })
 
 describe('latest attempt state', () => {
@@ -438,59 +572,260 @@ describe('latest attempt state', () => {
   })
 })
 
+describe('the eval gate rejects contradictory run evidence', () => {
+  const scenarios = matrix()
+  const expected = baseline(scenarios)
+
+  function evidence(): { run: EvalLatest; record: EvalRunRecord } {
+    const run = latest(scenarios)
+    run.implementation = 'impl-hash'
+    return { run, record: runRecordFor(run) }
+  }
+
+  test('fails when the summary and record disagree about an error', () => {
+    const { run, record } = evidence()
+    run.results[0]!.error = 'summary says the agent failed'
+    const gate = checkEvalGate(expected, run, undefined, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /error .* disagrees with run record/)
+  })
+
+  test('compares verifier exit codes in order instead of sorting them', () => {
+    const { run, record } = evidence()
+    run.results[0]!.verified = false
+    run.results[0]!.verifyExitCodes = [0, 1]
+    record.results[0]!.verified = false
+    record.results[0]!.verifyExitCodes = [1, 0]
+    const gate = checkEvalGate(expected, run, undefined, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /verifyExitCodes disagree/)
+  })
+
+  test('fails when a summary claims a pass while reporting a failing verifier', () => {
+    const { run, record } = evidence()
+    run.results[0]!.verified = true
+    run.results[0]!.verifyExitCodes = [1]
+    record.results[0]!.verified = true
+    record.results[0]!.verifyExitCodes = [0]
+    const gate = checkEvalGate(expected, run, undefined, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /failing visible verifier/)
+  })
+
+  test('fails when the summary does not reference the run record', () => {
+    const { run, record } = evidence()
+    delete run.runId
+    const gate = checkEvalGate(expected, run, undefined, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /does not reference a run/)
+  })
+
+  test('fails when the summary references a different run', () => {
+    const { run, record } = evidence()
+    run.runId = 'run-2'
+    const gate = checkEvalGate(expected, run, undefined, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /references run run-2/)
+  })
+})
+
+describe('checkpoint reconciliation', () => {
+  const hashes = Object.fromEntries(
+    matrix().map((scenario) => [scenario.id, { scenarioHash: 'scenario-hash', sourceHash: 'source-hash' }]),
+  )
+  const key = 'tiny-code-change/anvil/fake-agent'
+
+  test('encodes model ids so a slash does not create nested checkpoint paths', () => {
+    const name = checkpointFileName({
+      scenario: 'medium-verify-only',
+      variant: 'anvil',
+      model: 'provider/review-fake',
+    })
+    assert.equal(name, 'medium-verify-only--anvil--provider%2Freview-fake.json')
+    assert.ok(!name.includes('/'))
+  })
+
+  test('reads nested checkpoints and reports malformed ones', () => {
+    const dir = temp('anvil-eval-checkpoints-')
+    mkdirSync(join(dir, 'provider'), { recursive: true })
+    const checkpoint = runRecordFor(latest(matrix())).results[0]!
+    writeFileSync(join(dir, 'provider', 'review-fake.json'), JSON.stringify(checkpoint), 'utf8')
+    writeFileSync(join(dir, 'broken.json'), '{}', 'utf8')
+    const read = readCheckpointDirectory(dir)
+    assert.equal(read.entries.length, 1)
+    assert.equal(read.rejected.length, 1)
+  })
+
+  test('recovers a completed checkpoint that run.json never recorded', () => {
+    const record = runRecordFor(latest(matrix()))
+    const missing = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    record.results = record.results.filter((result) => result !== missing)
+    record.executionOrder = record.executionOrder.filter((entry) => entry !== key)
+    const reconciled = reconcileRunRecord(record, [{ result: missing, modifiedMs: 10 }], hashes)
+    assert.equal(reconciled.changed, true)
+    assert.equal(reconciled.record.results.length, 8)
+    assert.equal(allDeclaredCompleted(reconciled.record), true)
+  })
+
+  test('prefers a newer completed checkpoint over a stale record entry', () => {
+    const record = runRecordFor(latest(matrix()))
+    const stale = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    const newer: EvalRunRecordResult = {
+      ...stale,
+      verified: false,
+      verifyExitCodes: [1],
+      attempts: [
+        ...stale.attempts,
+        { startedAt: '2026-10-27T00:06:00.000Z', completedAt: '2026-10-27T00:06:30.000Z', state: 'completed' },
+      ],
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: newer, modifiedMs: 20 }], hashes)
+    const got = reconciled.record.results.find(
+      (result) => `${result.scenario}/${result.variant}/${result.model}` === key,
+    )!
+    assert.equal(reconciled.changed, true)
+    assert.equal(got.verified, false)
+    assert.equal(got.attempts.length, 2)
+  })
+
+  test('rejects a checkpoint whose hashes no longer match the fixtures', () => {
+    const record = runRecordFor(latest(matrix()))
+    const stale = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    const reconciled = reconcileRunRecord(
+      record,
+      [{ result: { ...stale, sourceHash: 'other' }, modifiedMs: 10 }],
+      hashes,
+    )
+    assert.equal(reconciled.changed, false)
+    assert.match(reconciled.rejected.join('\n'), /hashes do not match/)
+  })
+
+  test('skips a failed checkpoint instead of recovering it as evidence', () => {
+    const record = runRecordFor(latest(matrix()))
+    const stale = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    const failed: EvalRunRecordResult = {
+      ...stale,
+      attempts: [
+        ...stale.attempts,
+        { startedAt: '2026-10-27T00:06:00.000Z', completedAt: '2026-10-27T00:06:30.000Z', state: 'failed' },
+      ],
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: failed, modifiedMs: 10 }], hashes)
+    assert.equal(reconciled.changed, false)
+    const got = reconciled.record.results.find(
+      (result) => `${result.scenario}/${result.variant}/${result.model}` === key,
+    )!
+    assert.equal(latestAttemptState(got), 'completed')
+  })
+
+  test('does not resurrect an equal-attempt success over a failed record', () => {
+    const record = runRecordFor(latest(matrix()))
+    const index = record.results.findIndex((result) => `${result.scenario}/${result.variant}/${result.model}` === key)
+    const staleSuccess = record.results[index]!
+    record.results[index] = {
+      ...staleSuccess,
+      attempts: [{ startedAt: '2026-10-27T00:06:00.000Z', completedAt: '2026-10-27T00:06:30.000Z', state: 'failed' }],
+      error: 'the retry failed',
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: staleSuccess, modifiedMs: 10 }], hashes)
+    assert.equal(reconciled.changed, false)
+    assert.equal(latestAttemptState(reconciled.record.results[index]!), 'failed')
+  })
+
+  test('recognises a record whose declared keys all completed', () => {
+    assert.equal(allDeclaredCompleted(runRecord()), true)
+    const failed = runRecord()
+    failed.results[0]!.attempts = [
+      { startedAt: '2026-10-27T00:02:00.000Z', completedAt: '2026-10-27T00:02:30.000Z', state: 'failed' },
+    ]
+    assert.equal(allDeclaredCompleted(failed), false)
+  })
+
+  test('reports the first completed result whose fixtures changed', () => {
+    const recordHashes = { 'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'src-hash' } }
+    assert.equal(recordFixtureProblem(runRecord(), recordHashes), null)
+    assert.match(
+      recordFixtureProblem(runRecord(), {
+        'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'other' },
+      }) ?? '',
+      /different fixtures/,
+    )
+  })
+})
+
 describe('run record compatibility for resume', () => {
   const scenarios = {
     'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'src-hash' },
   }
   const models = [{ id: 'fake-agent', role: 'small' }]
+  const config = (over: Partial<Parameters<typeof checkRunRecordCompatibility>[1]> = {}) => ({
+    implementation: 'impl-hash',
+    scenarioHashes: scenarios,
+    models,
+    bundleDigest: 'bundle-hash',
+    harnessDigest: 'harness-hash',
+    opencodeVersion: null,
+    publishTranscripts: false,
+    ...over,
+  })
 
   test('passes when implementation, fixtures, models, and keys all match', () => {
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', scenarios, models, 'bundle-hash', null)
+    const gate = checkRunRecordCompatibility(runRecord(), config())
     assert.equal(gate.ok, true, gate.message)
   })
 
   test('fails when the implementation changed', () => {
-    const gate = checkRunRecordCompatibility(
-      runRecord({ implementation: 'old-impl' }),
-      'new-impl',
-      scenarios,
-      models,
-      'bundle-hash',
-      null,
-    )
+    const gate = checkRunRecordCompatibility(runRecord({ implementation: 'old-impl' }), config())
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
   })
 
+  test('fails when the harness changed', () => {
+    const gate = checkRunRecordCompatibility(runRecord(), config({ harnessDigest: 'other-harness' }))
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /different harness/)
+  })
+
+  test('fails when the run does not record a harness digest', () => {
+    const gate = checkRunRecordCompatibility(runRecord({ harnessDigest: null }), config())
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /does not record the harness/)
+  })
+
+  test('fails when the transcript policy changed', () => {
+    const gate = checkRunRecordCompatibility(runRecord(), config({ publishTranscripts: true }))
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /transcripts/)
+  })
+
+  test('fails when the Node version changed', () => {
+    const gate = checkRunRecordCompatibility(runRecord({ nodeVersion: 'v0.0.0' }), config())
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /Node/)
+  })
+
   test('fails when the models changed', () => {
-    const gate = checkRunRecordCompatibility(
-      runRecord(),
-      'impl-hash',
-      scenarios,
-      [{ id: 'other-model', role: 'small' }],
-      'bundle-hash',
-      null,
-    )
+    const gate = checkRunRecordCompatibility(runRecord(), config({ models: [{ id: 'other-model', role: 'small' }] }))
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
   })
 
   test('fails when a fixture scenario hash changed', () => {
     const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'new-sc-hash', sourceHash: 'src-hash' } }
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash', null)
+    const gate = checkRunRecordCompatibility(runRecord(), config({ scenarioHashes: changed }))
     assert.equal(gate.ok, false)
     assert.match(gate.message, /fixture changed, cannot resume/)
   })
 
   test('fails when a source hash changed', () => {
     const changed = { ...scenarios, 'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'new-src-hash' } }
-    const gate = checkRunRecordCompatibility(runRecord(), 'impl-hash', changed, models, 'bundle-hash', null)
+    const gate = checkRunRecordCompatibility(runRecord(), config({ scenarioHashes: changed }))
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
   })
 
   test('fails when there is no run record', () => {
-    const gate = checkRunRecordCompatibility(null, 'impl-hash', scenarios, models, 'bundle-hash', null)
+    const gate = checkRunRecordCompatibility(null, config())
     assert.equal(gate.ok, false)
     assert.match(gate.message, /no run record exists to resume/)
   })

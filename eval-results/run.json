@@ -1,12 +1,13 @@
 {
   "schemaVersion": 1,
-  "runId": "dd05c977-0fa7-48ae-ade4-2f7ec673682c",
-  "startedAt": "2026-10-27T23:30:46.752Z",
-  "completedAt": "2026-10-27T23:31:06.909Z",
+  "runId": "76f64c37-66a0-4390-a02f-626236219f35",
+  "startedAt": "2026-10-28T00:18:14.466Z",
+  "completedAt": "2026-10-28T00:18:34.272Z",
   "completionState": "completed",
-  "commitSha": "8cd403ec18e7943911855a2e2464894c7d3c954d",
-  "implementation": "9a2ab57edb6689498c0e51c1977842a810449bee96e6c2529d53bb12412ba2d2",
+  "commitSha": "b64bcf2e7745c47dfdef3a07a75908ecf926286f",
+  "implementation": "b26bd73ce7a0c2188ddc3c5d6301da2a358a265b88a7a608dad6427b3d278e6f",
   "bundleDigest": "3fd1cad4adcac0170f4a57e2f298e2e66bbd55c84d9809d3013036648d8d6a76",
+  "harnessDigest": "1c71ad02ee5a5031714ee4b021382c2d670430ab14449f499540de7269c17d88",
   "models": [
     {
       "id": "fake-agent",
@@ -15,6 +16,8 @@
   ],
   "opencodeVersion": null,
   "nodeVersion": "v24.13.0",
+  "publishTranscripts": false,
+  "subset": false,
   "runKeys": [
     "tiny-code-change/bare/fake-agent",
     "tiny-code-change/anvil/fake-agent",
@@ -43,20 +46,20 @@
       "modelRole": null,
       "scenarioHash": "5ad884910c28d85842006a5e1a8dc9f146dd6d6011fc8c1d4f0a3788ee8a79f7",
       "sourceHash": "3d2e98d105abce7280532ba0b132ff6d3d42241f8145831faaa1d23d3e668a4d",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:14.549Z",
+          "completedAt": "2026-10-28T00:18:16.449Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1811,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:30:48.710Z",
-          "completedAt": "2026-10-27T23:30:48.710Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 1882,
+      "transcript": ""
     },
     {
       "scenario": "tiny-code-change",
@@ -65,20 +68,20 @@
       "modelRole": null,
       "scenarioHash": "5ad884910c28d85842006a5e1a8dc9f146dd6d6011fc8c1d4f0a3788ee8a79f7",
       "sourceHash": "3d2e98d105abce7280532ba0b132ff6d3d42241f8145831faaa1d23d3e668a4d",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:16.453Z",
+          "completedAt": "2026-10-28T00:18:19.635Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3270,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:30:52.004Z",
-          "completedAt": "2026-10-27T23:30:52.004Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 3163,
+      "transcript": ""
     },
     {
       "scenario": "tiny-verify-only",
@@ -87,20 +90,20 @@
       "modelRole": null,
       "scenarioHash": "784d50a9537d935e8597f9503f27c7ebab3a94055f56d3d4f7f9c23c96c7571b",
       "sourceHash": "2533ec559159e7ff5c4c1c3ff31592edadbbd3bbef87e4337bed566c70f145d0",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:19.644Z",
+          "completedAt": "2026-10-28T00:18:21.188Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1547,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:30:53.575Z",
-          "completedAt": "2026-10-27T23:30:53.575Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 1526,
+      "transcript": ""
     },
     {
       "scenario": "tiny-verify-only",
@@ -109,20 +112,20 @@
       "modelRole": null,
       "scenarioHash": "784d50a9537d935e8597f9503f27c7ebab3a94055f56d3d4f7f9c23c96c7571b",
       "sourceHash": "2533ec559159e7ff5c4c1c3ff31592edadbbd3bbef87e4337bed566c70f145d0",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:21.192Z",
+          "completedAt": "2026-10-28T00:18:24.075Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2939,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:30:56.538Z",
-          "completedAt": "2026-10-27T23:30:56.538Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 2865,
+      "transcript": ""
     },
     {
       "scenario": "medium-code-change",
@@ -131,20 +134,20 @@
       "modelRole": null,
       "scenarioHash": "f22f6b7acfffeba5042a41672980c24a373b2e68169a96b10764b2778039c187",
       "sourceHash": "97c95ff93985341364aa86a7a53009cbcf524d74b546aea79b2dc4e688a1442e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:24.086Z",
+          "completedAt": "2026-10-28T00:18:26.052Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2014,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:30:58.580Z",
-          "completedAt": "2026-10-27T23:30:58.580Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 1943,
+      "transcript": ""
     },
     {
       "scenario": "medium-code-change",
@@ -153,20 +156,20 @@
       "modelRole": null,
       "scenarioHash": "f22f6b7acfffeba5042a41672980c24a373b2e68169a96b10764b2778039c187",
       "sourceHash": "97c95ff93985341364aa86a7a53009cbcf524d74b546aea79b2dc4e688a1442e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:26.056Z",
+          "completedAt": "2026-10-28T00:18:29.554Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3456,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:31:02.064Z",
-          "completedAt": "2026-10-27T23:31:02.064Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 3475,
+      "transcript": ""
     },
     {
       "scenario": "medium-verify-only",
@@ -175,20 +178,20 @@
       "modelRole": null,
       "scenarioHash": "789fb123b2d32361a6a9e4c434d619902519c056275825b3754077cb82311b0d",
       "sourceHash": "7b9b37f9ffd9303c2a8e231e433e41e62aee8a27ac9330e6cb14e5e6e38fea6e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:29.562Z",
+          "completedAt": "2026-10-28T00:18:31.218Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1724,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:31:03.815Z",
-          "completedAt": "2026-10-27T23:31:03.815Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 1636,
+      "transcript": ""
     },
     {
       "scenario": "medium-verify-only",
@@ -197,20 +200,20 @@
       "modelRole": null,
       "scenarioHash": "789fb123b2d32361a6a9e4c434d619902519c056275825b3754077cb82311b0d",
       "sourceHash": "7b9b37f9ffd9303c2a8e231e433e41e62aee8a27ac9330e6cb14e5e6e38fea6e",
+      "attempts": [
+        {
+          "startedAt": "2026-10-28T00:18:31.222Z",
+          "completedAt": "2026-10-28T00:18:34.220Z",
+          "state": "completed"
+        }
+      ],
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3007,
-      "transcript": "",
-      "attempts": [
-        {
-          "startedAt": "2026-10-27T23:31:06.847Z",
-          "completedAt": "2026-10-27T23:31:06.847Z",
-          "state": "completed"
-        }
-      ]
+      "durationMs": 2976,
+      "transcript": ""
     }
   ]
 }

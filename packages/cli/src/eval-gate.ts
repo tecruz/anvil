@@ -175,9 +175,21 @@ export interface EvalRunRecord {
   implementation: string
   /** Hash of the built CLI bundle, captured before the first scenario. */
   bundleDigest: string | null
+  /**
+   * Hash of the harness source. The implementation hash covers `packages/`, not the
+   * harness itself, so resume and the gate need this to notice a changed policy.
+   */
+  harnessDigest: string | null
   models: Array<{ id: string; role: string }>
   opencodeVersion: string | null
   nodeVersion: string | null
+  /** Whether transcripts were published when this run was created. */
+  publishTranscripts: boolean
+  /**
+   * True when `--scenario` selected less than the full matrix. A subset can never be
+   * promoted as complete evidence, even after every one of its keys finishes.
+   */
+  subset: boolean
   /** The run keys (scenario/variant/model) the run was asked to produce. */
   runKeys: string[]
   /** The run keys in the order they were executed. */
@@ -401,6 +413,18 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
   return { schemaVersion: 1, scenarios }
 }
 
+/**
+ * Parse a verifier exit-code list.
+ *
+ * Invalid elements are rejected rather than filtered: silently dropping a corrupt entry
+ * turns a malformed record into a passing one.
+ */
+function parseExitCodes(value: unknown): number[] | null {
+  if (!Array.isArray(value)) return null
+  if (!value.every((code): code is number => typeof code === 'number' && Number.isInteger(code))) return null
+  return [...value]
+}
+
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
@@ -427,6 +451,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
       return `${raw.scenario}: latest hiddenVerified is invalid`
     }
     if (!Array.isArray(raw.verifyExitCodes)) return `${raw.scenario}: latest verifyExitCodes is missing`
+    const verifyExitCodes = parseExitCodes(raw.verifyExitCodes)
+    if (verifyExitCodes === null) return `${raw.scenario}: latest verifyExitCodes is invalid`
     if (raw.error !== undefined && typeof raw.error !== 'string') return `${raw.scenario}: latest error is invalid`
     results.push({
       scenario: raw.scenario,
@@ -440,7 +466,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
       sourceHash: raw.sourceHash,
       verified: raw.verified,
       hiddenVerified: typeof raw.hiddenVerified === 'boolean' ? raw.hiddenVerified : null,
-      verifyExitCodes: raw.verifyExitCodes.filter((code): code is number => typeof code === 'number'),
+      verifyExitCodes,
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
     })
   }
@@ -450,6 +476,72 @@ export function parseLatest(value: unknown): EvalLatest | string {
     ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
     ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
     results,
+  }
+}
+
+/** Parse one run-record result, or explain why it cannot be one. */
+export function parseRunRecordResult(value: unknown): EvalRunRecordResult | string {
+  if (!isObject(value)) return 'run record result is not an object'
+  if (typeof value.scenario !== 'string' || value.scenario === '') return 'run record result has no scenario'
+  if (value.variant !== 'bare' && value.variant !== 'anvil') return 'run record result variant is invalid'
+  if (typeof value.model !== 'string' && value.model !== null) return 'run record result model is invalid'
+  if (typeof value.modelRole !== 'string' && value.modelRole !== null) {
+    return 'run record result modelRole is invalid'
+  }
+  const key = `${value.scenario}/${value.variant}`
+  if (typeof value.scenarioHash !== 'string' || value.scenarioHash === '') {
+    return `run record result ${key} scenarioHash is missing`
+  }
+  if (typeof value.sourceHash !== 'string' || value.sourceHash === '') {
+    return `run record result ${key} sourceHash is missing`
+  }
+  if (!Array.isArray(value.attempts)) return `run record result ${key} has no attempts list`
+  const attempts: EvalRunRecordAttempt[] = []
+  for (const attempt of value.attempts) {
+    if (!isObject(attempt)) return `run record result ${key} attempt is not an object`
+    if (typeof attempt.startedAt !== 'string') return `run record result ${key} attempt startedAt is missing`
+    if (attempt.state !== 'completed' && attempt.state !== 'failed' && attempt.state !== 'timed-out') {
+      return `run record result ${key} attempt state is invalid`
+    }
+    if (attempt.completedAt !== undefined && attempt.completedAt !== null && typeof attempt.completedAt !== 'string') {
+      return `run record result ${key} attempt completedAt is invalid`
+    }
+    if (attempt.error !== undefined && typeof attempt.error !== 'string') {
+      return `run record result ${key} attempt error is invalid`
+    }
+    attempts.push({
+      startedAt: attempt.startedAt,
+      completedAt: typeof attempt.completedAt === 'string' ? attempt.completedAt : null,
+      state: attempt.state,
+      ...(typeof attempt.error === 'string' ? { error: attempt.error } : {}),
+    })
+  }
+  if (!Array.isArray(value.verifyExitCodes)) return `run record result ${key} verifyExitCodes is missing`
+  const verifyExitCodes = parseExitCodes(value.verifyExitCodes)
+  if (verifyExitCodes === null) return `run record result ${key} verifyExitCodes is invalid`
+  if (typeof value.verified !== 'boolean') return `run record result ${key} verified is not a boolean`
+  if (value.hiddenVerified !== null && typeof value.hiddenVerified !== 'boolean') {
+    return `run record result ${key} hiddenVerified is invalid`
+  }
+  if (value.error !== undefined && typeof value.error !== 'string') {
+    return `run record result ${key} error is invalid`
+  }
+  return {
+    scenario: value.scenario,
+    variant: value.variant,
+    model: typeof value.model === 'string' ? value.model : null,
+    modelRole: typeof value.modelRole === 'string' ? value.modelRole : null,
+    scenarioHash: value.scenarioHash,
+    sourceHash: value.sourceHash,
+    attempts,
+    verified: value.verified,
+    hiddenVerified: typeof value.hiddenVerified === 'boolean' ? value.hiddenVerified : null,
+    verifyExitCodes,
+    costUsd: typeof value.costUsd === 'number' && Number.isFinite(value.costUsd) ? value.costUsd : null,
+    tokens: typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : null,
+    durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : 0,
+    transcript: typeof value.transcript === 'string' ? value.transcript : '',
+    ...(typeof value.error === 'string' ? { error: value.error } : {}),
   }
 }
 
@@ -473,50 +565,25 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (!Array.isArray(value.runKeys)) return 'run record has no runKeys list'
   if (!Array.isArray(value.executionOrder)) return 'run record has no executionOrder list'
   if (!Array.isArray(value.results)) return 'run record has no results list'
+  if (!Array.isArray(value.models)) return 'run record has no models list'
+  const models: Array<{ id: string; role: string }> = []
+  for (const model of value.models) {
+    if (!isObject(model) || typeof model.id !== 'string' || model.id === '' || typeof model.role !== 'string') {
+      return 'run record model is invalid'
+    }
+    models.push({ id: model.id, role: model.role })
+  }
+  if (value.publishTranscripts !== undefined && typeof value.publishTranscripts !== 'boolean') {
+    return 'run record publishTranscripts is invalid'
+  }
+  if (value.subset !== undefined && typeof value.subset !== 'boolean') {
+    return 'run record subset is invalid'
+  }
   const results: EvalRunRecordResult[] = []
   for (const raw of value.results) {
-    if (!isObject(raw)) return 'run record result is not an object'
-    if (typeof raw.scenario !== 'string') return 'run record result has no scenario'
-    if (raw.variant !== 'bare' && raw.variant !== 'anvil') return 'run record result variant is invalid'
-    if (typeof raw.scenarioHash !== 'string')
-      return `run record result ${raw.scenario}/${raw.variant} scenarioHash is missing`
-    if (typeof raw.sourceHash !== 'string')
-      return `run record result ${raw.scenario}/${raw.variant} sourceHash is missing`
-    if (!Array.isArray(raw.attempts)) return `run record result ${raw.scenario}/${raw.variant} has no attempts list`
-    const attempts: EvalRunRecordAttempt[] = []
-    for (const attempt of raw.attempts) {
-      if (!isObject(attempt)) return `run record result ${raw.scenario}/${raw.variant} attempt is not an object`
-      if (typeof attempt.startedAt !== 'string')
-        return `run record result ${raw.scenario}/${raw.variant} attempt startedAt is missing`
-      if (attempt.state !== 'completed' && attempt.state !== 'failed' && attempt.state !== 'timed-out') {
-        return `run record result ${raw.scenario}/${raw.variant} attempt state is invalid`
-      }
-      attempts.push({
-        startedAt: attempt.startedAt,
-        completedAt: typeof attempt.completedAt === 'string' ? attempt.completedAt : null,
-        state: attempt.state,
-        ...(typeof attempt.error === 'string' ? { error: attempt.error } : {}),
-      })
-    }
-    results.push({
-      scenario: raw.scenario,
-      variant: raw.variant,
-      model: typeof raw.model === 'string' ? raw.model : null,
-      modelRole: typeof raw.modelRole === 'string' ? raw.modelRole : null,
-      scenarioHash: raw.scenarioHash,
-      sourceHash: raw.sourceHash,
-      verified: typeof raw.verified === 'boolean' ? raw.verified : false,
-      hiddenVerified: typeof raw.hiddenVerified === 'boolean' ? raw.hiddenVerified : null,
-      verifyExitCodes: Array.isArray(raw.verifyExitCodes)
-        ? raw.verifyExitCodes.filter((code): code is number => typeof code === 'number')
-        : [],
-      costUsd: typeof raw.costUsd === 'number' && Number.isFinite(raw.costUsd) ? raw.costUsd : null,
-      tokens: typeof raw.tokens === 'number' && Number.isFinite(raw.tokens) ? raw.tokens : null,
-      durationMs: typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs) ? raw.durationMs : 0,
-      transcript: typeof raw.transcript === 'string' ? raw.transcript : '',
-      ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
-      attempts,
-    })
+    const parsed = parseRunRecordResult(raw)
+    if (typeof parsed === 'string') return parsed
+    results.push(parsed)
   }
   return {
     schemaVersion: 1,
@@ -527,18 +594,171 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
     commitSha: typeof value.commitSha === 'string' ? value.commitSha : null,
     implementation: value.implementation,
     bundleDigest: typeof value.bundleDigest === 'string' ? value.bundleDigest : null,
-    models: Array.isArray(value.models)
-      ? value.models.filter(
-          (m): m is { id: string; role: string } =>
-            isObject(m) && typeof m.id === 'string' && typeof m.role === 'string',
-        )
-      : [],
+    harnessDigest: typeof value.harnessDigest === 'string' ? value.harnessDigest : null,
+    models,
     opencodeVersion: typeof value.opencodeVersion === 'string' ? value.opencodeVersion : null,
     nodeVersion: typeof value.nodeVersion === 'string' ? value.nodeVersion : null,
+    publishTranscripts: value.publishTranscripts === true,
+    subset: value.subset === true,
     runKeys: value.runKeys.filter((k): k is string => typeof k === 'string'),
     executionOrder: value.executionOrder.filter((k): k is string => typeof k === 'string'),
     results,
   }
+}
+
+/** Stable, filesystem-safe checkpoint filename for one result.
+ *
+ * Model IDs contain `/` (`provider/model`), so the filename is encoded rather than joined
+ * raw: a raw join creates nested directories that direct-child discovery never finds.
+ */
+export function checkpointFileName(result: Pick<EvalRunRecordResult, 'scenario' | 'variant' | 'model'>): string {
+  const parts = [result.scenario, result.variant, result.model ?? 'unknown'].map((part) => encodeURIComponent(part))
+  return `${parts.join('--')}.json`
+}
+
+/** One checkpoint read from disk, with the timestamp used to order recovery. */
+export interface EvalCheckpointEntry {
+  result: EvalRunRecordResult
+  modifiedMs: number
+}
+
+/**
+ * Read every checkpoint under a checkpoint directory, recursively.
+ *
+ * A malformed checkpoint is reported, not cast into evidence. Direct-child discovery was
+ * wrong once model IDs started containing `/`; recursion keeps that fixed.
+ */
+export function readCheckpointDirectory(directory: string): {
+  entries: EvalCheckpointEntry[]
+  rejected: string[]
+} {
+  const entries: EvalCheckpointEntry[] = []
+  const rejected: string[] = []
+  if (!existsSync(directory)) return { entries, rejected }
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+        continue
+      }
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const parsed = parseRunRecordResult(readJsonFile(path))
+      if (typeof parsed === 'string') {
+        rejected.push(`${entry.name}: ${parsed}`)
+        continue
+      }
+      entries.push({ result: parsed, modifiedMs: statSync(path).mtimeMs })
+    }
+  }
+  walk(directory)
+  return { entries, rejected }
+}
+
+/**
+ * Reconcile checkpoints written before a run-record write succeeded.
+ *
+ * Only a checkpoint whose latest attempt completed, whose key belongs to this run, and
+ * whose scenario/source hashes match the current fixtures is usable. A newer checkpoint
+ * (more attempts) replaces a stale record entry; an older one never does.
+ */
+export function reconcileRunRecord(
+  record: EvalRunRecord,
+  checkpoints: readonly EvalCheckpointEntry[],
+  currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
+): { record: EvalRunRecord; changed: boolean; rejected: string[] } {
+  const next: EvalRunRecord = {
+    ...record,
+    runKeys: [...record.runKeys],
+    executionOrder: [...record.executionOrder],
+    results: record.results.map((result) => ({ ...result, attempts: [...result.attempts] })),
+  }
+  const rejected: string[] = []
+  const declared = new Set(next.runKeys)
+  const modelIds = new Set(next.models.map((model) => model.id))
+  let changed = false
+  const ordered = [...checkpoints].sort((a, b) => a.modifiedMs - b.modifiedMs)
+  for (const { result } of ordered) {
+    const key = `${result.scenario}/${result.variant}/${result.model}`
+    if (!declared.has(key)) {
+      rejected.push(`${key}: checkpoint is not a declared key for this run`)
+      continue
+    }
+    if (result.model === null || !modelIds.has(result.model)) {
+      rejected.push(`${key}: checkpoint model is not part of this run`)
+      continue
+    }
+    // A failed or timed-out attempt is retried on resume, never recovered as evidence.
+    if (latestAttemptState(result) !== 'completed') continue
+    const last = result.attempts[result.attempts.length - 1]
+    if (last === undefined || last.completedAt === null) {
+      rejected.push(`${key}: completed checkpoint has no completion timestamp`)
+      continue
+    }
+    if (last.error !== undefined || result.error !== undefined) {
+      rejected.push(`${key}: completed checkpoint carries an error`)
+      continue
+    }
+    if (result.verified && result.verifyExitCodes.length > 0 && result.verifyExitCodes[0] !== 0) {
+      rejected.push(`${key}: completed checkpoint is verified with a failing visible verifier`)
+      continue
+    }
+    const expected = currentScenarioHashes[result.scenario]
+    if (expected === undefined) {
+      rejected.push(`${key}: scenario is not part of the current matrix`)
+      continue
+    }
+    if (result.scenarioHash !== expected.scenarioHash || result.sourceHash !== expected.sourceHash) {
+      rejected.push(`${key}: checkpoint hashes do not match the current fixtures`)
+      continue
+    }
+    const index = next.results.findIndex((entry) => `${entry.scenario}/${entry.variant}/${entry.model}` === key)
+    if (index === -1) {
+      next.results.push(result)
+      if (!next.executionOrder.includes(key)) next.executionOrder.push(key)
+      changed = true
+      continue
+    }
+    const existing = next.results[index]!
+    // Only a checkpoint with strictly more attempts can replace a recorded result. Using
+    // mtime or an equal attempt count could resurrect an older success over a newer
+    // failure, which is precisely the kind of evidence mixing resume must refuse.
+    const newer = result.attempts.length > existing.attempts.length
+    if (newer) {
+      next.results[index] = result
+      changed = true
+    }
+  }
+  return { record: next, changed, rejected }
+}
+
+/** Every declared key has a completed result and nothing else does. */
+export function allDeclaredCompleted(record: EvalRunRecord): boolean {
+  if (record.runKeys.length === 0) return false
+  const completed = record.results
+    .filter((result) => latestAttemptState(result) === 'completed')
+    .map((result) => `${result.scenario}/${result.variant}/${result.model}`)
+  if (new Set(completed).size !== completed.length) return false
+  const completedSet = new Set(completed)
+  return completedSet.size === record.runKeys.length && record.runKeys.every((key) => completedSet.has(key))
+}
+
+/** The first completed result whose fixtures no longer match, or null. */
+export function recordFixtureProblem(
+  record: EvalRunRecord,
+  currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
+): string | null {
+  for (const result of record.results) {
+    if (latestAttemptState(result) !== 'completed') continue
+    const expected = currentScenarioHashes[result.scenario]
+    if (expected === undefined) {
+      return `run ${record.runId} recorded scenario ${result.scenario}, which is no longer in the current matrix`
+    }
+    if (result.scenarioHash !== expected.scenarioHash || result.sourceHash !== expected.sourceHash) {
+      return `run ${record.runId} recorded ${result.scenario} against different fixtures; the scenario or fixture changed`
+    }
+  }
+  return null
 }
 
 /**
@@ -566,42 +786,118 @@ export function checkRunRecord(
       message: `run ${record.runId} did not complete (state: ${record.completionState}); the latest summary must not be promoted from an incomplete run`,
     }
   }
+  if (record.subset) {
+    return {
+      ok: false,
+      message: `run ${record.runId} is a subset run; it cannot be promoted as complete evidence`,
+    }
+  }
+  if (record.completedAt === null) {
+    return {
+      ok: false,
+      message: `run ${record.runId} is marked completed but has no completion timestamp`,
+    }
+  }
+  if (record.harnessDigest === null) {
+    return {
+      ok: false,
+      message: `run ${record.runId} does not record the harness that produced it`,
+    }
+  }
   if (record.implementation !== currentImplementation) {
     return {
       ok: false,
       message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${currentImplementation.slice(0, 12)}; the implementation changed under the run`,
     }
   }
-  const executed = new Set(record.executionOrder)
+  const declared = record.runKeys
+  if (new Set(declared).size !== declared.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} declares duplicate run keys; the run record is corrupt`,
+    }
+  }
+  const declaredSet = new Set(declared)
   for (const key of requiredKeys) {
-    if (!executed.has(key)) {
+    if (!declaredSet.has(key)) {
       return {
         ok: false,
         message: `run ${record.runId} never executed ${key}; the run record is incomplete`,
       }
     }
   }
-  const completed = record.results
-    .filter((r) => latestAttemptState(r) === 'completed')
-    .map((r) => `${r.scenario}/${r.variant}/${r.model}`)
-  const missing = requiredKeys.filter((key) => !completed.includes(key))
-  if (missing.length > 0) {
-    return {
-      ok: false,
-      message: `run ${record.runId} did not complete ${missing.join(', ')}; the run record is incomplete`,
+  const requiredSet = new Set(requiredKeys)
+  for (const key of declared) {
+    if (!requiredSet.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} declares ${key}, which is not part of the completed matrix; the run record is incomplete`,
+      }
     }
   }
-  const keys = record.results.map((r) => `${r.scenario}/${r.variant}/${r.model}`)
-  if (new Set(keys).size !== keys.length) {
+  const executed = record.executionOrder
+  if (new Set(executed).size !== executed.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} execution order contains duplicates; the run record is corrupt`,
+    }
+  }
+  if (executed.length !== declared.length || executed.some((key) => !declaredSet.has(key))) {
+    return {
+      ok: false,
+      message: `run ${record.runId} execution order does not match declared run keys; the run record is corrupt`,
+    }
+  }
+  const recorded = record.results.map((r) => `${r.scenario}/${r.variant}/${r.model}`)
+  if (new Set(recorded).size !== recorded.length) {
     return {
       ok: false,
       message: `run ${record.runId} records duplicate results; the run record is corrupt`,
     }
   }
-  if (record.results.length !== record.executionOrder.length) {
-    return {
-      ok: false,
-      message: `run ${record.runId} execution order does not match recorded results; the run record is corrupt`,
+  const recordedSet = new Set(recorded)
+  for (const key of declared) {
+    if (!recordedSet.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} did not execute ${key}; the run record is incomplete`,
+      }
+    }
+  }
+  for (const key of recordedSet) {
+    if (!declaredSet.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded ${key}, which was never declared; the run record is corrupt`,
+      }
+    }
+  }
+  for (const result of record.results) {
+    const key = `${result.scenario}/${result.variant}/${result.model}`
+    if (latestAttemptState(result) !== 'completed') {
+      return {
+        ok: false,
+        message: `run ${record.runId} did not complete ${key}; the run record is incomplete`,
+      }
+    }
+    const last = result.attempts[result.attempts.length - 1]
+    if (last === undefined || last.completedAt === null) {
+      return {
+        ok: false,
+        message: `run ${record.runId} completed ${key} without a completion timestamp; the run record is incomplete`,
+      }
+    }
+    if (last.error !== undefined || result.error !== undefined) {
+      return {
+        ok: false,
+        message: `run ${record.runId} completed ${key} but recorded an error; the run record is contradictory`,
+      }
+    }
+    if (result.verified && result.verifyExitCodes.length > 0 && result.verifyExitCodes[0] !== 0) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded ${key} as verified with a failing visible verifier; the run record is contradictory`,
+      }
     }
   }
   return {
@@ -617,13 +913,21 @@ export function checkRunRecord(
  * models, and requested run keys exactly. A mismatch means the completed results
  * were produced under different inputs and must not be reused.
  */
+/** Everything a resumed run has to agree with, captured as one value so a new input
+ *  cannot be forgotten at a call site. */
+export interface EvalResumeConfig {
+  implementation: string
+  scenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>
+  models: Array<{ id: string; role: string }>
+  bundleDigest: string | null
+  harnessDigest: string | null
+  opencodeVersion: string | null
+  publishTranscripts: boolean
+}
+
 export function checkRunRecordCompatibility(
   record: EvalRunRecord | null | undefined,
-  currentImplementation: string,
-  currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
-  currentModels: Array<{ id: string; role: string }>,
-  currentBundleDigest: string | null,
-  currentOpencodeVersion: string | null = null,
+  config: EvalResumeConfig,
 ): EvalGateResult {
   if (record === null || record === undefined) {
     return {
@@ -631,36 +935,69 @@ export function checkRunRecordCompatibility(
       message: 'no run record exists to resume',
     }
   }
-  if (record.implementation !== currentImplementation) {
+  if (record.implementation !== config.implementation) {
     return {
       ok: false,
-      message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${currentImplementation.slice(0, 12)}; cannot resume`,
+      message: `run ${record.runId} evaluated implementation ${record.implementation.slice(0, 12)} but the current source hashes to ${config.implementation.slice(0, 12)}; cannot resume`,
     }
   }
-  if (record.bundleDigest !== currentBundleDigest) {
+  if (record.bundleDigest !== config.bundleDigest) {
     return {
       ok: false,
-      message: `run ${record.runId} built bundle ${record.bundleDigest?.slice(0, 12) ?? 'none'} but the current bundle hashes to ${currentBundleDigest?.slice(0, 12) ?? 'none'}; cannot resume`,
+      message: `run ${record.runId} built bundle ${record.bundleDigest?.slice(0, 12) ?? 'none'} but the current bundle hashes to ${config.bundleDigest?.slice(0, 12) ?? 'none'}; cannot resume`,
     }
   }
-  if (record.nodeVersion !== null && process.version !== null && record.nodeVersion !== process.version) {
+  if (record.harnessDigest === null || config.harnessDigest === null) {
+    return {
+      ok: false,
+      message: `run ${record.runId} does not record the harness that produced it; cannot resume safely`,
+    }
+  }
+  if (record.harnessDigest !== config.harnessDigest) {
+    return {
+      ok: false,
+      message: `run ${record.runId} was produced by a different harness (${record.harnessDigest.slice(0, 12)} != ${config.harnessDigest.slice(0, 12)}); cannot resume`,
+    }
+  }
+  if (record.nodeVersion === null) {
+    return {
+      ok: false,
+      message: `run ${record.runId} does not record the Node version it used; cannot resume safely`,
+    }
+  }
+  if (record.nodeVersion !== process.version) {
     return {
       ok: false,
       message: `run ${record.runId} used Node ${record.nodeVersion} but the current Node is ${process.version}; cannot resume`,
     }
   }
-  if (
-    record.opencodeVersion !== null &&
-    currentOpencodeVersion !== null &&
-    record.opencodeVersion !== currentOpencodeVersion
-  ) {
+  if (record.opencodeVersion !== config.opencodeVersion) {
     return {
       ok: false,
-      message: `run ${record.runId} used OpenCode ${record.opencodeVersion} but the current OpenCode is ${currentOpencodeVersion}; cannot resume`,
+      message: `run ${record.runId} used OpenCode ${record.opencodeVersion ?? 'unknown'} but the current OpenCode is ${config.opencodeVersion ?? 'unknown'}; cannot resume`,
+    }
+  }
+  if (record.publishTranscripts !== config.publishTranscripts) {
+    return {
+      ok: false,
+      message: `run ${record.runId} ${record.publishTranscripts ? 'published' : 'did not publish'} transcripts but this invocation ${config.publishTranscripts ? 'does' : 'does not'}; cannot resume`,
+    }
+  }
+  if (new Set(record.runKeys).size !== record.runKeys.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} declares duplicate run keys; cannot resume`,
+    }
+  }
+  const recordedKeys = record.results.map((result) => `${result.scenario}/${result.variant}/${result.model}`)
+  if (new Set(recordedKeys).size !== recordedKeys.length) {
+    return {
+      ok: false,
+      message: `run ${record.runId} records duplicate results; cannot resume`,
     }
   }
   const recordModels = JSON.stringify(record.models)
-  const currentModelsJson = JSON.stringify(currentModels)
+  const currentModelsJson = JSON.stringify(config.models)
   if (recordModels !== currentModelsJson) {
     return {
       ok: false,
@@ -669,8 +1006,10 @@ export function checkRunRecordCompatibility(
   }
   const recordKeys = new Set(record.runKeys)
   const currentKeys = new Set(
-    currentModels.flatMap((m) =>
-      Object.keys(currentScenarioHashes).flatMap((s) => ['bare', 'anvil'].map((v) => `${s}/${v}/${m.id}`)),
+    config.models.flatMap((model) =>
+      Object.keys(config.scenarioHashes).flatMap((scenario) =>
+        ['bare', 'anvil'].map((variant) => `${scenario}/${variant}/${model.id}`),
+      ),
     ),
   )
   for (const key of currentKeys) {
@@ -690,8 +1029,13 @@ export function checkRunRecordCompatibility(
     }
   }
   for (const result of record.results) {
-    const expected = currentScenarioHashes[result.scenario]
-    if (expected === undefined) continue
+    const expected = config.scenarioHashes[result.scenario]
+    if (expected === undefined) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded scenario ${result.scenario}, which is not in the requested matrix; cannot resume`,
+      }
+    }
     if (result.scenarioHash !== expected.scenarioHash) {
       return {
         ok: false,
@@ -707,13 +1051,27 @@ export function checkRunRecordCompatibility(
   }
   return {
     ok: true,
-    message: `run ${record.runId} is compatible with the current source and models`,
+    message: `run ${record.runId} is compatible with the current source, harness, and models`,
   }
+}
+
+/** The stable key for one scenario/variant/model result. */
+function resultKey(result: Pick<EvalResultSummary, 'scenario' | 'variant' | 'model'>): string {
+  return `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`
 }
 
 /** The declared run keys implied by a latest summary: `scenario/variant/model` per result. */
 function latestRunKeys(latest: EvalLatest): string[] {
-  return latest.results.map((result) => `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`)
+  return latest.results.map(resultKey)
+}
+
+/** Compare two exit-code lists in order, without sorting or mutating either input. */
+function sameExitCodes(left: readonly number[], right: readonly number[]): boolean {
+  if (left.length !== right.length) return false
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false
+  }
+  return true
 }
 
 /**
@@ -744,17 +1102,22 @@ export function checkEvalGate(
   if (currentImplementation !== undefined && latest.results.length > 0 && runRecord !== undefined) {
     const record = runRecord ?? null
     const recordCheck = checkRunRecord(record, currentImplementation, latestRunKeys(latest))
-    if (!recordCheck.ok) failures.push(recordCheck.message)
-    else if (record !== null && latest.runId !== undefined && record.runId !== latest.runId) {
-      failures.push(`latest summary references run ${latest.runId} but the run record is ${record.runId}`)
-    } else if (record !== null && latest.runId === undefined) {
-      failures.push(`latest summary does not reference a run but the run record is ${record.runId}`)
-    } else if (record !== null) {
-      const summaryKeys = new Set(latest.results.map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`))
+    if (!recordCheck.ok) {
+      failures.push(recordCheck.message)
+    }
+    if (record !== null) {
+      if (latest.runId === undefined) {
+        failures.push(`latest summary does not reference a run but the run record is ${record.runId}`)
+      } else if (record.runId !== latest.runId) {
+        failures.push(`latest summary references run ${latest.runId} but the run record is ${record.runId}`)
+      }
+    }
+    if (record !== null && recordCheck.ok) {
+      const summaryKeys = new Set(latest.results.map(resultKey))
       const recordKeys = new Set(
         record.results
           .filter((r) => latestAttemptState(r) === 'completed')
-          .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
+          .map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`),
       )
       for (const key of summaryKeys) {
         if (!recordKeys.has(key)) {
@@ -766,42 +1129,58 @@ export function checkEvalGate(
           failures.push(`run record completed ${key} but the latest summary does not report it`)
         }
       }
-      // The summary and run record must agree on verdicts and hashes for every completed result.
+      // The summary and run record must agree on verdicts, errors, and hashes for every
+      // completed result. Every disagreement is reported; an early return would hide some.
       const byRecordKey = new Map(
         record.results
           .filter((r) => latestAttemptState(r) === 'completed')
-          .map((r) => [`${r.scenario}/${r.variant}/${r.model}`, r]),
+          .map((r) => [`${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`, r]),
       )
       for (const summaryResult of latest.results) {
-        const recordResult = byRecordKey.get(
-          `${summaryResult.scenario}/${summaryResult.variant}/${summaryResult.model ?? 'unknown'}`,
-        )
+        const key = resultKey(summaryResult)
+        const recordResult = byRecordKey.get(key)
         if (recordResult === undefined) continue
         if (summaryResult.verified !== recordResult.verified) {
           failures.push(
-            `${summaryResult.scenario}: summary verified=${summaryResult.verified} but run record verified=${recordResult.verified}`,
+            `${key}: summary verified=${summaryResult.verified} but run record verified=${recordResult.verified}`,
           )
         }
         if (summaryResult.hiddenVerified !== recordResult.hiddenVerified) {
           failures.push(
-            `${summaryResult.scenario}: summary hiddenVerified=${summaryResult.hiddenVerified} but run record hiddenVerified=${recordResult.hiddenVerified}`,
+            `${key}: summary hiddenVerified=${summaryResult.hiddenVerified} but run record hiddenVerified=${recordResult.hiddenVerified}`,
           )
         }
-        if (
-          JSON.stringify(summaryResult.verifyExitCodes.sort()) !== JSON.stringify(recordResult.verifyExitCodes.sort())
-        ) {
-          failures.push(`${summaryResult.scenario}: summary verifyExitCodes disagree with run record`)
+        if (!sameExitCodes(summaryResult.verifyExitCodes, recordResult.verifyExitCodes)) {
+          failures.push(`${key}: summary verifyExitCodes disagree with run record`)
         }
         if (summaryResult.scenarioHash !== recordResult.scenarioHash) {
-          failures.push(`${summaryResult.scenario}: summary scenarioHash disagrees with run record`)
+          failures.push(`${key}: summary scenarioHash disagrees with run record`)
         }
         if (summaryResult.sourceHash !== recordResult.sourceHash) {
-          failures.push(`${summaryResult.scenario}: summary sourceHash disagrees with run record`)
+          failures.push(`${key}: summary sourceHash disagrees with run record`)
+        }
+        if (summaryResult.error !== recordResult.error) {
+          failures.push(
+            `${key}: summary error ${JSON.stringify(summaryResult.error ?? null)} disagrees with run record ${JSON.stringify(
+              recordResult.error ?? null,
+            )}`,
+          )
         }
       }
-      const summaryResultKeys = new Set(latest.results.map((r) => `${r.scenario}/${r.variant}/${r.model ?? 'unknown'}`))
+      const summaryResultKeys = new Set(latest.results.map(resultKey))
       if (summaryResultKeys.size !== latest.results.length) {
         failures.push(`latest summary records duplicate scenario/variant/model results`)
+      }
+    }
+    // A summary may not claim a verifier passed while reporting a failing exit code,
+    // regardless of what the run record says.
+    for (const summaryResult of latest.results) {
+      if (
+        summaryResult.verified &&
+        summaryResult.verifyExitCodes[0] !== undefined &&
+        summaryResult.verifyExitCodes[0] !== 0
+      ) {
+        failures.push(`${resultKey(summaryResult)}: summary reports verified with a failing visible verifier`)
       }
     }
   }
