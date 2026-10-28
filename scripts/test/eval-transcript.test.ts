@@ -72,6 +72,8 @@ describe('transcript redaction', () => {
       opencodeVersion: null,
       scenarioHash: 'scenario-hash',
       sourceHash: 'source-hash',
+      verifyCount: 1,
+      hiddenVerifyCount: 0,
       verified: false,
       hiddenVerified: null,
       verifyExitCodes: [1],

@@ -26,6 +26,17 @@ export type EvalScenarioKind = 'code-change' | 'verify-only'
 /** The roles a model can play in a comparison. */
 export type EvalModelRole = 'small' | 'frontier'
 
+/** Version 1 remains readable; only version 2 carries the complete evidence contract. */
+export const EVAL_SCHEMA_VERSION = 2
+export type EvalSchemaVersion = 1 | 2
+
+/** Authoritative verifier declarations, supplied from the selected scenario matrix. */
+export interface EvalVerifierScenario {
+  id: string
+  verify: readonly string[] | null
+  hiddenVerify?: readonly string[] | null
+}
+
 export interface EvalScenario {
   id: string
   size: EvalScenarioSize
@@ -59,13 +70,20 @@ export interface EvalBaselineScenario {
   kind: EvalScenarioKind
   scenarioHash: string
   sourceHash: string
+  /** Commands that must pass after the agent finishes. */
+  verify: string[] | null
+  /** Commands that grade the work after hidden files are in place. */
+  hiddenVerify: string[] | null
   expect: { verified?: boolean; hiddenVerified?: boolean }
 }
 
 export interface EvalBaseline {
-  schemaVersion: 1
+  schemaVersion: EvalSchemaVersion
   scenarios: EvalBaselineScenario[]
 }
+
+/** The fixture fingerprints captured when a run starts. */
+export type EvalFixtureHashes = Record<string, { scenarioHash: string; sourceHash: string }>
 
 export interface EvalResultSummary {
   scenario: string
@@ -77,6 +95,10 @@ export interface EvalResultSummary {
   opencodeVersion: string | null
   scenarioHash: string
   sourceHash: string
+  /** How many visible verifier commands the scenario declares. */
+  verifyCount: number | null
+  /** How many hidden verifier commands ran, or zero when the scenario has none. */
+  hiddenVerifyCount: number | null
   verified: boolean
   hiddenVerified: boolean | null
   verifyExitCodes: number[]
@@ -84,7 +106,7 @@ export interface EvalResultSummary {
 }
 
 export interface EvalLatest {
-  schemaVersion: 1
+  schemaVersion: EvalSchemaVersion
   generatedAt: string
   /**
    * Hash of the implementation that produced these results. Optional only so older
@@ -119,6 +141,10 @@ export interface EvalRunRecordResult {
   scenarioHash: string
   /** Hash of the fixture/verifier sources this result was produced against. */
   sourceHash: string
+  /** How many visible verifier commands the scenario declares. */
+  verifyCount: number | null
+  /** How many hidden verifier commands ran, or zero when the scenario has none. */
+  hiddenVerifyCount: number | null
   /** Every attempt at this key, newest last. A key is complete only when the last
    *  attempt finished in `completed` state. */
   attempts: EvalRunRecordAttempt[]
@@ -126,7 +152,8 @@ export interface EvalRunRecordResult {
   verified: boolean
   /** Whether the hidden verifier passed on the last completed attempt. */
   hiddenVerified: boolean | null
-  /** Exit codes from every verifier run on the last completed attempt. */
+  /** Exit codes from every verifier run on the last completed attempt: visible first,
+   *  then hidden. `verifyCount + hiddenVerifyCount` must equal this list's length. */
   verifyExitCodes: number[]
   /** What the run cost, when the ledger knows. */
   costUsd: number | null
@@ -162,7 +189,7 @@ export function attemptCount(result: EvalRunRecordResult): number {
  * complete run's evidence cannot be overwritten by an incomplete one.
  */
 export interface EvalRunRecord {
-  schemaVersion: 1
+  schemaVersion: EvalSchemaVersion
   /** Unique id for this run; checkpoint files and the summary reference it. */
   runId: string
   startedAt: string
@@ -190,6 +217,9 @@ export interface EvalRunRecord {
    * promoted as complete evidence, even after every one of its keys finishes.
    */
   subset: boolean
+  /** Fingerprints for every scenario in the run's matrix, captured before the first
+   *  scenario. This covers not-yet-started scenarios that have no result to carry a hash. */
+  scenarioHashes: EvalFixtureHashes | null
   /** The run keys (scenario/variant/model) the run was asked to produce. */
   runKeys: string[]
   /** The run keys in the order they were executed. */
@@ -387,7 +417,7 @@ export function readJsonFile(path: string): unknown {
 /** Parse a baseline, or explain why the file cannot be a baseline. */
 export function parseBaseline(value: unknown): EvalBaseline | string {
   if (!isObject(value)) return 'baseline is not an object'
-  if (value.schemaVersion !== 1) return 'baseline schemaVersion must be 1'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'baseline schemaVersion must be 1 or 2'
   if (!Array.isArray(value.scenarios)) return 'baseline has no scenarios list'
   const scenarios: EvalBaselineScenario[] = []
   for (const raw of value.scenarios) {
@@ -398,19 +428,34 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
     if (typeof raw.scenarioHash !== 'string') return `${raw.id}: baseline scenarioHash is missing`
     if (typeof raw.sourceHash !== 'string') return `${raw.id}: baseline sourceHash is missing`
     if (!isObject(raw.expect)) return `${raw.id}: baseline expect is missing`
+    const verify = value.schemaVersion === 1 && raw.verify == null ? null : raw.verify
+    if (verify !== null && (!Array.isArray(verify) || !verify.every((v): v is string => typeof v === 'string'))) {
+      return `${raw.id}: baseline verify is invalid`
+    }
+    if (value.schemaVersion === 2 && verify === null) return `${raw.id}: baseline verify is invalid`
+    const hiddenVerify = value.schemaVersion === 1 && raw.hiddenVerify == null ? null : raw.hiddenVerify
+    if (
+      hiddenVerify !== null &&
+      (!Array.isArray(hiddenVerify) || !hiddenVerify.every((v): v is string => typeof v === 'string'))
+    ) {
+      return `${raw.id}: baseline hiddenVerify is invalid`
+    }
+    if (value.schemaVersion === 2 && hiddenVerify === null) return `${raw.id}: baseline hiddenVerify is invalid`
     scenarios.push({
       id: raw.id,
       size: raw.size,
       kind: raw.kind,
       scenarioHash: raw.scenarioHash,
       sourceHash: raw.sourceHash,
+      verify,
+      hiddenVerify,
       expect: {
         ...(raw.expect.verified === undefined ? {} : { verified: raw.expect.verified === true }),
         ...(raw.expect.hiddenVerified === undefined ? {} : { hiddenVerified: raw.expect.hiddenVerified === true }),
       },
     })
   }
-  return { schemaVersion: 1, scenarios }
+  return { schemaVersion: value.schemaVersion, scenarios }
 }
 
 /**
@@ -425,10 +470,34 @@ function parseExitCodes(value: unknown): number[] | null {
   return [...value]
 }
 
+/** Parse a non-negative command count, or null when it is not one. */
+function parseCount(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return null
+  return value
+}
+
+/** Parse a fixture-fingerprint map, or explain why it is not one. */
+function parseFixtureHashes(value: unknown): EvalFixtureHashes | string {
+  if (!isObject(value)) return 'run record has no scenarioHashes map'
+  const hashes: EvalFixtureHashes = {}
+  for (const [scenario, raw] of Object.entries(value)) {
+    if (scenario === '') return 'run record scenarioHashes has an empty scenario id'
+    if (!isObject(raw)) return `run record scenarioHashes for ${scenario} is invalid`
+    if (typeof raw.scenarioHash !== 'string' || raw.scenarioHash === '') {
+      return `run record scenarioHashes for ${scenario} has no scenarioHash`
+    }
+    if (typeof raw.sourceHash !== 'string' || raw.sourceHash === '') {
+      return `run record scenarioHashes for ${scenario} has no sourceHash`
+    }
+    hashes[scenario] = { scenarioHash: raw.scenarioHash, sourceHash: raw.sourceHash }
+  }
+  return hashes
+}
+
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
-  if (value.schemaVersion !== 1) return 'latest summary schemaVersion must be 1'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'latest summary schemaVersion must be 1 or 2'
   if (value.implementation !== undefined && typeof value.implementation !== 'string') {
     return 'latest summary implementation is invalid'
   }
@@ -442,6 +511,14 @@ export function parseLatest(value: unknown): EvalLatest | string {
     if (raw.variant !== 'bare' && raw.variant !== 'anvil') return `${raw.scenario}: latest variant is invalid`
     if (typeof raw.scenarioHash !== 'string') return `${raw.scenario}: latest scenarioHash is missing`
     if (typeof raw.sourceHash !== 'string') return `${raw.scenario}: latest sourceHash is missing`
+    const verifyCount = parseCount(raw.verifyCount)
+    if (verifyCount === null && !(value.schemaVersion === 1 && raw.verifyCount == null)) {
+      return `${raw.scenario}: latest verifyCount is invalid`
+    }
+    const hiddenVerifyCount = parseCount(raw.hiddenVerifyCount)
+    if (hiddenVerifyCount === null && !(value.schemaVersion === 1 && raw.hiddenVerifyCount == null)) {
+      return `${raw.scenario}: latest hiddenVerifyCount is invalid`
+    }
     if (typeof raw.verified !== 'boolean') return `${raw.scenario}: latest verified is not a boolean`
     if (typeof raw.model !== 'string' && raw.model !== null) return `${raw.scenario}: latest model is invalid`
     if (typeof raw.opencodeVersion !== 'string' && raw.opencodeVersion !== null) {
@@ -464,6 +541,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
       opencodeVersion: typeof raw.opencodeVersion === 'string' ? raw.opencodeVersion : null,
       scenarioHash: raw.scenarioHash,
       sourceHash: raw.sourceHash,
+      verifyCount,
+      hiddenVerifyCount,
       verified: raw.verified,
       hiddenVerified: typeof raw.hiddenVerified === 'boolean' ? raw.hiddenVerified : null,
       verifyExitCodes,
@@ -471,7 +550,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
     })
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: value.schemaVersion,
     generatedAt: typeof value.generatedAt === 'string' ? value.generatedAt : '',
     ...(typeof value.implementation === 'string' ? { implementation: value.implementation } : {}),
     ...(typeof value.runId === 'string' ? { runId: value.runId } : {}),
@@ -480,7 +559,10 @@ export function parseLatest(value: unknown): EvalLatest | string {
 }
 
 /** Parse one run-record result, or explain why it cannot be one. */
-export function parseRunRecordResult(value: unknown): EvalRunRecordResult | string {
+export function parseRunRecordResult(
+  value: unknown,
+  schemaVersion: EvalSchemaVersion = 1,
+): EvalRunRecordResult | string {
   if (!isObject(value)) return 'run record result is not an object'
   if (typeof value.scenario !== 'string' || value.scenario === '') return 'run record result has no scenario'
   if (value.variant !== 'bare' && value.variant !== 'anvil') return 'run record result variant is invalid'
@@ -494,6 +576,14 @@ export function parseRunRecordResult(value: unknown): EvalRunRecordResult | stri
   }
   if (typeof value.sourceHash !== 'string' || value.sourceHash === '') {
     return `run record result ${key} sourceHash is missing`
+  }
+  const verifyCount = parseCount(value.verifyCount)
+  if (verifyCount === null && !(schemaVersion === 1 && value.verifyCount == null)) {
+    return `run record result ${key} verifyCount is invalid`
+  }
+  const hiddenVerifyCount = parseCount(value.hiddenVerifyCount)
+  if (hiddenVerifyCount === null && !(schemaVersion === 1 && value.hiddenVerifyCount == null)) {
+    return `run record result ${key} hiddenVerifyCount is invalid`
   }
   if (!Array.isArray(value.attempts)) return `run record result ${key} has no attempts list`
   const attempts: EvalRunRecordAttempt[] = []
@@ -533,6 +623,8 @@ export function parseRunRecordResult(value: unknown): EvalRunRecordResult | stri
     modelRole: typeof value.modelRole === 'string' ? value.modelRole : null,
     scenarioHash: value.scenarioHash,
     sourceHash: value.sourceHash,
+    verifyCount,
+    hiddenVerifyCount,
     attempts,
     verified: value.verified,
     hiddenVerified: typeof value.hiddenVerified === 'boolean' ? value.hiddenVerified : null,
@@ -548,7 +640,7 @@ export function parseRunRecordResult(value: unknown): EvalRunRecordResult | stri
 /** Parse a run record, or explain why the file cannot be one. */
 export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (!isObject(value)) return 'run record is not an object'
-  if (value.schemaVersion !== 1) return 'run record schemaVersion must be 1'
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return 'run record schemaVersion must be 1 or 2'
   if (typeof value.runId !== 'string' || value.runId === '') return 'run record has no runId'
   if (typeof value.startedAt !== 'string') return 'run record startedAt is missing'
   if (
@@ -579,14 +671,17 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
   if (value.subset !== undefined && typeof value.subset !== 'boolean') {
     return 'run record subset is invalid'
   }
+  const scenarioHashes =
+    value.schemaVersion === 1 && value.scenarioHashes == null ? null : parseFixtureHashes(value.scenarioHashes)
+  if (typeof scenarioHashes === 'string') return scenarioHashes
   const results: EvalRunRecordResult[] = []
   for (const raw of value.results) {
-    const parsed = parseRunRecordResult(raw)
+    const parsed = parseRunRecordResult(raw, value.schemaVersion)
     if (typeof parsed === 'string') return parsed
     results.push(parsed)
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: value.schemaVersion,
     runId: value.runId,
     startedAt: value.startedAt,
     completedAt: typeof value.completedAt === 'string' ? value.completedAt : null,
@@ -600,6 +695,7 @@ export function parseRunRecord(value: unknown): EvalRunRecord | string {
     nodeVersion: typeof value.nodeVersion === 'string' ? value.nodeVersion : null,
     publishTranscripts: value.publishTranscripts === true,
     subset: value.subset === true,
+    scenarioHashes,
     runKeys: value.runKeys.filter((k): k is string => typeof k === 'string'),
     executionOrder: value.executionOrder.filter((k): k is string => typeof k === 'string'),
     results,
@@ -643,7 +739,13 @@ export function readCheckpointDirectory(directory: string): {
         continue
       }
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-      const parsed = parseRunRecordResult(readJsonFile(path))
+      const raw = readJsonFile(path)
+      const schemaVersion = isObject(raw) ? (raw.schemaVersion ?? 1) : 1
+      if (schemaVersion !== 1 && schemaVersion !== 2) {
+        rejected.push(`${entry.name}: checkpoint schemaVersion must be 1 or 2`)
+        continue
+      }
+      const parsed = parseRunRecordResult(raw, schemaVersion)
       if (typeof parsed === 'string') {
         rejected.push(`${entry.name}: ${parsed}`)
         continue
@@ -656,16 +758,77 @@ export function readCheckpointDirectory(directory: string): {
 }
 
 /**
+ * Check that a result's verdicts agree with its verifier exit codes.
+ *
+ * `verifyExitCodes` holds the visible commands first and the hidden commands after them,
+ * so the counts are what distinguish "the visible verifier failed" from "the hidden
+ * verifier failed". Checking only the first code lets `[0, 1]` pass as verified and lets an
+ * empty list pass as verified without running anything.
+ */
+function verifierEvidenceProblem(
+  result: {
+    verified: boolean
+    hiddenVerified: boolean | null
+    verifyCount: number | null
+    hiddenVerifyCount: number | null
+    verifyExitCodes: readonly number[]
+  },
+  scenario: EvalVerifierScenario | undefined,
+): string | null {
+  if (result.verifyCount === null || result.hiddenVerifyCount === null) {
+    return 'has unknown verifier counts; regenerate version 2 evidence'
+  }
+  const visible = result.verifyExitCodes.slice(0, result.verifyCount)
+  const hidden = result.verifyExitCodes.slice(result.verifyCount)
+  if (result.verified && visible.length === 0) {
+    return 'is verified without a visible verifier'
+  }
+  if (result.verified && !visible.every((code) => code === 0)) {
+    return 'is verified with a failing visible verifier'
+  }
+  if (!result.verified && result.verifyCount > 0 && visible.every((code) => code === 0)) {
+    return 'is not verified although its visible verifier passed'
+  }
+  if (result.hiddenVerifyCount === 0) {
+    if (result.hiddenVerified !== null) {
+      return 'reports a hidden verdict without hidden verifier commands'
+    }
+  } else if (result.hiddenVerified !== hidden.every((code) => code === 0)) {
+    return 'has a hidden verdict that disagrees with its exit codes'
+  }
+  if (result.verifyExitCodes.length !== result.verifyCount + result.hiddenVerifyCount) {
+    return `reports ${result.verifyExitCodes.length} verifier exit codes but declares ${
+      result.verifyCount + result.hiddenVerifyCount
+    } verifier commands`
+  }
+  if (scenario === undefined) return 'has no authoritative scenario verifier definition'
+  if (scenario.verify === null || scenario.hiddenVerify === null) {
+    return 'has unknown scenario verifier definitions; supply the current matrix or regenerate the baseline'
+  }
+  if (result.verifyCount !== scenario.verify.length) {
+    return `reports ${result.verifyCount} visible verifier commands but the scenario defines ${scenario.verify.length}`
+  }
+  const hiddenCount = scenario.hiddenVerify?.length ?? 0
+  if (result.hiddenVerifyCount !== hiddenCount) {
+    return `reports ${result.hiddenVerifyCount} hidden verifier commands but the scenario defines ${hiddenCount}`
+  }
+  return null
+}
+
+/**
  * Reconcile checkpoints written before a run-record write succeeded.
  *
- * Only a checkpoint whose latest attempt completed, whose key belongs to this run, and
- * whose scenario/source hashes match the current fixtures is usable. A newer checkpoint
- * (more attempts) replaces a stale record entry; an older one never does.
+ * A checkpoint whose latest attempt completed, whose key belongs to this run, and whose
+ * scenario/source hashes match the current fixtures is usable evidence. A newer checkpoint
+ * (more attempts) replaces a stale record entry; an older or equal one never does. A newer
+ * checkpoint whose latest attempt failed is still adopted so the retry keeps the failure
+ * in its history and the key is not mistaken for complete.
  */
 export function reconcileRunRecord(
   record: EvalRunRecord,
   checkpoints: readonly EvalCheckpointEntry[],
   currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
+  scenarios: readonly EvalVerifierScenario[],
 ): { record: EvalRunRecord; changed: boolean; rejected: string[] } {
   const next: EvalRunRecord = {
     ...record,
@@ -676,6 +839,7 @@ export function reconcileRunRecord(
   const rejected: string[] = []
   const declared = new Set(next.runKeys)
   const modelIds = new Set(next.models.map((model) => model.id))
+  const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario]))
   let changed = false
   const ordered = [...checkpoints].sort((a, b) => a.modifiedMs - b.modifiedMs)
   for (const { result } of ordered) {
@@ -689,19 +853,28 @@ export function reconcileRunRecord(
       continue
     }
     // A failed or timed-out attempt is retried on resume, never recovered as evidence.
-    if (latestAttemptState(result) !== 'completed') continue
-    const last = result.attempts[result.attempts.length - 1]
-    if (last === undefined || last.completedAt === null) {
-      rejected.push(`${key}: completed checkpoint has no completion timestamp`)
+    // It is still adopted when it is newer than the recorded result: otherwise a retry
+    // would overwrite the checkpoint with only its own attempt and lose the failure that
+    // happened after the last run.json write.
+    if (latestAttemptState(result) === null) {
+      rejected.push(`${key}: checkpoint has no attempts`)
       continue
     }
-    if (last.error !== undefined || result.error !== undefined) {
-      rejected.push(`${key}: completed checkpoint carries an error`)
-      continue
-    }
-    if (result.verified && result.verifyExitCodes.length > 0 && result.verifyExitCodes[0] !== 0) {
-      rejected.push(`${key}: completed checkpoint is verified with a failing visible verifier`)
-      continue
+    if (latestAttemptState(result) === 'completed') {
+      const last = result.attempts[result.attempts.length - 1]
+      if (last === undefined || last.completedAt === null) {
+        rejected.push(`${key}: completed checkpoint has no completion timestamp`)
+        continue
+      }
+      if (last.error !== undefined || result.error !== undefined) {
+        rejected.push(`${key}: completed checkpoint carries an error`)
+        continue
+      }
+      const evidence = verifierEvidenceProblem(result, scenarioById.get(result.scenario))
+      if (evidence !== null) {
+        rejected.push(`${key}: completed checkpoint ${evidence}`)
+        continue
+      }
     }
     const expected = currentScenarioHashes[result.scenario]
     if (expected === undefined) {
@@ -713,21 +886,17 @@ export function reconcileRunRecord(
       continue
     }
     const index = next.results.findIndex((entry) => `${entry.scenario}/${entry.variant}/${entry.model}` === key)
-    if (index === -1) {
-      next.results.push(result)
-      if (!next.executionOrder.includes(key)) next.executionOrder.push(key)
-      changed = true
-      continue
-    }
-    const existing = next.results[index]!
     // Only a checkpoint with strictly more attempts can replace a recorded result. Using
     // mtime or an equal attempt count could resurrect an older success over a newer
     // failure, which is precisely the kind of evidence mixing resume must refuse.
-    const newer = result.attempts.length > existing.attempts.length
-    if (newer) {
+    if (index !== -1 && result.attempts.length <= next.results[index]!.attempts.length) continue
+    if (index === -1) {
+      next.results.push(result)
+      if (!next.executionOrder.includes(key)) next.executionOrder.push(key)
+    } else {
       next.results[index] = result
-      changed = true
     }
+    changed = true
   }
   return { record: next, changed, rejected }
 }
@@ -773,12 +942,17 @@ export function checkRunRecord(
   record: EvalRunRecord | null | undefined,
   currentImplementation: string,
   requiredKeys: string[],
+  currentHarnessDigest: string | null | undefined,
+  scenarios: readonly EvalVerifierScenario[],
 ): EvalGateResult {
   if (record === null || record === undefined) {
     return {
       ok: false,
       message: 'no run record exists; the latest summary cannot be trusted without one',
     }
+  }
+  if (record.schemaVersion !== EVAL_SCHEMA_VERSION || record.scenarioHashes === null) {
+    return { ok: false, message: `run ${record.runId} is legacy evidence; regenerate a version 2 run before promotion` }
   }
   if (record.completionState !== 'completed') {
     return {
@@ -802,6 +976,20 @@ export function checkRunRecord(
     return {
       ok: false,
       message: `run ${record.runId} does not record the harness that produced it`,
+    }
+  }
+  if (currentHarnessDigest !== undefined) {
+    if (currentHarnessDigest === null) {
+      return {
+        ok: false,
+        message: 'the current harness could not be fingerprinted; its evidence cannot be trusted',
+      }
+    }
+    if (record.harnessDigest !== currentHarnessDigest) {
+      return {
+        ok: false,
+        message: `run ${record.runId} was produced by harness ${record.harnessDigest.slice(0, 12)} but the current harness hashes to ${currentHarnessDigest.slice(0, 12)}; the harness changed`,
+      }
     }
   }
   if (record.implementation !== currentImplementation) {
@@ -872,6 +1060,7 @@ export function checkRunRecord(
       }
     }
   }
+  const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario]))
   for (const result of record.results) {
     const key = `${result.scenario}/${result.variant}/${result.model}`
     if (latestAttemptState(result) !== 'completed') {
@@ -893,10 +1082,24 @@ export function checkRunRecord(
         message: `run ${record.runId} completed ${key} but recorded an error; the run record is contradictory`,
       }
     }
-    if (result.verified && result.verifyExitCodes.length > 0 && result.verifyExitCodes[0] !== 0) {
+    const fixture = record.scenarioHashes[result.scenario]
+    if (fixture === undefined) {
       return {
         ok: false,
-        message: `run ${record.runId} recorded ${key} as verified with a failing visible verifier; the run record is contradictory`,
+        message: `run ${record.runId} has no fixture fingerprint for ${result.scenario}; the run record is corrupt`,
+      }
+    }
+    if (result.scenarioHash !== fixture.scenarioHash || result.sourceHash !== fixture.sourceHash) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded ${key} against fixtures that disagree with the run's captured fingerprints; the run record is contradictory`,
+      }
+    }
+    const evidence = verifierEvidenceProblem(result, scenarioById.get(result.scenario))
+    if (evidence !== null) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded ${key} but it ${evidence}; the run record is contradictory`,
       }
     }
   }
@@ -918,6 +1121,7 @@ export function checkRunRecord(
 export interface EvalResumeConfig {
   implementation: string
   scenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>
+  scenarios: readonly EvalVerifierScenario[]
   models: Array<{ id: string; role: string }>
   bundleDigest: string | null
   harnessDigest: string | null
@@ -934,6 +1138,9 @@ export function checkRunRecordCompatibility(
       ok: false,
       message: 'no run record exists to resume',
     }
+  }
+  if (record.schemaVersion !== EVAL_SCHEMA_VERSION || record.scenarioHashes === null) {
+    return { ok: false, message: `run ${record.runId} is legacy evidence; start a version 2 run instead of resuming` }
   }
   if (record.implementation !== config.implementation) {
     return {
@@ -1028,6 +1235,40 @@ export function checkRunRecordCompatibility(
       }
     }
   }
+  // Compare the fixtures captured when the run started, not only the results that
+  // happen to exist. A scenario that has not started yet has no result to carry a hash,
+  // so without this check changing its fixture would let resume continue under the old
+  // run id and promote evidence produced against two different matrices.
+  for (const [scenario, expected] of Object.entries(config.scenarioHashes)) {
+    const recorded = record.scenarioHashes[scenario]
+    if (recorded === undefined) {
+      return {
+        ok: false,
+        message: `run ${record.runId} does not record fixture hashes for ${scenario}; cannot resume safely`,
+      }
+    }
+    if (recorded.scenarioHash !== expected.scenarioHash) {
+      return {
+        ok: false,
+        message: `run ${record.runId} scenario ${scenario} hashes to ${recorded.scenarioHash.slice(0, 12)} but the current fixture hashes to ${expected.scenarioHash.slice(0, 12)}; the fixture changed, cannot resume`,
+      }
+    }
+    if (recorded.sourceHash !== expected.sourceHash) {
+      return {
+        ok: false,
+        message: `run ${record.runId} scenario ${scenario} source hashes to ${recorded.sourceHash.slice(0, 12)} but the current source hashes to ${expected.sourceHash.slice(0, 12)}; cannot resume`,
+      }
+    }
+  }
+  for (const scenario of Object.keys(record.scenarioHashes)) {
+    if (!(scenario in config.scenarioHashes)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded scenario ${scenario}, which is not in the requested matrix; cannot resume`,
+      }
+    }
+  }
+  const scenarioById = new Map(config.scenarios.map((scenario) => [scenario.id, scenario]))
   for (const result of record.results) {
     const expected = config.scenarioHashes[result.scenario]
     if (expected === undefined) {
@@ -1046,6 +1287,15 @@ export function checkRunRecordCompatibility(
       return {
         ok: false,
         message: `run ${record.runId} scenario ${result.scenario} source hashes to ${result.sourceHash.slice(0, 12)} but the current source hashes to ${expected.sourceHash.slice(0, 12)}; cannot resume`,
+      }
+    }
+    if (latestAttemptState(result) === 'completed') {
+      const evidence = verifierEvidenceProblem(result, scenarioById.get(result.scenario))
+      if (evidence !== null) {
+        return {
+          ok: false,
+          message: `run ${record.runId} recorded ${result.scenario} but it ${evidence}; cannot resume`,
+        }
       }
     }
   }
@@ -1092,8 +1342,14 @@ export function checkEvalGate(
   current?: readonly EvalBaselineScenario[],
   currentImplementation?: string,
   runRecord?: EvalRunRecord | null,
+  currentHarnessDigest?: string | null,
 ): EvalGateResult {
   const failures: string[] = []
+  const verifierScenarios = current ?? baseline.scenarios
+  const verifierById = new Map(verifierScenarios.map((scenario) => [scenario.id, scenario]))
+  if (latest.schemaVersion !== EVAL_SCHEMA_VERSION) {
+    failures.push('the latest summary is legacy evidence; regenerate version 2 evidence')
+  }
 
   // A latest summary must be traceable to a completed run record. An incomplete or
   // missing run record means the evidence was produced by an interrupted run and must
@@ -1101,7 +1357,13 @@ export function checkEvalGate(
   // callers that do not pass one keep the previous behaviour.
   if (currentImplementation !== undefined && latest.results.length > 0 && runRecord !== undefined) {
     const record = runRecord ?? null
-    const recordCheck = checkRunRecord(record, currentImplementation, latestRunKeys(latest))
+    const recordCheck = checkRunRecord(
+      record,
+      currentImplementation,
+      latestRunKeys(latest),
+      currentHarnessDigest,
+      verifierScenarios,
+    )
     if (!recordCheck.ok) {
       failures.push(recordCheck.message)
     }
@@ -1110,6 +1372,23 @@ export function checkEvalGate(
         failures.push(`latest summary does not reference a run but the run record is ${record.runId}`)
       } else if (record.runId !== latest.runId) {
         failures.push(`latest summary references run ${latest.runId} but the run record is ${record.runId}`)
+      }
+      // The record's captured fixtures must still describe the matrix on disk. This is
+      // what notices a fixture edited after the run started, even when the summary and
+      // baseline were both generated from the old fixture.
+      if (current !== undefined) {
+        for (const scenario of current) {
+          const recorded = record.scenarioHashes?.[scenario.id]
+          if (recorded === undefined) {
+            failures.push(`run ${record.runId} has no fixture fingerprint for ${scenario.id}`)
+            continue
+          }
+          if (recorded.scenarioHash !== scenario.scenarioHash || recorded.sourceHash !== scenario.sourceHash) {
+            failures.push(
+              `run ${record.runId} recorded ${scenario.id} against different fixtures than the current matrix`,
+            )
+          }
+        }
       }
     }
     if (record !== null && recordCheck.ok) {
@@ -1153,6 +1432,12 @@ export function checkEvalGate(
         if (!sameExitCodes(summaryResult.verifyExitCodes, recordResult.verifyExitCodes)) {
           failures.push(`${key}: summary verifyExitCodes disagree with run record`)
         }
+        if (summaryResult.verifyCount !== recordResult.verifyCount) {
+          failures.push(`${key}: summary verifyCount disagrees with run record`)
+        }
+        if (summaryResult.hiddenVerifyCount !== recordResult.hiddenVerifyCount) {
+          failures.push(`${key}: summary hiddenVerifyCount disagrees with run record`)
+        }
         if (summaryResult.scenarioHash !== recordResult.scenarioHash) {
           failures.push(`${key}: summary scenarioHash disagrees with run record`)
         }
@@ -1172,17 +1457,12 @@ export function checkEvalGate(
         failures.push(`latest summary records duplicate scenario/variant/model results`)
       }
     }
-    // A summary may not claim a verifier passed while reporting a failing exit code,
-    // regardless of what the run record says.
-    for (const summaryResult of latest.results) {
-      if (
-        summaryResult.verified &&
-        summaryResult.verifyExitCodes[0] !== undefined &&
-        summaryResult.verifyExitCodes[0] !== 0
-      ) {
-        failures.push(`${resultKey(summaryResult)}: summary reports verified with a failing visible verifier`)
-      }
-    }
+  }
+
+  // Validate every summary even for callers that omit the optional run record or matrix.
+  for (const result of latest.results) {
+    const evidence = verifierEvidenceProblem(result, verifierById.get(result.scenario))
+    if (evidence !== null) failures.push(`${resultKey(result)}: summary ${evidence}`)
   }
 
   if (currentImplementation !== undefined) {

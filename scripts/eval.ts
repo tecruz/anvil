@@ -43,6 +43,7 @@ import {
   checkpointFileName,
   checkRunRecord,
   checkRunRecordCompatibility,
+  EVAL_SCHEMA_VERSION,
   type EvalBaseline,
   type EvalBaselineScenario,
   type EvalLatest,
@@ -86,9 +87,9 @@ const checkpointsDir = join(resultsDir, 'checkpoints')
  * structured metadata and verdicts only. `--publish-transcripts` opts in, and even then
  * transcripts are redacted and size-limited before they touch disk or an artifact.
  */
-/** Maximum transcript bytes retained per scenario/variant. Larger transcripts are
- *  truncated, not dropped, so a failure still shows its tail. */
-const MAX_TRANSCRIPT_BYTES = 64 * 1024
+/** Maximum bytes retained per persisted free-text field. Larger values are truncated,
+ *  not dropped, so a failure still shows its tail. */
+const MAX_TEXT_BYTES = 64 * 1024
 /** Secret-shaped markers that must never appear in a persisted transcript. */
 const SECRET_MARKERS = [
   /sk-[A-Za-z0-9]{20,}/g, // OpenAI-style keys
@@ -107,14 +108,19 @@ export function redactTranscript(text: string): string {
   return redacted
 }
 
-/** Size-limit a transcript, keeping the head and tail so failures remain readable. */
-export function limitTranscript(text: string): string {
+/** Size-limit a free-text field, keeping the head and tail so failures remain readable. */
+function limitText(text: string, label: string): string {
   const bytes = Buffer.byteLength(text, 'utf8')
-  if (bytes <= MAX_TRANSCRIPT_BYTES) return text
-  const half = Math.floor(MAX_TRANSCRIPT_BYTES / 2)
+  if (bytes <= MAX_TEXT_BYTES) return text
+  const half = Math.floor(MAX_TEXT_BYTES / 2)
   const head = Buffer.from(text, 'utf8').subarray(0, half).toString('utf8')
   const tail = Buffer.from(text, 'utf8').subarray(-half).toString('utf8')
-  return `${head}\n\n... [transcript truncated, ${bytes} bytes total] ...\n\n${tail}`
+  return `${head}\n\n... [${label} truncated, ${bytes} bytes total] ...\n\n${tail}`
+}
+
+/** Size-limit a transcript before it is persisted or published. */
+export function limitTranscript(text: string): string {
+  return limitText(text, 'transcript')
 }
 
 /**
@@ -127,9 +133,11 @@ export function limitTranscript(text: string): string {
 export function sanitizeResult(result: ScenarioResult): ScenarioResult {
   return {
     ...result,
-    transcript: limitTranscript(redactTranscript(result.transcript)),
-    ...(result.verifyOutput === undefined ? {} : { verifyOutput: redactTranscript(result.verifyOutput) }),
-    ...(result.error === undefined ? {} : { error: redactTranscript(result.error) }),
+    transcript: limitText(redactTranscript(result.transcript), 'transcript'),
+    ...(result.verifyOutput === undefined
+      ? {}
+      : { verifyOutput: limitText(redactTranscript(result.verifyOutput), 'verifier output') }),
+    ...(result.error === undefined ? {} : { error: limitText(redactTranscript(result.error), 'error') }),
   }
 }
 
@@ -287,21 +295,20 @@ async function main(): Promise<void> {
     for (const rejected of checkpointRead.rejected) {
       console.warn(`Ignoring checkpoint ${rejected}`)
     }
-    const reconciled = reconcileRunRecord(parsed, checkpointRead.entries, currentScenarioHashes)
+    const reconciled = reconcileRunRecord(parsed, checkpointRead.entries, currentScenarioHashes, selectedScenarios)
     for (const rejected of reconciled.rejected) {
       console.warn(`Ignoring checkpoint ${rejected}`)
     }
     runRecord = reconciled.record
-    if (reconciled.changed) {
-      runRecord.completionState = 'in-progress'
-      runRecord.completedAt = null
-      writeRunRecord(runRecord)
-      console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
-    }
 
+    // Validate compatibility before mutating run.json: a rejected resume must leave
+    // the durable record intact so a later attempt can resume once the incompatibility
+    // is resolved. Recovering checkpoints first is safe because reconcileRunRecord
+    // validates every checkpoint's hashes before it can become evidence.
     const compatibility = checkRunRecordCompatibility(runRecord, {
       implementation: implementationBefore,
       scenarioHashes: currentScenarioHashes,
+      scenarios: selectedScenarios,
       models,
       bundleDigest,
       harnessDigest,
@@ -311,6 +318,13 @@ async function main(): Promise<void> {
     if (!compatibility.ok) {
       console.error(compatibility.message)
       process.exit(1)
+    }
+
+    if (reconciled.changed) {
+      runRecord.completionState = 'in-progress'
+      runRecord.completedAt = null
+      writeRunRecord(runRecord)
+      console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
     }
     runId = runRecord.runId
     const completed = new Set(
@@ -348,7 +362,7 @@ async function main(): Promise<void> {
     runId = randomUUID()
     const startedAt = new Date().toISOString()
     runRecord = {
-      schemaVersion: 1,
+      schemaVersion: EVAL_SCHEMA_VERSION,
       runId,
       startedAt,
       completedAt: null,
@@ -362,6 +376,7 @@ async function main(): Promise<void> {
       nodeVersion: process.version,
       publishTranscripts,
       subset: isSubset,
+      scenarioHashes: currentScenarioHashes,
       runKeys: declaredKeys,
       executionOrder: [],
       results: [],
@@ -391,6 +406,8 @@ async function main(): Promise<void> {
         opencodeVersion: runRecord.opencodeVersion,
         scenarioHash: prior.scenarioHash,
         sourceHash: prior.sourceHash,
+        verifyCount: prior.verifyCount,
+        hiddenVerifyCount: prior.hiddenVerifyCount,
         verified: prior.verified,
         hiddenVerified: prior.hiddenVerified,
         verifyExitCodes: [...prior.verifyExitCodes],
@@ -461,13 +478,15 @@ async function main(): Promise<void> {
     }
   }
 
-  // The implementation and bundle are hashed again after the run: if either changed under
-  // the run, the results were produced by a different binary than the one committed.
+  // The implementation, bundle, and harness are hashed again after the run: if any changed
+  // under the run, the results were produced by different inputs than the ones being
+  // committed as evidence.
   const implementationAfter = hashImplementation(repoRoot)
   const bundlePathAfter = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
   const bundleDigestAfter = existsSync(bundlePathAfter)
     ? createHash('sha256').update(readFileSync(bundlePathAfter)).digest('hex')
     : null
+  const harnessDigestAfter = hashHarness()
 
   // Reload the scenario matrix from disk so a definition that changed mid-run is detected,
   // not the in-memory object captured before the run started.
@@ -482,7 +501,11 @@ async function main(): Promise<void> {
   const complete = allDeclaredCompleted(runRecord)
 
   let completionState: EvalRunRecord['completionState']
-  if (implementationBefore !== implementationAfter || bundleDigest !== bundleDigestAfter) {
+  if (
+    implementationBefore !== implementationAfter ||
+    bundleDigest !== bundleDigestAfter ||
+    harnessDigest !== harnessDigestAfter
+  ) {
     completionState = 'failed'
   } else if (fixtureProblem !== null) {
     console.error(fixtureProblem)
@@ -506,7 +529,7 @@ async function main(): Promise<void> {
   // implementation changing. An interrupted run leaves checkpoints and a partial run
   // record, but latest.json keeps the last complete summary.
   if (completionState === 'completed') {
-    const recordCheck = checkRunRecord(runRecord, implementationBefore, declaredKeys)
+    const recordCheck = checkRunRecord(runRecord, implementationBefore, declaredKeys, harnessDigest, currentScenarios)
     if (!recordCheck.ok) {
       // The gate will never accept this record, so do not promote a summary from it.
       console.error(recordCheck.message)
@@ -566,6 +589,8 @@ async function runScenario(
     opencodeVersion,
     scenarioHash,
     sourceHash,
+    verifyCount: scenario.verify.length,
+    hiddenVerifyCount: 0,
     verified: false,
     hiddenVerified: null,
     verifyExitCodes: [],
@@ -641,11 +666,13 @@ async function runScenario(
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
-    if (scenario.hidden !== undefined && scenario.hidden.length > 0) {
-      for (const file of scenario.hidden) {
-        cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
-      }
-      const hidden = await runAll(scenario.hiddenVerify ?? [], workdir)
+    for (const file of scenario.hidden ?? []) {
+      cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
+    }
+    if ((scenario.hiddenVerify?.length ?? 0) > 0) {
+      const hiddenCommands = scenario.hiddenVerify ?? []
+      const hidden = await runAll(hiddenCommands, workdir)
+      result.hiddenVerifyCount = hiddenCommands.length
       result.hiddenVerified = hidden.every((r) => r.ok)
       result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
     }
@@ -835,7 +862,7 @@ function writeReport(results: ScenarioResult[], runRecord: EvalRunRecord): void 
   archiveRunRecord(runRecord)
 
   const latest: EvalLatest = {
-    schemaVersion: 1,
+    schemaVersion: EVAL_SCHEMA_VERSION,
     generatedAt,
     implementation,
     runId: runRecord.runId,
@@ -876,6 +903,8 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     opencodeVersion: result.opencodeVersion,
     scenarioHash: result.scenarioHash,
     sourceHash: result.sourceHash,
+    verifyCount: result.verifyCount,
+    hiddenVerifyCount: result.hiddenVerifyCount,
     verified: result.verified,
     hiddenVerified: result.hiddenVerified,
     verifyExitCodes: result.verifyExitCodes,
@@ -885,13 +914,15 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
 
 function writeBaseline(scenarios: readonly EvalScenario[]): void {
   const baseline: EvalBaseline = {
-    schemaVersion: 1,
+    schemaVersion: EVAL_SCHEMA_VERSION,
     scenarios: scenarios.map((scenario) => ({
       id: scenario.id,
       size: scenario.size,
       kind: scenario.kind,
       scenarioHash: hashScenario(scenario),
       sourceHash: hashScenarioSource(repoRoot, scenario),
+      verify: scenario.verify,
+      hiddenVerify: scenario.hiddenVerify ?? [],
       expect: scenario.expect,
     })),
   }
@@ -957,6 +988,8 @@ function recordResultFrom(
     modelRole: result.modelRole,
     scenarioHash,
     sourceHash,
+    verifyCount: result.verifyCount,
+    hiddenVerifyCount: result.hiddenVerifyCount,
     attempts,
     verified: result.verified,
     hiddenVerified: result.hiddenVerified,
@@ -973,7 +1006,7 @@ function recordResultFrom(
 function writeCheckpoint(runId: string, result: EvalRunRecordResult): void {
   const dir = join(checkpointsDir, runId)
   mkdirSync(dir, { recursive: true })
-  atomicWriteJson(join(dir, checkpointFileName(result)), result)
+  atomicWriteJson(join(dir, checkpointFileName(result)), { schemaVersion: EVAL_SCHEMA_VERSION, ...result })
 }
 
 /**
@@ -1120,9 +1153,11 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     kind: scenario.kind,
     scenarioHash: hashScenario(scenario),
     sourceHash: hashScenarioSource(repoRoot, scenario),
+    verify: scenario.verify,
+    hiddenVerify: scenario.hiddenVerify ?? [],
     expect: scenario.expect,
   }))
-  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord)
+  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord, hashHarness())
   if (!gate.ok) {
     console.error(gate.message)
     return 1

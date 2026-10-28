@@ -153,6 +153,19 @@ recovering it, and never promotes a subset or partial run. Transcripts are empty
 default; `--publish-transcripts` opts in, and every persisted transcript, error, and
 verifier output is redacted and size-limited first.
 
+New baselines, summaries, run records, and checkpoints use evidence schema version 2.
+Readers retain version 1 for historical inspection: missing verifier declarations/counts
+and the initial fixture snapshot remain unknown (`null`), never inferred from results.
+Legacy records cannot be resumed or promoted; a new run is required to produce version 2
+evidence. A historical baseline can still be compared with new evidence when the current
+scenario matrix supplies its verifier declarations.
+
+Recovery, resume, promotion, and gate checking share verifier-evidence validation against
+the scenario's declared visible and hidden commands. An internally consistent but truncated
+checkpoint is rejected rather than reused as completed work. If the optional current matrix
+is omitted from the gate API, the baseline's declarations are used instead. Resume refusal
+does not persist recovered state or replace the previous complete summary or its archive.
+
 `gen:playbooks` exists because a single-file CLI cannot read a directory of YAML at
 runtime, so the registry is compiled in. The authoring format stays
 `registry/playbooks/*.yaml`, and a test fails if the generated file is stale — the
