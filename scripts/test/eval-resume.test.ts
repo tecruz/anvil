@@ -84,7 +84,6 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     partial.results = partial.results.filter(
       (entry) => entry.scenario !== original.scenario || entry.variant !== original.variant,
     )
-    partial.runKeys = partial.runKeys.filter((key) => key !== originalKey)
     partial.executionOrder = partial.executionOrder.filter((key) => key !== originalKey)
     partial.completionState = 'in-progress'
     partial.completedAt = null
@@ -123,7 +122,6 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     // Refusing a fixture mismatch must not persist an otherwise recoverable checkpoint.
     const unstarted = structuredClone(complete)
     unstarted.results = unstarted.results.filter((entry) => !entry.scenario.startsWith('medium-code-change/'))
-    unstarted.runKeys = unstarted.runKeys.filter((key) => !key.startsWith('medium-code-change/'))
     unstarted.executionOrder = unstarted.executionOrder.filter((key) => !key.startsWith('medium-code-change/'))
     unstarted.completionState = 'in-progress'
     unstarted.completedAt = null

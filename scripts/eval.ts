@@ -65,6 +65,7 @@ import {
   readJsonFile,
   reconcileRunRecord,
   recordFixtureProblem,
+  resultKey,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
@@ -345,11 +346,7 @@ async function main(): Promise<void> {
       console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
     }
     runId = runRecord.runId
-    const completed = new Set(
-      runRecord.results
-        .filter((r) => latestAttemptState(r) === 'completed')
-        .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
-    )
+    const completed = new Set(runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map(resultKey))
     const remaining = declaredKeys.filter((key) => !completed.has(key))
     console.log(
       remaining.length === 0

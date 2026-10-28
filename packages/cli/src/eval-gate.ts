@@ -1376,7 +1376,7 @@ export function checkRunRecordCompatibility(
 }
 
 /** The stable key for one scenario/variant/model/repetition result. */
-function resultKey(result: Pick<EvalResultSummary, 'scenario' | 'variant' | 'model' | 'repetition'>): string {
+export function resultKey(result: Pick<EvalResultSummary, 'scenario' | 'variant' | 'model' | 'repetition'>): string {
   return `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}/${result.repetition}`
 }
 
