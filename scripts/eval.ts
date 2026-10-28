@@ -31,25 +31,40 @@
  */
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
+  allDeclaredCompleted,
   checkEvalGate,
+  checkpointFileName,
+  checkRunRecord,
+  checkRunRecordCompatibility,
+  EVAL_SCHEMA_VERSION,
   type EvalBaseline,
   type EvalBaselineScenario,
+  type EvalLatest,
   type EvalModel,
   type EvalModelRole,
   type EvalResultSummary,
+  type EvalRunRecord,
+  type EvalRunRecordAttempt,
+  type EvalRunRecordResult,
   type EvalScenario,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
+  latestAttemptState,
   parseBaseline,
   parseLatest,
+  parseRunRecord,
+  readCheckpointDirectory,
   readJsonFile,
+  reconcileRunRecord,
+  recordFixtureProblem,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
@@ -62,6 +77,69 @@ const resultsDir = join(repoRoot, 'eval-results')
 const rawDir = join(resultsDir, 'raw')
 const latestPath = join(resultsDir, 'latest.json')
 const baselinePath = join(resultsDir, 'baseline.json')
+const runRecordPath = join(resultsDir, 'run.json')
+const runArchiveDir = join(resultsDir, 'runs')
+const checkpointsDir = join(resultsDir, 'checkpoints')
+
+/** Transcript publication policy.
+ *
+ * Transcripts are never published by default: the checked-in `latest.json` carries
+ * structured metadata and verdicts only. `--publish-transcripts` opts in, and even then
+ * transcripts are redacted and size-limited before they touch disk or an artifact.
+ */
+/** Maximum bytes retained per persisted free-text field. Larger values are truncated,
+ *  not dropped, so a failure still shows its tail. */
+const MAX_TEXT_BYTES = 64 * 1024
+/** Secret-shaped markers that must never appear in a persisted transcript. */
+const SECRET_MARKERS = [
+  /sk-[A-Za-z0-9]{20,}/g, // OpenAI-style keys
+  /sk-or-[A-Za-z0-9]{20,}/g, // OpenRouter keys
+  /ghp_[A-Za-z0-9]{36,}/g, // GitHub personal access tokens
+  /github_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained tokens
+  /[A-Za-z0-9+/]{40,}/g, // long base64 blobs (catches provider ledgers)
+]
+
+/** Redact secret-shaped content from a transcript before it is persisted or uploaded. */
+export function redactTranscript(text: string): string {
+  let redacted = text
+  for (const marker of SECRET_MARKERS) {
+    redacted = redacted.replace(marker, '[redacted]')
+  }
+  return redacted
+}
+
+/** Size-limit a free-text field, keeping the head and tail so failures remain readable. */
+function limitText(text: string, label: string): string {
+  const bytes = Buffer.byteLength(text, 'utf8')
+  if (bytes <= MAX_TEXT_BYTES) return text
+  const half = Math.floor(MAX_TEXT_BYTES / 2)
+  const head = Buffer.from(text, 'utf8').subarray(0, half).toString('utf8')
+  const tail = Buffer.from(text, 'utf8').subarray(-half).toString('utf8')
+  return `${head}\n\n... [${label} truncated, ${bytes} bytes total] ...\n\n${tail}`
+}
+
+/** Size-limit a transcript before it is persisted or published. */
+export function limitTranscript(text: string): string {
+  return limitText(text, 'transcript')
+}
+
+/**
+ * Redact and bound every free-text field before it is persisted.
+ *
+ * Sanitizing at the persistence boundary -- rather than only in the final report -- is
+ * what keeps secrets out of checkpoints, the run record, and stdout. A checkpoint is an
+ * uploaded artifact and a run record is committed; neither gets a second chance.
+ */
+export function sanitizeResult(result: ScenarioResult): ScenarioResult {
+  return {
+    ...result,
+    transcript: limitText(redactTranscript(result.transcript), 'transcript'),
+    ...(result.verifyOutput === undefined
+      ? {}
+      : { verifyOutput: limitText(redactTranscript(result.verifyOutput), 'verifier output') }),
+    ...(result.error === undefined ? {} : { error: limitText(redactTranscript(result.error), 'error') }),
+  }
+}
 
 /** The two things being compared: the same repository, with and without the artifacts. */
 const VARIANTS = ['bare', 'anvil'] as const
@@ -80,7 +158,7 @@ interface RunResult {
   output: string
 }
 
-interface ScenarioResult extends EvalResultSummary {
+export interface ScenarioResult extends EvalResultSummary {
   /** What the work cost, when the ledger knows. */
   costUsd: number | null
   tokens: number | null
@@ -99,6 +177,8 @@ async function main(): Promise<void> {
   const checkOnly = args.includes('--check')
   const fakeAgent = args.includes('--fake-agent')
   const writeBaselineAfterRun = args.includes('--write-baseline')
+  const resume = args.includes('--resume')
+  const publishTranscripts = args.includes('--publish-transcripts')
   const only = flagValue('--scenario', args)
   const enabled = process.env.ANVIL_EVAL === '1'
 
@@ -126,6 +206,9 @@ async function main(): Promise<void> {
     console.error(`No scenario matched ${only ?? '(nothing)'}`)
     process.exit(1)
   }
+  // A subset selection (--scenario) remains explicitly partial: it must not overwrite
+  // valid complete evidence with a success-looking report covering only part of the matrix.
+  const isSubset = selectedScenarios.length !== scenarios.length
 
   const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
   if (models.length === 0) {
@@ -163,22 +246,307 @@ async function main(): Promise<void> {
   // checked-in bundle. Rebuild the CLI before evaluating so what executes is what is hashed.
   ensureCliBuilt()
 
+  // `--resume` continues an existing run: it validates that the implementation, fixtures,
+  // models, harness policy, and requested run keys still match, skips keys that already
+  // completed, and retries only the incomplete ones. Each attempt is recorded explicitly; a
+  // failure is never silently retried until it passes.
+  let runRecord: EvalRunRecord
+  let runId: string
+  const declaredKeys: string[] = []
+  for (const model of models) {
+    for (const scenario of selectedScenarios) {
+      for (const variant of VARIANTS) {
+        declaredKeys.push(`${scenario.id}/${variant}/${model.id}`)
+      }
+    }
+  }
+  const bundlePath = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+  const bundleDigest = existsSync(bundlePath)
+    ? createHash('sha256').update(readFileSync(bundlePath)).digest('hex')
+    : null
+  const harnessDigest = hashHarness()
+  const implementationBefore = hashImplementation(repoRoot)
   const opencodeVersion = fakeAgent ? null : await probeCommandVersion('opencode')
+  const currentScenarioHashes = Object.fromEntries(
+    selectedScenarios.map((scenario) => [
+      scenario.id,
+      { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
+    ]),
+  )
+
+  if (resume) {
+    // Resuming without a record cannot know which keys belong to the run. Starting a new
+    // run silently would discard the reason the caller asked to resume, so fail closed.
+    if (!existsSync(runRecordPath)) {
+      console.error('Cannot resume: eval-results/run.json is missing. Start a new run instead.')
+      process.exit(1)
+    }
+    const parsed = parseRunRecord(readJsonFile(runRecordPath))
+    if (typeof parsed === 'string') {
+      console.error(`Cannot resume: ${parsed}`)
+      process.exit(1)
+    }
+
+    // Recover completed checkpoints that were never recorded in run.json (for example
+    // because the run.json write failed after a checkpoint write). Discovery is recursive
+    // because model IDs contain `/`, and every checkpoint is validated before it can
+    // become evidence.
+    const checkpointRead = readCheckpointDirectory(join(checkpointsDir, parsed.runId))
+    for (const rejected of checkpointRead.rejected) {
+      console.warn(`Ignoring checkpoint ${rejected}`)
+    }
+    const reconciled = reconcileRunRecord(parsed, checkpointRead.entries, currentScenarioHashes, selectedScenarios)
+    for (const rejected of reconciled.rejected) {
+      console.warn(`Ignoring checkpoint ${rejected}`)
+    }
+    runRecord = reconciled.record
+
+    // Validate compatibility before mutating run.json: a rejected resume must leave
+    // the durable record intact so a later attempt can resume once the incompatibility
+    // is resolved. Recovering checkpoints first is safe because reconcileRunRecord
+    // validates every checkpoint's hashes before it can become evidence.
+    const compatibility = checkRunRecordCompatibility(runRecord, {
+      implementation: implementationBefore,
+      scenarioHashes: currentScenarioHashes,
+      scenarios: selectedScenarios,
+      models,
+      bundleDigest,
+      harnessDigest,
+      opencodeVersion,
+      publishTranscripts,
+    })
+    if (!compatibility.ok) {
+      console.error(compatibility.message)
+      process.exit(1)
+    }
+
+    if (reconciled.changed) {
+      runRecord.completionState = 'in-progress'
+      runRecord.completedAt = null
+      writeRunRecord(runRecord)
+      console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
+    }
+    runId = runRecord.runId
+    const completed = new Set(
+      runRecord.results
+        .filter((r) => latestAttemptState(r) === 'completed')
+        .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
+    )
+    const remaining = declaredKeys.filter((key) => !completed.has(key))
+    console.log(
+      remaining.length === 0
+        ? `Run ${runId} already completed all ${declaredKeys.length} keys; finishing without rerunning them.`
+        : `Resuming run ${runId}: ${remaining.length} of ${declaredKeys.length} keys remain.`,
+    )
+  } else {
+    // Never clobber the record that a checked-in summary references. Archiving a complete
+    // record first means a later partial or subset run cannot take away the provenance of
+    // the last complete one. Incomplete runs have no evidence to preserve.
+    if (existsSync(runRecordPath)) {
+      const prior = parseRunRecord(readJsonFile(runRecordPath))
+      if (typeof prior === 'string') {
+        console.warn(`Not archiving the previous run record: ${prior}`)
+      } else if (prior.completionState === 'completed' && !prior.subset) {
+        const archived = archiveRunRecord(prior, false)
+        console.log(
+          archived
+            ? `Archived previous run ${prior.runId} to ${join(runArchiveDir, `${prior.runId}.json`)}.`
+            : `Previous run ${prior.runId} is already archived.`,
+        )
+      } else {
+        console.log(
+          `Previous run ${prior.runId} is ${prior.subset ? 'a subset' : prior.completionState}; not archiving it.`,
+        )
+      }
+    }
+    runId = randomUUID()
+    const startedAt = new Date().toISOString()
+    runRecord = {
+      schemaVersion: EVAL_SCHEMA_VERSION,
+      runId,
+      startedAt,
+      completedAt: null,
+      completionState: 'in-progress',
+      commitSha: readCommitSha(),
+      implementation: implementationBefore,
+      bundleDigest,
+      harnessDigest,
+      models,
+      opencodeVersion,
+      nodeVersion: process.version,
+      publishTranscripts,
+      subset: isSubset,
+      scenarioHashes: currentScenarioHashes,
+      runKeys: declaredKeys,
+      executionOrder: [],
+      results: [],
+    }
+    writeRunRecord(runRecord)
+  }
 
   const results: ScenarioResult[] = []
+  const completedKeys = new Set(
+    runRecord.results
+      .filter((r) => latestAttemptState(r) === 'completed')
+      .map((r) => `${r.scenario}/${r.variant}/${r.model}`),
+  )
+  // Rehydrate completed results from the run record so a resume promotes every
+  // previously completed result, not only the ones this invocation runs.
+  for (const prior of runRecord.results) {
+    if (latestAttemptState(prior) !== 'completed') continue
+    const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
+    results.push(
+      sanitizeResult({
+        scenario: prior.scenario,
+        size: scenario?.size ?? 'tiny',
+        kind: scenario?.kind ?? 'code-change',
+        variant: prior.variant,
+        model: prior.model,
+        modelRole: prior.modelRole as EvalModelRole | null,
+        opencodeVersion: runRecord.opencodeVersion,
+        scenarioHash: prior.scenarioHash,
+        sourceHash: prior.sourceHash,
+        verifyCount: prior.verifyCount,
+        hiddenVerifyCount: prior.hiddenVerifyCount,
+        verified: prior.verified,
+        hiddenVerified: prior.hiddenVerified,
+        verifyExitCodes: [...prior.verifyExitCodes],
+        costUsd: prior.costUsd,
+        tokens: prior.tokens,
+        durationMs: prior.durationMs,
+        transcript: prior.transcript,
+        ...(prior.error === undefined ? {} : { error: prior.error }),
+      }),
+    )
+  }
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
       const sourceHash = hashScenarioSource(repoRoot, scenario)
       for (const variant of VARIANTS) {
-        results.push(await runScenario(scenario, variant, model, scenarioHash, sourceHash, opencodeVersion, fakeAgent))
+        const key = `${scenario.id}/${variant}/${model.id}`
+        // A key that already completed is not re-run: resume picks up incomplete work,
+        // it does not silently rerun finished results until they pass.
+        if (completedKeys.has(key)) continue
+
+        const attemptStartedAt = new Date().toISOString()
+        const rawResult = await runScenario(
+          scenario,
+          variant,
+          model,
+          scenarioHash,
+          sourceHash,
+          opencodeVersion,
+          fakeAgent,
+          publishTranscripts,
+        )
+        // Sanitize before anything persists it: the checkpoint, the run record, and the
+        // console table are all sinks, and a secret in an error string reaches all three.
+        const result = sanitizeResult(rawResult)
+        results.push(result)
+
+        // Checkpoint the attempt immediately, before the next scenario starts. A crash
+        // or timeout after this point leaves this attempt readable, and latest.json is
+        // never overwritten by an incomplete run.
+        const attempt: EvalRunRecordAttempt = {
+          startedAt: attemptStartedAt,
+          completedAt: new Date().toISOString(),
+          state: result.error === undefined ? 'completed' : 'failed',
+          ...(result.error === undefined ? {} : { error: result.error }),
+        }
+        const index = runRecord.results.findIndex(
+          (r) => r.scenario === scenario.id && r.variant === variant && r.model === model.id,
+        )
+        if (index === -1) {
+          const checkpoint = recordResultFrom(result, scenarioHash, sourceHash, [attempt])
+          writeCheckpoint(runId, checkpoint)
+          runRecord.executionOrder.push(key)
+          runRecord.results.push(checkpoint)
+        } else {
+          // A retry replaces the previous attempt's verdicts and metadata with the latest
+          // attempt's, so the run record never mixes a failed attempt's verdict with a
+          // completed attempt's metadata. In particular, a successful retry must clear the
+          // previous attempt's error rather than leave a contradiction behind.
+          const existing = runRecord.results[index]!
+          const updated = recordResultFrom(result, scenarioHash, sourceHash, [...existing.attempts, attempt])
+          runRecord.results[index] = updated
+          if (!runRecord.executionOrder.includes(key)) runRecord.executionOrder.push(key)
+          writeCheckpoint(runId, updated)
+        }
+        writeRunRecord(runRecord)
       }
     }
   }
 
-  writeReport(results)
+  // The implementation, bundle, and harness are hashed again after the run: if any changed
+  // under the run, the results were produced by different inputs than the ones being
+  // committed as evidence.
+  const implementationAfter = hashImplementation(repoRoot)
+  const bundlePathAfter = join(repoRoot, 'packages', 'cli', 'dist', 'cli.js')
+  const bundleDigestAfter = existsSync(bundlePathAfter)
+    ? createHash('sha256').update(readFileSync(bundlePathAfter)).digest('hex')
+    : null
+  const harnessDigestAfter = hashHarness()
+
+  // Reload the scenario matrix from disk so a definition that changed mid-run is detected,
+  // not the in-memory object captured before the run started.
+  const currentScenarios = loadScenarios()
+  const currentHashes = Object.fromEntries(
+    currentScenarios.map((scenario) => [
+      scenario.id,
+      { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
+    ]),
+  )
+  const fixtureProblem = recordFixtureProblem(runRecord, currentHashes)
+  const complete = allDeclaredCompleted(runRecord)
+
+  let completionState: EvalRunRecord['completionState']
+  if (
+    implementationBefore !== implementationAfter ||
+    bundleDigest !== bundleDigestAfter ||
+    harnessDigest !== harnessDigestAfter
+  ) {
+    completionState = 'failed'
+  } else if (fixtureProblem !== null) {
+    console.error(fixtureProblem)
+    completionState = 'failed'
+  } else if (!complete) {
+    completionState = 'partial'
+  } else if (isSubset || runRecord.subset) {
+    // A subset selection is explicitly partial: it promotes only the keys it ran and must
+    // not overwrite valid complete evidence with a success-looking partial report.
+    completionState = 'partial'
+  } else {
+    completionState = 'completed'
+  }
+
+  runRecord.completedAt = new Date().toISOString()
+  runRecord.completionState = completionState
+  runRecord.implementation = implementationBefore
+  writeRunRecord(runRecord)
+
+  // Only promote latest.json when the full declared run completed without the
+  // implementation changing. An interrupted run leaves checkpoints and a partial run
+  // record, but latest.json keeps the last complete summary.
+  if (completionState === 'completed') {
+    const recordCheck = checkRunRecord(runRecord, implementationBefore, declaredKeys, harnessDigest, currentScenarios)
+    if (!recordCheck.ok) {
+      // The gate will never accept this record, so do not promote a summary from it.
+      console.error(recordCheck.message)
+      runRecord.completionState = 'failed'
+      completionState = 'failed'
+      writeRunRecord(runRecord)
+    }
+  }
+
+  if (completionState === 'completed') {
+    writeReport(results, runRecord)
+  } else {
+    console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
+  }
+
   printSummary(results)
-  if (writeBaselineAfterRun) writeBaseline(scenarios)
+  if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(scenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
   // reported in the summary, and `--check` is the command that turns it into a failure.
@@ -207,6 +575,7 @@ async function runScenario(
   sourceHash: string,
   opencodeVersion: string | null,
   fake: boolean,
+  publishTranscripts: boolean,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-`))
   const started = Date.now()
@@ -220,6 +589,8 @@ async function runScenario(
     opencodeVersion,
     scenarioHash,
     sourceHash,
+    verifyCount: scenario.verify.length,
+    hiddenVerifyCount: 0,
     verified: false,
     hiddenVerified: null,
     verifyExitCodes: [],
@@ -258,12 +629,16 @@ async function runScenario(
     if (fake) {
       if (scenario.solution !== undefined) {
         cpSync(join(repoRoot, scenario.solution.from), join(workdir, ...scenario.solution.to.split('/')))
-        result.transcript = `[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`
+        result.transcript = publishTranscripts
+          ? limitTranscript(
+              redactTranscript(`[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`),
+            )
+          : ''
       } else if (scenario.kind === 'code-change') {
         result.error = 'a code-change scenario needs a solution for --fake-agent'
         return result
       } else {
-        result.transcript = '[fake-agent] ran the verifier'
+        result.transcript = publishTranscripts ? limitTranscript(redactTranscript('[fake-agent] ran the verifier')) : ''
       }
     } else {
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
@@ -276,7 +651,9 @@ async function runScenario(
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
       })
-      result.transcript = `${agent.stdout}\n${agent.stderr}`.trim()
+      result.transcript = publishTranscripts
+        ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
+        : ''
       if (agent.timedOut) {
         result.error = 'the agent timed out'
       } else if (!agent.ok) {
@@ -289,11 +666,13 @@ async function runScenario(
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
-    if (scenario.hidden !== undefined && scenario.hidden.length > 0) {
-      for (const file of scenario.hidden) {
-        cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
-      }
-      const hidden = await runAll(scenario.hiddenVerify ?? [], workdir)
+    for (const file of scenario.hidden ?? []) {
+      cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
+    }
+    if ((scenario.hiddenVerify?.length ?? 0) > 0) {
+      const hiddenCommands = scenario.hiddenVerify ?? []
+      const hidden = await runAll(hiddenCommands, workdir)
+      result.hiddenVerifyCount = hiddenCommands.length
       result.hiddenVerified = hidden.every((r) => r.ok)
       result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
     }
@@ -460,23 +839,57 @@ function runSync(bin: string, args: string[], cwd: string): void {
 // The report
 // ---------------------------------------------------------------------------
 
-function writeReport(results: ScenarioResult[]): void {
+function writeReport(results: ScenarioResult[], runRecord: EvalRunRecord): void {
   mkdirSync(rawDir, { recursive: true })
   const generatedAt = new Date().toISOString()
-  const implementation = hashImplementation(repoRoot)
+  const implementation = runRecord.implementation
   const stamp = generatedAt.replace(/[:.]/g, '-')
   const rawPath = join(rawDir, `eval-${stamp}.json`)
-  writeFileSync(rawPath, `${formatJson({ generatedAt, implementation, results })}\n`, 'utf8')
+  // Sanitize every result before it lands in the raw report: transcripts and verifier
+  // output can carry secrets, and the raw upload is world-readable.
+  const sanitized = results.map((result) => {
+    const safe = sanitizeResult(result)
+    return {
+      ...safe,
+      verifyOutput: safe.verifyOutput === undefined ? undefined : redactTranscript(safe.verifyOutput),
+    }
+  })
+  atomicWriteJson(rawPath, { generatedAt, implementation, results: sanitized })
   console.log(`\nReport written to ${rawPath}`)
 
-  const latest: { schemaVersion: 1; generatedAt: string; implementation: string; results: EvalResultSummary[] } = {
-    schemaVersion: 1,
+  // Archive the exact record the summary references before promoting the summary. If the
+  // archive write fails, latest.json still points at the previous, intact evidence.
+  archiveRunRecord(runRecord)
+
+  const latest: EvalLatest = {
+    schemaVersion: EVAL_SCHEMA_VERSION,
     generatedAt,
     implementation,
+    runId: runRecord.runId,
     results: results.map(summaryOf),
   }
-  writeFileSync(latestPath, `${formatJson(latest)}\n`, 'utf8')
+  atomicWriteJson(latestPath, latest)
   console.log(`Summary written to ${latestPath}`)
+}
+
+/** Write JSON atomically: serialize to a temp file in the same directory, then rename. */
+function atomicWriteJson(path: string, value: unknown): void {
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const temp = join(dir, `.tmp-${randomUUID()}.json`)
+  try {
+    writeFileSync(temp, `${formatJson(value)}\n`, 'utf8')
+    renameSync(temp, path)
+  } catch (err) {
+    // Never leave a half-written file in place of the last good one: remove the temp
+    // and leave the existing file untouched.
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // best effort
+    }
+    throw err
+  }
 }
 
 function summaryOf(result: ScenarioResult): EvalResultSummary {
@@ -490,6 +903,8 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     opencodeVersion: result.opencodeVersion,
     scenarioHash: result.scenarioHash,
     sourceHash: result.sourceHash,
+    verifyCount: result.verifyCount,
+    hiddenVerifyCount: result.hiddenVerifyCount,
     verified: result.verified,
     hiddenVerified: result.hiddenVerified,
     verifyExitCodes: result.verifyExitCodes,
@@ -499,18 +914,99 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
 
 function writeBaseline(scenarios: readonly EvalScenario[]): void {
   const baseline: EvalBaseline = {
-    schemaVersion: 1,
+    schemaVersion: EVAL_SCHEMA_VERSION,
     scenarios: scenarios.map((scenario) => ({
       id: scenario.id,
       size: scenario.size,
       kind: scenario.kind,
       scenarioHash: hashScenario(scenario),
       sourceHash: hashScenarioSource(repoRoot, scenario),
+      verify: scenario.verify,
+      hiddenVerify: scenario.hiddenVerify ?? [],
       expect: scenario.expect,
     })),
   }
   writeFileSync(baselinePath, `${formatJson(baseline)}\n`, 'utf8')
   console.log(`Baseline written to ${baselinePath}`)
+}
+
+/** HEAD of the repository the harness runs against, or null when git is unavailable. */
+function readCommitSha(): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim() || null
+  } catch {
+    return null
+  }
+}
+
+/** Atomically write the run record that tracks how a benchmark run is progressing. */
+function writeRunRecord(record: EvalRunRecord): void {
+  atomicWriteJson(runRecordPath, record)
+}
+
+/** A run id becomes a filename, so it must not be able to escape the archive directory. */
+function isSafeRunId(runId: string): boolean {
+  return /^[A-Za-z0-9._-]+$/.test(runId)
+}
+
+/** Keep a finished record under its run id so a later run cannot erase its provenance. */
+function archiveRunRecord(record: EvalRunRecord, overwrite = true): boolean {
+  if (!isSafeRunId(record.runId)) {
+    throw new Error(`run id ${JSON.stringify(record.runId)} is not safe to use as a filename`)
+  }
+  const path = join(runArchiveDir, `${record.runId}.json`)
+  if (!overwrite && existsSync(path)) return false
+  atomicWriteJson(path, record)
+  return true
+}
+
+/** Fingerprint the harness policy that a resumable run must not silently change. */
+function hashHarness(): string {
+  const hash = createHash('sha256')
+  for (const rel of ['scripts/eval.ts', 'eval/models.json']) {
+    const path = join(repoRoot, ...rel.split('/'))
+    if (!existsSync(path)) continue
+    hash.update(rel.replace(/\\/g, '/'))
+    hash.update('\0')
+    hash.update(readFileSync(path))
+    hash.update('\0')
+  }
+  return hash.digest('hex')
+}
+
+/** Build the persisted shape of one result from the sanitized run output. */
+function recordResultFrom(
+  result: ScenarioResult,
+  scenarioHash: string,
+  sourceHash: string,
+  attempts: EvalRunRecordAttempt[],
+): EvalRunRecordResult {
+  return {
+    scenario: result.scenario,
+    variant: result.variant,
+    model: result.model,
+    modelRole: result.modelRole,
+    scenarioHash,
+    sourceHash,
+    verifyCount: result.verifyCount,
+    hiddenVerifyCount: result.hiddenVerifyCount,
+    attempts,
+    verified: result.verified,
+    hiddenVerified: result.hiddenVerified,
+    verifyExitCodes: [...result.verifyExitCodes],
+    costUsd: result.costUsd,
+    tokens: result.tokens,
+    durationMs: result.durationMs,
+    transcript: result.transcript,
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }
+}
+
+/** Atomically checkpoint a single completed scenario/variant result. */
+function writeCheckpoint(runId: string, result: EvalRunRecordResult): void {
+  const dir = join(checkpointsDir, runId)
+  mkdirSync(dir, { recursive: true })
+  atomicWriteJson(join(dir, checkpointFileName(result)), { schemaVersion: EVAL_SCHEMA_VERSION, ...result })
 }
 
 /**
@@ -528,7 +1024,13 @@ function formatJson(value: unknown, level = 0): string {
   if (Array.isArray(value)) {
     if (value.length === 0) return '[]'
     const primitive = (item: unknown): boolean => item === null || ['string', 'number', 'boolean'].includes(typeof item)
-    if (value.every(primitive)) return `[${value.map((item) => JSON.stringify(item)).join(', ')}]`
+    if (value.every(primitive)) {
+      const inline = `[${value.map((item) => JSON.stringify(item)).join(', ')}]`
+      // Biome's line width is 120 characters. Keeping a long primitive array inline makes
+      // `npm run check` fail on the checked-in run record, so only short arrays stay on one
+      // line; the rest use the same one-item-per-line shape Biome prints.
+      if (inline.length <= 80) return inline
+    }
     return `[\n${value.map((item) => `${childIndent}${formatJson(item, level + 1)}`).join(',\n')}\n${indent}]`
   }
 
@@ -589,6 +1091,30 @@ function printScenarios(scenarios: readonly EvalScenario[], models: readonly Eva
 // The gate
 // ---------------------------------------------------------------------------
 
+/**
+ * Find the run record that produced a summary.
+ *
+ * `run.json` describes the most recent invocation, which may be a subset run. The
+ * promoted run's record is archived under `eval-results/runs/<runId>.json`, so the gate
+ * reads that first and falls back to `run.json` only when it is the same run.
+ */
+function loadRunRecordForLatest(latest: EvalLatest): EvalRunRecord | null {
+  const read = (path: string): EvalRunRecord | null => {
+    if (!existsSync(path)) return null
+    const parsed = parseRunRecord(readJsonFile(path))
+    return typeof parsed === 'string' ? null : parsed
+  }
+
+  if (latest.runId === undefined) return read(runRecordPath)
+  if (isSafeRunId(latest.runId)) {
+    const archived = read(join(runArchiveDir, `${latest.runId}.json`))
+    if (archived !== null && archived.runId === latest.runId) return archived
+  }
+  const current = read(runRecordPath)
+  if (current !== null && current.runId === latest.runId) return current
+  return null
+}
+
 function runCheck(scenarios: readonly EvalScenario[]): number {
   if (!existsSync(baselinePath)) {
     console.log('No eval baseline exists yet; the gate bootstraps as a pass.')
@@ -612,6 +1138,12 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     return 1
   }
 
+  // A latest summary must be traceable to a completed run record. Read the record that
+  // produced this summary -- which may have been archived if a later run overwrote
+  // `run.json` -- so the gate can reject summaries promoted from partial or interrupted
+  // runs.
+  const runRecord = loadRunRecordForLatest(latest)
+
   // The baseline has to describe the matrix on disk, not only the last run. Without this
   // half, editing a fixture after `--write-baseline` and never running the harness again
   // would pass, because `latest.json` and `baseline.json` would still agree with each other.
@@ -621,9 +1153,11 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     kind: scenario.kind,
     scenarioHash: hashScenario(scenario),
     sourceHash: hashScenarioSource(repoRoot, scenario),
+    verify: scenario.verify,
+    hiddenVerify: scenario.hiddenVerify ?? [],
     expect: scenario.expect,
   }))
-  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot))
+  const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord, hashHarness())
   if (!gate.ok) {
     console.error(gate.message)
     return 1
