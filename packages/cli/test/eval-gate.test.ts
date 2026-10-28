@@ -96,6 +96,10 @@ function latest(
   return {
     schemaVersion: EVAL_SCHEMA_VERSION,
     generatedAt: '2026-10-21T00:00:00.000Z',
+    runId: 'run-1',
+    repetitions: 1,
+    seed: 'test-seed',
+    order: 'alternate',
     results: scenarios.flatMap((s) =>
       (['bare', 'anvil'] as const).map((variant) => {
         const hiddenVerifyCount = s.hiddenVerify?.length ?? 0
@@ -114,6 +118,7 @@ function latest(
           verified: s.expect.verified !== false,
           hiddenVerified: s.expect.hiddenVerified === true ? true : null,
           verifyExitCodes: Array.from({ length: s.verify.length + hiddenVerifyCount }, () => 0),
+          repetition: 0,
         }
       }),
     ),
@@ -307,8 +312,8 @@ describe('the eval gate', () => {
 
 describe('eval gate parsing', () => {
   test('a baseline with the wrong schema version is refused', () => {
-    const parsed = parseBaseline({ schemaVersion: 3, scenarios: [] })
-    assert.equal(parsed, 'baseline schemaVersion must be 1 or 2')
+    const parsed = parseBaseline({ schemaVersion: 4, scenarios: [] })
+    assert.equal(parsed, 'baseline schemaVersion must be 1, 2 or 3')
   })
 
   test('a latest summary with a non-boolean verdict is refused', () => {
@@ -409,22 +414,22 @@ describe('versioned eval evidence', () => {
     )
   })
 
-  test('version 2 baseline, summary, and record round-trip without loss', () => {
+  test('version 3 baseline, summary, and record round-trip without loss', () => {
     for (const [value, parse] of [
       [baseline(matrix()), parseBaseline],
       [latest(matrix()), parseLatest],
       [runRecord(), parseRunRecord],
     ] as const) {
-      assert.equal(value.schemaVersion, 2)
+      assert.equal(value.schemaVersion, 3)
       assert.deepEqual(parse(JSON.parse(JSON.stringify(value))), value)
     }
   })
 
   test('unknown summary and checkpoint versions are rejected', () => {
-    assert.match(parseLatest({ ...latest(matrix()), schemaVersion: 3 }) as string, /schemaVersion must be 1 or 2/)
+    assert.match(parseLatest({ ...latest(matrix()), schemaVersion: 4 }) as string, /schemaVersion must be 1, 2 or 3/)
     const dir = temp('anvil-eval-unknown-version-')
-    writeFileSync(join(dir, 'unknown.json'), JSON.stringify({ ...runRecord().results[0], schemaVersion: 3 }))
-    assert.match(readCheckpointDirectory(dir).rejected.join('\n'), /checkpoint schemaVersion/)
+    writeFileSync(join(dir, 'unknown.json'), JSON.stringify({ ...runRecord().results[0], schemaVersion: 4 }))
+    assert.match(readCheckpointDirectory(dir).rejected.join('\n'), /checkpoint schemaVersion must be 1, 2 or 3/)
   })
 })
 
@@ -444,9 +449,12 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
     nodeVersion: process.version,
     publishTranscripts: false,
     subset: false,
+    repetitions: 1,
+    seed: 'test-seed',
+    order: 'alternate',
     scenarioHashes: { 'tiny-code-change': { scenarioHash: 'sc-hash', sourceHash: 'src-hash' } },
-    runKeys: ['tiny-code-change/bare/fake-agent', 'tiny-code-change/anvil/fake-agent'],
-    executionOrder: ['tiny-code-change/bare/fake-agent', 'tiny-code-change/anvil/fake-agent'],
+    runKeys: ['tiny-code-change/bare/fake-agent/0', 'tiny-code-change/anvil/fake-agent/0'],
+    executionOrder: ['tiny-code-change/bare/fake-agent/0', 'tiny-code-change/anvil/fake-agent/0'],
     results: [
       {
         scenario: 'tiny-code-change',
@@ -460,6 +468,7 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
         verified: true,
         hiddenVerified: true,
         verifyExitCodes: [0, 0],
+        repetition: 0,
         costUsd: null,
         tokens: null,
         durationMs: 1000,
@@ -484,6 +493,7 @@ function runRecord(over: Partial<EvalRunRecord> = {}): EvalRunRecord {
         verified: true,
         hiddenVerified: true,
         verifyExitCodes: [0, 0],
+        repetition: 0,
         costUsd: null,
         tokens: null,
         durationMs: 1500,
@@ -513,7 +523,9 @@ function checkRunRecord(
 }
 
 function runRecordFor(run: EvalLatest): EvalRunRecord {
-  const keys = run.results.map((result) => `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}`)
+  const keys = run.results.map(
+    (result) => `${result.scenario}/${result.variant}/${result.model ?? 'unknown'}/${result.repetition ?? 0}`,
+  )
   const scenarioHashes = Object.fromEntries(
     run.results.map((result) => [
       result.scenario,
@@ -525,6 +537,9 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
     scenarioHashes,
     runKeys: keys,
     executionOrder: keys,
+    repetitions: run.repetitions,
+    seed: run.seed,
+    order: run.order,
     results: run.results.map((result) => ({
       scenario: result.scenario,
       variant: result.variant,
@@ -537,6 +552,7 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       verified: result.verified,
       hiddenVerified: result.hiddenVerified,
       verifyExitCodes: [...result.verifyExitCodes],
+      repetition: result.repetition ?? 0,
       costUsd: null,
       tokens: null,
       durationMs: 0,
@@ -561,8 +577,8 @@ describe('run record contract', () => {
   })
 
   test('refuses a run record with the wrong schema version', () => {
-    const parsed = parseRunRecord({ ...runRecord(), schemaVersion: 3 })
-    assert.match(parsed as string, /schemaVersion must be 1 or 2/)
+    const parsed = parseRunRecord({ ...runRecord(), schemaVersion: 4 })
+    assert.match(parsed as string, /schemaVersion must be 1, 2 or 3/)
   })
 
   test('refuses a run record with no runId', () => {
@@ -577,8 +593,8 @@ describe('run record contract', () => {
 
   test('passes a completed run record with matching implementation and all keys', () => {
     const gate = checkRunRecord(runRecord(), 'impl-hash', [
-      'tiny-code-change/bare/fake-agent',
-      'tiny-code-change/anvil/fake-agent',
+      'tiny-code-change/bare/fake-agent/0',
+      'tiny-code-change/anvil/fake-agent/0',
     ])
     assert.equal(gate.ok, true, gate.message)
   })
@@ -591,23 +607,25 @@ describe('run record contract', () => {
 
   test('fails when the run did not complete', () => {
     const gate = checkRunRecord(runRecord({ completionState: 'partial' }), 'impl-hash', [
-      'tiny-code-change/bare',
-      'tiny-code-change/anvil',
+      'tiny-code-change/bare/fake-agent/0',
+      'tiny-code-change/anvil/fake-agent/0',
     ])
     assert.equal(gate.ok, false)
     assert.match(gate.message, /did not complete/)
   })
 
   test('fails when the implementation changed under the run', () => {
-    const gate = checkRunRecord(runRecord({ implementation: 'old-impl' }), 'new-impl', ['tiny-code-change/bare'])
+    const gate = checkRunRecord(runRecord({ implementation: 'old-impl' }), 'new-impl', [
+      'tiny-code-change/bare/fake-agent/0',
+    ])
     assert.equal(gate.ok, false)
     assert.match(gate.message, /implementation changed under the run/)
   })
 
   test('fails when the run never executed a declared key', () => {
     const gate = checkRunRecord(runRecord(), 'impl-hash', [
-      'tiny-code-change/bare/fake-agent',
-      'medium-code-change/anvil/fake-agent',
+      'tiny-code-change/bare/fake-agent/0',
+      'medium-code-change/anvil/fake-agent/0',
     ])
     assert.equal(gate.ok, false)
     assert.match(gate.message, /never executed/)
@@ -628,13 +646,16 @@ describe('run record contract', () => {
     record.results.push({
       ...record.results[1]!,
       scenario: 'medium-code-change',
+      repetition: 0,
     })
+    record.runKeys.push('medium-code-change/anvil/fake-agent/0')
+    record.executionOrder.push('medium-code-change/anvil/fake-agent/0')
     const gate = checkRunRecord(record, 'impl-hash', [
-      'tiny-code-change/bare/fake-agent',
-      'tiny-code-change/anvil/fake-agent',
+      'tiny-code-change/bare/fake-agent/0',
+      'tiny-code-change/anvil/fake-agent/0',
     ])
     assert.equal(gate.ok, false)
-    assert.match(gate.message, /never declared/)
+    assert.match(gate.message, /not part of the completed matrix/)
   })
 
   test('fails when a completed result still carries an error', () => {
@@ -874,8 +895,9 @@ describe('checkpoint reconciliation', () => {
       scenario: 'medium-verify-only',
       variant: 'anvil',
       model: 'provider/review-fake',
+      repetition: 0,
     })
-    assert.equal(name, 'medium-verify-only--anvil--provider%2Freview-fake.json')
+    assert.equal(name, 'medium-verify-only--anvil--provider%2Freview-fake--0.json')
     assert.ok(!name.includes('/'))
   })
 
@@ -1044,6 +1066,7 @@ describe('run record compatibility for resume', () => {
     harnessDigest: 'harness-hash',
     opencodeVersion: null,
     publishTranscripts: false,
+    repetitions: 1,
     ...over,
   })
 

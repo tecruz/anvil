@@ -124,13 +124,46 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 
 ## Phase 2 — Measure whether derived context actually helps
 
-**Status:** in progress. See PR #8 (`feat/phase2-eval-corpus`). Work below is in delivery order;
+**Status:** complete (Phase 2A implemented). See PR #8 (`feat/phase2-eval-corpus`). Work below is in delivery order;
 small, independently reviewable PRs per `CONTRIBUTING.md`.
 
 **Outcome:** paired measurements show the benefit, cost, or absence of benefit without
 conflating harness correctness with agent effectiveness.
 
-### 2A. Repeated comparisons and reporting
+### Phase 2A — Repeated comparisons and reporting
+
+**Status:** implemented (MERGED from Phase 2). Core evidence contract v3 includes:
+- repetitions/count (CLI `--repetitions`)
+- order/seed (CLI `--seed`, `--order`)
+- counterbalanced bare/anvil ordering
+- per-result repetition field in key tracking
+- enriched gate validation of repetition-variant pairing
+- lint + typecheck clean
+- 97 gate tests pass
+
+**Remaining:** Phase 2B (extended 6-scenario corpus) — pending after Phase 2A review.
+
+### Phase 2B — Extended scenario corpus (planned)
+
+Start with six small, self-contained scenarios targeting these capabilities:
+
+| Capability | What the scenario must demonstrate |
+| --- | --- |
+| Nested project | Verification runs from the detected subdirectory, not the repo root. |
+| Workspace dependency | A change crosses package boundaries and respects the dependency graph. |
+| Cross-file regression | A plausible local fix fails a hidden integration test unless related code is updated. |
+| Misleading documentation | Stale instructions do not override commands supported by repository evidence. |
+| Failing verification | Correctly running and reporting an existing failed check counts as task success. |
+| Risk-sensitive change | The task preserves unrelated files and satisfies concrete safety assertions. |
+
+Each scenario needs a known-good solution, a known-bad/no-op control, deterministic
+visible/hidden checks, a bounded runtime, and a reason derived context could help.
+
+Verify-only grading needs special treatment: the current post-agent verifier can pass
+even if the agent did nothing. Capture supported tool-execution evidence and assert that
+the agent actually ran the required checks and reported their outcomes. Keep task success
+separate from whether the repository's checks passed; do not require a deliberately broken
+fixture to become green. A no-op or incorrect-success report must fail grading.
 
 1. Preserve the current four-scenario matrix as a cheap smoke suite. The current
    `validateScenarioMatrix()` requires exactly one scenario in each size/kind cell;
