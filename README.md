@@ -10,15 +10,7 @@ rather than guessing.
 
 ## Install
 
-Two channels:
-
-```bash
-npm install -g @anvil/cli
-```
-
-installs a prebuilt, versioned tarball from the npm registry — no build toolchain needed, zero runtime dependencies.
-
-Or install directly from GitHub, which builds from source:
+Install directly from GitHub, the currently supported channel, which builds from source:
 
 ```bash
 npm install -g github:tecruz/anvil
@@ -30,8 +22,13 @@ or without installing, for one run:
 npx github:tecruz/anvil doctor
 ```
 
-**Not `npm install -g anvil`.** That name belongs to an unrelated package on npm, and
-the scoped `@anvil/cli` above is the one that works.
+**There is no npm registry release yet.** The prebuilt `@anvil/cli` channel is an accepted
+[distribution plan](docs/adr/0012-versioned-prebuilt-distribution.md), not an available
+release. Registry installation is not supported until the scoped package has been published
+and verified.
+
+**Not `npm install -g anvil`.** That name belongs to an unrelated package on npm; use the
+GitHub install instructions above.
 
 **Pin a tag if you care what you get.** A git install with no ref tracks the default branch,
 so a breaking change reaches you on someone else's schedule — the same reason a lockfile
@@ -39,12 +36,6 @@ exists:
 
 ```bash
 npm install -g github:tecruz/anvil#v0.1.0
-```
-
-The registry install is versioned by the package version itself:
-
-```bash
-npm install -g @anvil/cli@0.1.0
 ```
 
 Three things worth knowing before you install:

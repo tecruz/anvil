@@ -5,6 +5,17 @@
 - Milestone: Phase 4
 - Supersedes: none — extends [ADR-0007](0007-distribution-git-install.md)
 
+## Release status
+
+The decision is accepted, but the registry channel is **unreleased**. Acceptance records the
+intended design, not an available npm package. GitHub installation remains the supported
+channel until a scoped release has been published and verified.
+
+The existing release workflow still packs and publishes the repository root (`anvil`), not
+the scoped `packages/cli` workspace. Before advertising registry installation, it must pack,
+test, and publish the scoped artifact, and installation of the published `@anvil/cli` package
+must be verified from the registry.
+
 ## Context
 
 ADR-0007 established that the repository root is the distributed package for the git install
@@ -20,7 +31,7 @@ addresses:
    change reaches a user without a version bump. The README tells users to pin a tag, but the
    registry cannot enforce it, and there is no checksummed artifact to verify.
 
-Phase 4 ships a versioned prebuilt distribution: a tarball built once, tested exactly as those
+Phase 4 will ship a versioned prebuilt distribution: a tarball built once, tested exactly as those
 bytes, checksummed, and published to a registry. The git channel remains tested and supported
 for users who prefer it.
 
@@ -43,12 +54,12 @@ for users who prefer it.
   and source SHA, and publishes those same bytes — never rebuilt after testing.
 
 **The git channel is not retired.** `npm install -g github:tecruz/anvil#v0.1.0` keeps working
-and remains covered by CI. The registry is an additional, faster, checksummed channel — not a
+and remains covered by CI. The registry will be an additional, faster, checksummed channel — not a
 replacement.
 
 ## Consequences
 
-- Users can `npm install -g @anvil/cli` and type `anvil`, with a pinned version and a
+- Once released, users can `npm install -g @anvil/cli` and type `anvil`, with a pinned version and a
   checksummed artifact.
 - The root manifest is unchanged: `private` stays undefined, `prepare` still builds, and the
   git install path is still tested by CI and by `packages/cli/test/package.test.ts`.
