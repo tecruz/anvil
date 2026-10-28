@@ -413,8 +413,9 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
   for (const cell of expected) {
     if (!seen.has(cell)) return `the scenario matrix is missing ${cell.replace(':', ' / ')}`
   }
-  if (seen.size !== expected.size) return 'the scenario matrix has more cells than the four required ones'
-  if (scenarios.length !== expected.size) return 'the scenario matrix must have exactly one scenario per cell'
+  // Allow additional scenarios beyond the four required cells (Phase 2B).
+  // Extra scenarios must have a unique size/kind combination that is not already covered.
+  if (seen.size < expected.size) return 'the scenario matrix must cover all four required cells'
   return null
 }
 

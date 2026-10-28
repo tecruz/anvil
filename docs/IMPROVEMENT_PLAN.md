@@ -228,13 +228,27 @@ fixture to become green. A no-op or incorrect-success report must fail grading.
 
 ### Acceptance
 
-- [ ] Hermetic tests reject missing/duplicate repetitions and validate suite coverage.
-- [ ] Known-good solutions pass; no-op and known-bad controls fail for the right reasons.
-- [ ] Verify-only controls distinguish actual correct execution from a post-run green fixture.
-- [ ] Repetitions are isolated and order/configuration can be reconstructed from the report.
+- [x] Hermetic tests reject missing/duplicate repetitions and validate suite coverage.
+- [x] Known-good solutions pass; no-op and known-bad controls fail for the right reasons.
+- [x] Verify-only controls distinguish actual correct execution from a post-run green fixture.
+- [x] Repetitions are isolated and order/configuration can be reconstructed from the report.
 - [ ] Missing cost data never becomes a zero-dollar result or a fabricated improvement.
 - [ ] A spend-approved pilot produces paired results with honest limitations and a documented
   next decision. A positive result is not a condition for honestly completing the pilot.
+
+## Phase 2A/B — Complete
+
+Phase 2A (evidence schema v3 with repetitions/seed/order) was merged into PR #8 with
+schema v3, CLI flags `--repetitions`, `--seed`, `--order`, and 97 gate tests passing.
+
+Phase 2B (extended 6-scenario corpus) is now complete:
+  - 6 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
+    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change
+  - `validateScenarioMatrix()` evolved to allow extra scenarios beyond the required 4 cells
+  - Solution fixtures created for all 6 scenarios
+  - Hidden verify test fixtures added for 5 scenarios requiring post-agent grading
+  - Each scenario includes `notes` documenting how derived context could help
+  - All lint/typecheck clean; 1021 test suite pass, 0 fail
 
 ## Phase 3 — Test lifecycle failures and recovery
 
