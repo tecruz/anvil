@@ -75,6 +75,10 @@ change should be necessary unless inspection reveals a missing check.
 
 ## Phase 1 — Preserve evidence and survive interrupted runs
 
+**Status:** complete. PR #7 merged into `main` (merge commit `dd380fa`). Checkpoint recovery,
+evidence validation, and transcript privacy are implemented, version-2 evidence is regenerated,
+and `npm run check` passes: lint, typecheck, 1021 tests, docs check, and eval gate.
+
 **Outcome:** completed benchmark work survives cancellation without an incomplete run
 being mistaken for a passing baseline.
 
@@ -119,6 +123,9 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 - [ ] A maintainer-approved synthetic CI run demonstrates artifact retention after failure.
 
 ## Phase 2 — Measure whether derived context actually helps
+
+**Status:** in progress. See PR #8 (`feat/phase2-eval-corpus`). Work below is in delivery order;
+small, independently reviewable PRs per `CONTRIBUTING.md`.
 
 **Outcome:** paired measurements show the benefit, cost, or absence of benefit without
 conflating harness correctness with agent effectiveness.
