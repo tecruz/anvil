@@ -14,7 +14,7 @@ import {
 } from '../../packages/cli/src/eval-gate.ts'
 
 test('fake-agent resume validates verifier evidence before recovery and preserves evidence on refusal', {
-  timeout: 240_000,
+  timeout: 600_000,
 }, () => {
   const source = fileURLToPath(new URL('../../', import.meta.url))
   const workspace = mkdtempSync(join(tmpdir(), 'anvil-eval-resume-'))
@@ -53,7 +53,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
         cwd: root,
         env,
         encoding: 'utf8',
-        timeout: 120_000,
+        timeout: 300_000,
       })
       assert.equal(result.error, undefined, result.error?.message)
       return { status: result.status, output: `${result.stdout}\n${result.stderr}` }
@@ -94,7 +94,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     invocation = invoke('--resume')
     assert.equal(invocation.status, 0, invocation.output)
     assert.match(invocation.output, /Ignoring checkpoint.*reports 1 visible verifier commands.*defines 2/)
-    assert.match(invocation.output, /1 of 8 keys remain/)
+    assert.match(invocation.output, /1 of 20 keys remain/)
     const retried = record()
     const result = retried.results.find(
       (entry) => entry.scenario === original.scenario && entry.variant === original.variant,

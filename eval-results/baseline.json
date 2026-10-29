@@ -50,6 +50,82 @@
       "expect": {
         "verified": true
       }
+    },
+    {
+      "id": "nested-project",
+      "size": "tiny",
+      "kind": "code-change",
+      "scenarioHash": "57790f4d92620de830fc5ea13972ae2b8e0f0159b485d9d94e36fdfd999a8e7b",
+      "sourceHash": "a4245b7cbb441cf1dfdb629ea8c6a7c572b0f81fe2046939dff4f7db6792d3f6",
+      "verify": ["npm test"],
+      "hiddenVerify": ["node --test packages/sub/test/helper-hidden.test.js"],
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
+    },
+    {
+      "id": "workspace-dependency",
+      "size": "tiny",
+      "kind": "code-change",
+      "scenarioHash": "74d384f50d8be1bd1b7bc090dfd03d82f34f9386a8aede0a083415fabe14c789",
+      "sourceHash": "85e2efd4a8eaacab427bfa1c3396ca732506c4f319d5a17c0506fdfbf183da4f",
+      "verify": ["npm test"],
+      "hiddenVerify": ["node --test test/hidden-integration.test.js"],
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
+    },
+    {
+      "id": "cross-file-regression",
+      "size": "tiny",
+      "kind": "code-change",
+      "scenarioHash": "0f9799d9e8032fd73fc2409869cb2e0e1d1047e49dcb56e34afe66d89f17ab74",
+      "sourceHash": "3de99dda6bf2119099583a76c4d2dac6aa4d4f024687fc2dd4b3b807e8623e35",
+      "verify": ["npm test"],
+      "hiddenVerify": ["node --test test/hidden-integration.test.js"],
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
+    },
+    {
+      "id": "misleading-docs",
+      "size": "tiny",
+      "kind": "verify-only",
+      "scenarioHash": "3bc80899cfd173c3520529527b178a3f5bcbeef823037f6c6c267f9bc98defda",
+      "sourceHash": "2199b2237ebb1b6ac0e111ee239fa031bb7f139e8a9907111be1d4d4994e08ed",
+      "verify": ["npm test"],
+      "hiddenVerify": [],
+      "expect": {
+        "verified": true
+      }
+    },
+    {
+      "id": "failing-verification",
+      "size": "tiny",
+      "kind": "verify-only",
+      "scenarioHash": "476f2a81737f2ddc151ad4d2284980612c58a526d9230fdcce6d4c04d7611774",
+      "sourceHash": "65c770fe728726c79844b817e1f6cd0b03396b38f44e9cc014b01a4f42d8949c",
+      "verify": ["npm test"],
+      "hiddenVerify": [],
+      "expect": {
+        "verified": true
+      }
+    },
+    {
+      "id": "risk-sensitive-change",
+      "size": "tiny",
+      "kind": "code-change",
+      "scenarioHash": "00c20b2ac3ebbbe8efa28c2bed705035371379a87e04bd4a29e16c1121a22dd8",
+      "sourceHash": "995119b03733d8ca1d17391bb300d4a23c9c884b2ba5e3211f9b3c823865fb5f",
+      "verify": ["npm test"],
+      "hiddenVerify": ["node --test test/safety.test.js"],
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     }
   ]
 }

@@ -389,12 +389,13 @@ export function hashScenarioSource(repoRoot: string, scenario: EvalScenario): st
 /**
  * The matrix the eval harness promises.
  *
- * Two sizes and two kinds, one scenario each: a regression in either half is visible,
- * and a scenario that covers the same cell twice cannot silently replace the missing one.
+ * The four required cells (tiny/code-change, tiny/verify-only, medium/code-change, medium/verify-only)
+ * must each be covered at least once. Additional scenarios (Phase 2B+) may occupy the same
+ * size/kind cell; they are tracked separately so the gate can attribute results correctly.
  */
 export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): string | null {
   const expected = new Set(['tiny:code-change', 'tiny:verify-only', 'medium:code-change', 'medium:verify-only'])
-  const seen = new Set<string>()
+  const seen = new Map<string, string>() // cell -> first scenario id that claimed it
   const ids = new Set<string>()
 
   for (const scenario of scenarios) {
@@ -408,18 +409,14 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
       return `${scenario.id}: kind must be code-change or verify-only`
     }
     const cell = `${scenario.size}:${scenario.kind}`
-    if (seen.has(cell)) {
-      return `${scenario.id}: the matrix allows exactly one scenario per cell; ${scenario.size} / ${scenario.kind} is already covered`
-    }
-    seen.add(cell)
+    // Record the first scenario per cell; later ones in the same cell are permitted.
+    if (!seen.has(cell)) seen.set(cell, scenario.id)
   }
 
+  // Every required cell must be covered at least once.
   for (const cell of expected) {
     if (!seen.has(cell)) return `the scenario matrix is missing ${cell.replace(':', ' / ')}`
   }
-  // Allow additional scenarios beyond the four required cells (Phase 2B).
-  // Extra scenarios must have a unique size/kind combination that is not already covered.
-  if (seen.size < expected.size) return 'the scenario matrix must cover all four required cells'
   return null
 }
 
