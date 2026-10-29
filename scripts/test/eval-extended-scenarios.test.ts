@@ -33,8 +33,10 @@ function fixture(scenario: EvalScenario): string {
 /**
  * The harness-owned execution log for a scenario.
  *
- * It lives outside the fixture, so a report and an execution file written by the agent
- * inside the worktree are not evidence that anything ran.
+ * For captureExecution scenarios, the harness records the script's actual run
+ * itself; the agent receives no execution log env, so a path the agent could write
+ * to is never trusted as evidence. The harness-created log is used by the fake
+ * agent's `solutionRun` and by the verifiers.
  */
 function evidenceEnvironment(scenario: EvalScenario): NodeJS.ProcessEnv {
   if (scenario.captureExecution !== true) return {}
@@ -169,6 +171,34 @@ describe('extended eval scenarios', () => {
     assert.notEqual(verifyVisible(workdir, scenario, env), 0, 'a forged report must not pass the visible verifier')
     addHidden(workdir, scenario)
     assert.notEqual(verifyHidden(workdir, scenario, env), 0, 'a forged report must not pass the hidden verifier')
+  })
+
+  test('failing-verification rejects a report forged with an external log the agent wrote', () => {
+    const scenario = scenarios.find((entry) => entry.id === 'failing-verification')!
+    const workdir = fixture(scenario)
+    const forgedLogDir = mkdtempSync(join(tmpdir(), 'forged-log-'))
+    temps.push(forgedLogDir)
+    const forgedLog = join(forgedLogDir, 'executions.jsonl')
+    // Forge a log that claims success (exit 0) — if the agent wrote it without
+    // actually running the failing check, the harness-captured evidence will not match.
+    writeFileSync(
+      forgedLog,
+      `${JSON.stringify({ command: 'node run-check.js', exitCode: 0, at: new Date().toISOString() })}\n`,
+      'utf8',
+    )
+    writeFileSync(
+      join(workdir, '.anvil-eval-report.json'),
+      `${JSON.stringify({ command: 'node run-check.js', exitCode: 1, status: 'failed' })}\n`,
+      'utf8',
+    )
+    const env = { ANVIL_EVAL_EXECUTION_LOG: forgedLog }
+    assert.notEqual(
+      verifyVisible(workdir, scenario, env),
+      0,
+      'a forged external log must not pass the visible verifier',
+    )
+    addHidden(workdir, scenario)
+    assert.notEqual(verifyHidden(workdir, scenario, env), 0, 'a forged external log must not pass the hidden verifier')
   })
 
   test('a signal-terminated verifier is a failure, not a pass', () => {

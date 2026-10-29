@@ -637,13 +637,17 @@ async function runScenario(
   repetition: number,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-r${repetition}`))
-  // Execution evidence lives outside the agent's worktree. A verifier reads this log to
-  // prove a command actually ran; a report cannot fabricate an entry because the log is
-  // owned by the harness, not by the scenario's agent-writable files.
+  // Harness-owned execution evidence directory. The agent never receives this path.
+  // Verifiers receive it after the agent finishes, so they can compare the report
+  // against the actual execution the harness recorded.
   let executionDir: string | null = null
   if (scenario.captureExecution === true) {
     executionDir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
   }
+  // The agent must never learn the harness-owned log path; a path the agent can
+  // write to is forgeable by construction (same user, same filesystem).
+  const agentEnv: NodeJS.ProcessEnv = {}
+  // The harness captures execution evidence in its own log after the agent finishes.
   const executionEnv: NodeJS.ProcessEnv =
     executionDir === null ? {} : { ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'executions.jsonl') }
   const started = Date.now()
@@ -735,7 +739,7 @@ async function runScenario(
       agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
-        env: executionEnv,
+        env: agentEnv,
       })
       result.transcript = publishTranscripts
         ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
@@ -744,6 +748,23 @@ async function runScenario(
         result.error = 'the agent timed out'
       } else if (!agent.ok) {
         result.error = `the agent exited with code ${agent.code ?? '?'}`
+      }
+    }
+
+    // For verify-only scenarios with execution capture, the harness records the
+    // execution itself rather than trusting an agent-writable log path. The agent
+    // never sees `ANVIL_EVAL_EXECUTION_LOG`; this independent run is the ground truth
+    // the verifiers compare against, and neither the report nor the worktree can make
+    // it look like a command ran that did not run. Only needed for real agents: fake
+    // agents already ran `solutionRun` in the canned-answer block above.
+    if (!fake && scenario.captureExecution === true && executionDir !== null) {
+      const checkCommands = Array.isArray(scenario.solutionRun)
+        ? scenario.solutionRun
+        : scenario.solutionRun
+          ? [scenario.solutionRun]
+          : []
+      if (checkCommands.length > 0) {
+        await runAll(checkCommands, workdir, executionEnv)
       }
     }
 

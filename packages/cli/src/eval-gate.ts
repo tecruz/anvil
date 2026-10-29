@@ -69,9 +69,10 @@ export interface EvalScenario {
    */
   solutionRun?: string[]
   /**
-   * Capture execution evidence for this scenario in a harness-owned log, exposed to the
-   * agent and verifiers as `ANVIL_EVAL_EXECUTION_LOG`. Agent-writable files are never
-   * accepted as proof that a command ran.
+   * Capture execution evidence for this scenario in a harness-owned log. The log path
+   * is never exposed to the agent; an agent-writable path is forgeable by construction.
+   * Verifiers read the log from `ANVIL_EVAL_EXECUTION_LOG` in their own harness-provided
+   * environment.
    */
   captureExecution?: boolean
   /** How long the agent gets. */
