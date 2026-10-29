@@ -637,6 +637,15 @@ async function runScenario(
   repetition: number,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-r${repetition}`))
+  // Execution evidence lives outside the agent's worktree. A verifier reads this log to
+  // prove a command actually ran; a report cannot fabricate an entry because the log is
+  // owned by the harness, not by the scenario's agent-writable files.
+  let executionDir: string | null = null
+  if (scenario.captureExecution === true) {
+    executionDir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
+  }
+  const executionEnv: NodeJS.ProcessEnv =
+    executionDir === null ? {} : { ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'executions.jsonl') }
   const started = Date.now()
   const result: ScenarioResult = {
     scenario: scenario.id,
@@ -687,6 +696,13 @@ async function runScenario(
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
 
     if (fake) {
+      // A canned answer can include actions, not only files. Running them here is what
+      // makes verify-only evidence real: the check executes and the harness captures it,
+      // instead of a canned execution record being copied into the worktree.
+      if (scenario.solutionRun !== undefined) {
+        const actions = await runAll(scenario.solutionRun, workdir, executionEnv)
+        result.verifyOutput = actions.map((action) => action.output).join('\n')
+      }
       const answers = solutionFiles(scenario)
       if (answers.length > 0) {
         for (const answer of answers) {
@@ -697,7 +713,9 @@ async function runScenario(
         result.transcript = publishTranscripts
           ? limitTranscript(
               redactTranscript(
-                `[fake-agent] applied ${answers.map((answer) => `${answer.from} to ${answer.to}`).join(', ')}`,
+                `[fake-agent] ran ${(scenario.solutionRun ?? []).join(', ') || '(no commands)'}; applied ${answers
+                  .map((answer) => `${answer.from} to ${answer.to}`)
+                  .join(', ')}`,
               ),
             )
           : ''
@@ -717,6 +735,7 @@ async function runScenario(
       agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
+        env: executionEnv,
       })
       result.transcript = publishTranscripts
         ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
@@ -729,7 +748,7 @@ async function runScenario(
     }
 
     const verifyCwd = scenario.verifyInProjectDir === true ? projectDirIn(workdir) : workdir
-    const visible = await runAll(scenario.verify, verifyCwd)
+    const visible = await runAll(scenario.verify, verifyCwd, executionEnv)
     result.verified = visible.every((r) => r.ok)
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
@@ -741,7 +760,7 @@ async function runScenario(
     }
     if ((scenario.hiddenVerify?.length ?? 0) > 0) {
       const hiddenCommands = scenario.hiddenVerify ?? []
-      const hidden = await runAll(hiddenCommands, workdir)
+      const hidden = await runAll(hiddenCommands, workdir, executionEnv)
       result.hiddenVerifyCount = hiddenCommands.length
       result.hiddenVerified = hidden.every((r) => r.ok)
       result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
@@ -760,6 +779,13 @@ async function runScenario(
     result.error = err instanceof Error ? err.message : String(err)
   } finally {
     result.durationMs = Date.now() - started
+    if (executionDir !== null) {
+      try {
+        rmSync(executionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      } catch {
+        // best effort; a leaked evidence directory cannot change a verdict
+      }
+    }
     // `maxRetries` matters on Windows: git checks out its object files read-only, and
     // removing a read-only file fails with EPERM until the permission is relaxed. Node
     // retries that, but only when it is told to. A worktree the agent still holds open
@@ -819,14 +845,14 @@ function ensureCliBuilt(): void {
 // Process helpers
 // ---------------------------------------------------------------------------
 
-async function runAll(commands: string[], cwd: string): Promise<RunResult[]> {
+async function runAll(commands: string[], cwd: string, env: NodeJS.ProcessEnv = {}): Promise<RunResult[]> {
   const out: RunResult[] = []
   for (const command of commands) {
     // The same tokenizer the crew uses: a verify command is one string, and splitting it
     // on spaces passes quotes through literally.
     const [bin, ...rest] = tokenizeCommand(command)
     if (bin === undefined) continue
-    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000 }))
+    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000, env }))
   }
   return out
 }
@@ -835,7 +861,7 @@ export async function run(
   bin: string,
   args: string[],
   cwd: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<RunResult> {
   // `spawnArgv` rather than `spawn(bin, ...)`: the npm-installed `opencode` is a `.CMD`
   // shim on Windows, and Node's spawn does not resolve PATHEXT.
@@ -847,7 +873,7 @@ export async function run(
     // so the agent works in the fixture, not in the repo that launched the harness.
     const child = spawn(file, argv, {
       cwd,
-      env: { ...process.env, PWD: cwd },
+      env: { ...process.env, ...options.env, PWD: cwd },
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(needsVerbatim ? { windowsVerbatimArguments: true } : {}),
     })

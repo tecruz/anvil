@@ -30,6 +30,19 @@ function fixture(scenario: EvalScenario): string {
   return workdir
 }
 
+/**
+ * The harness-owned execution log for a scenario.
+ *
+ * It lives outside the fixture, so a report and an execution file written by the agent
+ * inside the worktree are not evidence that anything ran.
+ */
+function evidenceEnvironment(scenario: EvalScenario): NodeJS.ProcessEnv {
+  if (scenario.captureExecution !== true) return {}
+  const dir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
+  temps.push(dir)
+  return { ANVIL_EVAL_EXECUTION_LOG: join(dir, 'executions.jsonl') }
+}
+
 function projectDir(workdir: string, scenario: EvalScenario): string {
   if (scenario.verifyInProjectDir !== true) return workdir
   const { profile } = buildProfile(workdir, { root: workdir, host: null, remote: null, defaultBranch: null })
@@ -46,6 +59,13 @@ function applySolution(workdir: string, scenario: EvalScenario): void {
   }
 }
 
+function actLikeFakeAgent(workdir: string, scenario: EvalScenario, env: NodeJS.ProcessEnv): void {
+  for (const command of scenario.solutionRun ?? []) {
+    runCommand(command, workdir, env)
+  }
+  applySolution(workdir, scenario)
+}
+
 function addHidden(workdir: string, scenario: EvalScenario): void {
   for (const file of scenario.hidden ?? []) {
     const target = join(workdir, ...file.to.split('/'))
@@ -54,16 +74,20 @@ function addHidden(workdir: string, scenario: EvalScenario): void {
   }
 }
 
-function runCommand(command: string, cwd: string): { status: number | null; output: string } {
+function runCommand(
+  command: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv = {},
+): { status: number | null; output: string } {
   const [bin, ...args] = tokenizeCommand(command)
   if (bin === undefined) throw new Error(`empty command in ${command}`)
   const { file, args: argv } = spawnArgv(bin, args, { env: process.env, platform: process.platform })
   const needsVerbatim = process.platform === 'win32' && file.toLowerCase().endsWith('cmd.exe')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env }
+  delete childEnv.NODE_TEST_CONTEXT
   const result = spawnSync(file, argv, {
     cwd,
-    env,
+    env: childEnv,
     encoding: 'utf8',
     timeout: 30_000,
     ...(needsVerbatim ? { windowsVerbatimArguments: true } : {}),
@@ -72,16 +96,26 @@ function runCommand(command: string, cwd: string): { status: number | null; outp
   return { status: result.status, output: `${result.stdout}\n${result.stderr}` }
 }
 
-function verifyVisible(workdir: string, scenario: EvalScenario): number | null {
-  const cwd = projectDir(workdir, scenario)
-  return scenario.verify.map((command) => runCommand(command, cwd).status).find((status) => status !== 0) ?? 0
+/**
+ * Collapse verifier exit statuses into one verdict.
+ *
+ * A `null` status means the child was terminated by a signal (POSIX). That is a failure,
+ * not a pass: mapping it to 0 lets a killed verifier count as success.
+ */
+function aggregateVerifierStatuses(statuses: ReadonlyArray<number | null>): number {
+  const failure = statuses.find((status) => status !== 0)
+  if (failure === undefined) return 0
+  return failure === null ? 1 : failure
 }
 
-function verifyHidden(workdir: string, scenario: EvalScenario): number | null {
-  return (
-    (scenario.hiddenVerify ?? [])
-      .map((command) => runCommand(command, workdir).status)
-      .find((status) => status !== 0) ?? 0
+function verifyVisible(workdir: string, scenario: EvalScenario, env: NodeJS.ProcessEnv): number {
+  const cwd = projectDir(workdir, scenario)
+  return aggregateVerifierStatuses(scenario.verify.map((command) => runCommand(command, cwd, env).status))
+}
+
+function verifyHidden(workdir: string, scenario: EvalScenario, env: NodeJS.ProcessEnv): number {
+  return aggregateVerifierStatuses(
+    (scenario.hiddenVerify ?? []).map((command) => runCommand(command, workdir, env).status),
   )
 }
 
@@ -89,17 +123,19 @@ describe('extended eval scenarios', () => {
   for (const scenario of extended) {
     test(`${scenario.id}: the known-good solution passes both verifiers`, () => {
       const workdir = fixture(scenario)
-      applySolution(workdir, scenario)
-      assert.equal(verifyVisible(workdir, scenario), 0, 'the visible verifier must accept the solution')
+      const env = evidenceEnvironment(scenario)
+      actLikeFakeAgent(workdir, scenario, env)
+      assert.equal(verifyVisible(workdir, scenario, env), 0, 'the visible verifier must accept the solution')
       addHidden(workdir, scenario)
-      assert.equal(verifyHidden(workdir, scenario), 0, 'the hidden verifier must accept the solution')
+      assert.equal(verifyHidden(workdir, scenario, env), 0, 'the hidden verifier must accept the solution')
     })
 
     test(`${scenario.id}: a no-op fails grading`, () => {
       const workdir = fixture(scenario)
-      assert.notEqual(verifyVisible(workdir, scenario), 0, 'the visible verifier must reject a no-op')
+      const env = evidenceEnvironment(scenario)
+      assert.notEqual(verifyVisible(workdir, scenario, env), 0, 'the visible verifier must reject a no-op')
       addHidden(workdir, scenario)
-      assert.notEqual(verifyHidden(workdir, scenario), 0, 'the hidden verifier must reject a no-op')
+      assert.notEqual(verifyHidden(workdir, scenario, env), 0, 'the hidden verifier must reject a no-op')
     })
   }
 
@@ -112,16 +148,35 @@ describe('extended eval scenarios', () => {
     assert.deepEqual(consumer.deps, ['@repo/a'])
   })
 
-  test('failing-verification rejects a report that was not backed by an execution', () => {
+  test('failing-verification rejects a report that was not backed by a harness-captured execution', () => {
     const scenario = scenarios.find((entry) => entry.id === 'failing-verification')!
     const workdir = fixture(scenario)
+    const env = evidenceEnvironment(scenario)
+    // Forge both files the previous design compared: the report and a matching
+    // worktree-side execution record. Neither is harness evidence, so a report written
+    // without running the check must fail both verifiers.
+    const token = '2dc13894-395b-4ef7-85b0-bfe6777f3223'
     writeFileSync(
-      join(workdir, '.anvil-eval-report.json'),
-      `${JSON.stringify({ command: 'node run-check.js', exitCode: 1, status: 'failed', executionToken: 'fabricated' })}\n`,
+      join(workdir, '.anvil-eval-execution.json'),
+      `${JSON.stringify({ token, command: 'node run-check.js', exitCode: 1, at: new Date().toISOString() })}\n`,
       'utf8',
     )
-    assert.notEqual(verifyVisible(workdir, scenario), 0, 'a fabricated report must not pass the visible verifier')
+    writeFileSync(
+      join(workdir, '.anvil-eval-report.json'),
+      `${JSON.stringify({ command: 'node run-check.js', exitCode: 1, status: 'failed', executionToken: token })}\n`,
+      'utf8',
+    )
+    assert.notEqual(verifyVisible(workdir, scenario, env), 0, 'a forged report must not pass the visible verifier')
     addHidden(workdir, scenario)
-    assert.notEqual(verifyHidden(workdir, scenario), 0, 'a fabricated report must not pass the hidden verifier')
+    assert.notEqual(verifyHidden(workdir, scenario, env), 0, 'a forged report must not pass the hidden verifier')
+  })
+
+  test('a signal-terminated verifier is a failure, not a pass', () => {
+    assert.equal(aggregateVerifierStatuses([]), 0)
+    assert.equal(aggregateVerifierStatuses([0, 0]), 0)
+    assert.equal(aggregateVerifierStatuses([1]), 1)
+    assert.equal(aggregateVerifierStatuses([null]), 1, 'a single signal-terminated verifier must fail')
+    assert.equal(aggregateVerifierStatuses([null, 1]), 1, 'null must not mask a later failure')
+    assert.equal(aggregateVerifierStatuses([0, null]), 1, 'a later signal termination must fail')
   })
 })

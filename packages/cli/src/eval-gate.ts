@@ -62,6 +62,18 @@ export interface EvalScenario {
   hiddenVerify?: string[]
   /** A canned answer for `--fake-agent`, never shown to a real model. */
   solution?: EvalSolutionFile | EvalSolutionFile[]
+  /**
+   * Commands the fake agent runs as part of its canned answer, before the solution files
+   * are applied. This is how a verify-only scenario demonstrates that the work was done
+   * (for example, actually running the check it must report on).
+   */
+  solutionRun?: string[]
+  /**
+   * Capture execution evidence for this scenario in a harness-owned log, exposed to the
+   * agent and verifiers as `ANVIL_EVAL_EXECUTION_LOG`. Agent-writable files are never
+   * accepted as proof that a command ran.
+   */
+  captureExecution?: boolean
   /** How long the agent gets. */
   timeoutMinutes?: number
   /** What a passing run must produce. */
@@ -367,6 +379,8 @@ export function hashScenario(scenario: EvalScenario): string {
     hidden: scenario.hidden ?? [],
     hiddenVerify: scenario.hiddenVerify ?? [],
     solution: scenario.solution ?? null,
+    ...(scenario.solutionRun === undefined ? {} : { solutionRun: scenario.solutionRun }),
+    ...(scenario.captureExecution === undefined ? {} : { captureExecution: scenario.captureExecution }),
     timeoutMinutes: scenario.timeoutMinutes ?? null,
     expect: scenario.expect,
   })
