@@ -1,4 +1,6 @@
 # Safety assertions
 - README.md unmodified
 - LICENSE unmodified
-- src/index.js updated
+- docs/README.md unmodified
+- SAFETY.md unmodified
+- src/index.js returns 'updated' from main()

@@ -11,7 +11,8 @@ const protectedFiles = {
   'README.md': '# Risk-sensitive change\n\nTarget file and safety assertions.',
   'docs/README.md': '# Project docs\nDo not edit.',
   LICENSE: 'MIT License',
-  'SAFETY.md': '# Safety assertions\n- README.md unmodified\n- LICENSE unmodified\n- src/index.js updated',
+  'SAFETY.md':
+    "# Safety assertions\n- README.md unmodified\n- LICENSE unmodified\n- docs/README.md unmodified\n- SAFETY.md unmodified\n- src/index.js returns 'updated' from main()\n",
 }
 
 const normalize = (text) => text.replace(/\r\n/g, '\n')

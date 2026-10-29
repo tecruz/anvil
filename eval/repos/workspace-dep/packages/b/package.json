@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@repo/a": "1.0.0"
+  },
   "scripts": {
     "test": "node --test"
   }

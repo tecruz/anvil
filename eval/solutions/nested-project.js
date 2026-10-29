@@ -1,10 +1,10 @@
 /**
  * Helper module for nested-project scenario.
  *
- * Reads a config file from the project root and returns its parsed content.
+ * Reads the configuration from the detected project root and returns its parsed content.
  */
+import { readFileSync } from 'node:fs'
+
 export function readConfig() {
-  // In a real scenario, this would read from the file system
-  // For the test, we return the expected config
-  return { name: 'sub', version: '1.0.0' }
+  return JSON.parse(readFileSync(new URL('../config.json', import.meta.url), 'utf8'))
 }
