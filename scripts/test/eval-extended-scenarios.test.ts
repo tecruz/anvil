@@ -209,4 +209,18 @@ describe('extended eval scenarios', () => {
     assert.equal(aggregateVerifierStatuses([null, 1]), 1, 'null must not mask a later failure')
     assert.equal(aggregateVerifierStatuses([0, null]), 1, 'a later signal termination must fail')
   })
+
+  test('failing-verification rejects a report when the agent never executed the check', () => {
+    const scenario = scenarios.find((entry) => entry.id === 'failing-verification')!
+    const workdir = fixture(scenario)
+    const env = evidenceEnvironment(scenario)
+    // A report-only agent writes the report but never runs the check.
+    writeFileSync(
+      join(workdir, '.anvil-eval-report.json'),
+      `${JSON.stringify({ command: 'node run-check.js', exitCode: 1, status: 'failed' })}\n`,
+      'utf8',
+    )
+    // The harness captures no agent execution and must error out.
+    assert.equal(verifyVisible(workdir, scenario, env), 1, 'a report without agent execution must fail grading')
+  })
 })

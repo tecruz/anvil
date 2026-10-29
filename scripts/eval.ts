@@ -32,7 +32,17 @@
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -753,18 +763,43 @@ async function runScenario(
 
     // For verify-only scenarios with execution capture, the harness records the
     // execution itself rather than trusting an agent-writable log path. The agent
-    // never sees `ANVIL_EVAL_EXECUTION_LOG`; this independent run is the ground truth
-    // the verifiers compare against, and neither the report nor the worktree can make
-    // it look like a command ran that did not run. Only needed for real agents: fake
+    // never sees `ANVIL_EVAL_EXECUTION_LOG`. Only needed for real agents: fake
     // agents already ran `solutionRun` in the canned-answer block above.
     if (!fake && scenario.captureExecution === true && executionDir !== null) {
-      const checkCommands = Array.isArray(scenario.solutionRun)
+      // The agent must have run the check for evidence to be valid; a report-only
+      // agent that never invoked the command must fail grading.
+      const checkCommands: string[] = Array.isArray(scenario.solutionRun)
         ? scenario.solutionRun
-        : scenario.solutionRun
+        : scenario.solutionRun !== undefined
           ? [scenario.solutionRun]
           : []
-      if (checkCommands.length > 0) {
-        await runAll(checkCommands, workdir, executionEnv)
+      const transcriptHasCheck =
+        checkCommands.length > 0 && checkCommands.some((cmd) => result.transcript.includes(cmd.split(' ')[0]!))
+      if (!transcriptHasCheck) {
+        result.error =
+          'the agent did not execute the required check command; a report without execution evidence is not evidence'
+      } else {
+        // Give the script a dummy log so it can write, but the harness writes the
+        // real evidence from the actual process result below.
+        const dummyEnv = { ...executionEnv, ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'dummy.jsonl') }
+        const actions = await runAll(checkCommands, workdir, dummyEnv)
+        // Write harness-owned evidence from the actual exits, not from a script
+        // that the agent could have edited to lie about its exit code.
+        const logPath = join(executionDir, 'executions.jsonl')
+        for (let i = 0; i < actions.length; i += 1) {
+          const cmd = checkCommands[i] ?? checkCommands[0]!
+          const action = actions[i]!
+          appendFileSync(
+            logPath,
+            `${JSON.stringify({
+              command: cmd,
+              exitCode: action.ok ? 0 : (action.code ?? 1),
+              at: new Date().toISOString(),
+            })}\n`,
+            'utf8',
+          )
+        }
+        result.verifyOutput = actions.map((a) => a.output).join('\n')
       }
     }
 
