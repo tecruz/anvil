@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { run } from '../eval.ts'
+import { parseOpenCodeRunEvents, run } from '../eval.ts'
 
 const temps: string[] = []
 after(() => {
@@ -18,6 +18,41 @@ function temp(prefix: string): string {
 }
 
 describe('eval harness process environment', () => {
+  test('parses OpenCode JSON tool events, not prose claims, as executed commands', () => {
+    const output = [
+      JSON.stringify({ type: 'text', part: { type: 'text', text: 'node' } }),
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          type: 'tool',
+          tool: 'bash',
+          state: { status: 'completed', input: { command: 'node run-check.js' } },
+        },
+      }),
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          type: 'tool',
+          tool: 'bash',
+          state: { status: 'running', input: { command: 'node not-completed.js' } },
+        },
+      }),
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', input: { command: 'node not-a-shell.js' } },
+        },
+      }),
+    ].join('\n')
+
+    assert.deepEqual(parseOpenCodeRunEvents(output), {
+      text: 'node',
+      completedCommands: ['node run-check.js'],
+    })
+  })
+
   test('run sets PWD to the subprocess cwd, not the inherited PWD', async () => {
     const inherited = process.env.PWD ?? process.cwd()
     const scenario = temp('anvil-eval-scenario-')

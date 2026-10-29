@@ -656,7 +656,7 @@ async function runScenario(
   }
   // The agent must never learn the harness-owned log path; a path the agent can
   // write to is forgeable by construction (same user, same filesystem).
-  const agentEnv: NodeJS.ProcessEnv = {}
+  const agentEnv: NodeJS.ProcessEnv = { ANVIL_EVAL_EXECUTION_LOG: undefined }
   // The harness captures execution evidence in its own log after the agent finishes.
   const executionEnv: NodeJS.ProcessEnv =
     executionDir === null ? {} : { ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'executions.jsonl') }
@@ -708,6 +708,7 @@ async function runScenario(
     // behaviour for anvil's safety check, and the answer is not to pass prose as argv.
     const taskFile = join(workdir, TASK_FILE)
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
+    let agentExecutionCommands: string[] = []
 
     if (fake) {
       // A canned answer can include actions, not only files. Running them here is what
@@ -745,14 +746,16 @@ async function runScenario(
       // OpenCode 2's private server inherits this process's provider credentials and
       // exits with the command instead of leaving work running in a shared service.
       // `run` uses the subprocess cwd; it does not accept a `--dir` flag.
-      const agentArgs = ['run', '--standalone', '--auto', '--model', model.id]
+      const agentArgs = ['run', '--standalone', '--auto', '--format', 'json', '--model', model.id]
       agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
         env: agentEnv,
       })
+      const agentEvents = parseOpenCodeRunEvents(agent.stdout)
+      agentExecutionCommands = agentEvents.completedCommands
       result.transcript = publishTranscripts
-        ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
+        ? limitTranscript(redactTranscript(`${agentEvents.text}\n${agent.stderr}`.trim()))
         : ''
       if (agent.timedOut) {
         result.error = 'the agent timed out'
@@ -773,14 +776,18 @@ async function runScenario(
         : scenario.solutionRun !== undefined
           ? [scenario.solutionRun]
           : []
-      const transcriptHasCheck =
-        checkCommands.length > 0 && checkCommands.some((cmd) => result.transcript.includes(cmd.split(' ')[0]!))
-      if (!transcriptHasCheck) {
+      const executedChecks = agentExecutionCommands.filter((command) =>
+        checkCommands.some((expected) => command.trim() === expected),
+      )
+      if (checkCommands.length === 0 || !checkCommands.every((expected) => executedChecks.includes(expected))) {
         result.error =
           'the agent did not execute the required check command; a report without execution evidence is not evidence'
+      } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
+        result.error = 'the agent modified a check or verifier script; execution evidence is invalid'
       } else {
-        // Give the script a dummy log so it can write, but the harness writes the
-        // real evidence from the actual process result below.
+        // The completed tool event proves the agent invoked the exact check. Rerun
+        // the unchanged script under harness control to record its real exit status;
+        // its self-reported log goes to a dummy path and is never accepted.
         const dummyEnv = { ...executionEnv, ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'dummy.jsonl') }
         const actions = await runAll(checkCommands, workdir, dummyEnv)
         // Write harness-owned evidence from the actual exits, not from a script
@@ -858,6 +865,61 @@ async function runScenario(
   return result
 }
 
+/** Extract text and completed shell commands from OpenCode's `run --format json` stream. */
+export function parseOpenCodeRunEvents(output: string): { text: string; completedCommands: string[] } {
+  const text: string[] = []
+  const completedCommands: string[] = []
+  for (const line of output.split(/\r?\n/)) {
+    if (line.trim() === '') continue
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (event === null || typeof event !== 'object') continue
+    const record = event as {
+      type?: unknown
+      part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { status?: unknown; input?: unknown } }
+    }
+    if (record.type === 'text' && record.part?.type === 'text' && typeof record.part.text === 'string') {
+      text.push(record.part.text)
+    }
+    if (
+      record.type === 'tool_use' &&
+      record.part?.type === 'tool' &&
+      record.part.tool === 'bash' &&
+      record.part.state?.status === 'completed' &&
+      record.part.state.input !== null &&
+      typeof record.part.state.input === 'object'
+    ) {
+      const input = record.part.state.input as { command?: unknown }
+      if (typeof input.command === 'string') completedCommands.push(input.command)
+    }
+  }
+  return { text: text.join('\n'), completedCommands }
+}
+
+/** Ensure the agent did not alter the check or visible verifier before harness replay. */
+function scenarioEvidenceScriptsUnchanged(scenario: EvalScenario, workdir: string): boolean {
+  const fixtureRoot = join(repoRoot, ...scenario.repo.split('/'))
+  const commands = [...(scenario.solutionRun ?? []), ...scenario.verify]
+  const scripts = new Set<string>()
+  for (const command of commands) {
+    const [, ...args] = tokenizeCommand(command)
+    for (const arg of args) {
+      if (/\.(?:c|m)?js$/i.test(arg) && !arg.startsWith('-')) scripts.add(arg)
+    }
+  }
+  for (const script of scripts) {
+    const original = join(fixtureRoot, ...script.split('/'))
+    const current = join(workdir, ...script.split('/'))
+    if (!existsSync(original) || !existsSync(current) || !readFileSync(original).equals(readFileSync(current)))
+      return false
+  }
+  return true
+}
+
 /**
  * Resolve the directory a scenario's verifier should run in.
  *
@@ -929,7 +991,7 @@ export async function run(
     // so the agent works in the fixture, not in the repo that launched the harness.
     const child = spawn(file, argv, {
       cwd,
-      env: { ...process.env, ...options.env, PWD: cwd },
+      env: childEnvironment(options.env, cwd),
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(needsVerbatim ? { windowsVerbatimArguments: true } : {}),
     })
@@ -966,6 +1028,15 @@ export async function run(
       })
     })
   })
+}
+
+/** Merge a subprocess environment while allowing explicit `undefined` values to unset keys. */
+function childEnvironment(overrides: NodeJS.ProcessEnv | undefined, cwd: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...overrides, PWD: cwd }
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete env[key]
+  }
+  return env
 }
 
 /**
