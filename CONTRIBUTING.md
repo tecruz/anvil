@@ -190,7 +190,8 @@ reports it.
 ## The harness that runs an agent
 
 ```bash
-npm run eval -- --list                     # the scenario matrix and the model pair
+npm run eval -- --list                     # the default matrix and the model pair
+npm run eval -- --list --suite extended    # the opt-in Phase 2B scenarios
 npm run eval -- --dry-run                  # what a run would do, and it costs nothing
 ANVIL_EVAL=1 npm run eval                  # what it would do, with an agent and a model
 ANVIL_EVAL=1 npm run eval -- --models all  # small and frontier in one comparison
@@ -198,11 +199,13 @@ npm run eval -- --fake-agent --write-baseline  # hermetic bootstrap, no model is
 npm run eval:check                         # compare the last summary with the baseline
 ```
 
-The matrix is four scenarios on purpose: `tiny` and `medium`, each once as a code change
-and once as a verify-only task. A code-change scenario is graded by a hidden test copied
-in after the agent finishes; a verify-only scenario is graded by the repository's own
-verify command. Both matter, because context that helps a model write code can still fail
-to help it read a repository.
+The default matrix is the original four scenarios: `tiny` and `medium`, each once as a
+code change and once as a verify-only task. `--suite extended` adds the Phase 2B corpus
+as an opt-in measurement, so the scheduled benchmark's spend does not grow silently. A
+code-change scenario is graded by a hidden test copied in after the agent finishes; a
+verify-only scenario is graded by a verifier that checks the report the agent was asked
+to write. Both matter, because context that helps a model write code can still fail to
+help it read a repository.
 
 The report records what a run cannot be understood without: the model, the opencode
 version, the scenario and fixture hashes, the verify exit codes, and what the work cost.

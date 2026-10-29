@@ -76,6 +76,12 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     assert.equal(invocation.status, 0, invocation.output)
 
     const complete = record()
+    // The default suite is the original four-scenario smoke matrix: four scenarios, two
+    // variants each. An extended scenario slipping into the default run would double the
+    // scheduled benchmark's spend.
+    assert.equal(complete.results.length, 8)
+    assert.equal(complete.runKeys.length, 8)
+    assert.equal(complete.subset, false)
     const original = complete.results.find(
       (entry) => entry.scenario === 'tiny-verify-only' && entry.variant === 'bare',
     )!
@@ -94,7 +100,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     invocation = invoke('--resume')
     assert.equal(invocation.status, 0, invocation.output)
     assert.match(invocation.output, /Ignoring checkpoint.*reports 1 visible verifier commands.*defines 2/)
-    assert.match(invocation.output, /1 of 20 keys remain/)
+    assert.match(invocation.output, /1 of 8 keys remain/)
     const retried = record()
     const result = retried.results.find(
       (entry) => entry.scenario === original.scenario && entry.variant === original.variant,

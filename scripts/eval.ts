@@ -66,10 +66,12 @@ import {
   reconcileRunRecord,
   recordFixtureProblem,
   resultKey,
+  solutionFiles,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
 import { probeCommandVersion, spawnArgv } from '../packages/core/src/exec.ts'
+import { buildProfile } from '../packages/profile/src/index.ts'
 import { readAgentSession } from '../packages/worktrees/src/index.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -146,6 +148,19 @@ export function sanitizeResult(result: ScenarioResult): ScenarioResult {
 const VARIANTS = ['bare', 'anvil'] as const
 type Variant = (typeof VARIANTS)[number]
 
+/**
+ * The original, gated matrix. The scheduled benchmark and `eval:check` use exactly these
+ * four scenarios so a scheduled run still costs eight agent invocations, not the cost of
+ * every scenario anyone has ever added. Phase 2B scenarios remain available through
+ * `--suite extended` (or `--scenario`), but they do not silently expand the default run.
+ */
+const SMOKE_SCENARIO_IDS: ReadonlySet<string> = new Set([
+  'tiny-code-change',
+  'tiny-verify-only',
+  'medium-code-change',
+  'medium-verify-only',
+])
+
 /** Where the task is written inside the prepared repository. */
 const TASK_FILE = '.anvil-eval-task.md'
 
@@ -181,6 +196,7 @@ async function main(): Promise<void> {
   const resume = args.includes('--resume')
   const publishTranscripts = args.includes('--publish-transcripts')
   const only = flagValue('--scenario', args)
+  const suiteRaw = flagValue('--suite', args) ?? 'smoke'
   const repetitionsRaw = flagValue('--repetitions', args)
   const repetitions = repetitionsRaw === null ? 1 : Number(repetitionsRaw)
   const seedRaw = flagValue('--seed', args)
@@ -201,6 +217,11 @@ async function main(): Promise<void> {
     console.error(`--order must be 'alternate' or 'fixed', got ${order}`)
     process.exit(1)
   }
+  if (!['smoke', 'extended', 'all'].includes(suiteRaw)) {
+    console.error(`--suite must be 'smoke', 'extended' or 'all', got ${suiteRaw}`)
+    process.exit(1)
+  }
+  const suite = suiteRaw as 'smoke' | 'extended' | 'all'
 
   if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
     console.error(
@@ -221,14 +242,21 @@ async function main(): Promise<void> {
   }
 
   const scenarios = loadScenarios()
-  const selectedScenarios = only === null ? scenarios : scenarios.filter((s) => s.id === only)
+  const suiteScenarios =
+    suite === 'smoke'
+      ? scenarios.filter((scenario) => SMOKE_SCENARIO_IDS.has(scenario.id))
+      : suite === 'extended'
+        ? scenarios.filter((scenario) => !SMOKE_SCENARIO_IDS.has(scenario.id))
+        : scenarios
+  const selectedScenarios = only === null ? suiteScenarios : scenarios.filter((s) => s.id === only)
   if (selectedScenarios.length === 0) {
     console.error(`No scenario matched ${only ?? '(nothing)'}`)
     process.exit(1)
   }
-  // A subset selection (--scenario) remains explicitly partial: it must not overwrite
-  // valid complete evidence with a success-looking report covering only part of the matrix.
-  const isSubset = selectedScenarios.length !== scenarios.length
+  // A subset selection is explicitly partial: it must not overwrite valid complete evidence
+  // with a success-looking report covering only part of the matrix. The smoke suite is the
+  // gated matrix, so it is complete; extended and all are exploratory measurements.
+  const isSubset = only !== null || suite !== 'smoke'
 
   const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
   if (models.length === 0) {
@@ -259,7 +287,9 @@ async function main(): Promise<void> {
   }
 
   if (checkOnly) {
-    process.exit(runCheck(scenarios))
+    // The gate is defined over the original smoke matrix. Extended scenarios are opt-in
+    // measurements; they must not make the scheduled check fail simply by existing.
+    process.exit(runCheck(scenarios.filter((scenario) => SMOKE_SCENARIO_IDS.has(scenario.id))))
   }
 
   // The gate hashes the source, so the harness must run that same source -- not a stale
@@ -574,7 +604,7 @@ async function main(): Promise<void> {
   }
 
   printSummary(results)
-  if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(scenarios)
+  if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(selectedScenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
   // reported in the summary, and `--check` is the command that turns it into a failure.
@@ -657,11 +687,18 @@ async function runScenario(
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
 
     if (fake) {
-      if (scenario.solution !== undefined) {
-        cpSync(join(repoRoot, scenario.solution.from), join(workdir, ...scenario.solution.to.split('/')))
+      const answers = solutionFiles(scenario)
+      if (answers.length > 0) {
+        for (const answer of answers) {
+          const target = join(workdir, ...answer.to.split('/'))
+          mkdirSync(dirname(target), { recursive: true })
+          cpSync(join(repoRoot, answer.from), target)
+        }
         result.transcript = publishTranscripts
           ? limitTranscript(
-              redactTranscript(`[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`),
+              redactTranscript(
+                `[fake-agent] applied ${answers.map((answer) => `${answer.from} to ${answer.to}`).join(', ')}`,
+              ),
             )
           : ''
       } else if (scenario.kind === 'code-change') {
@@ -691,13 +728,16 @@ async function runScenario(
       }
     }
 
-    const visible = await runAll(scenario.verify, workdir)
+    const verifyCwd = scenario.verifyInProjectDir === true ? projectDirIn(workdir) : workdir
+    const visible = await runAll(scenario.verify, verifyCwd)
     result.verified = visible.every((r) => r.ok)
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
     for (const file of scenario.hidden ?? []) {
-      cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
+      const target = join(workdir, ...file.to.split('/'))
+      mkdirSync(dirname(target), { recursive: true })
+      cpSync(join(repoRoot, file.from), target, { recursive: true })
     }
     if ((scenario.hiddenVerify?.length ?? 0) > 0) {
       const hiddenCommands = scenario.hiddenVerify ?? []
@@ -734,6 +774,19 @@ async function runScenario(
   }
 
   return result
+}
+
+/**
+ * Resolve the directory a scenario's verifier should run in.
+ *
+ * The profile's `projectDir` is the same detection `anvil init` and `crew verify` use.
+ * Running the verifier there is what makes a nested-project scenario measure detection
+ * rather than accidentally measuring the repository root.
+ */
+function projectDirIn(workdir: string): string {
+  const { profile } = buildProfile(workdir, { root: workdir, host: null, remote: null, defaultBranch: null })
+  if (profile.projectDir === '') return workdir
+  return join(workdir, ...profile.projectDir.split('/'))
 }
 
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */

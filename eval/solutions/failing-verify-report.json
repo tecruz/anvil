@@ -1,0 +1,5 @@
+{
+  "command": "node run-check.js",
+  "exitCode": 1,
+  "status": "failed"
+}
