@@ -259,8 +259,9 @@ calls or isolated path helpers.
 reporting, cross-process claim-registry locking, fetch-lock stale-owner recovery, and the
 state-directory containment guard are implemented. The boundary-by-boundary outcomes are
 recorded in [LIFECYCLE_RECOVERY.md](LIFECYCLE_RECOVERY.md); verification evidence is in the
-Phase 3 PR. The source tested was `bee7d91`, and the hermetic eval summary was regenerated
-against it rather than reused.
+Phase 3 PR. Review follow-ups cover linked leaf outputs and hooks, successor-safe lock
+recovery, same-ticket replacement during release, and remote-only shipping bases. The
+reviewed source is `0148e38`; its hermetic eval summary was regenerated rather than reused.
 
 ### Work
 
