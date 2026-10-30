@@ -237,6 +237,41 @@ describe('ship: failure at each mutation boundary', () => {
     assert.equal(transport.calls.length, 0)
   })
 
+  for (const explicitRef of [false, true]) {
+    test(`a remote-only base ships with risk analysis and the short PR target (explicit ref: ${explicitRef})`, async () => {
+      const { repo } = makeRepoWithOrigin()
+      execFileSync('git', ['push', 'origin', 'main:refs/heads/release'], { cwd: repo, stdio: 'pipe' })
+      const { claim } = await claimTicket({
+        repoRoot: repo,
+        ticket: ticket(),
+        base: 'release',
+        worktreeRoot: join(temp('anvil-remote-base-'), 'wt'),
+      })
+      assert.equal(claim.baseRef, 'origin/release')
+      assert.equal(execFileSync('git', ['branch', '--list', 'release'], { cwd: repo, encoding: 'utf8' }).trim(), '')
+      writeFileSync(join(claim.worktreePath, 'change.txt'), 'change\n')
+      execFileSync('git', ['add', 'change.txt'], { cwd: claim.worktreePath })
+      execFileSync('git', ['commit', '-m', 'change'], { cwd: claim.worktreePath, stdio: 'pipe' })
+      const transport = recordingTransport({})
+      let target: string | undefined
+      transport.upsertPullRequest = async (options) => {
+        target = options.base
+        return { number: 42, url: 'https://example.com/pr/42', created: true }
+      }
+      const options = {
+        ...shipOptions(repo, claim.worktreePath, transport),
+        branch: claim.branch,
+        baseBranch: claim.baseBranch,
+        ...(explicitRef ? { baseRef: claim.baseRef } : {}),
+      }
+      options.profile.risk = [{ glob: 'change.txt', level: 'high', reason: 'fixture', origin: 'heuristic' }]
+      const result = await ship(options)
+      assert.equal(result.ok, true)
+      assert.equal(target, 'release')
+      assert.deepEqual(result.risk.highPaths, ['change.txt'], 'diff must use the resolved ref too')
+    })
+  }
+
   test('push succeeds, PR fails — branch pushed but no PR (documented partial failure)', async () => {
     const { repo } = makeRepoWithOrigin()
     const transport = recordingTransport({ pushOk: true, prOk: false, prDetail: 'rate limited' })

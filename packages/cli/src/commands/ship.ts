@@ -153,6 +153,7 @@ export const shipCommand: Command = {
       worktreePath: claim.worktreePath,
       branch,
       baseBranch: claim.baseBranch,
+      baseRef: claim.baseRef,
       ticket,
       profile,
       transport,

@@ -15,7 +15,7 @@
  */
 
 import { join } from 'node:path'
-import { git, type WorktreeStatus, worktreeStatus } from '@anvil/git'
+import { git, revExists, type WorktreeStatus, worktreeStatus } from '@anvil/git'
 import {
   analyzeRisk,
   codeownersFor,
@@ -62,6 +62,8 @@ export interface ShipOptions {
   worktreePath: string
   branch: string
   baseBranch: string
+  /** Resolved Git ref, distinct from the forge's short PR target branch. */
+  baseRef?: string
   ticket: Ticket
   profile: ProjectProfile
   transport: ForgeTransport
@@ -101,7 +103,15 @@ export interface ShipResult {
   commandsRun: string[]
 }
 
-export async function ship(options: ShipOptions): Promise<ShipResult> {
+export async function ship(input: ShipOptions): Promise<ShipResult> {
+  // Older callers only supply the PR target name. Resolve its remote-tracking ref
+  // without creating a local branch; never change the base sent to the forge.
+  const baseRef =
+    input.baseRef ??
+    ((await revExists(input.worktreePath, `refs/remotes/origin/${input.baseBranch}`))
+      ? `refs/remotes/origin/${input.baseBranch}`
+      : input.baseBranch)
+  const options = { ...input, baseRef }
   const stages: ShipStage[] = []
   const commandsRun: string[] = []
 
@@ -374,7 +384,9 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     }
   }
 
-  const head = await git(['rev-list', '--count', `${options.baseBranch}..HEAD`], { cwd: options.worktreePath })
+  const head = await git(['rev-list', '--count', `${options.baseRef ?? options.baseBranch}..HEAD`], {
+    cwd: options.worktreePath,
+  })
   if (head.exitCode !== 0) {
     // A base ref that cannot be resolved makes the diff, the risk analysis and the PR
     // target all unreliable. Refusing here is the only answer that does not guess.
@@ -394,8 +406,14 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
 }
 
 /** Repo-relative paths changed on this branch. */
-export async function changedPaths(options: { worktreePath: string; baseBranch: string }): Promise<string[]> {
-  const res = await git(['diff', '--name-only', `${options.baseBranch}...HEAD`], { cwd: options.worktreePath })
+export async function changedPaths(options: {
+  worktreePath: string
+  baseBranch: string
+  baseRef?: string
+}): Promise<string[]> {
+  const res = await git(['diff', '--name-only', `${options.baseRef ?? options.baseBranch}...HEAD`], {
+    cwd: options.worktreePath,
+  })
   if (res.exitCode !== 0) return []
   return res.stdout
     .split('\n')
