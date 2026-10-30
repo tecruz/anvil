@@ -477,6 +477,7 @@ export interface ReleaseOptions {
 export interface ReleaseOperations {
   removeWorktree(repoRoot: string, path: string, force: boolean): Promise<RunResult>
   deleteBranch(repoRoot: string, branch: string, force: boolean): Promise<RunResult>
+  writeRegistry(repoRoot: string, registry: ClaimRegistry): void
 }
 
 export interface ReleaseResult {
@@ -505,6 +506,7 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
   const operations: ReleaseOperations = {
     removeWorktree,
     deleteBranch,
+    writeRegistry: writeClaims,
     ...options.operations,
   }
   const registry = readClaims(repoRoot)
@@ -583,7 +585,7 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
   claim.state = worktreeRemoved ? 'released' : 'active'
   registry.claims = registry.claims.map((c) => (c.key === key ? claim : c))
   try {
-    writeClaims(repoRoot, registry)
+    operations.writeRegistry(repoRoot, registry)
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     throw new AnvilError(

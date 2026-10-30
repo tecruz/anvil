@@ -358,6 +358,31 @@ describe('worktree lifecycle', () => {
     await Promise.all([withFetchLock({ cwd: repo }, task), withFetchLock({ cwd: repo }, task)])
     assert.equal(maxConcurrent, 1, 'the lock must serialize, not just exist')
   })
+
+  test('a lock left by a dead process is broken, so a later fetch does not block', async () => {
+    const repo = makeRepo()
+    const lockDir = join(repo, '.git', 'anvil-locks')
+    mkdirSync(lockDir, { recursive: true })
+    // A pid that cannot exist: the holder was killed before it could remove the lock.
+    writeFileSync(join(lockDir, 'fetch.lock'), '999999999', 'utf8')
+
+    const result = await withFetchLock({ cwd: repo, timeoutMs: 2_000, pollMs: 10 }, async () => 'ran')
+    assert.equal(result, 'ran')
+    assert.equal(existsSync(join(lockDir, 'fetch.lock')), false, 'the stale lock is removed')
+  })
+
+  test('a lock held by a live process is not broken', async () => {
+    const repo = makeRepo()
+    const lockDir = join(repo, '.git', 'anvil-locks')
+    mkdirSync(lockDir, { recursive: true })
+    writeFileSync(join(lockDir, 'fetch.lock'), String(process.pid), 'utf8')
+
+    await assert.rejects(
+      () => withFetchLock({ cwd: repo, timeoutMs: 80, pollMs: 10 }, async () => 'ran'),
+      /Timed out waiting for the fetch lock/,
+    )
+    assert.ok(existsSync(join(lockDir, 'fetch.lock')), 'a live owner keeps its lock')
+  })
 })
 
 // ===========================================================================
@@ -873,6 +898,34 @@ describe('claims', () => {
     assert.match(rel.branchRetainedBecause ?? '', /branch is protected/)
     assert.equal(existsSync(result.claim.worktreePath), false)
     assert.equal(readClaims(repo).claims[0]?.state, 'released')
+  })
+
+  test('a failed registry write after removal names the stale claim it leaves behind', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel7-'), 'wt'),
+    })
+
+    await assert.rejects(
+      () =>
+        releaseClaim({
+          repoRoot: repo,
+          key: 'local-1',
+          operations: {
+            writeRegistry: () => {
+              throw new Error('disk full')
+            },
+          },
+        }),
+      /Released local-1 but could not update the claim registry: disk full/,
+    )
+
+    assert.equal(existsSync(result.claim.worktreePath), false, 'the worktree was already removed')
+    const [status] = await claimStatuses(repo)
+    assert.equal(status?.claim.state, 'active', 'the old registry survived the failed write')
+    assert.equal(status?.orphaned, true, 'status identifies the stale claim for cleanup')
   })
 
   test('three claims coexist with no cross-contamination', async () => {
