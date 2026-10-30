@@ -1073,6 +1073,55 @@ describe('claims', () => {
     assert.equal(status?.orphaned, true, 'status identifies the stale claim for cleanup')
   })
 
+  test('release does not replace a newer claim registered after its worktree was removed', async () => {
+    const repo = makeRepo()
+    const worktreeRoot = join(temp('anvil-release-reclaim-'), 'wt')
+    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot })
+    let replacementBranch: string | undefined
+    await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      operations: {
+        removeWorktree: async (...args) => {
+          const removed = await removeWorktree(...args)
+          assert.equal(removed.exitCode, 0)
+          const replacement = await claimTicket({
+            repoRoot: repo,
+            ticket: ticket({ title: 'Replacement' }),
+            worktreeRoot,
+          })
+          replacementBranch = replacement.claim.branch
+          return removed
+        },
+      },
+    })
+    const saved = readClaims(repo).claims[0]
+    assert.equal(saved?.branch, replacementBranch)
+    assert.equal(saved?.state, 'active')
+    assert.ok(existsSync(saved!.worktreePath))
+    assert.equal((await claimStatuses(repo))[0]?.branchMismatch, false)
+  })
+
+  test('release merges its state without losing concurrent launch metadata on the same claim', async () => {
+    const repo = makeRepo()
+    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-release-launch-'), 'wt') })
+    await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      operations: {
+        removeWorktree: async (...args) => {
+          await updateClaims(repo, (registry) => {
+            registry.claims[0]!.agent = { runner: 'opencode', pid: 12345 }
+          })
+          return removeWorktree(...args)
+        },
+      },
+    })
+    const saved = readClaims(repo).claims[0]
+    assert.equal(saved?.state, 'released')
+    assert.equal(saved?.agent?.pid, 12345)
+  })
+
   test('three claims coexist with no cross-contamination', async () => {
     const repo = makeRepo()
     const wtRoot = join(temp('anvil-m3-crew-'), 'wt')

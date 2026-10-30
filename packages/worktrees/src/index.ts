@@ -628,7 +628,14 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
     // this release started, and writing the earlier snapshot would discard it.
     await withClaimsLock(repoRoot, async () => {
       const current = readClaims(repoRoot)
-      current.claims = current.claims.map((c) => (c.key === key ? claim : c))
+      current.claims = current.claims.map((c) =>
+        c.key === key &&
+        c.branch === claim.branch &&
+        c.worktreePath === claim.worktreePath &&
+        c.createdAt === claim.createdAt
+          ? { ...c, state: claim.state }
+          : c,
+      )
       operations.writeRegistry(repoRoot, current)
     })
   } catch (err) {
