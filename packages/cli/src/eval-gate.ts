@@ -74,10 +74,10 @@ export interface EvalScenario {
    * Verifiers read the log from `ANVIL_EVAL_EXECUTION_LOG` in their own harness-provided
    * environment.
    *
-   * The evidence is the agent's own tool events: the harness replays the check
-   * itself, and the exit status the agent's run produced has to agree with the
-   * replay. A report alone is not evidence, and a run whose outcome the agent did
-   * not see is not evidence either.
+   * Real agents invoke a harness-provided Node launcher. A parent-process broker
+   * executes source captured before the agent starts and keeps execution records
+   * in memory. Completed tool events must agree with those records; a shell event,
+   * a matching exit code, or a report alone does not prove which script ran.
    */
   captureExecution?: boolean
   /** How long the agent gets. */

@@ -30,6 +30,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
       'packages',
       'eval',
       'scripts/eval.ts',
+      'scripts/eval-check-broker.ts',
       'scripts/build.mjs',
       'package.json',
       'package-lock.json',

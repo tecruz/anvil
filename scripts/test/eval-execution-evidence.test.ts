@@ -22,6 +22,7 @@ test('failing-verification requires a completed agent tool call and an unchanged
       'packages',
       'eval',
       'scripts/eval.ts',
+      'scripts/eval-check-broker.ts',
       'scripts/build.mjs',
       'package.json',
       'package-lock.json',
@@ -45,6 +46,11 @@ if (process.argv.includes('--version')) {
 }
 
 const mode = process.env.EVAL_AGENT_MODE
+const runCheck = (command = 'node run-check.js') => spawnSync(
+  process.platform === 'win32' ? 'powershell.exe' : '/bin/sh',
+  process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', command] : ['-c', command],
+  { encoding: 'utf8' },
+)
 
 appendFileSync(process.env.EVAL_AGENT_TRACE, JSON.stringify({
   executionLogEnv: process.env.ANVIL_EVAL_EXECUTION_LOG ?? null,
@@ -64,14 +70,19 @@ if (mode === 'report-only') {
   }
   let exitCode
   let command = 'node run-check.js'
-  if (mode === 'transient-check') {
-    // Run a check that exits 0, then put the original back. The tool reports the
-    // status it actually saw, so the harness can tell this apart from an honest run
-    // that saw the restored check fail.
+  if (mode === 'transient-check' || mode === 'same-exit-check' || mode === 'broker-transient-check') {
+    // A direct runtime bypass can run a swapped check and restore it, even with
+    // the expected exit status. Neither it nor a rejected broker call is evidence.
     const original = readFileSync('run-check.js')
-    writeFileSync('run-check.js', "console.error('forged'); process.exit(0)\\n")
-    const result = spawnSync(process.execPath, ['run-check.js'], { encoding: 'utf8' })
+    writeFileSync('run-check.js', "console.error('forged'); process.exit(" + (mode === 'transient-check' ? '0' : '1') + ")\\n")
+    const result = mode === 'broker-transient-check' ? runCheck()
+      : spawnSync(process.execPath, ['run-check.js'], { encoding: 'utf8' })
     writeFileSync('run-check.js', original)
+    // PowerShell's -Command host maps a nonzero native exit to shell status 1;
+    // POSIX sh preserves the launcher's rejection status (2).
+    const expectedExit = mode === 'transient-check' ? 0
+      : mode === 'same-exit-check' || process.platform === 'win32' ? 1 : 2
+    if (result.status !== expectedExit) process.exit(3)
     exitCode = result.status
   } else if (mode === 'chained-command') {
     // The check runs, but the command it is part of reports the status of its last
@@ -101,7 +112,7 @@ if (mode === 'report-only') {
   } else {
     if (mode === 'honest-dot-script') command = 'node ./run-check.js'
     if (mode === 'honest-quoted-script') command = 'node "run-check.js"'
-    const result = spawnSync(process.execPath, [mode === 'honest-dot-script' ? './run-check.js' : 'run-check.js'], { encoding: 'utf8' })
+    const result = runCheck(command)
     if (mode.startsWith('honest') && result.status !== 1) process.exit(3)
     exitCode = result.status
   }
@@ -162,6 +173,8 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
       'honest-quoted-script',
       'modified-check',
       'transient-check',
+      'same-exit-check',
+      'broker-transient-check',
       ...rejectedCommands,
     ]) {
       const trace = join(workspace, `${mode}.jsonl`)
@@ -196,21 +209,21 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           assert.equal(result.hiddenVerified, true, `${result.variant}: ${result.error ?? 'hidden verifier failed'}`)
           assert.equal(result.error, undefined, `${result.variant}: ${result.error}`)
         } else {
+          assert.doesNotMatch(result.error ?? '', /the agent exited|the agent timed out/, `${mode}: mock must complete`)
           assert.equal(result.verified, false, `${mode} must not pass visible verification`)
           assert.equal(result.hiddenVerified, false, `${mode} must not pass hidden verification`)
         }
       }
-      if (mode === 'modified-check') {
+      if (mode === 'modified-check' || mode === 'broker-transient-check') {
         for (const result of record.results) {
-          assert.match(result.error ?? '', /modified a check or verifier script/)
+          assert.match(result.error ?? '', /modified a check/)
         }
       }
-      if (mode === 'transient-check') {
-        // The check was restored, so only the exit status the agent's own run
-        // produced can tell the truth here.
+      if (mode === 'transient-check' || mode === 'same-exit-check') {
+        // Both swapped checks were restored and emitted completed tool events,
+        // but neither actually ran captured source under harness control.
         for (const result of record.results) {
-          assert.match(result.error ?? '', /exited with 0/)
-          assert.match(result.error ?? '', /exits with 1/)
+          assert.match(result.error ?? '', /no harness-controlled execution/)
         }
       }
       if (rejectedCommands.has(mode)) {

@@ -153,6 +153,15 @@ recovering it, and never promotes a subset or partial run. Transcripts are empty
 default; `--publish-transcripts` opts in, and every persisted transcript, error, and
 verifier output is redacted and size-limited first.
 
+Captured verify-only checks use a harness-provided `node` launcher. Its parent-process
+broker executes a Node ESM source snapshot captured before the agent starts, using an
+absolute runtime, and keeps source hashes and actual exits in memory. Shell events must
+match those executions; an equal exit code or a restored script is not sufficient.
+Invalid capture vetoes both verifier verdicts, even if an agent forges an on-disk log.
+The launcher is not secret and cannot submit source or attest to results. This protects
+execution provenance, not against native processes attacking the host; it is not an OS
+sandbox. Capture currently supports standalone Node ESM main scripts.
+
 New baselines, summaries, run records, and checkpoints use evidence schema version 2.
 Readers retain version 1 for historical inspection: missing verifier declarations/counts
 and the initial fixture snapshot remain unknown (`null`), never inferred from results.

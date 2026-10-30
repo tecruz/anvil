@@ -32,17 +32,7 @@
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import {
-  appendFileSync,
-  cpSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -83,6 +73,7 @@ import { tokenizeCommand } from '../packages/core/src/args.ts'
 import { probeCommandVersion, spawnArgv } from '../packages/core/src/exec.ts'
 import { buildProfile } from '../packages/profile/src/index.ts'
 import { readAgentSession } from '../packages/worktrees/src/index.ts'
+import { type CheckBroker, type CheckExecution, captureCheck, startCheckBroker } from './eval-check-broker.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -201,7 +192,7 @@ export interface AgentExecution {
    * The exit status OpenCode observed for that command, or null when the event
    * carries none.
    *
-   * Null is not a pass. The harness compares this number with its own replay, and a
+   * Null is not a pass. The harness compares this number with its own execution, and a
    * command whose status cannot be read cannot be compared, so it is not accepted as
    * evidence.
    */
@@ -705,6 +696,8 @@ async function runScenario(
   // The harness captures execution evidence in its own log after the agent finishes.
   const executionEnv: NodeJS.ProcessEnv =
     executionDir === null ? {} : { ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'executions.jsonl') }
+  let checkBroker: CheckBroker | null = null
+  let executionEvidenceValid = fake || scenario.captureExecution !== true
   const started = Date.now()
   const result: ScenarioResult = {
     scenario: scenario.id,
@@ -786,6 +779,21 @@ async function runScenario(
         result.transcript = publishTranscripts ? limitTranscript(redactTranscript('[fake-agent] ran the verifier')) : ''
       }
     } else {
+      if (scenario.captureExecution === true) {
+        const fixtureRoot = join(repoRoot, ...scenario.repo.split('/'))
+        const manifest = JSON.parse(readFileSync(join(fixtureRoot, 'package.json'), 'utf8')) as { type?: unknown }
+        if (manifest.type !== 'module') throw new Error('execution capture requires a Node ESM fixture')
+        const checks = (scenario.solutionRun ?? []).map((command) => {
+          const args = parseEvidenceCommand(command)
+          if (args?.length !== 2 || args[0] !== 'node' || !args[1]?.endsWith('.js')) {
+            throw new Error(`execution capture supports only a standalone Node ESM script: ${JSON.stringify(command)}`)
+          }
+          return captureCheck(command, args[1], fixtureRoot)
+        })
+        if (checks.length === 0) throw new Error('the scenario declares no check command to capture')
+        checkBroker = await startCheckBroker(checks, workdir)
+        Object.assign(agentEnv, checkBroker.env)
+      }
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
       // permission prompt is a hang, and a hang is not a result.
       // OpenCode 2's private server inherits this process's provider credentials and
@@ -797,6 +805,7 @@ async function runScenario(
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
         env: agentEnv,
       })
+      await checkBroker?.close()
       const agentEvents = parseOpenCodeRunEvents(agent.stdout)
       agentExecutions = agentEvents.executions
       result.transcript = publishTranscripts
@@ -821,13 +830,14 @@ async function runScenario(
         : scenario.solutionRun !== undefined
           ? [scenario.solutionRun]
           : []
-      // The agent's own executions of each check, in the order the tool ran them.
-      // These come from OpenCode's events, not from anything the agent wrote, so the
-      // agent cannot edit them into existence.
+      // Shell events prove invocation, not script identity. They must match a
+      // broker execution of source captured before the agent started.
       const observedRuns = checkCommands.map((expected) =>
         agentExecutions.filter((execution) => isCheckCommand(expected, execution.command)),
       )
-      if (checkCommands.length === 0) {
+      if (checkBroker !== null && checkBroker.integrityError !== null) {
+        addError(result, checkBroker.integrityError)
+      } else if (checkCommands.length === 0) {
         addError(result, 'the scenario declares no check command, so there is no execution evidence to collect')
       } else if (observedRuns.some((runs) => runs.length === 0)) {
         addError(
@@ -837,42 +847,34 @@ async function runScenario(
       } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
         addError(result, 'the agent modified a check or verifier script; execution evidence is invalid')
       } else {
-        // The completed tool event proves the agent invoked the exact check. Rerun
-        // the unchanged script under harness control to record its real exit status;
-        // its self-reported log goes to a dummy path and is never accepted.
-        const dummyEnv = { ...executionEnv, ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'dummy.jsonl') }
-        const replays = await replayCommands(checkCommands, workdir, dummyEnv)
-        // The exit status the agent's own run produced has to agree with the replay.
-        // Without this, an agent could replace the check with one that exits 0, run
-        // it, restore the original, and report the outcome the restored script would
-        // have produced: the replay's exit code, not the one it actually saw.
-        const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, replays)
+        const executions = checkCommands.map((command) =>
+          checkBroker?.executions.findLast((execution) => execution.command === command),
+        )
+        const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, executions)
         if (disagreement !== null) {
           addError(result, disagreement)
         } else {
-          // Write harness-owned evidence from the actual exits, not from a script
-          // that the agent could have edited to lie about its exit code.
-          const logPath = join(executionDir, 'executions.jsonl')
-          for (let i = 0; i < checkCommands.length; i += 1) {
-            const replay = replays[i]!
-            appendFileSync(
-              logPath,
-              `${JSON.stringify({
-                command: checkCommands[i],
-                exitCode: replay.ok ? 0 : (replay.code ?? 1),
-                at: new Date().toISOString(),
-              })}\n`,
-              'utf8',
-            )
-          }
-          result.verifyOutput = replays.map((r) => r.output).join('\n')
+          executionEvidenceValid = true
         }
       }
+      // Publish only parent-process records, never append to a file an agent may
+      // have found and forged. Invalid evidence also vetoes verifier verdicts.
+      writeFileSync(
+        join(executionDir, 'executions.jsonl'),
+        executionEvidenceValid
+          ? (checkBroker?.executions ?? [])
+              .map(
+                ({ command, exitCode, sourceHash, at }) => `${JSON.stringify({ command, exitCode, sourceHash, at })}\n`,
+              )
+              .join('')
+          : '',
+        'utf8',
+      )
     }
 
     const verifyCwd = scenario.verifyInProjectDir === true ? projectDirIn(workdir) : workdir
     const visible = await runAll(scenario.verify, verifyCwd, executionEnv)
-    result.verified = visible.every((r) => r.ok)
+    result.verified = executionEvidenceValid && visible.every((r) => r.ok)
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
@@ -885,7 +887,7 @@ async function runScenario(
       const hiddenCommands = scenario.hiddenVerify ?? []
       const hidden = await runAll(hiddenCommands, workdir, executionEnv)
       result.hiddenVerifyCount = hiddenCommands.length
-      result.hiddenVerified = hidden.every((r) => r.ok)
+      result.hiddenVerified = executionEvidenceValid && hidden.every((r) => r.ok)
       result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
     }
 
@@ -901,6 +903,11 @@ async function runScenario(
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err)
   } finally {
+    try {
+      await checkBroker?.close()
+    } catch (error) {
+      addError(result, `could not close the check broker: ${error instanceof Error ? error.message : String(error)}`)
+    }
     result.durationMs = Date.now() - started
     if (executionDir !== null) {
       try {
@@ -1059,56 +1066,26 @@ function normalizeScriptPath(arg: string): string {
 }
 
 /**
- * Run each check command under harness control, keeping every result aligned with
- * the command it came from.
- *
- * `runAll` drops a command it cannot parse, which would shift the remaining results
- * one place along the list. The evidence log pairs each result with its command, so
- * the alignment has to hold even for a command that cannot run.
- */
-async function replayCommands(commands: readonly string[], cwd: string, env: NodeJS.ProcessEnv): Promise<RunResult[]> {
-  const out: RunResult[] = []
-  for (const command of commands) {
-    const [bin, ...rest] = tokenizeCommand(command)
-    if (bin === undefined) {
-      const message = `the check command is empty: ${JSON.stringify(command)}`
-      out.push({ ok: false, code: null, stdout: '', stderr: message, timedOut: false, output: message })
-      continue
-    }
-    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000, env }))
-  }
-  return out
-}
-
-/**
- * Find the first check whose agent-observed outcome disagrees with the harness's replay.
- *
- * The exit status is the one part of the evidence the agent cannot write: OpenCode
- * reports it from the process it ran, and no report or worktree file can turn a
- * command that exited 0 into one that exited 1. Requiring the two to agree is what
- * stops "replace the check, run it, restore it, report the restored result".
- *
- * The last observed run of each command is the one compared, because that is the run
- * whose result the agent was holding when it wrote its report.
+ * Require both a completed tool event and a parent-controlled execution of captured
+ * source. Equal exit statuses alone cannot distinguish a same-exit replacement.
  */
 function findEvidenceDisagreement(
   commands: readonly string[],
   observedRuns: readonly (readonly AgentExecution[])[],
-  replays: readonly RunResult[],
+  executions: readonly (CheckExecution | undefined)[],
 ): string | null {
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index] as string
     const observed = observedRuns[index]?.at(-1)
-    const replay = replays[index]
-    if (observed === undefined || replay === undefined) {
-      return `the harness could not replay ${JSON.stringify(command)}; execution evidence is incomplete`
+    const execution = executions[index]
+    if (observed === undefined || execution === undefined) {
+      return `no harness-controlled execution of ${JSON.stringify(command)} was captured; shell events alone do not prove which script ran`
     }
     if (observed.exitCode === null) {
       return `the agent's execution of ${JSON.stringify(command)} reported no exit status; execution evidence cannot be verified`
     }
-    const replayedExit = replay.ok ? 0 : (replay.code ?? 1)
-    if (observed.exitCode !== replayedExit) {
-      return `the agent's execution of ${JSON.stringify(command)} exited with ${observed.exitCode}, but the unchanged check exits with ${replayedExit}; execution evidence does not match the check`
+    if (observed.exitCode !== execution.exitCode) {
+      return `the agent's execution of ${JSON.stringify(command)} exited with ${observed.exitCode}, but the captured check exits with ${execution.exitCode}; execution evidence does not match the check`
     }
   }
   return null
@@ -1428,7 +1405,7 @@ function archiveRunRecord(record: EvalRunRecord, overwrite = true): boolean {
 /** Fingerprint the harness policy that a resumable run must not silently change. */
 function hashHarness(): string {
   const hash = createHash('sha256')
-  for (const rel of ['scripts/eval.ts', 'eval/models.json']) {
+  for (const rel of ['scripts/eval.ts', 'scripts/eval-check-broker.ts', 'eval/models.json']) {
     const path = join(repoRoot, ...rel.split('/'))
     if (!existsSync(path)) continue
     hash.update(rel.replace(/\\/g, '/'))
