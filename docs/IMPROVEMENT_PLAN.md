@@ -1,6 +1,6 @@
 # Implementation plan: reliability, evidence, and distribution
 
-Status: **proposed; no implementation authorized by this document**.
+Status: **Phases 0–2 complete; Phase 3 in progress; Phase 4 proposed.**
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -254,6 +254,11 @@ Phase 2B (extended 6-scenario corpus) is now complete:
 
 **Outcome:** safety invariants are exercised across whole operations, not only successful
 calls or isolated path helpers.
+
+**Progress:** claim creation and release boundary recovery, ship provider-failure reporting,
+and the fetch-lock stale-owner tests are implemented. The current boundary-by-boundary
+outcomes are recorded in [LIFECYCLE_RECOVERY.md](LIFECYCLE_RECOVERY.md). Cross-process
+claim-registry locking remains open; see the known gap in that document.
 
 ### Work
 
