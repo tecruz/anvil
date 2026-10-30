@@ -231,6 +231,7 @@ export const releaseCommand: Command = {
       worktreeRemoved: result.worktreeRemoved,
       branchDeleted: result.branchDeleted,
       ...(result.retainedBecause === undefined ? {} : { retainedBecause: result.retainedBecause }),
+      ...(result.branchRetainedBecause === undefined ? {} : { branchRetainedBecause: result.branchRetainedBecause }),
     }
 
     if (result.retainedBecause !== undefined) {
@@ -249,6 +250,9 @@ export const releaseCommand: Command = {
       const s = ctx.style
       const out = [`${s.green('released')} ${key}`]
       if (result.branchDeleted) out.push(`  deleted branch ${result.claim.branch}`)
+      if (result.branchRetainedBecause !== undefined) {
+        out.push(`  ${s.yellow('kept branch')} ${result.claim.branch}: ${result.branchRetainedBecause}`)
+      }
       return out.join('\n')
     })
     return undefined

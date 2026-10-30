@@ -688,6 +688,44 @@ describe('claims', () => {
     assert.equal(readClaims(repo).claims.length, 0)
   })
 
+  test('a claim that fails while warming the worktree removes the worktree and branch it created', async () => {
+    const repo = makeRepo()
+    // A committed file named `.anvil` makes the first warm-up write fail after
+    // `git worktree add` has already succeeded. No permission change is needed.
+    writeFileSync(join(repo, '.anvil'), 'a file, not a directory\n', 'utf8')
+    git(repo, 'add', '.anvil')
+    git(repo, 'commit', '-m', 'block the state directory')
+    const wtRoot = join(temp('anvil-m3-cfail-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false, 'the half-warm worktree must be gone')
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
+    assert.equal(readClaims(repo).claims.length, 0, 'a failed claim must register nothing')
+    assert.deepEqual(await findOrphanWorktrees(repo), [], 'no unregistered worktree may survive')
+  })
+
+  test('a claim that cannot record itself removes the worktree and branch', async () => {
+    const repo = makeRepo()
+    // A directory where claims.json belongs makes the atomic registry write fail. The
+    // worktree is warm by then, so this is the late boundary after every other write.
+    mkdirSync(join(repo, '.anvil', 'claims.json'), { recursive: true })
+    const wtRoot = join(temp('anvil-m3-cfail2-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false)
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
+    assert.equal(readClaims(repo).claims.length, 0)
+    assert.deepEqual(await findOrphanWorktrees(repo), [])
+  })
+
   test('status reports uncommitted and unpushed separately', async () => {
     const repo = makeRepo()
     const result = await claimTicket({
@@ -783,6 +821,58 @@ describe('claims', () => {
     const rel = await releaseClaim({ repoRoot: repo, key: 'local-1' })
     assert.equal(rel.worktreeRemoved, true)
     assert.equal(existsSync(result.claim.worktreePath), false)
+  })
+
+  test('a forced release of a locked worktree preserves the worktree, branch and active claim', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel5-'), 'wt'),
+    })
+    const path = result.claim.worktreePath
+    git(repo, 'worktree', 'lock', path)
+
+    await assert.rejects(
+      () => releaseClaim({ repoRoot: repo, key: 'local-1', force: true, deleteBranch: true }),
+      /worktree remove failed/,
+    )
+
+    // The removal failed, so nothing else may have happened: the branch is still in use,
+    // the worktree is still on disk, and the registry still says the claim is active.
+    assert.ok(existsSync(path))
+    assert.equal(await branchExists(repo, result.claim.branch), true)
+    assert.equal(readClaims(repo).claims[0]?.state, 'active')
+
+    git(repo, 'worktree', 'unlock', path)
+    const retry = await releaseClaim({ repoRoot: repo, key: 'local-1', force: true, deleteBranch: true })
+    assert.equal(retry.worktreeRemoved, true, 'unlocking makes the same release retryable')
+    assert.equal(retry.branchDeleted, true)
+    assert.equal(existsSync(path), false)
+  })
+
+  test('a failed branch deletion is reported without pretending the release failed', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel6-'), 'wt'),
+    })
+
+    const rel = await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      deleteBranch: true,
+      operations: {
+        deleteBranch: async () => ({ exitCode: 1, stdout: '', stderr: 'branch is protected' }),
+      },
+    })
+
+    assert.equal(rel.worktreeRemoved, true)
+    assert.equal(rel.branchDeleted, false)
+    assert.match(rel.branchRetainedBecause ?? '', /branch is protected/)
+    assert.equal(existsSync(result.claim.worktreePath), false)
+    assert.equal(readClaims(repo).claims[0]?.state, 'released')
   })
 
   test('three claims coexist with no cross-contamination', async () => {
