@@ -185,8 +185,9 @@ export const shipCommand: Command = {
 
     if (!result.ok) {
       const failed = result.stages.find((s) => !s.ok)
+      const hint = failed?.hint ?? hintForStage(failed?.name)
       const err = new AnvilError(ErrorCode.PreflightFailed, failed?.detail ?? 'ship did not complete', {
-        ...(hintForStage(failed?.name) === undefined ? {} : { hint: hintForStage(failed?.name) as string }),
+        ...(hint === undefined ? {} : { hint }),
         details: { stages: result.stages },
       })
       // The stage report is the answer even when a stage failed (the plan says a failed

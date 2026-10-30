@@ -237,6 +237,40 @@ describe('ship: failure at each mutation boundary', () => {
     assert.equal(transport.calls.length, 0)
   })
 
+  test('a diff without a merge base refuses before verify, push, or any provider call', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    // Point the remote-tracking base at an unrelated root commit. The branch still has
+    // commits, but the three-dot diff has no merge base -- the same state a shallow fetch
+    // can produce after the base advances.
+    const unrelated = git(repo, 'commit-tree', 'HEAD^{tree}', '-m', 'unrelated history').trim()
+    git(repo, 'update-ref', 'refs/remotes/origin/main', unrelated)
+
+    let verifyRuns = 0
+    const options = shipOptions(repo, worktreePath, transport)
+    options.run = async () => {
+      verifyRuns += 1
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    const refuse = result.stages.find((s) => s.name === 'refuse')
+    assert.equal(refuse?.ok, false)
+    assert.match(refuse?.detail ?? '', /Cannot compute changed files/)
+    assert.match(refuse?.detail ?? '', /no merge base/)
+    assert.match(refuse?.hint ?? '', /shares history/)
+    assert.equal(verifyRuns, 0, 'the diff failure is a refusal, so verification must not start')
+    assert.equal(
+      result.stages.find((s) => s.name === 'push'),
+      undefined,
+    )
+    assert.equal(transport.calls.length, 0)
+  })
+
   for (const explicitRef of [false, true]) {
     test(`a remote-only base ships with risk analysis and the short PR target (explicit ref: ${explicitRef})`, async () => {
       const { repo } = makeRepoWithOrigin()

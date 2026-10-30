@@ -32,6 +32,7 @@ permissions or runs elevated.
 | Release | Concurrent replacement / launch recording | A new claim or launch metadata is registered after removal but before the release writes state | A replacement claim stays active; metadata added to the original claim survives its state update | `worktrees.test.ts`, "newer claim" and "concurrent launch metadata" |
 | Ship | Refusal | Base branch cannot be resolved | Refuses before verify, push or any provider call | `ship-failures.test.ts`, "unavailable base branch" |
 | Ship | Remote-only base | `origin/release` exists but local `release` does not | Verify and risk analysis use the resolved Git ref; the forge still receives the short PR target `release` | `ship-failures.test.ts`, "remote-only base" |
+| Ship | Changed-file diff | The base and branch have no merge base, as after a shallow fetch advances the base | Refuses before verify, push or any provider call; names the base and asks for the missing history | `ship-failures.test.ts`, "without a merge base" |
 | Ship | Verify | Injected command runner returns non-zero | Stops before push; no transport call is made | `ship-failures.test.ts`, "verify failure" |
 | Ship | Push | Injected transport throws or returns `ok: false` | `push` stage is failed; no PR stage is attempted | `ship-failures.test.ts`, "thrown push" |
 | Ship | Post-push provider read | `findPullRequest` throws | `push` stage is still reported as successful; `pr` stage explains that the remote step already happened | `ship-failures.test.ts`, "provider failure after the push" |
@@ -86,6 +87,9 @@ about what a failure *reports*:
   remote and the user needs to know that.
 - An unresolved base ref refuses before any provider call, rather than deriving an empty
   diff and an empty risk analysis from a failed command.
+- A failed changed-file diff refuses before verification, push or any provider call. It is
+  never treated as an empty change set, because that would hide high-risk paths and
+  CODEOWNERS reviewers. The failure names the base and asks for enough shared history.
 - Git comparisons use the recorded `baseRef`, distinct from the short PR target branch.
   Callers without a recorded ref resolve the remote-tracking branch first. A valid
   remote-only base therefore does not require creating a local branch to ship.

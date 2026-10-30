@@ -15,6 +15,7 @@
  */
 
 import { join } from 'node:path'
+import { AnvilError, ErrorCode } from '@anvil/core'
 import { git, revExists, type WorktreeStatus, worktreeStatus } from '@anvil/git'
 import {
   analyzeRisk,
@@ -90,6 +91,8 @@ export interface ShipStage {
   name: 'refuse' | 'verify' | 'push' | 'pr' | 'ticket'
   ok: boolean
   detail: string
+  /** Actionable recovery guidance, when this stage has a specific remedy. */
+  hint?: string
 }
 
 export interface ShipResult {
@@ -117,7 +120,12 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
 
   // ---- 1. Refuse before anything irreversible ------------------------------
   const refusal = await checkRefusals(options)
-  stages.push({ name: 'refuse', ok: refusal.ok, detail: refusal.detail })
+  stages.push({
+    name: 'refuse',
+    ok: refusal.ok,
+    detail: refusal.detail,
+    ...(refusal.hint === undefined ? {} : { hint: refusal.hint }),
+  })
   if (!refusal.ok) {
     return {
       ok: false,
@@ -201,7 +209,9 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
   }
 
   // ---- 3. What changed, and how risky is it? -------------------------------
-  const changed = await changedPaths(options)
+  // The refusal stage already computed the diff: a failed diff is a refusal, not an
+  // empty change set that would hide risk analysis and CODEOWNERS reviewers.
+  const changed = refusal.changedPaths
   const risk = analyzeRisk(changed, options.profile.risk)
 
   const codeowners = codeownersFor(options.profile, options.read)
@@ -363,6 +373,10 @@ export function inferredVerifyCommands(profile: ProjectProfile): string[] {
 interface Refusal {
   ok: boolean
   detail: string
+  /** Actionable recovery guidance, when this refusal has a specific remedy. */
+  hint?: string
+  /** Changed paths, populated only when the refusal check succeeds. */
+  changedPaths: string[]
 }
 
 /**
@@ -381,6 +395,7 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     return {
       ok: false,
       detail: `The worktree has ${status.changes.length} uncommitted change(s). Ship ships commits, not a working tree.`,
+      changedPaths: [],
     }
   }
 
@@ -393,28 +408,58 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     return {
       ok: false,
       detail: `Cannot resolve base branch ${options.baseBranch} in ${options.worktreePath}: ${head.stderr.trim() || head.stdout.trim() || `exit ${head.exitCode}`}`,
+      changedPaths: [],
     }
   }
   if (head.stdout.trim() === '0') {
     return {
       ok: false,
       detail: `No commits on ${options.branch} beyond ${options.baseBranch}.`,
+      changedPaths: [],
     }
   }
 
-  return { ok: true, detail: 'nothing to refuse' }
+  // The changed-file diff is a precondition for the risk analysis, CODEOWNERS reviewers
+  // and the PR body. A failed diff must never become an empty change set: that would
+  // silently hide high-risk paths and required reviewers before an irreversible push.
+  try {
+    const changed = await changedPaths(options)
+    return { ok: true, detail: 'nothing to refuse', changedPaths: changed }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    const hint = err instanceof AnvilError ? err.hint : undefined
+    return {
+      ok: false,
+      detail,
+      ...(hint === undefined ? {} : { hint }),
+      changedPaths: [],
+    }
+  }
 }
 
-/** Repo-relative paths changed on this branch. */
+/**
+ * Repo-relative paths changed on this branch.
+ *
+ * Throws when Git cannot compute the diff. In particular, an unrelated base and branch
+ * have no merge base, which is common after a shallow fetch advances the base ref.
+ * Treating that failure as an empty diff would bypass risk analysis and reviewers.
+ */
 export async function changedPaths(options: {
   worktreePath: string
   baseBranch: string
   baseRef?: string
 }): Promise<string[]> {
-  const res = await git(['diff', '--name-only', `${options.baseRef ?? options.baseBranch}...HEAD`], {
+  const baseRef = options.baseRef ?? options.baseBranch
+  const res = await git(['diff', '--name-only', `${baseRef}...HEAD`], {
     cwd: options.worktreePath,
   })
-  if (res.exitCode !== 0) return []
+  if (res.exitCode !== 0) {
+    const detail = res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`
+    throw new AnvilError(ErrorCode.PreflightFailed, `Cannot compute changed files against ${baseRef}: ${detail}`, {
+      hint: 'Use a base that shares history with the branch; if the clone is shallow, fetch the missing history (for example, `git fetch --unshallow` or `git fetch --deepen=...`).',
+      details: { baseRef, baseBranch: options.baseBranch, exitCode: res.exitCode },
+    })
+  }
   return res.stdout
     .split('\n')
     .map((p) => p.trim())
