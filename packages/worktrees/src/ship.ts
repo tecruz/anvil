@@ -203,20 +203,46 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   ].sort()
 
   // ---- 4. Push -------------------------------------------------------------
-  const pushed = await options.transport.pushBranch({
-    cwd: options.worktreePath,
-    branch: options.branch,
-  })
+  // The transport is the network boundary. A thrown error is a failed push, not a crash:
+  // the caller needs the stage record to know that nothing reached the remote.
+  let pushed: { ok: boolean; detail: string }
+  try {
+    pushed = await options.transport.pushBranch({
+      cwd: options.worktreePath,
+      branch: options.branch,
+    })
+  } catch (err) {
+    pushed = { ok: false, detail: err instanceof Error ? err.message : String(err) }
+  }
   stages.push({ name: 'push', ok: pushed.ok, detail: pushed.detail })
   if (!pushed.ok) {
     return { ok: false, stages, risk, reviewers, commandsRun }
   }
 
   // ---- 5. Pull request -----------------------------------------------------
-  const existing = await options.transport.findPullRequest({
-    cwd: options.worktreePath,
-    branch: options.branch,
-  })
+  // Reading whether a PR already exists is another provider call. If it fails, the push
+  // already succeeded, and the result must say so rather than losing that fact in a throw.
+  let existing: { number: number; url: string; state: string } | null
+  try {
+    existing = await options.transport.findPullRequest({
+      cwd: options.worktreePath,
+      branch: options.branch,
+    })
+  } catch (err) {
+    stages.push({
+      name: 'pr',
+      ok: false,
+      detail: `push succeeded, but could not read the existing PR: ${err instanceof Error ? err.message : String(err)}`,
+    })
+    return {
+      ok: false,
+      stages,
+      risk,
+      reviewers,
+      ...(verification === undefined ? {} : { verification }),
+      commandsRun,
+    }
+  }
   const body = renderPrBody({
     ticket: options.ticket,
     risk,
@@ -349,7 +375,15 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
   }
 
   const head = await git(['rev-list', '--count', `${options.baseBranch}..HEAD`], { cwd: options.worktreePath })
-  if (head.exitCode === 0 && head.stdout.trim() === '0') {
+  if (head.exitCode !== 0) {
+    // A base ref that cannot be resolved makes the diff, the risk analysis and the PR
+    // target all unreliable. Refusing here is the only answer that does not guess.
+    return {
+      ok: false,
+      detail: `Cannot resolve base branch ${options.baseBranch} in ${options.worktreePath}: ${head.stderr.trim() || head.stdout.trim() || `exit ${head.exitCode}`}`,
+    }
+  }
+  if (head.stdout.trim() === '0') {
     return {
       ok: false,
       detail: `No commits on ${options.branch} beyond ${options.baseBranch}.`,

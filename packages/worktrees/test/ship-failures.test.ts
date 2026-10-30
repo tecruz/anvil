@@ -64,8 +64,10 @@ function baseProfile(root: string): ProjectProfile {
 function recordingTransport(opts: {
   pushOk?: boolean
   pushDetail?: string
+  pushThrows?: boolean
   prOk?: boolean
   prDetail?: string
+  findThrows?: boolean
 }): ForgeTransport & { calls: string[] } {
   const calls: string[] = []
   const transport: ForgeTransport = {
@@ -96,6 +98,18 @@ function recordingTransport(opts: {
     transport.pushBranch = async () => {
       calls.push('push-fail')
       return { ok: false, detail: opts.pushDetail ?? 'push rejected' }
+    }
+  }
+  if (opts.pushThrows === true) {
+    transport.pushBranch = async () => {
+      calls.push('push-throw')
+      throw new Error(opts.pushDetail ?? 'network unavailable')
+    }
+  }
+  if (opts.findThrows === true) {
+    transport.findPullRequest = async () => {
+      calls.push('find-pr-throw')
+      throw new Error(opts.prDetail ?? 'gh timed out')
     }
   }
   return { ...transport, calls }
@@ -171,6 +185,56 @@ describe('ship: failure at each mutation boundary', () => {
       result.stages.find((s) => s.name === 'pr'),
       undefined,
     )
+  })
+
+  test('a thrown push is a failed push stage, not an uncaught crash', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({ pushThrows: true, pushDetail: 'network unavailable' })
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const result = await ship(shipOptions(repo, worktreePath, transport))
+
+    assert.equal(result.ok, false)
+    const push = result.stages.find((s) => s.name === 'push')
+    assert.equal(push?.ok, false)
+    assert.match(push?.detail ?? '', /network unavailable/)
+    assert.equal(
+      result.stages.find((s) => s.name === 'pr'),
+      undefined,
+    )
+  })
+
+  test('a provider failure after the push reports that the push already succeeded', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({ findThrows: true, prDetail: 'gh timed out' })
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const result = await ship(shipOptions(repo, worktreePath, transport))
+
+    assert.equal(result.ok, false)
+    assert.equal(result.stages.find((s) => s.name === 'push')?.ok, true)
+    const pr = result.stages.find((s) => s.name === 'pr')
+    assert.equal(pr?.ok, false)
+    assert.match(pr?.detail ?? '', /push succeeded/)
+    assert.match(pr?.detail ?? '', /gh timed out/)
+    assert.equal(transport.calls.filter((c) => c === 'push:feat/local-1-slug').length, 1)
+    assert.equal(transport.calls.includes('find-pr-throw'), true)
+  })
+
+  test('an unavailable base branch refuses before the transport is called', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const options = shipOptions(repo, worktreePath, transport)
+    options.baseBranch = 'does-not-exist'
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    const refuse = result.stages.find((s) => s.name === 'refuse')
+    assert.equal(refuse?.ok, false)
+    assert.match(refuse?.detail ?? '', /Cannot resolve base branch/)
+    assert.equal(transport.calls.length, 0)
   })
 
   test('push succeeds, PR fails — branch pushed but no PR (documented partial failure)', async () => {
