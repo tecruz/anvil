@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  watch,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { type TestContext, test } from 'node:test'
@@ -10,14 +20,19 @@ import { type CheckBroker, captureCheck, startCheckBroker } from '../eval-check-
 
 const original = "console.error('original-check'); process.exit(1)\n"
 
-async function fixture(t: TestContext, source = original) {
+async function fixture(t: TestContext, source = original, directoryAlias = false) {
   const root = mkdtempSync(join(tmpdir(), 'anvil-check-broker-test-'))
   const trusted = join(root, 'fixture')
-  const workdir = join(root, 'workdir')
+  let workdir = join(root, 'workdir')
   mkdirSync(trusted)
   mkdirSync(workdir)
   writeFileSync(join(trusted, 'run-check.js'), source)
   writeFileSync(join(workdir, 'run-check.js'), source)
+  if (directoryAlias) {
+    const alias = join(root, 'alias')
+    symlinkSync(workdir, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    workdir = alias
+  }
   const check = captureCheck('node run-check.js', 'run-check.js', trusted)
   const broker = await startCheckBroker([check], workdir)
   t.after(async () => {
@@ -27,10 +42,14 @@ async function fixture(t: TestContext, source = original) {
   return { workdir, check, broker }
 }
 
-async function launch(broker: CheckBroker, cwd: string, args: string[]) {
+async function launch(broker: CheckBroker, cwd: string, args: string[], shell = false) {
   const env = { ...process.env, ...broker.env }
   delete env.NODE_TEST_CONTEXT
-  const command = spawnArgv('node', args, { env })
+  const command = shell
+    ? process.platform === 'win32'
+      ? spawnArgv('powershell', ['-NoProfile', '-NonInteractive', '-Command', 'node run-check.js'], { env })
+      : spawnArgv('/bin/sh', ['-c', 'node run-check.js'], { env })
+    : spawnArgv('node', args, { env })
   return await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
     const child = spawn(command.file, command.args, {
       cwd,
@@ -91,6 +110,41 @@ test('same-exit script replacement is rejected and the integrity error survives 
   assert.equal(honest.code, 1)
   assert.equal(broker.executions.length, 1)
   assert.match(broker.integrityError ?? '', /modified a check script/)
+})
+
+test('a declared directory alias and its physical cwd share execution provenance', async (t) => {
+  const { workdir, broker } = await fixture(t, original, true)
+  const result = await launch(broker, realpathSync(workdir), ['./run-check.js'])
+  assert.equal(result.code, 1, result.stderr)
+  assert.match(result.stderr, /original-check/)
+  assert.equal(broker.executions.length, 1, 'the launcher must not fall back to an unrecorded native run')
+})
+
+test('a shell-normalized cwd still routes through the check broker', async (t) => {
+  const { workdir, broker } = await fixture(t, original, true)
+  const cwd = process.platform === 'win32' ? workdir.toUpperCase() : realpathSync(workdir)
+  const result = await launch(broker, cwd, ['run-check.js'], true)
+  assert.equal(result.code, 1, result.stderr)
+  assert.match(result.stderr, /original-check/)
+  assert.equal(broker.executions.length, 1, 'PowerShell/sh must not bypass capture when normalizing the cwd')
+})
+
+test('broker requests accept equivalent directory aliases but reject a different directory', async (t) => {
+  const { workdir, check, broker } = await fixture(t, original, true)
+  for (const cwd of [workdir, realpathSync(workdir)]) {
+    const response = await fetch(endpoint(broker), {
+      method: 'POST',
+      body: JSON.stringify({ command: check.command, cwd }),
+    })
+    assert.equal(response.status, 200, await response.text())
+  }
+  assert.equal(broker.executions.length, 2)
+  const response = await fetch(endpoint(broker), {
+    method: 'POST',
+    body: JSON.stringify({ command: check.command, cwd: tmpdir() }),
+  })
+  assert.equal(response.status, 400)
+  assert.equal(broker.executions.length, 2)
 })
 
 test('a client can request execution but cannot submit source or attest to an exit status', async (t) => {

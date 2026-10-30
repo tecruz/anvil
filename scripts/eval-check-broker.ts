@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -49,6 +49,9 @@ function hashSource(source: string): string {
  * This is a provenance boundary, not an OS sandbox for hostile native processes.
  */
 export async function startCheckBroker(checks: readonly CapturedCheck[], workdir: string): Promise<CheckBroker> {
+  // macOS temporary paths (/var vs /private/var), Windows short names and shell
+  // directory normalization can give the same directory different spellings.
+  const directory = realpathSync.native(workdir)
   const executions: CheckExecution[] = []
   let integrityError: string | null = null
   let closing = false
@@ -75,13 +78,21 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { command?: unknown; cwd?: unknown }
       const check = checks.find((entry) => entry.command === input?.command)
-      if (check === undefined || input?.cwd !== workdir) {
+      let requestDirectory: string | null = null
+      if (typeof input?.cwd === 'string') {
+        try {
+          requestDirectory = realpathSync.native(input.cwd)
+        } catch {
+          // An invalid path is not the scenario directory.
+        }
+      }
+      if (check === undefined || requestDirectory !== directory) {
         reply(response, 400, { error: 'unknown check or working directory' })
         return
       }
       let current: string | null = null
       try {
-        current = readFileSync(join(workdir, check.script), 'utf8')
+        current = readFileSync(join(directory, check.script), 'utf8')
       } catch {
         // A missing script is an integrity failure too.
       }
@@ -93,7 +104,7 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
       // Never accept source, environment, argv or an exit status from the client.
       // The absolute runtime and captured source prevent executable/file swaps and
       // a race between the integrity check above and Node reading the main script.
-      const env: NodeJS.ProcessEnv = { ...process.env, PWD: workdir }
+      const env: NodeJS.ProcessEnv = { ...process.env, PWD: directory }
       for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT', 'ANVIL_EVAL_EXECUTION_LOG'])
         delete env[name]
       let exitCode = 0
@@ -101,7 +112,7 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
       let stderr: string
       try {
         const result = await execFileAsync(process.execPath, ['--input-type=module', '--eval', check.source], {
-          cwd: workdir,
+          cwd: directory,
           env,
           encoding: 'utf8',
           timeout: 30_000,
@@ -167,11 +178,13 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
     const client = join(launcher, 'client.mjs')
     const endpoint = `http://127.0.0.1:${address.port}${route}`
     const script = `import { spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 const checks = ${JSON.stringify(checks.map(({ command, script }) => ({ command, script })))}
-const cwd = ${JSON.stringify(workdir)}
+const cwd = ${JSON.stringify(directory)}
+const actualCwd = realpathSync.native(process.cwd())
 const args = process.argv.slice(2)
-const check = process.cwd() === cwd && args.length === 1
+const check = actualCwd === cwd && args.length === 1
   ? checks.find((entry) => resolve(cwd, args[0]) === resolve(cwd, entry.script)) : undefined
 if (check === undefined) {
   const child = spawn(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' })
@@ -181,7 +194,7 @@ if (check === undefined) {
   try {
     const response = await fetch(${JSON.stringify(endpoint)}, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: check.command, cwd: process.cwd() }),
+      body: JSON.stringify({ command: check.command, cwd: actualCwd }),
       signal: AbortSignal.timeout(35000),
     })
     const result = await response.json()
