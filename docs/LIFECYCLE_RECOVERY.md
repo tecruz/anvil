@@ -1,6 +1,6 @@
 # Lifecycle failure and recovery
 
-Status: **Phase 3 in progress.** This document records the mutation boundaries each
+Status: **Phase 3 complete.** This document records the mutation boundaries each
 operation exposes, how a failure is injected without special privileges, and what the user
 is left with. It is the reference for the Phase 3 acceptance criterion "faults at each
 declared boundary have a documented, tested recovery outcome".
@@ -23,6 +23,7 @@ permissions or runs elevated.
 | Claim | Worktree created, warm-up fails | A committed `.anvil` file makes the context write fail | Removes the worktree and branch it created; registers nothing; no orphan survives | `worktrees.test.ts`, "fails while warming" |
 | Claim | `.anvil` is a link | A directory link replaces the state directory | Refuses before writing; the link target receives nothing, and the worktree and branch are removed | `worktrees.test.ts`, "would write through a linked .anvil" |
 | Claim | Worktree warm, registry write fails | `.anvil/claims.json` is a directory | Removes the worktree and branch; the atomic registry write leaves the previous registry intact | `worktrees.test.ts`, "cannot record itself" |
+| Claim | Concurrent registration from another process | Six real processes append to one registry at the same time | The claims lock serializes read-modify-write; every claim survives and the lock is released | `worktrees.test.ts`, "concurrent registrations" |
 | Release | Worktree removal | `git worktree lock` makes forced removal fail | Worktree, branch and active registry entry all survive; unlocking makes the same release retryable | `worktrees.test.ts`, "locked worktree" |
 | Release | Branch deletion | Injected `git branch -D` failure | Worktree removal is reported as successful; `branchRetainedBecause` names the kept branch | `worktrees.test.ts`, "failed branch deletion" |
 | Release | Registry write | Injected `writeRegistry` failure | Error says whether the worktree was removed; the previous registry survives, so a removed worktree leaves an active claim that `status --orphans` finds | `worktrees.test.ts`, "failed registry write after removal" |
@@ -42,7 +43,9 @@ A claim is one recoverable unit from the successful `git worktree add` until
    `.anvil` is validated as a real directory inside the worktree first; a link or a file is
    refused rather than written through.
 3. Read the runner version, environment notes and upstream state. None of these mutate.
-4. Read, merge and atomically write the claim registry. This is the last fallible step.
+4. Under the repository claims lock, read, merge and atomically write the claim registry.
+   This is the last fallible step. The lock covers the whole read-modify-write cycle, so a
+   claim recorded by another process is never overwritten by a stale snapshot.
 
 If step 2, 3 or 4 fails, the new worktree is force-removed, then the new branch is deleted.
 Only then is the original error rethrown, with `details.cleanedUp` set to `true`. If either
@@ -61,8 +64,10 @@ that the user added.
    has changed at that point, so the claim stays active and the operation is retryable.
 4. Delete the branch only after the worktree is gone. A branch-deletion failure is a
    reported partial result, not a reason to pretend the worktree is still there.
-5. Write the registry atomically. If this fails, the error names whether the worktree was
-   already removed, because that determines whether the user has an orphan to clean up.
+5. Under the claims lock, re-read the registry, replace this claim's entry and write it
+   atomically. Re-reading inside the lock keeps a claim another process made during the
+   release. If the write fails, the error names whether the worktree was already removed,
+   because that determines whether the user has an orphan to clean up.
 
 ## Ship ordering
 
@@ -76,9 +81,23 @@ about what a failure *reports*:
 - An unresolved base ref refuses before any provider call, rather than deriving an empty
   diff and an empty risk analysis from a failed command.
 
-## Known gap
+## Claim registry locking
 
-Two separate `anvil claim` processes can still race on the claim registry: the atomic write
-prevents a truncated file, but not a lost update between the two read-modify-write cycles.
-`anvil crew` is safe because it claims serially in one process. A repository-level registry
-lock is the next Phase 3 change; it is not claimed as fixed here.
+Registry writes are serialized per repository by `withRepoLock`/`withClaimsLock`: a
+pid-stamped lock at `<common-git-dir>/anvil-locks/claims.lock`. Because it lives beside the
+common git dir, claims made from different worktrees of the same repository contend on the
+same file. The lock covers the read, the mutation and the atomic write. `claimTicket`,
+`releaseClaim` and the crew's launch recording all re-read inside it, so a claim recorded
+by another process is never overwritten by a stale snapshot.
+
+The wait is bounded (20 seconds by default). A lock whose recorded pid no longer exists is
+removed by the next waiter; a live owner is never preempted. The file is released in
+`finally`, including when the mutation or the write throws.
+
+This boundary had to be fixed rather than documented: without the lock, six concurrent
+writers read the same registry and then rename their own temp file, which loses updates and
+can even fail the rename with `EPERM` on Windows. The regression test
+`concurrent registrations from separate processes do not lose a claim` starts six real
+child processes against one repository and requires all six claims to be present;
+`a claims lock left by a dead process is broken instead of blocking the next writer` covers
+stale-owner recovery.
