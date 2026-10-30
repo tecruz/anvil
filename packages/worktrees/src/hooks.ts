@@ -21,10 +21,11 @@
  *    one that states its boundary.
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, normalize } from 'node:path'
 import { SHIP_GUARD_ENV } from '@anvil/core'
 import { effectiveHooksDir, enableWorktreeConfig, setWorktreeHooksPath } from '@anvil/git'
+import { checkedStatePath, createStateDirectory } from './state.ts'
 
 /** The directory holding the claim's hooks, inside the claimed worktree. */
 export const PUSH_GUARD_DIR = '.anvil/hooks'
@@ -63,14 +64,13 @@ export async function installPushGuard(options: {
 
   const chained: string[] = []
   try {
-    mkdirSync(hooksDir, { recursive: true })
-
+    const hooks = new Map<string, string>()
     // Dispatch every existing hook except pre-push; it is handled below, after the guard.
     if (previous !== null && existsSync(previous)) {
       for (const entry of readdirSync(previous, { withFileTypes: true })) {
         if (entry.name === PUSH_GUARD_HOOK || entry.name.endsWith('.sample')) continue
         if (!entry.isFile() && !entry.isSymbolicLink()) continue
-        writeHook(join(hooksDir, entry.name), renderChainedHook(join(previous, entry.name)))
+        hooks.set(entry.name, renderChainedHook(join(previous, entry.name)))
         chained.push(entry.name)
       }
     }
@@ -79,13 +79,18 @@ export async function installPushGuard(options: {
     const chainPrePush = previousPrePush !== null && isFile(previousPrePush)
     if (chainPrePush) chained.push(PUSH_GUARD_HOOK)
 
-    writeHook(
-      join(hooksDir, PUSH_GUARD_HOOK),
+    hooks.set(
+      PUSH_GUARD_HOOK,
       renderPrePushHook({
         key: options.key,
         previousHook: chainPrePush ? previousPrePush : null,
       }),
     )
+
+    // Refuse the whole batch before any write or chmod can follow a linked output.
+    for (const name of hooks.keys()) checkedStatePath(options.worktreePath, ['hooks', name])
+    createStateDirectory(options.worktreePath, ['hooks'])
+    for (const [name, content] of hooks) writeHook(join(hooksDir, name), content)
 
     const enabled = await enableWorktreeConfig(options.worktreePath)
     if (enabled.exitCode !== 0) {
