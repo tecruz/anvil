@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { parseOpenCodeRunEvents, run } from '../eval.ts'
+import { isCheckCommand, parseOpenCodeRunEvents, run } from '../eval.ts'
 
 const temps: string[] = []
 after(() => {
@@ -18,22 +18,29 @@ function temp(prefix: string): string {
 }
 
 describe('eval harness process environment', () => {
-  test('parses OpenCode JSON tool events, not prose claims, as executed commands', () => {
+  test('parses OpenCode 2 shell events, with the exit status the tool observed', () => {
+    // The exact shape `@opencode/cli@2.1.4` writes: the tool is named `shell`, and
+    // the structured output -- including the exit status -- sits under
+    // `state.metadata.metadata`.
     const output = [
       JSON.stringify({ type: 'text', part: { type: 'text', text: 'node' } }),
       JSON.stringify({
         type: 'tool_use',
         part: {
           type: 'tool',
-          tool: 'bash',
-          state: { status: 'completed', input: { command: 'node run-check.js' } },
+          tool: 'shell',
+          state: {
+            status: 'completed',
+            input: { command: 'node run-check.js' },
+            metadata: { metadata: { status: 'completed', truncated: false, exit: 1 } },
+          },
         },
       }),
       JSON.stringify({
         type: 'tool_use',
         part: {
           type: 'tool',
-          tool: 'bash',
+          tool: 'shell',
           state: { status: 'running', input: { command: 'node not-completed.js' } },
         },
       }),
@@ -49,8 +56,55 @@ describe('eval harness process environment', () => {
 
     assert.deepEqual(parseOpenCodeRunEvents(output), {
       text: 'node',
-      completedCommands: ['node run-check.js'],
+      executions: [{ command: 'node run-check.js', exitCode: 1 }],
     })
+  })
+
+  test('parses OpenCode 1 bash events, which report the exit status one level up', () => {
+    const output = [
+      JSON.stringify({
+        type: 'tool',
+        part: {
+          type: 'tool',
+          tool: 'bash',
+          state: {
+            status: 'completed',
+            input: { command: 'node run-check.js' },
+            metadata: { output: '(no output)', exit: 1, truncated: false },
+          },
+        },
+      }),
+    ].join('\n')
+
+    assert.deepEqual(parseOpenCodeRunEvents(output).executions, [{ command: 'node run-check.js', exitCode: 1 }])
+  })
+
+  test('a shell event with no readable exit status is reported as unknown, not as a pass', () => {
+    const output = JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'shell',
+        state: { status: 'completed', input: { command: 'node run-check.js' } },
+      },
+    })
+
+    assert.deepEqual(parseOpenCodeRunEvents(output).executions, [{ command: 'node run-check.js', exitCode: null }])
+  })
+
+  test('the check command is matched on its arguments, not on its spelling', () => {
+    assert.equal(isCheckCommand('node run-check.js', 'node run-check.js'), true)
+    assert.equal(isCheckCommand('node run-check.js', 'node ./run-check.js'), true)
+    assert.equal(isCheckCommand('node run-check.js', 'node  run-check.js'), true)
+    assert.equal(isCheckCommand('node run-check.js', 'node "run-check.js"'), true)
+
+    // A different script, an extra argument, or a compound command is a different
+    // command: the exit status of a compound is the status of its last part.
+    assert.equal(isCheckCommand('node run-check.js', 'node other-check.js'), false)
+    assert.equal(isCheckCommand('node run-check.js', 'node run-check.js --force'), false)
+    assert.equal(isCheckCommand('node run-check.js', 'node run-check.js && echo done'), false)
+    assert.equal(isCheckCommand('node run-check.js', 'echo node run-check.js'), false)
+    assert.equal(isCheckCommand('node run-check.js', ''), false)
   })
 
   test('run sets PWD to the subprocess cwd, not the inherited PWD', async () => {

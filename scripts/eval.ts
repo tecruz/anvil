@@ -174,6 +174,40 @@ const SMOKE_SCENARIO_IDS: ReadonlySet<string> = new Set([
 /** Where the task is written inside the prepared repository. */
 const TASK_FILE = '.anvil-eval-task.md'
 
+/**
+ * The tool names OpenCode has used for its shell tool.
+ *
+ * OpenCode 2 renamed `bash` to `shell`. The benchmark pins one version and a
+ * developer's machine may carry the other, so the harness reads both. A tool the
+ * harness does not recognise is not a shell execution, and is ignored.
+ */
+const SHELL_TOOL_NAMES = new Set(['shell', 'bash'])
+
+/**
+ * Where a completed shell tool reports its exit status, per OpenCode version.
+ *
+ * The paths are relative to the tool state's `metadata` object. OpenCode 2 nests the
+ * tool's structured output one level deeper (`state.metadata.metadata.exit`);
+ * OpenCode 1 put it directly under `state.metadata.exit`. Both are read, and a status
+ * that is in neither place is reported as absent rather than guessed at.
+ */
+const EXIT_STATUS_PATHS: readonly (readonly string[])[] = [['metadata', 'exit'], ['exit']]
+
+/** One shell command the agent's tool ran, with the status that command produced. */
+export interface AgentExecution {
+  /** The command string the tool ran, verbatim. */
+  command: string
+  /**
+   * The exit status OpenCode observed for that command, or null when the event
+   * carries none.
+   *
+   * Null is not a pass. The harness compares this number with its own replay, and a
+   * command whose status cannot be read cannot be compared, so it is not accepted as
+   * evidence.
+   */
+  exitCode: number | null
+}
+
 interface RunResult {
   ok: boolean
   code: number | null
@@ -194,6 +228,17 @@ export interface ScenarioResult extends EvalResultSummary {
   /** What the verifier said, so a failure can be read rather than guessed at. */
   verifyOutput?: string
   error?: string
+}
+
+/**
+ * Record a failure on a result without discarding the one already there.
+ *
+ * A run can fail for more than one reason at once: an agent that exits non-zero and
+ * leaves no execution evidence behind has two, and the second finding is not less
+ * true because the first one was reported first.
+ */
+function addError(result: ScenarioResult, message: string): void {
+  result.error = result.error === undefined ? message : `${result.error}; ${message}`
 }
 
 async function main(): Promise<void> {
@@ -708,7 +753,7 @@ async function runScenario(
     // behaviour for anvil's safety check, and the answer is not to pass prose as argv.
     const taskFile = join(workdir, TASK_FILE)
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
-    let agentExecutionCommands: string[] = []
+    let agentExecutions: AgentExecution[] = []
 
     if (fake) {
       // A canned answer can include actions, not only files. Running them here is what
@@ -753,14 +798,14 @@ async function runScenario(
         env: agentEnv,
       })
       const agentEvents = parseOpenCodeRunEvents(agent.stdout)
-      agentExecutionCommands = agentEvents.completedCommands
+      agentExecutions = agentEvents.executions
       result.transcript = publishTranscripts
         ? limitTranscript(redactTranscript(`${agentEvents.text}\n${agent.stderr}`.trim()))
         : ''
       if (agent.timedOut) {
-        result.error = 'the agent timed out'
+        addError(result, 'the agent timed out')
       } else if (!agent.ok) {
-        result.error = `the agent exited with code ${agent.code ?? '?'}`
+        addError(result, `the agent exited with code ${agent.code ?? '?'}`)
       }
     }
 
@@ -776,37 +821,52 @@ async function runScenario(
         : scenario.solutionRun !== undefined
           ? [scenario.solutionRun]
           : []
-      const executedChecks = agentExecutionCommands.filter((command) =>
-        checkCommands.some((expected) => command.trim() === expected),
+      // The agent's own executions of each check, in the order the tool ran them.
+      // These come from OpenCode's events, not from anything the agent wrote, so the
+      // agent cannot edit them into existence.
+      const observedRuns = checkCommands.map((expected) =>
+        agentExecutions.filter((execution) => isCheckCommand(expected, execution.command)),
       )
-      if (checkCommands.length === 0 || !checkCommands.every((expected) => executedChecks.includes(expected))) {
-        result.error =
-          'the agent did not execute the required check command; a report without execution evidence is not evidence'
+      if (checkCommands.length === 0) {
+        addError(result, 'the scenario declares no check command, so there is no execution evidence to collect')
+      } else if (observedRuns.some((runs) => runs.length === 0)) {
+        addError(
+          result,
+          `the agent did not run ${checkCommands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
+        )
       } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
-        result.error = 'the agent modified a check or verifier script; execution evidence is invalid'
+        addError(result, 'the agent modified a check or verifier script; execution evidence is invalid')
       } else {
         // The completed tool event proves the agent invoked the exact check. Rerun
         // the unchanged script under harness control to record its real exit status;
         // its self-reported log goes to a dummy path and is never accepted.
         const dummyEnv = { ...executionEnv, ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'dummy.jsonl') }
-        const actions = await runAll(checkCommands, workdir, dummyEnv)
-        // Write harness-owned evidence from the actual exits, not from a script
-        // that the agent could have edited to lie about its exit code.
-        const logPath = join(executionDir, 'executions.jsonl')
-        for (let i = 0; i < actions.length; i += 1) {
-          const cmd = checkCommands[i] ?? checkCommands[0]!
-          const action = actions[i]!
-          appendFileSync(
-            logPath,
-            `${JSON.stringify({
-              command: cmd,
-              exitCode: action.ok ? 0 : (action.code ?? 1),
-              at: new Date().toISOString(),
-            })}\n`,
-            'utf8',
-          )
+        const replays = await replayCommands(checkCommands, workdir, dummyEnv)
+        // The exit status the agent's own run produced has to agree with the replay.
+        // Without this, an agent could replace the check with one that exits 0, run
+        // it, restore the original, and report the outcome the restored script would
+        // have produced: the replay's exit code, not the one it actually saw.
+        const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, replays)
+        if (disagreement !== null) {
+          addError(result, disagreement)
+        } else {
+          // Write harness-owned evidence from the actual exits, not from a script
+          // that the agent could have edited to lie about its exit code.
+          const logPath = join(executionDir, 'executions.jsonl')
+          for (let i = 0; i < checkCommands.length; i += 1) {
+            const replay = replays[i]!
+            appendFileSync(
+              logPath,
+              `${JSON.stringify({
+                command: checkCommands[i],
+                exitCode: replay.ok ? 0 : (replay.code ?? 1),
+                at: new Date().toISOString(),
+              })}\n`,
+              'utf8',
+            )
+          }
+          result.verifyOutput = replays.map((r) => r.output).join('\n')
         }
-        result.verifyOutput = actions.map((a) => a.output).join('\n')
       }
     }
 
@@ -865,10 +925,35 @@ async function runScenario(
   return result
 }
 
-/** Extract text and completed shell commands from OpenCode's `run --format json` stream. */
-export function parseOpenCodeRunEvents(output: string): { text: string; completedCommands: string[] } {
+/** Read a number at a path through an unknown value, or null when it is not there. */
+function numberAtPath(source: unknown, path: readonly string[]): number | null {
+  let current: unknown = source
+  for (const key of path) {
+    if (current === null || typeof current !== 'object') return null
+    current = (current as Record<string, unknown>)[key]
+  }
+  return typeof current === 'number' && Number.isFinite(current) ? current : null
+}
+
+/** The exit status a completed shell tool reported, whichever OpenCode version wrote it. */
+function readExitStatus(metadata: unknown): number | null {
+  for (const path of EXIT_STATUS_PATHS) {
+    const value = numberAtPath(metadata, path)
+    if (value !== null) return value
+  }
+  return null
+}
+
+/**
+ * Extract text and completed shell executions from OpenCode's `run --format json` stream.
+ *
+ * Only the tool's own events count. The prose an agent writes is not evidence of
+ * anything, and neither is a report the agent left in the worktree: this reads what
+ * OpenCode says it ran and what that run returned.
+ */
+export function parseOpenCodeRunEvents(output: string): { text: string; executions: AgentExecution[] } {
   const text: string[] = []
-  const completedCommands: string[] = []
+  const executions: AgentExecution[] = []
   for (const line of output.split(/\r?\n/)) {
     if (line.trim() === '') continue
     let event: unknown
@@ -880,24 +965,112 @@ export function parseOpenCodeRunEvents(output: string): { text: string; complete
     if (event === null || typeof event !== 'object') continue
     const record = event as {
       type?: unknown
-      part?: { type?: unknown; text?: unknown; tool?: unknown; state?: { status?: unknown; input?: unknown } }
+      part?: {
+        type?: unknown
+        text?: unknown
+        tool?: unknown
+        state?: { status?: unknown; input?: unknown; metadata?: unknown }
+      }
     }
     if (record.type === 'text' && record.part?.type === 'text' && typeof record.part.text === 'string') {
       text.push(record.part.text)
     }
-    if (
-      record.type === 'tool_use' &&
-      record.part?.type === 'tool' &&
-      record.part.tool === 'bash' &&
-      record.part.state?.status === 'completed' &&
-      record.part.state.input !== null &&
-      typeof record.part.state.input === 'object'
-    ) {
-      const input = record.part.state.input as { command?: unknown }
-      if (typeof input.command === 'string') completedCommands.push(input.command)
+    // OpenCode 2 emits `tool_use` events; OpenCode 1 emits `tool` events. Both carry
+    // the tool part under `part`, and both report a shell run that finished as
+    // `completed` -- including a command that exited non-zero, which is a completed
+    // run with a failing status, not a failed run.
+    if (record.type !== 'tool_use' && record.type !== 'tool') continue
+    if (record.part?.type !== 'tool') continue
+    if (typeof record.part.tool !== 'string' || !SHELL_TOOL_NAMES.has(record.part.tool)) continue
+    if (record.part.state?.status !== 'completed') continue
+    const input = record.part.state.input
+    if (input === null || typeof input !== 'object') continue
+    const command = (input as { command?: unknown }).command
+    if (typeof command !== 'string') continue
+    executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+  }
+  return { text: text.join('\n'), executions }
+}
+
+/**
+ * Whether a command the agent ran is the scenario's check command.
+ *
+ * The comparison is on the argument vector, not on the raw string, so a model that
+ * writes `node ./run-check.js` or pads the whitespace is recognised as having run
+ * the same check. Anything that changes the arguments -- an extra flag, a different
+ * script, a compound command -- is a different command, and is not evidence: the
+ * exit status of `node run-check.js && echo done` is the status of `echo`.
+ *
+ * Accepting an equivalent spelling does not weaken the evidence. The harness still
+ * replays the canonical command itself and requires the agent's own exit status to
+ * agree with it.
+ */
+export function isCheckCommand(expected: string, actual: string): boolean {
+  const want = tokenizeCommand(expected)
+  const got = tokenizeCommand(actual)
+  if (want.length === 0 || want.length !== got.length) return false
+  return want.every((arg, index) => normalizeCommandArgument(arg) === normalizeCommandArgument(got[index] as string))
+}
+
+/** `./run-check.js` and `run-check.js` name the same file. */
+function normalizeCommandArgument(arg: string): string {
+  return arg.replace(/^\.\//, '').replace(/\\/g, '/')
+}
+
+/**
+ * Run each check command under harness control, keeping every result aligned with
+ * the command it came from.
+ *
+ * `runAll` drops a command it cannot parse, which would shift the remaining results
+ * one place along the list. The evidence log pairs each result with its command, so
+ * the alignment has to hold even for a command that cannot run.
+ */
+async function replayCommands(commands: readonly string[], cwd: string, env: NodeJS.ProcessEnv): Promise<RunResult[]> {
+  const out: RunResult[] = []
+  for (const command of commands) {
+    const [bin, ...rest] = tokenizeCommand(command)
+    if (bin === undefined) {
+      const message = `the check command is empty: ${JSON.stringify(command)}`
+      out.push({ ok: false, code: null, stdout: '', stderr: message, timedOut: false, output: message })
+      continue
+    }
+    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000, env }))
+  }
+  return out
+}
+
+/**
+ * Find the first check whose agent-observed outcome disagrees with the harness's replay.
+ *
+ * The exit status is the one part of the evidence the agent cannot write: OpenCode
+ * reports it from the process it ran, and no report or worktree file can turn a
+ * command that exited 0 into one that exited 1. Requiring the two to agree is what
+ * stops "replace the check, run it, restore it, report the restored result".
+ *
+ * The last observed run of each command is the one compared, because that is the run
+ * whose result the agent was holding when it wrote its report.
+ */
+function findEvidenceDisagreement(
+  commands: readonly string[],
+  observedRuns: readonly (readonly AgentExecution[])[],
+  replays: readonly RunResult[],
+): string | null {
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index] as string
+    const observed = observedRuns[index]?.at(-1)
+    const replay = replays[index]
+    if (observed === undefined || replay === undefined) {
+      return `the harness could not replay ${JSON.stringify(command)}; execution evidence is incomplete`
+    }
+    if (observed.exitCode === null) {
+      return `the agent's execution of ${JSON.stringify(command)} reported no exit status; execution evidence cannot be verified`
+    }
+    const replayedExit = replay.ok ? 0 : (replay.code ?? 1)
+    if (observed.exitCode !== replayedExit) {
+      return `the agent's execution of ${JSON.stringify(command)} exited with ${observed.exitCode}, but the unchanged check exits with ${replayedExit}; execution evidence does not match the check`
     }
   }
-  return { text: text.join('\n'), completedCommands }
+  return null
 }
 
 /** Ensure the agent did not alter the check or visible verifier before harness replay. */

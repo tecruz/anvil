@@ -73,6 +73,11 @@ export interface EvalScenario {
    * is never exposed to the agent; an agent-writable path is forgeable by construction.
    * Verifiers read the log from `ANVIL_EVAL_EXECUTION_LOG` in their own harness-provided
    * environment.
+   *
+   * The evidence is the agent's own tool events: the harness replays the check
+   * itself, and the exit status the agent's run produced has to agree with the
+   * replay. A report alone is not evidence, and a run whose outcome the agent did
+   * not see is not evidence either.
    */
   captureExecution?: boolean
   /** How long the agent gets. */

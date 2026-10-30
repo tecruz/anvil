@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
 import { test } from 'node:test'
@@ -44,12 +44,14 @@ if (process.argv.includes('--version')) {
   process.exit(0)
 }
 
+const mode = process.env.EVAL_AGENT_MODE
+
 appendFileSync(process.env.EVAL_AGENT_TRACE, JSON.stringify({
   executionLogEnv: process.env.ANVIL_EVAL_EXECUTION_LOG ?? null,
-  mode: process.env.EVAL_AGENT_MODE,
+  mode: mode,
 }) + '\\n')
 
-if (process.env.EVAL_AGENT_MODE === 'report-only') {
+if (mode === 'report-only') {
   if (process.env.EVAL_FORGED_LOG) {
     appendFileSync(process.env.EVAL_FORGED_LOG, JSON.stringify({
       command: 'node run-check.js', exitCode: 1, at: new Date().toISOString(),
@@ -57,19 +59,43 @@ if (process.env.EVAL_AGENT_MODE === 'report-only') {
   }
   console.log(JSON.stringify({ type: 'text', part: { type: 'text', text: 'node' } }))
 } else {
-  if (process.env.EVAL_AGENT_MODE === 'modified-check') {
+  if (mode === 'modified-check') {
     writeFileSync('run-check.js', "console.error('forged'); process.exit(0)\\n")
   }
-  if (process.env.EVAL_AGENT_MODE === 'honest') {
+  let exitCode
+  if (mode === 'transient-check') {
+    // Run a check that exits 0, then put the original back. The tool reports the
+    // status it actually saw, so the harness can tell this apart from an honest run
+    // that saw the restored check fail.
+    const original = readFileSync('run-check.js')
+    writeFileSync('run-check.js', "console.error('forged'); process.exit(0)\\n")
     const result = spawnSync(process.execPath, ['run-check.js'], { encoding: 'utf8' })
-    if (result.status !== 1) process.exit(3)
+    writeFileSync('run-check.js', original)
+    exitCode = result.status
+  } else if (mode === 'chained-command') {
+    // The check runs, but the command it is part of reports the status of its last
+    // part, not the check's. There is no exit status to attribute to the check.
+    exitCode = 0
+  } else {
+    const result = spawnSync(process.execPath, ['run-check.js'], { encoding: 'utf8' })
+    if (mode === 'honest' && result.status !== 1) process.exit(3)
+    exitCode = result.status
   }
+  // The event shape '@opencode/cli@2.1.4' writes: the tool is named 'shell', and the
+  // exit status sits under state.metadata.metadata.
+  const command = mode === 'chained-command'
+    ? 'node run-check.js; echo "EXIT_CODE=$LASTEXITCODE"'
+    : 'node run-check.js'
   console.log(JSON.stringify({
     type: 'tool_use',
     part: {
       type: 'tool',
-      tool: 'bash',
-      state: { status: 'completed', input: { command: 'node run-check.js' } },
+      tool: 'shell',
+      state: {
+        status: 'completed',
+        input: { command },
+        metadata: { metadata: { status: 'completed', truncated: false, exit: exitCode } },
+      },
     },
   }))
 }
@@ -80,7 +106,17 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
 `,
       'utf8',
     )
+
+    // The mock has to be launchable the way the real CLI is: a `.cmd` shim on Windows,
+    // a plain executable on POSIX. Without the POSIX launcher the lookup finds no
+    // `opencode` at all, and on a machine that has one it would find the real CLI
+    // instead of the mock.
     writeFileSync(join(bin, 'opencode.cmd'), `@echo off\r\n"${process.execPath}" "${mockAgent}" %*\r\n`, 'utf8')
+    const posixLauncher = join(bin, 'opencode')
+    writeFileSync(posixLauncher, `#!/bin/sh\nexec "${process.execPath}" "${mockAgent}" "$@"\n`, 'utf8')
+    // The executable bit is what makes the POSIX launcher runnable; without it the
+    // lookup finds the file and the spawn fails with a permission error.
+    chmodSync(posixLauncher, 0o755)
 
     const env = { ...process.env }
     delete env.Path
@@ -91,7 +127,7 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
     env.TEMP = runtime
     env.ANVIL_EVAL = '1'
 
-    for (const mode of ['report-only', 'honest', 'modified-check']) {
+    for (const mode of ['report-only', 'honest', 'modified-check', 'transient-check', 'chained-command']) {
       const trace = join(workspace, `${mode}.jsonl`)
       const forgedLog = join(workspace, `${mode}-forged.jsonl`)
       const result = spawnSync(
@@ -122,9 +158,30 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
         if (mode === 'honest') {
           assert.equal(result.verified, true, `${result.variant}: ${result.error ?? 'visible verifier failed'}`)
           assert.equal(result.hiddenVerified, true, `${result.variant}: ${result.error ?? 'hidden verifier failed'}`)
+          assert.equal(result.error, undefined, `${result.variant}: ${result.error}`)
         } else {
           assert.equal(result.verified, false, `${mode} must not pass visible verification`)
           assert.equal(result.hiddenVerified, false, `${mode} must not pass hidden verification`)
+        }
+      }
+      if (mode === 'modified-check') {
+        for (const result of record.results) {
+          assert.match(result.error ?? '', /modified a check or verifier script/)
+        }
+      }
+      if (mode === 'transient-check') {
+        // The check was restored, so only the exit status the agent's own run
+        // produced can tell the truth here.
+        for (const result of record.results) {
+          assert.match(result.error ?? '', /exited with 0/)
+          assert.match(result.error ?? '', /exits with 1/)
+        }
+      }
+      if (mode === 'chained-command') {
+        // A command the check is part of reports the status of its last part, so
+        // there is no exit status to attribute to the check itself.
+        for (const result of record.results) {
+          assert.match(result.error ?? '', /as a command on its own/)
         }
       }
 
