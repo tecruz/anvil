@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
 import { claimTicket } from '@anvil/worktrees'
-import { type ForgeTransport, ship } from '@anvil/worktrees/ship'
+import { type ForgeTransport, type ShipOptions, ship } from '@anvil/worktrees/ship'
 
 const temps: string[] = []
 after(() => {
@@ -115,7 +115,7 @@ function recordingTransport(opts: {
   return { ...transport, calls }
 }
 
-function shipOptions(repo: string, worktree: string, transport: ForgeTransport) {
+function shipOptions(repo: string, worktree: string, transport: ForgeTransport): ShipOptions {
   return {
     repoRoot: repo,
     worktreePath: worktree,
@@ -264,6 +264,73 @@ describe('ship: failure at each mutation boundary', () => {
     assert.match(refuse?.detail ?? '', /no merge base/)
     assert.match(refuse?.hint ?? '', /shares history/)
     assert.equal(verifyRuns, 0, 'the diff failure is a refusal, so verification must not start')
+    assert.equal(
+      result.stages.find((s) => s.name === 'push'),
+      undefined,
+    )
+    assert.equal(transport.calls.length, 0)
+  })
+
+  test('a commit created during verification is analyzed before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    // Committed before shipping, so the late commit is the only thing the diff gains
+    // while verification runs.
+    writeFileSync(join(worktreePath, 'CODEOWNERS'), 'late.txt @security\n', 'utf8')
+    git(worktreePath, 'add', 'CODEOWNERS')
+    git(worktreePath, 'commit', '-m', 'owners')
+
+    const options = shipOptions(repo, worktreePath, transport)
+    options.profile.docs.codeowners = 'CODEOWNERS'
+    options.profile.risk = [{ glob: 'late.txt', level: 'high', reason: 'late change', origin: 'heuristic' }]
+    options.read = (rel) => {
+      try {
+        return readFileSync(join(worktreePath, rel), 'utf8')
+      } catch {
+        return null
+      }
+    }
+    options.run = async () => {
+      writeFileSync(join(worktreePath, 'late.txt'), 'late change\n', 'utf8')
+      git(worktreePath, 'add', 'late.txt')
+      git(worktreePath, 'commit', '-m', 'commit during verification')
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.equal(result.stages.find((s) => s.name === 'diff')?.ok, true)
+    assert.deepEqual(result.risk.highPaths, ['late.txt'], 'risk analysis must see the pushed tree')
+    assert.deepEqual(result.reviewers, ['@security'], 'reviewers must see the pushed tree too')
+    assert.equal(transport.calls.filter((c) => c.startsWith('push')).length, 1)
+  })
+
+  test('a diff that fails after verification stops the ship before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const unrelated = git(repo, 'commit-tree', 'HEAD^{tree}', '-m', 'unrelated history').trim()
+    let verifyRuns = 0
+    const options = shipOptions(repo, worktreePath, transport)
+    options.run = async () => {
+      verifyRuns += 1
+      // The early check saw a shared base; the base moves before the recomputation.
+      git(repo, 'update-ref', 'refs/remotes/origin/main', unrelated)
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(verifyRuns, 1)
+    assert.equal(result.ok, false)
+    const diff = result.stages.find((s) => s.name === 'diff')
+    assert.equal(diff?.ok, false)
+    assert.match(diff?.detail ?? '', /no merge base/)
+    assert.match(diff?.hint ?? '', /shares history/)
     assert.equal(
       result.stages.find((s) => s.name === 'push'),
       undefined,

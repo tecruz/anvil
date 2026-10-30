@@ -32,7 +32,8 @@ permissions or runs elevated.
 | Release | Concurrent replacement / launch recording | A new claim or launch metadata is registered after removal but before the release writes state | A replacement claim stays active; metadata added to the original claim survives its state update | `worktrees.test.ts`, "newer claim" and "concurrent launch metadata" |
 | Ship | Refusal | Base branch cannot be resolved | Refuses before verify, push or any provider call | `ship-failures.test.ts`, "unavailable base branch" |
 | Ship | Remote-only base | `origin/release` exists but local `release` does not | Verify and risk analysis use the resolved Git ref; the forge still receives the short PR target `release` | `ship-failures.test.ts`, "remote-only base" |
-| Ship | Changed-file diff | The base and branch have no merge base, as after a shallow fetch advances the base | Refuses before verify, push or any provider call; names the base and asks for the missing history | `ship-failures.test.ts`, "without a merge base" |
+| Ship | Changed-file diff | The base and branch have no merge base, as after a shallow fetch advances the base | The early validation refuses before verify; a failure of the post-verify recomputation is a failed `diff` stage. Neither reaches push or any provider call; both name the base and ask for the missing history | `ship-failures.test.ts`, "without a merge base" and "fails after verification" |
+| Ship | Changed-file diff recomputation | A commit is created or the base ref moves while verification runs | Risk analysis and CODEOWNERS reviewers use the diff recomputed after verification, so the pushed tree is the tree described | `ship-failures.test.ts`, "commit created during verification" |
 | Ship | Verify | Injected command runner returns non-zero | Stops before push; no transport call is made | `ship-failures.test.ts`, "verify failure" |
 | Ship | Push | Injected transport throws or returns `ok: false` | `push` stage is failed; no PR stage is attempted | `ship-failures.test.ts`, "thrown push" |
 | Ship | Post-push provider read | `findPullRequest` throws | `push` stage is still reported as successful; `pr` stage explains that the remote step already happened | `ship-failures.test.ts`, "provider failure after the push" |
@@ -78,8 +79,8 @@ that the user added.
 
 ## Ship ordering
 
-The irreversible ordering is unchanged: refuse, verify, push, PR, ticket. The additions are
-about what a failure *reports*:
+The irreversible ordering is unchanged: refuse, verify, diff, push, PR, ticket. The
+additions are about what a failure *reports*:
 
 - A thrown provider call is converted into a failed stage, so the caller still receives the
   stages that succeeded.
@@ -87,9 +88,11 @@ about what a failure *reports*:
   remote and the user needs to know that.
 - An unresolved base ref refuses before any provider call, rather than deriving an empty
   diff and an empty risk analysis from a failed command.
-- A failed changed-file diff refuses before verification, push or any provider call. It is
-  never treated as an empty change set, because that would hide high-risk paths and
-  CODEOWNERS reviewers. The failure names the base and asks for enough shared history.
+- The changed-file diff is validated before verification and recomputed after it, so a
+  commit created while checks run is included in the risk analysis and CODEOWNERS
+  reviewers. It is never treated as an empty change set. A failed validation refuses
+  before verify; a failed recomputation is a failed `diff` stage; neither reaches push or
+  any provider call, and both name the base and ask for enough shared history.
 - Git comparisons use the recorded `baseRef`, distinct from the short PR target branch.
   Callers without a recorded ref resolve the remote-tracking branch first. A valid
   remote-only base therefore does not require creating a local branch to ship.

@@ -70,7 +70,7 @@ export const shipCommand: Command = {
   summary: 'Verify, push, open a pull request, and update the ticket.',
   usage: 'anvil ship <key> [--draft] [--probe] [--skip-verify] [--reviewers a,b]',
   details: [
-    'Order matters and is deliberate: refuse, verify, push, pull request, ticket. The',
+    'Order matters and is deliberate: refuse, verify, diff, push, pull request, ticket. The',
     'stages that could lose work or leave debris on the remote run last, so a failed',
     'verification means nothing reached the remote at all.',
     '',
@@ -236,6 +236,8 @@ function hintForStage(stage: string | undefined): string | undefined {
       return 'Commit your work in the worktree, or re-claim the ticket.'
     case 'verify':
       return 'Fix the failing command, or re-run with --skip-verify if it is not a real signal.'
+    case 'diff':
+      return 'Fetch the missing history, or choose a base that shares history with the branch.'
     case 'push':
       return 'Check the remote and your credentials: git push -u origin <branch>.'
     case 'pr':

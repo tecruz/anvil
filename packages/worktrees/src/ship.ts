@@ -10,8 +10,8 @@
  *     arrives as one implementation of it.
  *  2. **Every stage can stop the ship, and says why.** A pipeline that pushes first and
  *     verifies later leaves a branch on the remote when the work is broken. Order is
- *     therefore: refuse, verify, push, PR, ticket — and the stages that can lose work run
- *     last.
+ *     therefore: refuse, verify, diff, push, PR, ticket — and the stages that can lose work
+ *     run last.
  */
 
 import { join } from 'node:path'
@@ -88,7 +88,7 @@ export interface ShipOptions {
 }
 
 export interface ShipStage {
-  name: 'refuse' | 'verify' | 'push' | 'pr' | 'ticket'
+  name: 'refuse' | 'verify' | 'diff' | 'push' | 'pr' | 'ticket'
   ok: boolean
   detail: string
   /** Actionable recovery guidance, when this stage has a specific remedy. */
@@ -209,9 +209,27 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
   }
 
   // ---- 3. What changed, and how risky is it? -------------------------------
-  // The refusal stage already computed the diff: a failed diff is a refusal, not an
-  // empty change set that would hide risk analysis and CODEOWNERS reviewers.
-  const changed = refusal.changedPaths
+  // Recompute after verification: a check command, or an agent working beside it, can
+  // create a commit while verify runs. The push sends the post-verification tree, so the
+  // risk analysis and CODEOWNERS reviewers must describe that same tree. The earlier
+  // check in checkRefusals only proves the diff can be computed at all.
+  let changed: string[]
+  try {
+    changed = await changedPaths(options)
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    const hint = err instanceof AnvilError ? err.hint : undefined
+    stages.push({ name: 'diff', ok: false, detail, ...(hint === undefined ? {} : { hint }) })
+    return {
+      ok: false,
+      stages,
+      risk: { touched: [], highPaths: [], mediumPaths: [], level: null },
+      reviewers: [],
+      verification,
+      commandsRun,
+    }
+  }
+  stages.push({ name: 'diff', ok: true, detail: `${changed.length} file(s) changed against ${options.baseRef}` })
   const risk = analyzeRisk(changed, options.profile.risk)
 
   const codeowners = codeownersFor(options.profile, options.read)
@@ -375,8 +393,6 @@ interface Refusal {
   detail: string
   /** Actionable recovery guidance, when this refusal has a specific remedy. */
   hint?: string
-  /** Changed paths, populated only when the refusal check succeeds. */
-  changedPaths: string[]
 }
 
 /**
@@ -395,7 +411,6 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     return {
       ok: false,
       detail: `The worktree has ${status.changes.length} uncommitted change(s). Ship ships commits, not a working tree.`,
-      changedPaths: [],
     }
   }
 
@@ -408,23 +423,20 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     return {
       ok: false,
       detail: `Cannot resolve base branch ${options.baseBranch} in ${options.worktreePath}: ${head.stderr.trim() || head.stdout.trim() || `exit ${head.exitCode}`}`,
-      changedPaths: [],
     }
   }
   if (head.stdout.trim() === '0') {
     return {
       ok: false,
       detail: `No commits on ${options.branch} beyond ${options.baseBranch}.`,
-      changedPaths: [],
     }
   }
 
-  // The changed-file diff is a precondition for the risk analysis, CODEOWNERS reviewers
-  // and the PR body. A failed diff must never become an empty change set: that would
-  // silently hide high-risk paths and required reviewers before an irreversible push.
+  // Validate the changed-file diff before running verification, so an impossible diff
+  // does not cost a full test run. The result is discarded: step 3 recomputes it after
+  // verification, and the recomputation is what risk analysis and reviewers consume.
   try {
-    const changed = await changedPaths(options)
-    return { ok: true, detail: 'nothing to refuse', changedPaths: changed }
+    await changedPaths(options)
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     const hint = err instanceof AnvilError ? err.hint : undefined
@@ -432,9 +444,10 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
       ok: false,
       detail,
       ...(hint === undefined ? {} : { hint }),
-      changedPaths: [],
     }
   }
+
+  return { ok: true, detail: 'nothing to refuse' }
 }
 
 /**
