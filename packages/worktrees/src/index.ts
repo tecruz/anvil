@@ -45,6 +45,7 @@ import {
   removeWorktree,
   resolveBaseRef,
   type WorktreeStatus,
+  withRepoLock,
   worktreeStatus,
 } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
@@ -194,6 +195,36 @@ export function writeClaims(repoRoot: string, registry: ClaimRegistry): void {
     }
     throw err
   }
+}
+
+/**
+ * Serialize the claim registry's read-modify-write cycle across processes.
+ *
+ * The atomic write stops a truncated file, but not a lost update: two processes that read
+ * the same registry and then write their own copy leave only one of the two claims. The
+ * lock is per-repository, beside the common git dir, so claims made from different
+ * worktrees of the same repository contend on the same file.
+ */
+export async function withClaimsLock<T>(repoRoot: string, fn: () => Promise<T>): Promise<T> {
+  return withRepoLock({ cwd: repoRoot, name: 'claims' }, fn)
+}
+
+/**
+ * Apply one mutation to the claim registry under the claims lock.
+ *
+ * The callback is synchronous on purpose: the lock must cover the read, the mutation and
+ * the write, and an async callback would invite unrelated work while holding it.
+ */
+export async function updateClaims(
+  repoRoot: string,
+  mutate: (registry: ClaimRegistry) => void,
+): Promise<ClaimRegistry> {
+  return withClaimsLock(repoRoot, async () => {
+    const registry = readClaims(repoRoot)
+    mutate(registry)
+    writeClaims(repoRoot, registry)
+    return registry
+  })
 }
 
 /**
@@ -425,9 +456,11 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
     const notes = await environmentNotes(repoRoot)
     const needsUpstream = !(await hasUpstream(worktreePath, branch))
 
-    const registry = readClaims(repoRoot)
-    registry.claims = [...registry.claims.filter((c) => c.key !== claim.key), claim]
-    writeClaims(repoRoot, registry)
+    // The registry update is the last fallible step, and it runs under the repository
+    // claims lock so a concurrent claim in another process cannot overwrite this one.
+    await updateClaims(repoRoot, (registry) => {
+      registry.claims = [...registry.claims.filter((c) => c.key !== claim.key), claim]
+    })
 
     return {
       claim,
@@ -643,9 +676,14 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
   }
 
   claim.state = worktreeRemoved ? 'released' : 'active'
-  registry.claims = registry.claims.map((c) => (c.key === key ? claim : c))
   try {
-    operations.writeRegistry(repoRoot, registry)
+    // Re-read inside the lock: the registry may have gained another process's claim since
+    // this release started, and writing the earlier snapshot would discard it.
+    await withClaimsLock(repoRoot, async () => {
+      const current = readClaims(repoRoot)
+      current.claims = current.claims.map((c) => (c.key === key ? claim : c))
+      operations.writeRegistry(repoRoot, current)
+    })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     throw new AnvilError(

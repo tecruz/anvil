@@ -26,7 +26,7 @@ import { spawnArgv } from '@anvil/core'
 import { mainWorktreeRoot } from '@anvil/git'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
-import { type Claim, claimTicket, readClaims, writeClaims } from './index.ts'
+import { type Claim, claimTicket, readClaims, updateClaims } from './index.ts'
 
 // ---------------------------------------------------------------------------
 // Concurrency policy
@@ -306,7 +306,7 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
         launched: true,
         detail: result.detail,
       }
-      recordLaunch(repoRoot, claim.key, result.pid)
+      await recordLaunch(repoRoot, claim.key, result.pid)
       return launch
     } catch (err) {
       return {
@@ -324,24 +324,24 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
   return { claims, launches, failures }
 }
 
-function recordLaunch(repoRoot: string, key: string, pid: number | null): void {
-  const registry = readClaims(repoRoot)
-  registry.claims = registry.claims.map((c) =>
-    c.key === key
-      ? {
-          ...c,
-          agent: {
-            ...(c.agent ?? { runner: 'opencode' }),
-            launchedAt: new Date().toISOString(),
-            // The pid, under its own name. It used to be written as `sessionId`, which is
-            // how a process id ended up in a field called "session"; readers still accept
-            // that, but nothing writes it any more.
-            ...(pid === null ? {} : { pid }),
-          },
-        }
-      : c,
-  )
-  writeClaims(repoRoot, registry)
+async function recordLaunch(repoRoot: string, key: string, pid: number | null): Promise<void> {
+  await updateClaims(repoRoot, (registry) => {
+    registry.claims = registry.claims.map((c) =>
+      c.key === key
+        ? {
+            ...c,
+            agent: {
+              ...(c.agent ?? { runner: 'opencode' }),
+              launchedAt: new Date().toISOString(),
+              // The pid, under its own name. It used to be written as `sessionId`, which is
+              // how a process id ended up in a field called "session"; readers still accept
+              // that, but nothing writes it any more.
+              ...(pid === null ? {} : { pid }),
+            },
+          }
+        : c,
+    )
+  })
 }
 
 /** Where the launch prompt is written inside the worktree, so argv stays single-line. */

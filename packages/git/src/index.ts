@@ -431,32 +431,44 @@ export async function deleteBranch(cwd: string, branch: string, force = true): P
 }
 
 // ---------------------------------------------------------------------------
-// Fetch serialization
+// Repository locks
 // ---------------------------------------------------------------------------
 
 /**
- * Serialize `git fetch` across processes.
+ * Serialize work that mutates shared repository state across processes.
  *
- * Worktrees have isolated indexes but **share** refs, and `git fetch` writes them. Two
- * concurrent fetches race, and the loser's error surfaces far from its cause. A lock
- * file with a bounded wait turns that into a short pause.
+ * Worktrees have isolated indexes but **share** refs and the per-repository state file
+ * anvil keeps beside the common git dir. Two concurrent fetches race on refs, and two
+ * concurrent claim registrations race on a read-modify-write cycle. A lock file with a
+ * bounded wait turns both into a short pause.
  *
  * The lock is advisory and per-repository, stored beside the common git dir so every
  * worktree of the same repo contends on the same file.
  *
  * A process killed between acquiring and releasing leaves the file behind, and without
- * recovery every later fetch in that repository waits out the timeout and fails until
- * someone deletes it by hand. The lock records the holder's pid, so a lock whose owner
- * no longer exists is broken by the next waiter instead of blocking the repository.
+ * recovery every later operation in that repository waits out the timeout and fails until
+ * someone deletes it by hand. The lock records the holder's pid, so a lock whose owner no
+ * longer exists is broken by the next waiter instead of blocking the repository.
  */
 export interface LockOptions {
   cwd: string
   timeoutMs?: number
   pollMs?: number
 }
-export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T>): Promise<T> {
+
+export interface RepoLockOptions extends LockOptions {
+  /** Lock file stem, e.g. `fetch` or `claims`. Internal names only, never user input. */
+  name: string
+}
+
+export async function withRepoLock<T>(options: RepoLockOptions, fn: () => Promise<T>): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 20_000
   const pollMs = options.pollMs ?? 100
+  if (options.name === '' || /[/\\]|\.\./.test(options.name)) {
+    throw new AnvilError(ErrorCode.Internal, `Invalid repository lock name: ${options.name}`, {
+      hint: 'Lock names are fixed identifiers chosen by anvil, not paths.',
+    })
+  }
   const common = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: options.cwd })
   if (common.exitCode !== 0) {
     throw new AnvilError(ErrorCode.NotAGitRepo, 'Cannot locate the repository git directory', {
@@ -465,7 +477,7 @@ export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T
   }
   const dir = join(normalizeGitPath(common.stdout), 'anvil-locks')
   mkdirSync(dir, { recursive: true })
-  const lockPath = join(dir, 'fetch.lock')
+  const lockPath = join(dir, `${options.name}.lock`)
   const deadline = Date.now() + timeoutMs
 
   let handle: number | null = null
@@ -476,8 +488,8 @@ export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T
     } catch {
       breakStaleLock(lockPath)
       if (Date.now() > deadline) {
-        throw new AnvilError(ErrorCode.Usage, 'Timed out waiting for the fetch lock', {
-          hint: `Another anvil or git process is fetching this repository. Lock: ${lockPath}`,
+        throw new AnvilError(ErrorCode.Usage, `Timed out waiting for the ${options.name} lock`, {
+          hint: `Another anvil or git process is using this repository. Lock: ${lockPath}`,
         })
       }
       await new Promise((r) => setTimeout(r, pollMs))
@@ -495,6 +507,11 @@ export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T
       // Already removed by a concurrent process: fine.
     }
   }
+}
+
+/** Serialize `git fetch` across processes. */
+export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T>): Promise<T> {
+  return withRepoLock({ ...options, name: 'fetch' }, fn)
 }
 
 /** True when a pid is running. Signal 0 tests existence without signalling. */

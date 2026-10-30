@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -32,6 +32,7 @@ import {
   findOrphanWorktrees,
   readClaims,
   releaseClaim,
+  updateClaims,
   writeClaims,
 } from '@anvil/worktrees'
 
@@ -70,6 +71,61 @@ function canCreateDirectoryLink(): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Run one registry append in a separate process.
+ *
+ * The write is a real read-modify-write against shared state, and the sync sleep widens the
+ * window between the read and the write. Without a cross-process lock every writer reads
+ * the same registry and only the last one survives; with it, the appends serialize.
+ */
+function appendClaimFromAnotherProcess(repo: string, key: string): Promise<void> {
+  const moduleUrl = new URL('../src/index.ts', import.meta.url).href
+  // A shared start time lines the reads up, so a missing lock loses updates instead of
+  // sometimes winning by process-startup order.
+  const startAt = Date.now() + 2_500
+  const script = `
+import { updateClaims } from ${JSON.stringify(moduleUrl)}
+const key = process.env.ANVIL_TEST_KEY
+const startAt = Number(process.env.ANVIL_TEST_START_AT)
+await new Promise((resolve) => setTimeout(resolve, Math.max(0, startAt - Date.now())))
+await updateClaims(process.env.ANVIL_TEST_REPO, (registry) => {
+  registry.claims.push({
+    key,
+    ticket: { provider: 'local', id: key, key },
+    branch: 'feat/' + key,
+    baseBranch: 'main',
+    baseRef: 'refs/heads/main',
+    worktreePath: process.env.ANVIL_TEST_REPO + '-wt-' + key,
+    worktreeId: null,
+    state: 'active',
+    createdAt: new Date().toISOString(),
+  })
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
+})
+`
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      env: {
+        ...process.env,
+        ANVIL_TEST_REPO: repo,
+        ANVIL_TEST_KEY: key,
+        ANVIL_TEST_START_AT: String(startAt),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`writer for ${key} exited ${String(code)}: ${stderr}`))
+    })
+  })
 }
 
 /** A real repository with one commit, so worktrees can branch from it. */
@@ -806,6 +862,37 @@ describe('claims', () => {
     assert.equal(existsSync(join(wtRoot, 'local-1')), false)
     assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
     assert.deepEqual(await findOrphanWorktrees(repo), [])
+  })
+
+  test('concurrent registrations from separate processes do not lose a claim', async () => {
+    const repo = makeRepo()
+    const keys = Array.from({ length: 6 }, (_, i) => `proc-${i + 1}`)
+
+    await Promise.all(keys.map((key) => appendClaimFromAnotherProcess(repo, key)))
+
+    const stored = readClaims(repo)
+      .claims.map((c) => c.key)
+      .sort()
+    assert.deepEqual(stored, keys, 'every process-owned claim must survive')
+    assert.equal(
+      existsSync(join(repo, '.git', 'anvil-locks', 'claims.lock')),
+      false,
+      'the claims lock must be released',
+    )
+  })
+
+  test('a claims lock left by a dead process is broken instead of blocking the next writer', async () => {
+    const repo = makeRepo()
+    const lockDir = join(repo, '.git', 'anvil-locks')
+    mkdirSync(lockDir, { recursive: true })
+    // A pid that cannot exist: the holder was killed before it could remove the lock.
+    writeFileSync(join(lockDir, 'claims.lock'), '999999999', 'utf8')
+
+    await updateClaims(repo, (registry) => {
+      registry.claims = []
+    })
+
+    assert.equal(existsSync(join(lockDir, 'claims.lock')), false, 'the stale lock is removed')
   })
 
   test('status reports uncommitted and unpushed separately', async () => {
