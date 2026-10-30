@@ -16,19 +16,11 @@
  */
 
 import { execFile } from 'node:child_process'
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
+import { withDirectoryLock } from './lock.ts'
 
 const execFileAsync = promisify(execFile)
 
@@ -439,16 +431,16 @@ export async function deleteBranch(cwd: string, branch: string, force = true): P
  *
  * Worktrees have isolated indexes but **share** refs and the per-repository state file
  * anvil keeps beside the common git dir. Two concurrent fetches race on refs, and two
- * concurrent claim registrations race on a read-modify-write cycle. A lock file with a
+ * concurrent claim registrations race on a read-modify-write cycle. A lock directory with a
  * bounded wait turns both into a short pause.
  *
  * The lock is advisory and per-repository, stored beside the common git dir so every
  * worktree of the same repo contends on the same file.
  *
- * A process killed between acquiring and releasing leaves the file behind, and without
+ * A process killed between acquiring and releasing leaves its unique record behind, and without
  * recovery every later operation in that repository waits out the timeout and fails until
- * someone deletes it by hand. The lock records the holder's pid, so a lock whose owner no
- * longer exists is broken by the next waiter instead of blocking the repository.
+ * someone deletes it by hand. Dead contenders are removed by the next waiter. Unique
+ * record names prevent two stale observers from accidentally removing a live successor.
  */
 export interface LockOptions {
   cwd: string
@@ -464,7 +456,7 @@ export interface RepoLockOptions extends LockOptions {
 export async function withRepoLock<T>(options: RepoLockOptions, fn: () => Promise<T>): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 20_000
   const pollMs = options.pollMs ?? 100
-  if (options.name === '' || /[/\\]|\.\./.test(options.name)) {
+  if (!/^[a-z][a-z0-9-]*$/.test(options.name)) {
     throw new AnvilError(ErrorCode.Internal, `Invalid repository lock name: ${options.name}`, {
       hint: 'Lock names are fixed identifiers chosen by anvil, not paths.',
     })
@@ -476,78 +468,13 @@ export async function withRepoLock<T>(options: RepoLockOptions, fn: () => Promis
     })
   }
   const dir = join(normalizeGitPath(common.stdout), 'anvil-locks')
-  mkdirSync(dir, { recursive: true })
   const lockPath = join(dir, `${options.name}.lock`)
-  const deadline = Date.now() + timeoutMs
-
-  let handle: number | null = null
-  for (;;) {
-    try {
-      handle = openSync(lockPath, 'wx')
-      break
-    } catch {
-      breakStaleLock(lockPath)
-      if (Date.now() > deadline) {
-        throw new AnvilError(ErrorCode.Usage, `Timed out waiting for the ${options.name} lock`, {
-          hint: `Another anvil or git process is using this repository. Lock: ${lockPath}`,
-        })
-      }
-      await new Promise((r) => setTimeout(r, pollMs))
-    }
-  }
-
-  try {
-    writeFileSync(handle as number, String(process.pid), 'utf8')
-    return await fn()
-  } finally {
-    if (handle !== null) closeSync(handle)
-    try {
-      unlinkSync(lockPath)
-    } catch {
-      // Already removed by a concurrent process: fine.
-    }
-  }
+  return withDirectoryLock(lockPath, { timeoutMs, pollMs, name: options.name }, fn)
 }
 
 /** Serialize `git fetch` across processes. */
 export async function withFetchLock<T>(options: LockOptions, fn: () => Promise<T>): Promise<T> {
   return withRepoLock({ ...options, name: 'fetch' }, fn)
-}
-
-/** True when a pid is running. Signal 0 tests existence without signalling. */
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (err) {
-    // EPERM means it exists but is owned by someone else.
-    return (err as { code?: string }).code === 'EPERM'
-  }
-}
-
-/**
- * Remove a lock whose owner is gone.
- *
- * The pid recorded in the lock is the holder, so this only frees a lock abandoned by a
- * crashed or killed process. A live owner is left alone: breaking its lock is the exact
- * race this mechanism exists to prevent.
- */
-function breakStaleLock(lockPath: string): void {
-  let raw: string
-  try {
-    raw = readFileSync(lockPath, 'utf8').trim()
-  } catch {
-    return // vanished between the failed open and here
-  }
-  const pid = Number.parseInt(raw, 10)
-  if (!Number.isFinite(pid) || pid <= 0) return // unreadable: not ours to break
-  if (pid === process.pid) return
-  if (pidAlive(pid)) return
-  try {
-    unlinkSync(lockPath)
-  } catch {
-    // Someone else got there first.
-  }
 }
 
 /** Fetch, serialized. Returns the raw result so callers can decide on a non-zero exit. */

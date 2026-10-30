@@ -51,6 +51,13 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
 }
 
+function fakeLock(repo: string, name: string, pid: number): string {
+  const path = join(repo, '.git', 'anvil-locks', `${name}.lock`, `${pid}-00000000-0000-0000-0000-000000000001`)
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'ticket-1'), '')
+  return path
+}
+
 /** The link kind that needs no elevation: a junction on Windows, a directory symlink elsewhere. */
 const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
 
@@ -440,27 +447,23 @@ describe('worktree lifecycle', () => {
 
   test('a lock left by a dead process is broken, so a later fetch does not block', async () => {
     const repo = makeRepo()
-    const lockDir = join(repo, '.git', 'anvil-locks')
-    mkdirSync(lockDir, { recursive: true })
-    // A pid that cannot exist: the holder was killed before it could remove the lock.
-    writeFileSync(join(lockDir, 'fetch.lock'), '999999999', 'utf8')
+    const stale = fakeLock(repo, 'fetch', 999999999)
 
     const result = await withFetchLock({ cwd: repo, timeoutMs: 2_000, pollMs: 10 }, async () => 'ran')
     assert.equal(result, 'ran')
-    assert.equal(existsSync(join(lockDir, 'fetch.lock')), false, 'the stale lock is removed')
+    assert.equal(existsSync(stale), false, 'the stale record is removed')
+    assert.deepEqual(readdirSync(join(repo, '.git', 'anvil-locks', 'fetch.lock')), [])
   })
 
   test('a lock held by a live process is not broken', async () => {
     const repo = makeRepo()
-    const lockDir = join(repo, '.git', 'anvil-locks')
-    mkdirSync(lockDir, { recursive: true })
-    writeFileSync(join(lockDir, 'fetch.lock'), String(process.pid), 'utf8')
+    const held = fakeLock(repo, 'fetch', process.pid)
 
     await assert.rejects(
       () => withFetchLock({ cwd: repo, timeoutMs: 80, pollMs: 10 }, async () => 'ran'),
       /Timed out waiting for the fetch lock/,
     )
-    assert.ok(existsSync(join(lockDir, 'fetch.lock')), 'a live owner keeps its lock')
+    assert.ok(existsSync(held), 'a live owner keeps its record')
   })
 })
 
@@ -874,25 +877,23 @@ describe('claims', () => {
       .claims.map((c) => c.key)
       .sort()
     assert.deepEqual(stored, keys, 'every process-owned claim must survive')
-    assert.equal(
-      existsSync(join(repo, '.git', 'anvil-locks', 'claims.lock')),
-      false,
-      'the claims lock must be released',
+    assert.deepEqual(
+      readdirSync(join(repo, '.git', 'anvil-locks', 'claims.lock')),
+      [],
+      'every lock record must be released',
     )
   })
 
   test('a claims lock left by a dead process is broken instead of blocking the next writer', async () => {
     const repo = makeRepo()
-    const lockDir = join(repo, '.git', 'anvil-locks')
-    mkdirSync(lockDir, { recursive: true })
-    // A pid that cannot exist: the holder was killed before it could remove the lock.
-    writeFileSync(join(lockDir, 'claims.lock'), '999999999', 'utf8')
+    const stale = fakeLock(repo, 'claims', 999999999)
 
     await updateClaims(repo, (registry) => {
       registry.claims = []
     })
 
-    assert.equal(existsSync(join(lockDir, 'claims.lock')), false, 'the stale lock is removed')
+    assert.equal(existsSync(stale), false, 'the stale record is removed')
+    assert.deepEqual(readdirSync(join(repo, '.git', 'anvil-locks', 'claims.lock')), [])
   })
 
   test('status reports uncommitted and unpushed separately', async () => {
