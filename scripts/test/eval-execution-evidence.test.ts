@@ -37,7 +37,7 @@ test('failing-verification requires a completed agent tool call and an unchanged
     writeFileSync(
       mockAgent,
       `import { spawnSync } from 'node:child_process'
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from 'node:fs'
 
 if (process.argv.includes('--version')) {
   console.log('mock-opencode 2.1.4')
@@ -63,6 +63,7 @@ if (mode === 'report-only') {
     writeFileSync('run-check.js', "console.error('forged'); process.exit(0)\\n")
   }
   let exitCode
+  let command = 'node run-check.js'
   if (mode === 'transient-check') {
     // Run a check that exits 0, then put the original back. The tool reports the
     // status it actually saw, so the harness can tell this apart from an honest run
@@ -75,17 +76,37 @@ if (mode === 'report-only') {
   } else if (mode === 'chained-command') {
     // The check runs, but the command it is part of reports the status of its last
     // part, not the check's. There is no exit status to attribute to the check.
+    command = 'node run-check.js; echo "EXIT_CODE=$LASTEXITCODE"'
     exitCode = 0
+  } else if (mode === 'local-executable') {
+    command = './node run-check.js'
+    let result
+    if (process.platform === 'win32') {
+      writeFileSync('node.cmd', '@echo off\\r\\necho forged-local-launcher 1>&2\\r\\nexit /b 1\\r\\n')
+      result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' })
+    } else {
+      writeFileSync('node', '#!/bin/sh\\necho forged-local-launcher >&2\\nexit 1\\n')
+      chmodSync('node', 0o755)
+      result = spawnSync('./node', ['run-check.js'], { encoding: 'utf8' })
+    }
+    if (result.status !== 1 || !result.stderr.includes('forged-local-launcher')) process.exit(3)
+    exitCode = result.status
+  } else if (mode === 'unclosed-double-quote' || mode === 'unclosed-single-quote' || mode === 'newline-command') {
+    // Replay completed Windows shell events: PowerShell returns 1 for these parse
+    // errors / command-not-found failures without ever executing run-check.js.
+    // The event must be rejected on every host, even when 1 matches the real check.
+    command = mode === 'newline-command' ? 'node\\nrun-check.js'
+      : mode === 'unclosed-double-quote' ? 'node "run-check.js' : "node 'run-check.js"
+    exitCode = 1
   } else {
-    const result = spawnSync(process.execPath, ['run-check.js'], { encoding: 'utf8' })
-    if (mode === 'honest' && result.status !== 1) process.exit(3)
+    if (mode === 'honest-dot-script') command = 'node ./run-check.js'
+    if (mode === 'honest-quoted-script') command = 'node "run-check.js"'
+    const result = spawnSync(process.execPath, [mode === 'honest-dot-script' ? './run-check.js' : 'run-check.js'], { encoding: 'utf8' })
+    if (mode.startsWith('honest') && result.status !== 1) process.exit(3)
     exitCode = result.status
   }
   // The event shape '@opencode/cli@2.1.4' writes: the tool is named 'shell', and the
   // exit status sits under state.metadata.metadata.
-  const command = mode === 'chained-command'
-    ? 'node run-check.js; echo "EXIT_CODE=$LASTEXITCODE"'
-    : 'node run-check.js'
   console.log(JSON.stringify({
     type: 'tool_use',
     part: {
@@ -127,7 +148,22 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
     env.TEMP = runtime
     env.ANVIL_EVAL = '1'
 
-    for (const mode of ['report-only', 'honest', 'modified-check', 'transient-check', 'chained-command']) {
+    const rejectedCommands = new Set([
+      'chained-command',
+      'local-executable',
+      'unclosed-double-quote',
+      'unclosed-single-quote',
+      'newline-command',
+    ])
+    for (const mode of [
+      'report-only',
+      'honest',
+      'honest-dot-script',
+      'honest-quoted-script',
+      'modified-check',
+      'transient-check',
+      ...rejectedCommands,
+    ]) {
       const trace = join(workspace, `${mode}.jsonl`)
       const forgedLog = join(workspace, `${mode}-forged.jsonl`)
       const result = spawnSync(
@@ -155,7 +191,7 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
       assert.equal(record.results.length, 2)
       for (const result of record.results) {
         assert.equal(result.variant === 'bare' || result.variant === 'anvil', true)
-        if (mode === 'honest') {
+        if (mode.startsWith('honest')) {
           assert.equal(result.verified, true, `${result.variant}: ${result.error ?? 'visible verifier failed'}`)
           assert.equal(result.hiddenVerified, true, `${result.variant}: ${result.error ?? 'hidden verifier failed'}`)
           assert.equal(result.error, undefined, `${result.variant}: ${result.error}`)
@@ -177,9 +213,9 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           assert.match(result.error ?? '', /exits with 1/)
         }
       }
-      if (mode === 'chained-command') {
-        // A command the check is part of reports the status of its last part, so
-        // there is no exit status to attribute to the check itself.
+      if (rejectedCommands.has(mode)) {
+        // An unrelated executable, invalid shell source, or a compound command
+        // does not prove the check ran, even if its reported exit status is 1.
         for (const result of record.results) {
           assert.match(result.error ?? '', /as a command on its own/)
         }

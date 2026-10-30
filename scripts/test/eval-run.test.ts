@@ -97,6 +97,8 @@ describe('eval harness process environment', () => {
     assert.equal(isCheckCommand('node run-check.js', 'node ./run-check.js'), true)
     assert.equal(isCheckCommand('node run-check.js', 'node  run-check.js'), true)
     assert.equal(isCheckCommand('node run-check.js', 'node "run-check.js"'), true)
+    assert.equal(isCheckCommand('node run-check.js', ' \tnode\t./run-check.js\t '), true)
+    assert.equal(isCheckCommand('node run-check.js literal', 'node ./run-check.js ./literal'), false)
 
     // A different script, an extra argument, or a compound command is a different
     // command: the exit status of a compound is the status of its last part.
@@ -105,6 +107,44 @@ describe('eval harness process environment', () => {
     assert.equal(isCheckCommand('node run-check.js', 'node run-check.js && echo done'), false)
     assert.equal(isCheckCommand('node run-check.js', 'echo node run-check.js'), false)
     assert.equal(isCheckCommand('node run-check.js', ''), false)
+  })
+
+  test('a local executable is not equivalent to a PATH-resolved executable', () => {
+    for (const command of ['./node run-check.js', '.\\node run-check.js', '"node" run-check.js']) {
+      assert.equal(isCheckCommand('node run-check.js', command), false, command)
+    }
+    assert.equal(isCheckCommand('./node run-check.js', 'node run-check.js'), false)
+  })
+
+  test('malformed or compound shell source cannot be flattened into check arguments', () => {
+    const commands = [
+      'node "run-check.js',
+      "node 'run-check.js",
+      'node\nrun-check.js',
+      'node\r\nrun-check.js',
+      'node run-check.js\n',
+      'node\vrun-check.js',
+      'node\u2028run-check.js',
+      'node run-check.js\0',
+      'node "run-check".js',
+      'node run-check.js; echo done',
+      'node run-check.js|echo done',
+      'node run-check.js>report.txt',
+      'node $(echo run-check.js)',
+      'node `echo run-check.js`',
+      'node "$CHECK_SCRIPT"',
+      'node %CHECK_SCRIPT%',
+      '& node run-check.js',
+    ]
+    for (const command of commands) {
+      assert.equal(isCheckCommand('node run-check.js', command), false, JSON.stringify(command))
+    }
+  })
+
+  test('shell-dependent quotes and escapes fail closed regardless of the host OS', () => {
+    for (const command of ['node .\\run-check.js', 'node ".\\run-check.js"', "node 'run-check.js'"]) {
+      assert.equal(isCheckCommand('node run-check.js', command), false, command)
+    }
   })
 
   test('run sets PWD to the subprocess cwd, not the inherited PWD', async () => {

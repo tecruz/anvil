@@ -995,26 +995,67 @@ export function parseOpenCodeRunEvents(output: string): { text: string; executio
 /**
  * Whether a command the agent ran is the scenario's check command.
  *
- * The comparison is on the argument vector, not on the raw string, so a model that
- * writes `node ./run-check.js` or pads the whitespace is recognised as having run
- * the same check. Anything that changes the arguments -- an extra flag, a different
- * script, a compound command -- is a different command, and is not evidence: the
- * exit status of `node run-check.js && echo done` is the status of `echo`.
+ * Accept only a small, literal subset of shell syntax. `tokenizeCommand` is for
+ * direct process argv, not shell source: it silently accepts unterminated quotes
+ * and flattens newlines that a shell treats as command separators. A shell parse
+ * error can exit 1 without running the check, so its status is not check evidence.
  *
- * Accepting an equivalent spelling does not weaken the evidence. The harness still
- * replays the canonical command itself and requires the agent's own exit status to
- * agree with it.
+ * Executables must match exactly: `./node` is an agent-writable local program, not
+ * PATH-resolved `node`. Only Node's script operand gets path normalization, so
+ * `node ./run-check.js` remains supported without changing other argument values.
  */
 export function isCheckCommand(expected: string, actual: string): boolean {
-  const want = tokenizeCommand(expected)
-  const got = tokenizeCommand(actual)
-  if (want.length === 0 || want.length !== got.length) return false
-  return want.every((arg, index) => normalizeCommandArgument(arg) === normalizeCommandArgument(got[index] as string))
+  const want = parseEvidenceCommand(expected)
+  const got = parseEvidenceCommand(actual)
+  if (want === null || got === null || want.length === 0 || want.length !== got.length) return false
+  return want.every((arg, index) => {
+    const actualArg = got[index] as string
+    if (index === 1 && want[0] === 'node' && !arg.startsWith('-') && /\.(?:c|m)?js$/.test(arg)) {
+      return normalizeScriptPath(arg) === normalizeScriptPath(actualArg)
+    }
+    return arg === actualArg
+  })
 }
 
-/** `./run-check.js` and `run-check.js` name the same file. */
-function normalizeCommandArgument(arg: string): string {
-  return arg.replace(/^\.\//, '').replace(/\\/g, '/')
+/**
+ * Read inert words separated by ASCII spaces/tabs, with optional whole-argument
+ * double quotes. Everything else fails closed: no controls, operators, expansions,
+ * escapes, quote concatenation, or quoted executables (which PowerShell does not
+ * invoke without an operator). Single quotes and backslashes are not interpreted
+ * consistently across cmd, PowerShell and POSIX shells; the host OS alone does not
+ * identify the agent's shell. This is deliberately not a general shell parser.
+ */
+function parseEvidenceCommand(command: string): string[] | null {
+  const args: string[] = []
+  let cursor = 0
+  while (cursor < command.length) {
+    if (command[cursor] === ' ' || command[cursor] === '\t') {
+      cursor++
+      continue
+    }
+    const start = cursor
+    const quote = command[cursor]
+    let arg: string
+    if (quote === '"') {
+      if (args.length === 0) return null
+      const end = command.indexOf(quote, cursor + 1)
+      if (end === -1) return null
+      arg = command.slice(cursor + 1, end)
+      cursor = end + 1
+    } else {
+      while (cursor < command.length && command[cursor] !== ' ' && command[cursor] !== '\t') cursor++
+      arg = command.slice(start, cursor)
+    }
+    if (cursor < command.length && command[cursor] !== ' ' && command[cursor] !== '\t') return null
+    if (!/^[A-Za-z0-9_./: -]+$/.test(arg)) return null
+    args.push(arg)
+  }
+  return args
+}
+
+/** Normalize a script path, never a command name or an arbitrary argument value. */
+function normalizeScriptPath(arg: string): string {
+  return arg.replace(/^\.\//, '')
 }
 
 /**
