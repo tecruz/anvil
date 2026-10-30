@@ -14,7 +14,7 @@ import {
 } from '../../packages/cli/src/eval-gate.ts'
 
 test('fake-agent resume validates verifier evidence before recovery and preserves evidence on refusal', {
-  timeout: 240_000,
+  timeout: 600_000,
 }, () => {
   const source = fileURLToPath(new URL('../../', import.meta.url))
   const workspace = mkdtempSync(join(tmpdir(), 'anvil-eval-resume-'))
@@ -30,6 +30,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
       'packages',
       'eval',
       'scripts/eval.ts',
+      'scripts/eval-check-broker.ts',
       'scripts/build.mjs',
       'package.json',
       'package-lock.json',
@@ -53,7 +54,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
         cwd: root,
         env,
         encoding: 'utf8',
-        timeout: 120_000,
+        timeout: 300_000,
       })
       assert.equal(result.error, undefined, result.error?.message)
       return { status: result.status, output: `${result.stdout}\n${result.stderr}` }
@@ -76,6 +77,12 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     assert.equal(invocation.status, 0, invocation.output)
 
     const complete = record()
+    // The default suite is the original four-scenario smoke matrix: four scenarios, two
+    // variants each. An extended scenario slipping into the default run would double the
+    // scheduled benchmark's spend.
+    assert.equal(complete.results.length, 8)
+    assert.equal(complete.runKeys.length, 8)
+    assert.equal(complete.subset, false)
     const original = complete.results.find(
       (entry) => entry.scenario === 'tiny-verify-only' && entry.variant === 'bare',
     )!

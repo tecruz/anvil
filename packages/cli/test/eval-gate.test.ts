@@ -140,9 +140,9 @@ describe('the eval scenario matrix', () => {
     assert.match(validateScenarioMatrix(scenarios) ?? '', /duplicate scenario id/)
   })
 
-  test('rejects a second scenario in a cell the matrix already covers', () => {
+  test('allows additional scenarios in an already-covered cell', () => {
     const scenarios = [...matrix(), scenario({ id: 'tiny-code-change-again' })]
-    assert.match(validateScenarioMatrix(scenarios) ?? '', /exactly one scenario per cell/)
+    assert.equal(validateScenarioMatrix(scenarios), null)
   })
 
   test('rejects an unknown size or kind', () => {

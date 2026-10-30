@@ -66,11 +66,14 @@ import {
   reconcileRunRecord,
   recordFixtureProblem,
   resultKey,
+  solutionFiles,
   validateScenarioMatrix,
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
 import { probeCommandVersion, spawnArgv } from '../packages/core/src/exec.ts'
+import { buildProfile } from '../packages/profile/src/index.ts'
 import { readAgentSession } from '../packages/worktrees/src/index.ts'
+import { type CheckBroker, type CheckExecution, captureCheck, startCheckBroker } from './eval-check-broker.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -146,8 +149,55 @@ export function sanitizeResult(result: ScenarioResult): ScenarioResult {
 const VARIANTS = ['bare', 'anvil'] as const
 type Variant = (typeof VARIANTS)[number]
 
+/**
+ * The original, gated matrix. The scheduled benchmark and `eval:check` use exactly these
+ * four scenarios so a scheduled run still costs eight agent invocations, not the cost of
+ * every scenario anyone has ever added. Phase 2B scenarios remain available through
+ * `--suite extended` (or `--scenario`), but they do not silently expand the default run.
+ */
+const SMOKE_SCENARIO_IDS: ReadonlySet<string> = new Set([
+  'tiny-code-change',
+  'tiny-verify-only',
+  'medium-code-change',
+  'medium-verify-only',
+])
+
 /** Where the task is written inside the prepared repository. */
 const TASK_FILE = '.anvil-eval-task.md'
+
+/**
+ * The tool names OpenCode has used for its shell tool.
+ *
+ * OpenCode 2 renamed `bash` to `shell`. The benchmark pins one version and a
+ * developer's machine may carry the other, so the harness reads both. A tool the
+ * harness does not recognise is not a shell execution, and is ignored.
+ */
+const SHELL_TOOL_NAMES = new Set(['shell', 'bash'])
+
+/**
+ * Where a completed shell tool reports its exit status, per OpenCode version.
+ *
+ * The paths are relative to the tool state's `metadata` object. OpenCode 2 nests the
+ * tool's structured output one level deeper (`state.metadata.metadata.exit`);
+ * OpenCode 1 put it directly under `state.metadata.exit`. Both are read, and a status
+ * that is in neither place is reported as absent rather than guessed at.
+ */
+const EXIT_STATUS_PATHS: readonly (readonly string[])[] = [['metadata', 'exit'], ['exit']]
+
+/** One shell command the agent's tool ran, with the status that command produced. */
+export interface AgentExecution {
+  /** The command string the tool ran, verbatim. */
+  command: string
+  /**
+   * The exit status OpenCode observed for that command, or null when the event
+   * carries none.
+   *
+   * Null is not a pass. The harness compares this number with its own execution, and a
+   * command whose status cannot be read cannot be compared, so it is not accepted as
+   * evidence.
+   */
+  exitCode: number | null
+}
 
 interface RunResult {
   ok: boolean
@@ -171,6 +221,17 @@ export interface ScenarioResult extends EvalResultSummary {
   error?: string
 }
 
+/**
+ * Record a failure on a result without discarding the one already there.
+ *
+ * A run can fail for more than one reason at once: an agent that exits non-zero and
+ * leaves no execution evidence behind has two, and the second finding is not less
+ * true because the first one was reported first.
+ */
+function addError(result: ScenarioResult, message: string): void {
+  result.error = result.error === undefined ? message : `${result.error}; ${message}`
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
   const dryRun = args.includes('--dry-run')
@@ -181,6 +242,7 @@ async function main(): Promise<void> {
   const resume = args.includes('--resume')
   const publishTranscripts = args.includes('--publish-transcripts')
   const only = flagValue('--scenario', args)
+  const suiteRaw = flagValue('--suite', args) ?? 'smoke'
   const repetitionsRaw = flagValue('--repetitions', args)
   const repetitions = repetitionsRaw === null ? 1 : Number(repetitionsRaw)
   const seedRaw = flagValue('--seed', args)
@@ -201,6 +263,11 @@ async function main(): Promise<void> {
     console.error(`--order must be 'alternate' or 'fixed', got ${order}`)
     process.exit(1)
   }
+  if (!['smoke', 'extended', 'all'].includes(suiteRaw)) {
+    console.error(`--suite must be 'smoke', 'extended' or 'all', got ${suiteRaw}`)
+    process.exit(1)
+  }
+  const suite = suiteRaw as 'smoke' | 'extended' | 'all'
 
   if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
     console.error(
@@ -221,14 +288,21 @@ async function main(): Promise<void> {
   }
 
   const scenarios = loadScenarios()
-  const selectedScenarios = only === null ? scenarios : scenarios.filter((s) => s.id === only)
+  const suiteScenarios =
+    suite === 'smoke'
+      ? scenarios.filter((scenario) => SMOKE_SCENARIO_IDS.has(scenario.id))
+      : suite === 'extended'
+        ? scenarios.filter((scenario) => !SMOKE_SCENARIO_IDS.has(scenario.id))
+        : scenarios
+  const selectedScenarios = only === null ? suiteScenarios : scenarios.filter((s) => s.id === only)
   if (selectedScenarios.length === 0) {
     console.error(`No scenario matched ${only ?? '(nothing)'}`)
     process.exit(1)
   }
-  // A subset selection (--scenario) remains explicitly partial: it must not overwrite
-  // valid complete evidence with a success-looking report covering only part of the matrix.
-  const isSubset = selectedScenarios.length !== scenarios.length
+  // A subset selection is explicitly partial: it must not overwrite valid complete evidence
+  // with a success-looking report covering only part of the matrix. The smoke suite is the
+  // gated matrix, so it is complete; extended and all are exploratory measurements.
+  const isSubset = only !== null || suite !== 'smoke'
 
   const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
   if (models.length === 0) {
@@ -259,7 +333,9 @@ async function main(): Promise<void> {
   }
 
   if (checkOnly) {
-    process.exit(runCheck(scenarios))
+    // The gate is defined over the original smoke matrix. Extended scenarios are opt-in
+    // measurements; they must not make the scheduled check fail simply by existing.
+    process.exit(runCheck(scenarios.filter((scenario) => SMOKE_SCENARIO_IDS.has(scenario.id))))
   }
 
   // The gate hashes the source, so the harness must run that same source -- not a stale
@@ -574,7 +650,7 @@ async function main(): Promise<void> {
   }
 
   printSummary(results)
-  if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(scenarios)
+  if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(selectedScenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
   // reported in the summary, and `--check` is the command that turns it into a failure.
@@ -607,6 +683,21 @@ async function runScenario(
   repetition: number,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-r${repetition}`))
+  // Harness-owned execution evidence directory. The agent never receives this path.
+  // Verifiers receive it after the agent finishes, so they can compare the report
+  // against the actual execution the harness recorded.
+  let executionDir: string | null = null
+  if (scenario.captureExecution === true) {
+    executionDir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
+  }
+  // The agent must never learn the harness-owned log path; a path the agent can
+  // write to is forgeable by construction (same user, same filesystem).
+  const agentEnv: NodeJS.ProcessEnv = { ANVIL_EVAL_EXECUTION_LOG: undefined }
+  // The harness captures execution evidence in its own log after the agent finishes.
+  const executionEnv: NodeJS.ProcessEnv =
+    executionDir === null ? {} : { ANVIL_EVAL_EXECUTION_LOG: join(executionDir, 'executions.jsonl') }
+  let checkBroker: CheckBroker | null = null
+  let executionEvidenceValid = fake || scenario.captureExecution !== true
   const started = Date.now()
   const result: ScenarioResult = {
     scenario: scenario.id,
@@ -655,13 +746,30 @@ async function runScenario(
     // behaviour for anvil's safety check, and the answer is not to pass prose as argv.
     const taskFile = join(workdir, TASK_FILE)
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
+    let agentExecutions: AgentExecution[] = []
 
     if (fake) {
-      if (scenario.solution !== undefined) {
-        cpSync(join(repoRoot, scenario.solution.from), join(workdir, ...scenario.solution.to.split('/')))
+      // A canned answer can include actions, not only files. Running them here is what
+      // makes verify-only evidence real: the check executes and the harness captures it,
+      // instead of a canned execution record being copied into the worktree.
+      if (scenario.solutionRun !== undefined) {
+        const actions = await runAll(scenario.solutionRun, workdir, executionEnv)
+        result.verifyOutput = actions.map((action) => action.output).join('\n')
+      }
+      const answers = solutionFiles(scenario)
+      if (answers.length > 0) {
+        for (const answer of answers) {
+          const target = join(workdir, ...answer.to.split('/'))
+          mkdirSync(dirname(target), { recursive: true })
+          cpSync(join(repoRoot, answer.from), target)
+        }
         result.transcript = publishTranscripts
           ? limitTranscript(
-              redactTranscript(`[fake-agent] applied ${scenario.solution.from} to ${scenario.solution.to}`),
+              redactTranscript(
+                `[fake-agent] ran ${(scenario.solutionRun ?? []).join(', ') || '(no commands)'}; applied ${answers
+                  .map((answer) => `${answer.from} to ${answer.to}`)
+                  .join(', ')}`,
+              ),
             )
           : ''
       } else if (scenario.kind === 'code-change') {
@@ -671,39 +779,115 @@ async function runScenario(
         result.transcript = publishTranscripts ? limitTranscript(redactTranscript('[fake-agent] ran the verifier')) : ''
       }
     } else {
+      if (scenario.captureExecution === true) {
+        const fixtureRoot = join(repoRoot, ...scenario.repo.split('/'))
+        const manifest = JSON.parse(readFileSync(join(fixtureRoot, 'package.json'), 'utf8')) as { type?: unknown }
+        if (manifest.type !== 'module') throw new Error('execution capture requires a Node ESM fixture')
+        const checks = (scenario.solutionRun ?? []).map((command) => {
+          const args = parseEvidenceCommand(command)
+          if (args?.length !== 2 || args[0] !== 'node' || !args[1]?.endsWith('.js')) {
+            throw new Error(`execution capture supports only a standalone Node ESM script: ${JSON.stringify(command)}`)
+          }
+          return captureCheck(command, args[1], fixtureRoot)
+        })
+        if (checks.length === 0) throw new Error('the scenario declares no check command to capture')
+        checkBroker = await startCheckBroker(checks, workdir)
+        Object.assign(agentEnv, checkBroker.env)
+      }
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
       // permission prompt is a hang, and a hang is not a result.
       // OpenCode 2's private server inherits this process's provider credentials and
       // exits with the command instead of leaving work running in a shared service.
       // `run` uses the subprocess cwd; it does not accept a `--dir` flag.
-      const agentArgs = ['run', '--standalone', '--auto', '--model', model.id]
+      const agentArgs = ['run', '--standalone', '--auto', '--format', 'json', '--model', model.id]
       agentArgs.push(`Read ${TASK_FILE} and follow every instruction in it exactly.`)
       const agent = await run('opencode', agentArgs, workdir, {
         timeoutMs: (scenario.timeoutMinutes ?? 10) * 60_000,
+        env: agentEnv,
       })
+      await checkBroker?.close()
+      const agentEvents = parseOpenCodeRunEvents(agent.stdout)
+      agentExecutions = agentEvents.executions
       result.transcript = publishTranscripts
-        ? limitTranscript(redactTranscript(`${agent.stdout}\n${agent.stderr}`.trim()))
+        ? limitTranscript(redactTranscript(`${agentEvents.text}\n${agent.stderr}`.trim()))
         : ''
       if (agent.timedOut) {
-        result.error = 'the agent timed out'
+        addError(result, 'the agent timed out')
       } else if (!agent.ok) {
-        result.error = `the agent exited with code ${agent.code ?? '?'}`
+        addError(result, `the agent exited with code ${agent.code ?? '?'}`)
       }
     }
 
-    const visible = await runAll(scenario.verify, workdir)
-    result.verified = visible.every((r) => r.ok)
+    // For verify-only scenarios with execution capture, the harness records the
+    // execution itself rather than trusting an agent-writable log path. The agent
+    // never sees `ANVIL_EVAL_EXECUTION_LOG`. Only needed for real agents: fake
+    // agents already ran `solutionRun` in the canned-answer block above.
+    if (!fake && scenario.captureExecution === true && executionDir !== null) {
+      // The agent must have run the check for evidence to be valid; a report-only
+      // agent that never invoked the command must fail grading.
+      const checkCommands: string[] = Array.isArray(scenario.solutionRun)
+        ? scenario.solutionRun
+        : scenario.solutionRun !== undefined
+          ? [scenario.solutionRun]
+          : []
+      // Shell events prove invocation, not script identity. They must match a
+      // broker execution of source captured before the agent started.
+      const observedRuns = checkCommands.map((expected) =>
+        agentExecutions.filter((execution) => isCheckCommand(expected, execution.command)),
+      )
+      if (checkBroker !== null && checkBroker.integrityError !== null) {
+        addError(result, checkBroker.integrityError)
+      } else if (checkCommands.length === 0) {
+        addError(result, 'the scenario declares no check command, so there is no execution evidence to collect')
+      } else if (observedRuns.some((runs) => runs.length === 0)) {
+        addError(
+          result,
+          `the agent did not run ${checkCommands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
+        )
+      } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
+        addError(result, 'the agent modified a check or verifier script; execution evidence is invalid')
+      } else {
+        const executions = checkCommands.map((command) =>
+          checkBroker?.executions.findLast((execution) => execution.command === command),
+        )
+        const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, executions)
+        if (disagreement !== null) {
+          addError(result, disagreement)
+        } else {
+          executionEvidenceValid = true
+        }
+      }
+      // Publish only parent-process records, never append to a file an agent may
+      // have found and forged. Invalid evidence also vetoes verifier verdicts.
+      writeFileSync(
+        join(executionDir, 'executions.jsonl'),
+        executionEvidenceValid
+          ? (checkBroker?.executions ?? [])
+              .map(
+                ({ command, exitCode, sourceHash, at }) => `${JSON.stringify({ command, exitCode, sourceHash, at })}\n`,
+              )
+              .join('')
+          : '',
+        'utf8',
+      )
+    }
+
+    const verifyCwd = scenario.verifyInProjectDir === true ? projectDirIn(workdir) : workdir
+    const visible = await runAll(scenario.verify, verifyCwd, executionEnv)
+    result.verified = executionEvidenceValid && visible.every((r) => r.ok)
     result.verifyExitCodes = visible.map((r) => r.code ?? -1)
     result.verifyOutput = visible.map((r) => r.output).join('\n')
 
     for (const file of scenario.hidden ?? []) {
-      cpSync(join(repoRoot, file.from), join(workdir, ...file.to.split('/')), { recursive: true })
+      const target = join(workdir, ...file.to.split('/'))
+      mkdirSync(dirname(target), { recursive: true })
+      cpSync(join(repoRoot, file.from), target, { recursive: true })
     }
     if ((scenario.hiddenVerify?.length ?? 0) > 0) {
       const hiddenCommands = scenario.hiddenVerify ?? []
-      const hidden = await runAll(hiddenCommands, workdir)
+      const hidden = await runAll(hiddenCommands, workdir, executionEnv)
       result.hiddenVerifyCount = hiddenCommands.length
-      result.hiddenVerified = hidden.every((r) => r.ok)
+      result.hiddenVerified = executionEvidenceValid && hidden.every((r) => r.ok)
       result.verifyExitCodes = [...result.verifyExitCodes, ...hidden.map((r) => r.code ?? -1)]
     }
 
@@ -719,7 +903,19 @@ async function runScenario(
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err)
   } finally {
+    try {
+      await checkBroker?.close()
+    } catch (error) {
+      addError(result, `could not close the check broker: ${error instanceof Error ? error.message : String(error)}`)
+    }
     result.durationMs = Date.now() - started
+    if (executionDir !== null) {
+      try {
+        rmSync(executionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      } catch {
+        // best effort; a leaked evidence directory cannot change a verdict
+      }
+    }
     // `maxRetries` matters on Windows: git checks out its object files read-only, and
     // removing a read-only file fails with EPERM until the permission is relaxed. Node
     // retries that, but only when it is told to. A worktree the agent still holds open
@@ -734,6 +930,198 @@ async function runScenario(
   }
 
   return result
+}
+
+/** Read a number at a path through an unknown value, or null when it is not there. */
+function numberAtPath(source: unknown, path: readonly string[]): number | null {
+  let current: unknown = source
+  for (const key of path) {
+    if (current === null || typeof current !== 'object') return null
+    current = (current as Record<string, unknown>)[key]
+  }
+  return typeof current === 'number' && Number.isFinite(current) ? current : null
+}
+
+/** The exit status a completed shell tool reported, whichever OpenCode version wrote it. */
+function readExitStatus(metadata: unknown): number | null {
+  for (const path of EXIT_STATUS_PATHS) {
+    const value = numberAtPath(metadata, path)
+    if (value !== null) return value
+  }
+  return null
+}
+
+/**
+ * Extract text and completed shell executions from OpenCode's `run --format json` stream.
+ *
+ * Only the tool's own events count. The prose an agent writes is not evidence of
+ * anything, and neither is a report the agent left in the worktree: this reads what
+ * OpenCode says it ran and what that run returned.
+ */
+export function parseOpenCodeRunEvents(output: string): { text: string; executions: AgentExecution[] } {
+  const text: string[] = []
+  const executions: AgentExecution[] = []
+  for (const line of output.split(/\r?\n/)) {
+    if (line.trim() === '') continue
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (event === null || typeof event !== 'object') continue
+    const record = event as {
+      type?: unknown
+      part?: {
+        type?: unknown
+        text?: unknown
+        tool?: unknown
+        state?: { status?: unknown; input?: unknown; metadata?: unknown }
+      }
+    }
+    if (record.type === 'text' && record.part?.type === 'text' && typeof record.part.text === 'string') {
+      text.push(record.part.text)
+    }
+    // OpenCode 2 emits `tool_use` events; OpenCode 1 emits `tool` events. Both carry
+    // the tool part under `part`, and both report a shell run that finished as
+    // `completed` -- including a command that exited non-zero, which is a completed
+    // run with a failing status, not a failed run.
+    if (record.type !== 'tool_use' && record.type !== 'tool') continue
+    if (record.part?.type !== 'tool') continue
+    if (typeof record.part.tool !== 'string' || !SHELL_TOOL_NAMES.has(record.part.tool)) continue
+    if (record.part.state?.status !== 'completed') continue
+    const input = record.part.state.input
+    if (input === null || typeof input !== 'object') continue
+    const command = (input as { command?: unknown }).command
+    if (typeof command !== 'string') continue
+    executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+  }
+  return { text: text.join('\n'), executions }
+}
+
+/**
+ * Whether a command the agent ran is the scenario's check command.
+ *
+ * Accept only a small, literal subset of shell syntax. `tokenizeCommand` is for
+ * direct process argv, not shell source: it silently accepts unterminated quotes
+ * and flattens newlines that a shell treats as command separators. A shell parse
+ * error can exit 1 without running the check, so its status is not check evidence.
+ *
+ * Executables must match exactly: `./node` is an agent-writable local program, not
+ * PATH-resolved `node`. Only Node's script operand gets path normalization, so
+ * `node ./run-check.js` remains supported without changing other argument values.
+ */
+export function isCheckCommand(expected: string, actual: string): boolean {
+  const want = parseEvidenceCommand(expected)
+  const got = parseEvidenceCommand(actual)
+  if (want === null || got === null || want.length === 0 || want.length !== got.length) return false
+  return want.every((arg, index) => {
+    const actualArg = got[index] as string
+    if (index === 1 && want[0] === 'node' && !arg.startsWith('-') && /\.(?:c|m)?js$/.test(arg)) {
+      return normalizeScriptPath(arg) === normalizeScriptPath(actualArg)
+    }
+    return arg === actualArg
+  })
+}
+
+/**
+ * Read inert words separated by ASCII spaces/tabs, with optional whole-argument
+ * double quotes. Everything else fails closed: no controls, operators, expansions,
+ * escapes, quote concatenation, or quoted executables (which PowerShell does not
+ * invoke without an operator). Single quotes and backslashes are not interpreted
+ * consistently across cmd, PowerShell and POSIX shells; the host OS alone does not
+ * identify the agent's shell. This is deliberately not a general shell parser.
+ */
+function parseEvidenceCommand(command: string): string[] | null {
+  const args: string[] = []
+  let cursor = 0
+  while (cursor < command.length) {
+    if (command[cursor] === ' ' || command[cursor] === '\t') {
+      cursor++
+      continue
+    }
+    const start = cursor
+    const quote = command[cursor]
+    let arg: string
+    if (quote === '"') {
+      if (args.length === 0) return null
+      const end = command.indexOf(quote, cursor + 1)
+      if (end === -1) return null
+      arg = command.slice(cursor + 1, end)
+      cursor = end + 1
+    } else {
+      while (cursor < command.length && command[cursor] !== ' ' && command[cursor] !== '\t') cursor++
+      arg = command.slice(start, cursor)
+    }
+    if (cursor < command.length && command[cursor] !== ' ' && command[cursor] !== '\t') return null
+    if (!/^[A-Za-z0-9_./: -]+$/.test(arg)) return null
+    args.push(arg)
+  }
+  return args
+}
+
+/** Normalize a script path, never a command name or an arbitrary argument value. */
+function normalizeScriptPath(arg: string): string {
+  return arg.replace(/^\.\//, '')
+}
+
+/**
+ * Require both a completed tool event and a parent-controlled execution of captured
+ * source. Equal exit statuses alone cannot distinguish a same-exit replacement.
+ */
+function findEvidenceDisagreement(
+  commands: readonly string[],
+  observedRuns: readonly (readonly AgentExecution[])[],
+  executions: readonly (CheckExecution | undefined)[],
+): string | null {
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index] as string
+    const observed = observedRuns[index]?.at(-1)
+    const execution = executions[index]
+    if (observed === undefined || execution === undefined) {
+      return `no harness-controlled execution of ${JSON.stringify(command)} was captured; shell events alone do not prove which script ran`
+    }
+    if (observed.exitCode === null) {
+      return `the agent's execution of ${JSON.stringify(command)} reported no exit status; execution evidence cannot be verified`
+    }
+    if (observed.exitCode !== execution.exitCode) {
+      return `the agent's execution of ${JSON.stringify(command)} exited with ${observed.exitCode}, but the captured check exits with ${execution.exitCode}; execution evidence does not match the check`
+    }
+  }
+  return null
+}
+
+/** Ensure the agent did not alter the check or visible verifier before harness replay. */
+function scenarioEvidenceScriptsUnchanged(scenario: EvalScenario, workdir: string): boolean {
+  const fixtureRoot = join(repoRoot, ...scenario.repo.split('/'))
+  const commands = [...(scenario.solutionRun ?? []), ...scenario.verify]
+  const scripts = new Set<string>()
+  for (const command of commands) {
+    const [, ...args] = tokenizeCommand(command)
+    for (const arg of args) {
+      if (/\.(?:c|m)?js$/i.test(arg) && !arg.startsWith('-')) scripts.add(arg)
+    }
+  }
+  for (const script of scripts) {
+    const original = join(fixtureRoot, ...script.split('/'))
+    const current = join(workdir, ...script.split('/'))
+    if (!existsSync(original) || !existsSync(current) || !readFileSync(original).equals(readFileSync(current)))
+      return false
+  }
+  return true
+}
+
+/**
+ * Resolve the directory a scenario's verifier should run in.
+ *
+ * The profile's `projectDir` is the same detection `anvil init` and `crew verify` use.
+ * Running the verifier there is what makes a nested-project scenario measure detection
+ * rather than accidentally measuring the repository root.
+ */
+function projectDirIn(workdir: string): string {
+  const { profile } = buildProfile(workdir, { root: workdir, host: null, remote: null, defaultBranch: null })
+  if (profile.projectDir === '') return workdir
+  return join(workdir, ...profile.projectDir.split('/'))
 }
 
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */
@@ -766,14 +1154,14 @@ function ensureCliBuilt(): void {
 // Process helpers
 // ---------------------------------------------------------------------------
 
-async function runAll(commands: string[], cwd: string): Promise<RunResult[]> {
+async function runAll(commands: string[], cwd: string, env: NodeJS.ProcessEnv = {}): Promise<RunResult[]> {
   const out: RunResult[] = []
   for (const command of commands) {
     // The same tokenizer the crew uses: a verify command is one string, and splitting it
     // on spaces passes quotes through literally.
     const [bin, ...rest] = tokenizeCommand(command)
     if (bin === undefined) continue
-    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000 }))
+    out.push(await run(bin, rest, cwd, { timeoutMs: 5 * 60_000, env }))
   }
   return out
 }
@@ -782,7 +1170,7 @@ export async function run(
   bin: string,
   args: string[],
   cwd: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<RunResult> {
   // `spawnArgv` rather than `spawn(bin, ...)`: the npm-installed `opencode` is a `.CMD`
   // shim on Windows, and Node's spawn does not resolve PATHEXT.
@@ -794,7 +1182,7 @@ export async function run(
     // so the agent works in the fixture, not in the repo that launched the harness.
     const child = spawn(file, argv, {
       cwd,
-      env: { ...process.env, PWD: cwd },
+      env: childEnvironment(options.env, cwd),
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(needsVerbatim ? { windowsVerbatimArguments: true } : {}),
     })
@@ -831,6 +1219,15 @@ export async function run(
       })
     })
   })
+}
+
+/** Merge a subprocess environment while allowing explicit `undefined` values to unset keys. */
+function childEnvironment(overrides: NodeJS.ProcessEnv | undefined, cwd: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...overrides, PWD: cwd }
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete env[key]
+  }
+  return env
 }
 
 /**
@@ -1008,7 +1405,7 @@ function archiveRunRecord(record: EvalRunRecord, overwrite = true): boolean {
 /** Fingerprint the harness policy that a resumable run must not silently change. */
 function hashHarness(): string {
   const hash = createHash('sha256')
-  for (const rel of ['scripts/eval.ts', 'eval/models.json']) {
+  for (const rel of ['scripts/eval.ts', 'scripts/eval-check-broker.ts', 'eval/models.json']) {
     const path = join(repoRoot, ...rel.split('/'))
     if (!existsSync(path)) continue
     hash.update(rel.replace(/\\/g, '/'))

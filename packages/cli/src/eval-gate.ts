@@ -38,6 +38,12 @@ export interface EvalVerifierScenario {
   hiddenVerify?: readonly string[] | null
 }
 
+/** One file a canned answer writes into the fixture. */
+export interface EvalSolutionFile {
+  from: string
+  to: string
+}
+
 export interface EvalScenario {
   id: string
   size: EvalScenarioSize
@@ -48,12 +54,32 @@ export interface EvalScenario {
   task: string
   /** Commands that must pass after the agent finishes. */
   verify: string[]
+  /** Run the visible verifier from the detected project directory instead of the root. */
+  verifyInProjectDir?: boolean
   /** Files copied in after the agent finishes, to grade the work itself. */
   hidden?: Array<{ from: string; to: string }>
   /** Commands that grade the work, run after the hidden files are in place. */
   hiddenVerify?: string[]
   /** A canned answer for `--fake-agent`, never shown to a real model. */
-  solution?: { from: string; to: string }
+  solution?: EvalSolutionFile | EvalSolutionFile[]
+  /**
+   * Commands the fake agent runs as part of its canned answer, before the solution files
+   * are applied. This is how a verify-only scenario demonstrates that the work was done
+   * (for example, actually running the check it must report on).
+   */
+  solutionRun?: string[]
+  /**
+   * Capture execution evidence for this scenario in a harness-owned log. The log path
+   * is never exposed to the agent; an agent-writable path is forgeable by construction.
+   * Verifiers read the log from `ANVIL_EVAL_EXECUTION_LOG` in their own harness-provided
+   * environment.
+   *
+   * Real agents invoke a harness-provided Node launcher. A parent-process broker
+   * executes source captured before the agent starts and keeps execution records
+   * in memory. Completed tool events must agree with those records; a shell event,
+   * a matching exit code, or a report alone does not prove which script ran.
+   */
+  captureExecution?: boolean
   /** How long the agent gets. */
   timeoutMinutes?: number
   /** What a passing run must produce. */
@@ -355,9 +381,12 @@ export function hashScenario(scenario: EvalScenario): string {
     repo: scenario.repo,
     task: scenario.task,
     verify: scenario.verify,
+    verifyInProjectDir: scenario.verifyInProjectDir ?? false,
     hidden: scenario.hidden ?? [],
     hiddenVerify: scenario.hiddenVerify ?? [],
     solution: scenario.solution ?? null,
+    ...(scenario.solutionRun === undefined ? {} : { solutionRun: scenario.solutionRun }),
+    ...(scenario.captureExecution === undefined ? {} : { captureExecution: scenario.captureExecution }),
     timeoutMinutes: scenario.timeoutMinutes ?? null,
     expect: scenario.expect,
   })
@@ -382,19 +411,28 @@ export function hashScenarioSource(repoRoot: string, scenario: EvalScenario): st
   }
   hashPath(scenario.repo)
   for (const file of scenario.hidden ?? []) hashPath(file.from)
-  if (scenario.solution !== undefined) hashPath(scenario.solution.from)
+  const solutions =
+    scenario.solution === undefined ? [] : Array.isArray(scenario.solution) ? scenario.solution : [scenario.solution]
+  for (const file of solutions) hashPath(file.from)
   return hash.digest('hex')
+}
+
+/** Normalize a canned answer, which may be one file or several. */
+export function solutionFiles(scenario: EvalScenario): EvalSolutionFile[] {
+  if (scenario.solution === undefined) return []
+  return Array.isArray(scenario.solution) ? scenario.solution : [scenario.solution]
 }
 
 /**
  * The matrix the eval harness promises.
  *
- * Two sizes and two kinds, one scenario each: a regression in either half is visible,
- * and a scenario that covers the same cell twice cannot silently replace the missing one.
+ * The four required cells (tiny/code-change, tiny/verify-only, medium/code-change, medium/verify-only)
+ * must each be covered at least once. Additional scenarios (Phase 2B+) may occupy the same
+ * size/kind cell; they are tracked separately so the gate can attribute results correctly.
  */
 export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): string | null {
   const expected = new Set(['tiny:code-change', 'tiny:verify-only', 'medium:code-change', 'medium:verify-only'])
-  const seen = new Set<string>()
+  const seen = new Map<string, string>() // cell -> first scenario id that claimed it
   const ids = new Set<string>()
 
   for (const scenario of scenarios) {
@@ -408,18 +446,14 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
       return `${scenario.id}: kind must be code-change or verify-only`
     }
     const cell = `${scenario.size}:${scenario.kind}`
-    if (seen.has(cell)) {
-      return `${scenario.id}: the matrix allows exactly one scenario per cell; ${scenario.size} / ${scenario.kind} is already covered`
-    }
-    seen.add(cell)
+    // Record the first scenario per cell; later ones in the same cell are permitted.
+    if (!seen.has(cell)) seen.set(cell, scenario.id)
   }
 
+  // Every required cell must be covered at least once.
   for (const cell of expected) {
     if (!seen.has(cell)) return `the scenario matrix is missing ${cell.replace(':', ' / ')}`
   }
-  // Allow additional scenarios beyond the four required cells (Phase 2B).
-  // Extra scenarios must have a unique size/kind combination that is not already covered.
-  if (seen.size < expected.size) return 'the scenario matrix must cover all four required cells'
   return null
 }
 
