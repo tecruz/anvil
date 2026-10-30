@@ -18,7 +18,16 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode, probeCommandVersion } from '@anvil/core'
 import {
@@ -96,6 +105,55 @@ export function claimsPath(repoRoot: string): string {
   return join(repoRoot, '.anvil', 'claims.json')
 }
 
+/**
+ * Resolve a root's `.anvil` directory, refusing a link that would redirect state writes.
+ *
+ * `.anvil/` is git-ignored, so a symlink committed to a repository survives checkout, and
+ * `mkdir` plus `writeFile` would then create the ticket context and claim registry wherever
+ * the link points. That is a write outside the approved root caused by repository content,
+ * which is exactly the boundary this package must not cross. A real directory is created
+ * when absent; a link, file, or anything that resolves elsewhere is an error.
+ */
+function checkedStateDirectory(root: string): string {
+  const directory = join(root, '.anvil')
+  const existing = lstatSync(directory, { throwIfNoEntry: false })
+  if (existing?.isSymbolicLink() === true) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to write anvil state through a link: ${directory}`, {
+      hint: 'Remove the link and retry; .anvil must be a real directory inside the repository or worktree.',
+      details: { path: directory },
+    })
+  }
+  if (existing !== undefined && !existing.isDirectory()) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing to write anvil state: ${directory} is not a directory`, {
+      hint: 'Remove or rename the path and retry; .anvil must be a directory.',
+      details: { path: directory },
+    })
+  }
+
+  if (existing === undefined) {
+    mkdirSync(directory, { recursive: true })
+  }
+
+  // Re-read after creating: `mkdir` succeeds through a link created between the two calls.
+  const after = lstatSync(directory)
+  const realRoot = realpathSync(root)
+  const realDirectory = realpathSync(directory)
+  const expected = join(realRoot, '.anvil')
+  const contained =
+    process.platform === 'win32' ? realDirectory.toLowerCase() === expected.toLowerCase() : realDirectory === expected
+  if (after.isSymbolicLink() || !after.isDirectory() || !contained) {
+    throw new AnvilError(
+      ErrorCode.PreflightFailed,
+      `Refusing to write anvil state outside the repository: ${directory} resolves to ${realDirectory}`,
+      {
+        hint: 'Remove the link and retry; .anvil must be a real directory inside the repository or worktree.',
+        details: { path: directory, resolved: realDirectory },
+      },
+    )
+  }
+  return directory
+}
+
 export function readClaims(repoRoot: string): ClaimRegistry {
   const path = claimsPath(repoRoot)
   if (!existsSync(path)) return { schemaVersion: 1, claims: [] }
@@ -123,7 +181,7 @@ export function readClaims(repoRoot: string): ClaimRegistry {
  */
 export function writeClaims(repoRoot: string, registry: ClaimRegistry): void {
   const path = claimsPath(repoRoot)
-  mkdirSync(dirname(path), { recursive: true })
+  checkedStateDirectory(repoRoot)
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
     writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
@@ -319,9 +377,11 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
 
     const context = renderContextBundle({ ticket, profile, branch })
     const overlay = renderAgentsOverlay({ ticket, profile })
-    mkdirSync(join(worktreePath, '.anvil'), { recursive: true })
-    writeFileSync(join(worktreePath, context.path), context.content, 'utf8')
-    writeFileSync(join(worktreePath, overlay.path), overlay.content, 'utf8')
+    // The state directory is validated once and all writes go through it, so a linked
+    // `.anvil` cannot redirect ticket context or the registry outside the worktree.
+    const stateDirectory = checkedStateDirectory(worktreePath)
+    writeFileSync(join(stateDirectory, basename(context.path)), context.content, 'utf8')
+    writeFileSync(join(stateDirectory, basename(overlay.path)), overlay.content, 'utf8')
     const _excluded = await excludeAnvilState(repoRoot)
 
     // Enforce "agents commit, humans ship" in git rather than in the prompt. A failure

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -32,6 +32,7 @@ import {
   findOrphanWorktrees,
   readClaims,
   releaseClaim,
+  writeClaims,
 } from '@anvil/worktrees'
 
 const temps: string[] = []
@@ -47,6 +48,28 @@ function temp(prefix: string): string {
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+}
+
+/** The link kind that needs no elevation: a junction on Windows, a directory symlink elsewhere. */
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
+
+/**
+ * Whether this machine can create a directory link at all.
+ *
+ * Windows only allows symlinks with Developer Mode or elevation; junctions usually work but
+ * can be blocked by policy. The containment test skips rather than failing where the
+ * capability is absent, because the guard's behaviour is only meaningful if a link can exist.
+ */
+function canCreateDirectoryLink(): boolean {
+  const probe = temp('anvil-link-probe-')
+  const target = join(probe, 'target')
+  mkdirSync(target)
+  try {
+    symlinkSync(target, join(probe, 'link'), directoryLinkType)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** A real repository with one commit, so worktrees can branch from it. */
@@ -748,6 +771,40 @@ describe('claims', () => {
     assert.equal(existsSync(join(wtRoot, 'local-1')), false)
     assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
     assert.equal(readClaims(repo).claims.length, 0)
+    assert.deepEqual(await findOrphanWorktrees(repo), [])
+  })
+
+  test('the registry writer refuses a linked .anvil instead of writing through it', (t) => {
+    if (!canCreateDirectoryLink()) {
+      t.skip('this machine cannot create a directory link without elevation')
+      return
+    }
+    const repo = makeRepo()
+    const outside = temp('anvil-m3-link-out-')
+    symlinkSync(outside, join(repo, '.anvil'), directoryLinkType)
+
+    assert.throws(() => writeClaims(repo, { schemaVersion: 1, claims: [] }), /through a link/)
+    assert.deepEqual(readdirSync(outside), [], 'a linked state directory must receive nothing')
+  })
+
+  test('a claim that would write through a linked .anvil removes the worktree and branch', async (t) => {
+    if (!canCreateDirectoryLink()) {
+      t.skip('this machine cannot create a directory link without elevation')
+      return
+    }
+    const repo = makeRepo()
+    const outside = temp('anvil-m3-link-out2-')
+    symlinkSync(outside, join(repo, '.anvil'), directoryLinkType)
+    const wtRoot = join(temp('anvil-m3-clink-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.deepEqual(readdirSync(outside), [], 'the claim wrote nothing outside the repository')
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false)
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
     assert.deepEqual(await findOrphanWorktrees(repo), [])
   })
 

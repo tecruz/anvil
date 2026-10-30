@@ -6,8 +6,10 @@ is left with. It is the reference for the Phase 3 acceptance criterion "faults a
 declared boundary have a documented, tested recovery outcome".
 
 Injection is deliberately boring: a committed file where a directory belongs, a directory
-where a file belongs, a git worktree lock, a stub provider, or an injected git operation.
-No test changes machine-wide permissions or runs elevated.
+where a file belongs, a directory link (a junction on Windows) where a real directory
+belongs, a git worktree lock, a stub provider, or an injected git operation. Link tests skip
+wherever the machine cannot create a link without elevation; no test changes machine-wide
+permissions or runs elevated.
 
 ## Summary
 
@@ -19,6 +21,7 @@ No test changes machine-wide permissions or runs elevated.
 | Apply | Alias collision | Two manifest paths reach one file through a hard link or directory alias | The pre-apply content is restored once, for the shared file | `staging-apply-failures.test.ts` |
 | Claim | Preflight and branch collision | Occupied target; invalid branch; branch exists | Refuses before creating a worktree, branch or registry entry | `worktrees.test.ts` |
 | Claim | Worktree created, warm-up fails | A committed `.anvil` file makes the context write fail | Removes the worktree and branch it created; registers nothing; no orphan survives | `worktrees.test.ts`, "fails while warming" |
+| Claim | `.anvil` is a link | A directory link replaces the state directory | Refuses before writing; the link target receives nothing, and the worktree and branch are removed | `worktrees.test.ts`, "would write through a linked .anvil" |
 | Claim | Worktree warm, registry write fails | `.anvil/claims.json` is a directory | Removes the worktree and branch; the atomic registry write leaves the previous registry intact | `worktrees.test.ts`, "cannot record itself" |
 | Release | Worktree removal | `git worktree lock` makes forced removal fail | Worktree, branch and active registry entry all survive; unlocking makes the same release retryable | `worktrees.test.ts`, "locked worktree" |
 | Release | Branch deletion | Injected `git branch -D` failure | Worktree removal is reported as successful; `branchRetainedBecause` names the kept branch | `worktrees.test.ts`, "failed branch deletion" |
@@ -36,6 +39,8 @@ A claim is one recoverable unit from the successful `git worktree add` until
 
 1. Create the worktree and branch atomically with `git worktree add -b`.
 2. Warm the worktree (context bundle, AGENTS overlay, shared exclude entry, push guard).
+   `.anvil` is validated as a real directory inside the worktree first; a link or a file is
+   refused rather than written through.
 3. Read the runner version, environment notes and upstream state. None of these mutate.
 4. Read, merge and atomically write the claim registry. This is the last fallible step.
 
