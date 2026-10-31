@@ -146,7 +146,7 @@ What each step does:
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
   run concurrently. The decision is always printed.
-- **`ship`** runs the pipeline in a deliberate order: refuse, verify, push, pull
+- **`ship`** runs the pipeline in a deliberate order: refuse, verify, diff, push, pull
   request, ticket. The stages that could lose work or leave debris on the remote run
   last, so a failed verification means nothing reached the remote at all. It refuses
   before pushing when the worktree has uncommitted changes or the branch has no commits

@@ -1,6 +1,6 @@
 # Implementation plan: reliability, evidence, and distribution
 
-Status: **proposed; no implementation authorized by this document**.
+Status: **Phases 0-3 complete; Phase 4 proposed.**
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -255,6 +255,14 @@ Phase 2B (extended 6-scenario corpus) is now complete:
 **Outcome:** safety invariants are exercised across whole operations, not only successful
 calls or isolated path helpers.
 
+**Status:** complete. Claim creation and release boundary recovery, ship provider-failure
+reporting, cross-process claim-registry locking, fetch-lock stale-owner recovery, and the
+state-directory containment guard are implemented. The boundary-by-boundary outcomes are
+recorded in [LIFECYCLE_RECOVERY.md](LIFECYCLE_RECOVERY.md); verification evidence is in the
+Phase 3 PR. Review follow-ups cover linked leaf outputs and hooks, successor-safe lock
+recovery, same-ticket replacement during release, and remote-only shipping bases. The
+reviewed source is `0148e38`; its hermetic eval summary was regenerated rather than reused.
+
 ### Work
 
 1. Define each operation's allowed side effects before adding failure injection:
@@ -287,12 +295,12 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 
 ### Acceptance
 
-- [ ] Sentinel files prove the absence of unintended filesystem mutations after rejection.
-- [ ] Faults at each declared boundary have a documented, tested recovery outcome.
-- [ ] Lock cleanup, registry consistency, and safe retries are asserted, not just exit codes.
-- [ ] Symlink/junction cases run on suitable Windows, Ubuntu, and macOS CI runners;
+- [x] Sentinel files prove the absence of unintended filesystem mutations after rejection.
+- [x] Faults at each declared boundary have a documented, tested recovery outcome.
+- [x] Lock cleanup, registry consistency, and safe retries are asserted, not just exit codes.
+- [x] Symlink/junction cases run on suitable Windows, Ubuntu, and macOS CI runners;
   capability skips are explicit, and injected failure tests run without elevation.
-- [ ] Existing PWD, staging, cache-serialization, and unpushed-commit regressions remain covered.
+- [x] Existing PWD, staging, cache-serialization, and unpushed-commit regressions remain covered.
 
 ## Phase 4 — Ship a versioned prebuilt distribution
 

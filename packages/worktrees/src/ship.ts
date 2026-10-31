@@ -10,12 +10,13 @@
  *     arrives as one implementation of it.
  *  2. **Every stage can stop the ship, and says why.** A pipeline that pushes first and
  *     verifies later leaves a branch on the remote when the work is broken. Order is
- *     therefore: refuse, verify, push, PR, ticket — and the stages that can lose work run
- *     last.
+ *     therefore: refuse, verify, diff, push, PR, ticket — and the stages that can lose work
+ *     run last.
  */
 
 import { join } from 'node:path'
-import { git, type WorktreeStatus, worktreeStatus } from '@anvil/git'
+import { AnvilError, ErrorCode } from '@anvil/core'
+import { git, revExists, type WorktreeStatus, worktreeStatus } from '@anvil/git'
 import {
   analyzeRisk,
   codeownersFor,
@@ -62,6 +63,8 @@ export interface ShipOptions {
   worktreePath: string
   branch: string
   baseBranch: string
+  /** Resolved Git ref, distinct from the forge's short PR target branch. */
+  baseRef?: string
   ticket: Ticket
   profile: ProjectProfile
   transport: ForgeTransport
@@ -85,9 +88,11 @@ export interface ShipOptions {
 }
 
 export interface ShipStage {
-  name: 'refuse' | 'verify' | 'push' | 'pr' | 'ticket'
+  name: 'refuse' | 'verify' | 'diff' | 'push' | 'pr' | 'ticket'
   ok: boolean
   detail: string
+  /** Actionable recovery guidance, when this stage has a specific remedy. */
+  hint?: string
 }
 
 export interface ShipResult {
@@ -101,13 +106,26 @@ export interface ShipResult {
   commandsRun: string[]
 }
 
-export async function ship(options: ShipOptions): Promise<ShipResult> {
+export async function ship(input: ShipOptions): Promise<ShipResult> {
+  // Older callers only supply the PR target name. Resolve its remote-tracking ref
+  // without creating a local branch; never change the base sent to the forge.
+  const baseRef =
+    input.baseRef ??
+    ((await revExists(input.worktreePath, `refs/remotes/origin/${input.baseBranch}`))
+      ? `refs/remotes/origin/${input.baseBranch}`
+      : input.baseBranch)
+  const options = { ...input, baseRef }
   const stages: ShipStage[] = []
   const commandsRun: string[] = []
 
   // ---- 1. Refuse before anything irreversible ------------------------------
   const refusal = await checkRefusals(options)
-  stages.push({ name: 'refuse', ok: refusal.ok, detail: refusal.detail })
+  stages.push({
+    name: 'refuse',
+    ok: refusal.ok,
+    detail: refusal.detail,
+    ...(refusal.hint === undefined ? {} : { hint: refusal.hint }),
+  })
   if (!refusal.ok) {
     return {
       ok: false,
@@ -191,7 +209,27 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   }
 
   // ---- 3. What changed, and how risky is it? -------------------------------
-  const changed = await changedPaths(options)
+  // Recompute after verification: a check command, or an agent working beside it, can
+  // create a commit while verify runs. The push sends the post-verification tree, so the
+  // risk analysis and CODEOWNERS reviewers must describe that same tree. The earlier
+  // check in checkRefusals only proves the diff can be computed at all.
+  let changed: string[]
+  try {
+    changed = await changedPaths(options)
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    const hint = err instanceof AnvilError ? err.hint : undefined
+    stages.push({ name: 'diff', ok: false, detail, ...(hint === undefined ? {} : { hint }) })
+    return {
+      ok: false,
+      stages,
+      risk: { touched: [], highPaths: [], mediumPaths: [], level: null },
+      reviewers: [],
+      verification,
+      commandsRun,
+    }
+  }
+  stages.push({ name: 'diff', ok: true, detail: `${changed.length} file(s) changed against ${options.baseRef}` })
   const risk = analyzeRisk(changed, options.profile.risk)
 
   const codeowners = codeownersFor(options.profile, options.read)
@@ -203,20 +241,46 @@ export async function ship(options: ShipOptions): Promise<ShipResult> {
   ].sort()
 
   // ---- 4. Push -------------------------------------------------------------
-  const pushed = await options.transport.pushBranch({
-    cwd: options.worktreePath,
-    branch: options.branch,
-  })
+  // The transport is the network boundary. A thrown error is a failed push, not a crash:
+  // the caller needs the stage record to know that nothing reached the remote.
+  let pushed: { ok: boolean; detail: string }
+  try {
+    pushed = await options.transport.pushBranch({
+      cwd: options.worktreePath,
+      branch: options.branch,
+    })
+  } catch (err) {
+    pushed = { ok: false, detail: err instanceof Error ? err.message : String(err) }
+  }
   stages.push({ name: 'push', ok: pushed.ok, detail: pushed.detail })
   if (!pushed.ok) {
     return { ok: false, stages, risk, reviewers, commandsRun }
   }
 
   // ---- 5. Pull request -----------------------------------------------------
-  const existing = await options.transport.findPullRequest({
-    cwd: options.worktreePath,
-    branch: options.branch,
-  })
+  // Reading whether a PR already exists is another provider call. If it fails, the push
+  // already succeeded, and the result must say so rather than losing that fact in a throw.
+  let existing: { number: number; url: string; state: string } | null
+  try {
+    existing = await options.transport.findPullRequest({
+      cwd: options.worktreePath,
+      branch: options.branch,
+    })
+  } catch (err) {
+    stages.push({
+      name: 'pr',
+      ok: false,
+      detail: `push succeeded, but could not read the existing PR: ${err instanceof Error ? err.message : String(err)}`,
+    })
+    return {
+      ok: false,
+      stages,
+      risk,
+      reviewers,
+      ...(verification === undefined ? {} : { verification }),
+      commandsRun,
+    }
+  }
   const body = renderPrBody({
     ticket: options.ticket,
     risk,
@@ -327,6 +391,8 @@ export function inferredVerifyCommands(profile: ProjectProfile): string[] {
 interface Refusal {
   ok: boolean
   detail: string
+  /** Actionable recovery guidance, when this refusal has a specific remedy. */
+  hint?: string
 }
 
 /**
@@ -348,21 +414,65 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
     }
   }
 
-  const head = await git(['rev-list', '--count', `${options.baseBranch}..HEAD`], { cwd: options.worktreePath })
-  if (head.exitCode === 0 && head.stdout.trim() === '0') {
+  const head = await git(['rev-list', '--count', `${options.baseRef ?? options.baseBranch}..HEAD`], {
+    cwd: options.worktreePath,
+  })
+  if (head.exitCode !== 0) {
+    // A base ref that cannot be resolved makes the diff, the risk analysis and the PR
+    // target all unreliable. Refusing here is the only answer that does not guess.
+    return {
+      ok: false,
+      detail: `Cannot resolve base branch ${options.baseBranch} in ${options.worktreePath}: ${head.stderr.trim() || head.stdout.trim() || `exit ${head.exitCode}`}`,
+    }
+  }
+  if (head.stdout.trim() === '0') {
     return {
       ok: false,
       detail: `No commits on ${options.branch} beyond ${options.baseBranch}.`,
     }
   }
 
+  // Validate the changed-file diff before running verification, so an impossible diff
+  // does not cost a full test run. The result is discarded: step 3 recomputes it after
+  // verification, and the recomputation is what risk analysis and reviewers consume.
+  try {
+    await changedPaths(options)
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    const hint = err instanceof AnvilError ? err.hint : undefined
+    return {
+      ok: false,
+      detail,
+      ...(hint === undefined ? {} : { hint }),
+    }
+  }
+
   return { ok: true, detail: 'nothing to refuse' }
 }
 
-/** Repo-relative paths changed on this branch. */
-export async function changedPaths(options: { worktreePath: string; baseBranch: string }): Promise<string[]> {
-  const res = await git(['diff', '--name-only', `${options.baseBranch}...HEAD`], { cwd: options.worktreePath })
-  if (res.exitCode !== 0) return []
+/**
+ * Repo-relative paths changed on this branch.
+ *
+ * Throws when Git cannot compute the diff. In particular, an unrelated base and branch
+ * have no merge base, which is common after a shallow fetch advances the base ref.
+ * Treating that failure as an empty diff would bypass risk analysis and reviewers.
+ */
+export async function changedPaths(options: {
+  worktreePath: string
+  baseBranch: string
+  baseRef?: string
+}): Promise<string[]> {
+  const baseRef = options.baseRef ?? options.baseBranch
+  const res = await git(['diff', '--name-only', `${baseRef}...HEAD`], {
+    cwd: options.worktreePath,
+  })
+  if (res.exitCode !== 0) {
+    const detail = res.stderr.trim() || res.stdout.trim() || `exit ${res.exitCode}`
+    throw new AnvilError(ErrorCode.PreflightFailed, `Cannot compute changed files against ${baseRef}: ${detail}`, {
+      hint: 'Use a base that shares history with the branch; if the clone is shallow, fetch the missing history (for example, `git fetch --unshallow` or `git fetch --deepen=...`).',
+      details: { baseRef, baseBranch: options.baseBranch, exitCode: res.exitCode },
+    })
+  }
   return res.stdout
     .split('\n')
     .map((p) => p.trim())

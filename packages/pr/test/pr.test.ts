@@ -493,7 +493,7 @@ describe('ship pipeline', () => {
     assert.equal(forge.pushed, false)
   })
 
-  test('the happy path runs refuse, push, pr, ticket in that order', async () => {
+  test('the happy path runs refuse, verify, diff, push, pr, ticket in that order', async () => {
     const dir = repo()
     workOnBranch(dir, 'a.txt', 'work')
     const forge = fakeForge()
@@ -512,7 +512,7 @@ describe('ship pipeline', () => {
     assert.equal(result.ok, true)
     assert.deepEqual(
       result.stages.map((s) => s.name),
-      ['refuse', 'verify', 'push', 'pr', 'ticket'],
+      ['refuse', 'verify', 'diff', 'push', 'pr', 'ticket'],
     )
     assert.equal(result.pr?.number, 7)
     assert.equal(commented.length, 1)

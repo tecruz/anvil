@@ -17,7 +17,8 @@
  *    debris to clean up.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode, probeCommandVersion } from '@anvil/core'
 import {
@@ -31,15 +32,18 @@ import {
   normalizeGitPath,
   type PreflightCheck,
   preflightClaim,
+  type RunResult,
   removeWorktree,
   resolveBaseRef,
   type WorktreeStatus,
+  withRepoLock,
   worktreeStatus,
 } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
 import { type InjectionFinding, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
 import { installPushGuard, type PushGuardResult } from './hooks.ts'
+import { checkedStatePath, createStateDirectory } from './state.ts'
 
 export type ClaimState = 'active' | 'shipped' | 'released' | 'stale'
 
@@ -110,10 +114,61 @@ export function readClaims(repoRoot: string): ClaimRegistry {
   }
 }
 
+/**
+ * Write the claim registry atomically.
+ *
+ * This file is the only record that a worktree belongs to a claim. A crash or a failed
+ * write in the middle of `JSON.stringify` used to leave a truncated file, which `readClaims`
+ * treats as an empty registry -- every existing worktree then becomes an orphan. Writing a
+ * sibling temp file and renaming it means a reader sees either the previous registry or the
+ * complete new one, never half of either.
+ */
 export function writeClaims(repoRoot: string, registry: ClaimRegistry): void {
   const path = claimsPath(repoRoot)
-  mkdirSync(dirname(path), { recursive: true })
-  writeFileSync(path, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
+  checkedStatePath(repoRoot, ['claims.json'])
+  createStateDirectory(repoRoot)
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, `${JSON.stringify(registry, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    renameSync(temporary, path)
+  } catch (err) {
+    try {
+      unlinkSync(temporary)
+    } catch {
+      // The temp file may never have been created, or may already be gone.
+    }
+    throw err
+  }
+}
+
+/**
+ * Serialize the claim registry's read-modify-write cycle across processes.
+ *
+ * The atomic write stops a truncated file, but not a lost update: two processes that read
+ * the same registry and then write their own copy leave only one of the two claims. The
+ * lock is per-repository, beside the common git dir, so claims made from different
+ * worktrees of the same repository contend on the same file.
+ */
+export async function withClaimsLock<T>(repoRoot: string, fn: () => Promise<T>): Promise<T> {
+  return withRepoLock({ cwd: repoRoot, name: 'claims' }, fn)
+}
+
+/**
+ * Apply one mutation to the claim registry under the claims lock.
+ *
+ * The callback is synchronous on purpose: the lock must cover the read, the mutation and
+ * the write, and an async callback would invite unrelated work while holding it.
+ */
+export async function updateClaims(
+  repoRoot: string,
+  mutate: (registry: ClaimRegistry) => void,
+): Promise<ClaimRegistry> {
+  return withClaimsLock(repoRoot, async () => {
+    const registry = readClaims(repoRoot)
+    mutate(registry)
+    writeClaims(repoRoot, registry)
+    return registry
+  })
 }
 
 /**
@@ -282,70 +337,130 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
     )
   }
 
-  // 6. Make the worktree warm: ticket context, AGENTS overlay, and an exclusion so
-  //    company-internal ticket text stays out of git.
-  const profile = buildProfile(worktreePath, {
-    root: worktreePath,
-    host: null,
-    remote: null,
-    defaultBranch: null,
-  }).profile
+  // 6. From here the worktree exists. Everything between creating it and recording it is
+  //    one recoverable unit: a failure must not leave an unregistered worktree and branch
+  //    stranded. Nothing after `writeClaims` can fail, so it is deliberately last.
+  try {
+    // Make the worktree warm: ticket context, AGENTS overlay, and an exclusion so
+    // company-internal ticket text stays out of git.
+    const profile = buildProfile(worktreePath, {
+      root: worktreePath,
+      host: null,
+      remote: null,
+      defaultBranch: null,
+    }).profile
 
-  const context = renderContextBundle({ ticket, profile, branch })
-  const overlay = renderAgentsOverlay({ ticket, profile })
-  mkdirSync(join(worktreePath, '.anvil'), { recursive: true })
-  writeFileSync(join(worktreePath, context.path), context.content, 'utf8')
-  writeFileSync(join(worktreePath, overlay.path), overlay.content, 'utf8')
-  const _excluded = await excludeAnvilState(repoRoot)
+    const context = renderContextBundle({ ticket, profile, branch })
+    const overlay = renderAgentsOverlay({ ticket, profile })
+    // Validate both outputs before the first write: a real parent does not make linked
+    // leaf files safe. The hook installer checks its own complete output batch too.
+    const contextPath = checkedStatePath(worktreePath, [basename(context.path)])
+    const overlayPath = checkedStatePath(worktreePath, [basename(overlay.path)])
+    checkedStatePath(worktreePath, ['hooks'], true)
+    createStateDirectory(worktreePath)
+    writeFileSync(contextPath, context.content, 'utf8')
+    writeFileSync(overlayPath, overlay.content, 'utf8')
+    const _excluded = await excludeAnvilState(repoRoot)
 
-  // 7. Enforce "agents commit, humans ship" in git rather than in the prompt. A failure
-  //    here is reported, not fatal: a claim on an old git is still a useful worktree.
-  const pushGuard = await installPushGuard({ worktreePath, key: ticket.ref.key })
+    // Enforce "agents commit, humans ship" in git rather than in the prompt. A failure
+    // here is reported, not fatal: a claim on an old git is still a useful worktree.
+    const pushGuard = await installPushGuard({ worktreePath, key: ticket.ref.key })
 
-  const worktrees = await listWorktrees(repoRoot)
-  const entry = worktrees.find((w) => w.branch === branch)
+    const worktrees = await listWorktrees(repoRoot)
+    const entry = worktrees.find((w) => w.branch === branch)
 
-  // The path says which binary; the version says what produced the work. Only opencode is
-  // probed, because that is the runner whose version the claim is later trying to reproduce;
-  // probing arbitrary user commands on every claim would be a surprise side effect.
-  const resolvedVersion =
-    options.runner !== undefined &&
-    basename(options.runner)
-      .replace(/\.(?:cmd|bat|exe)$/i, '')
-      .toLowerCase() === 'opencode'
-      ? await probeCommandVersion(options.runner, {
-          cwd: repoRoot,
-          ...(options.env === undefined ? {} : { env: options.env }),
-        })
-      : null
+    // The path says which binary; the version says what produced the work. Only opencode is
+    // probed, because that is the runner whose version the claim is later trying to reproduce;
+    // probing arbitrary user commands on every claim would be a surprise side effect.
+    const resolvedVersion =
+      options.runner !== undefined &&
+      basename(options.runner)
+        .replace(/\.(?:cmd|bat|exe)$/i, '')
+        .toLowerCase() === 'opencode'
+        ? await probeCommandVersion(options.runner, {
+            cwd: repoRoot,
+            ...(options.env === undefined ? {} : { env: options.env }),
+          })
+        : null
 
-  const claim: Claim = {
-    key: ticket.ref.key,
-    ticket: ticket.ref,
-    branch,
-    baseBranch: preferred ?? base.resolved.replace(/^origin\//, ''),
-    baseRef: base.ref,
-    worktreePath,
-    worktreeId: entry?.id ?? null,
-    state: 'active',
-    createdAt: new Date().toISOString(),
-    ...(options.runner === undefined
-      ? {}
-      : { agent: { runner: options.runner, ...(resolvedVersion === null ? {} : { version: resolvedVersion }) } }),
+    const claim: Claim = {
+      key: ticket.ref.key,
+      ticket: ticket.ref,
+      branch,
+      baseBranch: preferred ?? base.resolved.replace(/^origin\//, ''),
+      baseRef: base.ref,
+      worktreePath,
+      worktreeId: entry?.id ?? null,
+      state: 'active',
+      createdAt: new Date().toISOString(),
+      ...(options.runner === undefined
+        ? {}
+        : { agent: { runner: options.runner, ...(resolvedVersion === null ? {} : { version: resolvedVersion }) } }),
+    }
+
+    // Read state that cannot mutate anything before the registry is written. If either
+    // probe fails, the cleanup below sees a claim that was never registered.
+    const notes = await environmentNotes(repoRoot)
+    const needsUpstream = !(await hasUpstream(worktreePath, branch))
+
+    // The registry update is the last fallible step, and it runs under the repository
+    // claims lock so a concurrent claim in another process cannot overwrite this one.
+    await updateClaims(repoRoot, (registry) => {
+      registry.claims = [...registry.claims.filter((c) => c.key !== claim.key), claim]
+    })
+
+    return {
+      claim,
+      checks: pre.checks,
+      notes,
+      needsUpstream,
+      injection: context.injection,
+      pushGuard,
+    }
+  } catch (err) {
+    const cleanupError = await rollbackClaimCreation(repoRoot, worktreePath, branch)
+    const detail = err instanceof Error ? err.message : String(err)
+    if (cleanupError !== null) {
+      throw new AnvilError(
+        ErrorCode.Internal,
+        `Claim setup failed and cleanup was incomplete: ${detail}. ${cleanupError}`,
+        {
+          hint: `Inspect ${worktreePath} and branch "${branch}" before retrying; remove them manually if they are still present.`,
+          cause: err,
+          details: { worktreePath, branch, cleanedUp: false },
+        },
+      )
+    }
+    throw new AnvilError(
+      err instanceof AnvilError ? err.code : ErrorCode.Internal,
+      `Claim setup failed; the worktree and branch were removed: ${detail}`,
+      {
+        hint: 'Nothing was registered. Fix the reported problem and retry.',
+        cause: err,
+        details: { worktreePath, branch, cleanedUp: true },
+      },
+    )
   }
+}
 
-  const registry = readClaims(repoRoot)
-  registry.claims = [...registry.claims.filter((c) => c.key !== claim.key), claim]
-  writeClaims(repoRoot, registry)
-
-  return {
-    claim,
-    checks: pre.checks,
-    notes: await environmentNotes(repoRoot),
-    needsUpstream: !(await hasUpstream(worktreePath, branch)),
-    injection: context.injection,
-    pushGuard,
+/**
+ * Remove a worktree and branch created by a claim that failed before registration.
+ *
+ * Returns a description of what could not be cleaned up, or null when the rollback
+ * completed. Forcing is safe here: this worktree was created moments ago and no user work
+ * can be in it yet. The branch is deleted only after the worktree is gone, because git
+ * refuses to delete a branch that a worktree still has checked out.
+ */
+async function rollbackClaimCreation(repoRoot: string, worktreePath: string, branch: string): Promise<string | null> {
+  const removed = await removeWorktree(repoRoot, worktreePath, true)
+  if (removed.exitCode !== 0) {
+    return `git worktree remove failed: ${removed.stderr.trim() || removed.stdout.trim() || `exit ${removed.exitCode}`}`
   }
+  const deleted = await deleteBranch(repoRoot, branch, true)
+  if (deleted.exitCode !== 0) {
+    return `git branch -D failed after the worktree was removed: ${deleted.stderr.trim() || deleted.stdout.trim() || `exit ${deleted.exitCode}`}`
+  }
+  return null
 }
 
 async function hasUpstream(cwd: string, branch: string): Promise<boolean> {
@@ -390,6 +505,19 @@ export interface ReleaseOptions {
   force?: boolean
   /** Also delete the branch. */
   deleteBranch?: boolean
+  /**
+   * Injected git operations, for failure tests. Production callers never pass this.
+   *
+   * A locked worktree already fails the real removal; overriding branch deletion is the
+   * only way to exercise that boundary without a machine-wide permission change.
+   */
+  operations?: Partial<ReleaseOperations>
+}
+
+export interface ReleaseOperations {
+  removeWorktree(repoRoot: string, path: string, force: boolean): Promise<RunResult>
+  deleteBranch(repoRoot: string, branch: string, force: boolean): Promise<RunResult>
+  writeRegistry(repoRoot: string, registry: ClaimRegistry): void
 }
 
 export interface ReleaseResult {
@@ -398,6 +526,8 @@ export interface ReleaseResult {
   branchDeleted: boolean
   /** Why the worktree was kept, when it was. */
   retainedBecause?: string
+  /** Why the branch was kept, when deletion was requested and failed. */
+  branchRetainedBecause?: string
 }
 
 /**
@@ -406,9 +536,19 @@ export interface ReleaseResult {
  * Refuses to remove a worktree holding uncommitted changes unless forced, and reports the
  * two "would lose work" conditions separately: uncommitted changes and unpushed commits.
  * A crew that reports "clean" while commits sit unpushed will lose them.
+ *
+ * Every mutation boundary has an explicit outcome: a refused removal leaves the registry
+ * active, a failed branch deletion is reported without pretending the release failed, and
+ * a failed registry write says which part already happened.
  */
 export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResult> {
   const { repoRoot, key } = options
+  const operations: ReleaseOperations = {
+    removeWorktree,
+    deleteBranch,
+    writeRegistry: writeClaims,
+    ...options.operations,
+  }
   const registry = readClaims(repoRoot)
   const claim = registry.claims.find((c) => c.key === key)
   if (claim === undefined) {
@@ -451,16 +591,21 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
     if (losing.length > 0 && options.force !== true) {
       retainedBecause = `worktree has ${losing.join(' and ')}`
     } else {
-      const removed = await removeWorktree(repoRoot, claim.worktreePath, options.force === true)
+      const removed = await operations.removeWorktree(repoRoot, claim.worktreePath, options.force === true)
       if (removed.exitCode === 0) {
         worktreeRemoved = true
       } else if (options.force === true) {
         // `git worktree remove --force` still refuses locked worktrees.
-        throw new AnvilError(ErrorCode.PreflightFailed, `git worktree remove failed: ${removed.stderr.trim()}`, {
-          hint: 'The worktree may be locked. Run `git worktree unlock <path>` and retry.',
-        })
+        throw new AnvilError(
+          ErrorCode.PreflightFailed,
+          `git worktree remove failed: ${removed.stderr.trim() || removed.stdout.trim() || `exit ${removed.exitCode}`}`,
+          {
+            hint: 'The worktree may be locked. Run `git worktree unlock <path>` and retry.',
+            details: { worktreePath: claim.worktreePath },
+          },
+        )
       } else {
-        retainedBecause = `git refused to remove it: ${removed.stderr.trim()}`
+        retainedBecause = `git refused to remove it: ${removed.stderr.trim() || removed.stdout.trim() || `exit ${removed.exitCode}`}`
       }
     }
   } else {
@@ -468,20 +613,54 @@ export async function releaseClaim(options: ReleaseOptions): Promise<ReleaseResu
   }
 
   let branchDeleted = false
+  let branchRetainedBecause: string | undefined
   if (options.deleteBranch === true && worktreeRemoved) {
-    const res = await deleteBranch(repoRoot, claim.branch, true)
+    const res = await operations.deleteBranch(repoRoot, claim.branch, true)
     branchDeleted = res.exitCode === 0
+    if (!branchDeleted) {
+      branchRetainedBecause = res.stderr.trim() || res.stdout.trim() || `git branch -D exited ${res.exitCode}`
+    }
   }
 
   claim.state = worktreeRemoved ? 'released' : 'active'
-  registry.claims = registry.claims.map((c) => (c.key === key ? claim : c))
-  writeClaims(repoRoot, registry)
+  try {
+    // Re-read inside the lock: the registry may have gained another process's claim since
+    // this release started, and writing the earlier snapshot would discard it.
+    await withClaimsLock(repoRoot, async () => {
+      const current = readClaims(repoRoot)
+      current.claims = current.claims.map((c) =>
+        c.key === key &&
+        c.branch === claim.branch &&
+        c.worktreePath === claim.worktreePath &&
+        c.createdAt === claim.createdAt
+          ? { ...c, state: claim.state }
+          : c,
+      )
+      operations.writeRegistry(repoRoot, current)
+    })
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new AnvilError(
+      ErrorCode.Internal,
+      worktreeRemoved
+        ? `Released ${key} but could not update the claim registry: ${detail}. The worktree was removed and the registry still lists the claim.`
+        : `Could not update the claim registry for ${key}: ${detail}. The worktree was left in place.`,
+      {
+        hint: worktreeRemoved
+          ? 'Run `anvil status --orphans` to find the stale entry, or repair .anvil/claims.json before retrying.'
+          : 'Check that .anvil is writable, then retry.',
+        cause: err,
+        details: { worktreePath: claim.worktreePath, worktreeRemoved, branchDeleted },
+      },
+    )
+  }
 
   return {
     claim,
     worktreeRemoved,
     branchDeleted,
     ...(retainedBecause === undefined ? {} : { retainedBecause }),
+    ...(branchRetainedBecause === undefined ? {} : { branchRetainedBecause }),
   }
 }
 

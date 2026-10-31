@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
 import { claimTicket } from '@anvil/worktrees'
-import { type ForgeTransport, ship } from '@anvil/worktrees/ship'
+import { type ForgeTransport, type ShipOptions, ship } from '@anvil/worktrees/ship'
 
 const temps: string[] = []
 after(() => {
@@ -64,8 +64,10 @@ function baseProfile(root: string): ProjectProfile {
 function recordingTransport(opts: {
   pushOk?: boolean
   pushDetail?: string
+  pushThrows?: boolean
   prOk?: boolean
   prDetail?: string
+  findThrows?: boolean
 }): ForgeTransport & { calls: string[] } {
   const calls: string[] = []
   const transport: ForgeTransport = {
@@ -98,10 +100,22 @@ function recordingTransport(opts: {
       return { ok: false, detail: opts.pushDetail ?? 'push rejected' }
     }
   }
+  if (opts.pushThrows === true) {
+    transport.pushBranch = async () => {
+      calls.push('push-throw')
+      throw new Error(opts.pushDetail ?? 'network unavailable')
+    }
+  }
+  if (opts.findThrows === true) {
+    transport.findPullRequest = async () => {
+      calls.push('find-pr-throw')
+      throw new Error(opts.prDetail ?? 'gh timed out')
+    }
+  }
   return { ...transport, calls }
 }
 
-function shipOptions(repo: string, worktree: string, transport: ForgeTransport) {
+function shipOptions(repo: string, worktree: string, transport: ForgeTransport): ShipOptions {
   return {
     repoRoot: repo,
     worktreePath: worktree,
@@ -172,6 +186,192 @@ describe('ship: failure at each mutation boundary', () => {
       undefined,
     )
   })
+
+  test('a thrown push is a failed push stage, not an uncaught crash', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({ pushThrows: true, pushDetail: 'network unavailable' })
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const result = await ship(shipOptions(repo, worktreePath, transport))
+
+    assert.equal(result.ok, false)
+    const push = result.stages.find((s) => s.name === 'push')
+    assert.equal(push?.ok, false)
+    assert.match(push?.detail ?? '', /network unavailable/)
+    assert.equal(
+      result.stages.find((s) => s.name === 'pr'),
+      undefined,
+    )
+  })
+
+  test('a provider failure after the push reports that the push already succeeded', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({ findThrows: true, prDetail: 'gh timed out' })
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const result = await ship(shipOptions(repo, worktreePath, transport))
+
+    assert.equal(result.ok, false)
+    assert.equal(result.stages.find((s) => s.name === 'push')?.ok, true)
+    const pr = result.stages.find((s) => s.name === 'pr')
+    assert.equal(pr?.ok, false)
+    assert.match(pr?.detail ?? '', /push succeeded/)
+    assert.match(pr?.detail ?? '', /gh timed out/)
+    assert.equal(transport.calls.filter((c) => c === 'push:feat/local-1-slug').length, 1)
+    assert.equal(transport.calls.includes('find-pr-throw'), true)
+  })
+
+  test('an unavailable base branch refuses before the transport is called', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const options = shipOptions(repo, worktreePath, transport)
+    options.baseBranch = 'does-not-exist'
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    const refuse = result.stages.find((s) => s.name === 'refuse')
+    assert.equal(refuse?.ok, false)
+    assert.match(refuse?.detail ?? '', /Cannot resolve base branch/)
+    assert.equal(transport.calls.length, 0)
+  })
+
+  test('a diff without a merge base refuses before verify, push, or any provider call', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    // Point the remote-tracking base at an unrelated root commit. The branch still has
+    // commits, but the three-dot diff has no merge base -- the same state a shallow fetch
+    // can produce after the base advances.
+    const unrelated = git(repo, 'commit-tree', 'HEAD^{tree}', '-m', 'unrelated history').trim()
+    git(repo, 'update-ref', 'refs/remotes/origin/main', unrelated)
+
+    let verifyRuns = 0
+    const options = shipOptions(repo, worktreePath, transport)
+    options.run = async () => {
+      verifyRuns += 1
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    const refuse = result.stages.find((s) => s.name === 'refuse')
+    assert.equal(refuse?.ok, false)
+    assert.match(refuse?.detail ?? '', /Cannot compute changed files/)
+    assert.match(refuse?.detail ?? '', /no merge base/)
+    assert.match(refuse?.hint ?? '', /shares history/)
+    assert.equal(verifyRuns, 0, 'the diff failure is a refusal, so verification must not start')
+    assert.equal(
+      result.stages.find((s) => s.name === 'push'),
+      undefined,
+    )
+    assert.equal(transport.calls.length, 0)
+  })
+
+  test('a commit created during verification is analyzed before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    // Committed before shipping, so the late commit is the only thing the diff gains
+    // while verification runs.
+    writeFileSync(join(worktreePath, 'CODEOWNERS'), 'late.txt @security\n', 'utf8')
+    git(worktreePath, 'add', 'CODEOWNERS')
+    git(worktreePath, 'commit', '-m', 'owners')
+
+    const options = shipOptions(repo, worktreePath, transport)
+    options.profile.docs.codeowners = 'CODEOWNERS'
+    options.profile.risk = [{ glob: 'late.txt', level: 'high', reason: 'late change', origin: 'heuristic' }]
+    options.read = (rel) => {
+      try {
+        return readFileSync(join(worktreePath, rel), 'utf8')
+      } catch {
+        return null
+      }
+    }
+    options.run = async () => {
+      writeFileSync(join(worktreePath, 'late.txt'), 'late change\n', 'utf8')
+      git(worktreePath, 'add', 'late.txt')
+      git(worktreePath, 'commit', '-m', 'commit during verification')
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.equal(result.stages.find((s) => s.name === 'diff')?.ok, true)
+    assert.deepEqual(result.risk.highPaths, ['late.txt'], 'risk analysis must see the pushed tree')
+    assert.deepEqual(result.reviewers, ['@security'], 'reviewers must see the pushed tree too')
+    assert.equal(transport.calls.filter((c) => c.startsWith('push')).length, 1)
+  })
+
+  test('a diff that fails after verification stops the ship before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+
+    const unrelated = git(repo, 'commit-tree', 'HEAD^{tree}', '-m', 'unrelated history').trim()
+    let verifyRuns = 0
+    const options = shipOptions(repo, worktreePath, transport)
+    options.run = async () => {
+      verifyRuns += 1
+      // The early check saw a shared base; the base moves before the recomputation.
+      git(repo, 'update-ref', 'refs/remotes/origin/main', unrelated)
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(verifyRuns, 1)
+    assert.equal(result.ok, false)
+    const diff = result.stages.find((s) => s.name === 'diff')
+    assert.equal(diff?.ok, false)
+    assert.match(diff?.detail ?? '', /no merge base/)
+    assert.match(diff?.hint ?? '', /shares history/)
+    assert.equal(
+      result.stages.find((s) => s.name === 'push'),
+      undefined,
+    )
+    assert.equal(transport.calls.length, 0)
+  })
+
+  for (const explicitRef of [false, true]) {
+    test(`a remote-only base ships with risk analysis and the short PR target (explicit ref: ${explicitRef})`, async () => {
+      const { repo } = makeRepoWithOrigin()
+      execFileSync('git', ['push', 'origin', 'main:refs/heads/release'], { cwd: repo, stdio: 'pipe' })
+      const { claim } = await claimTicket({
+        repoRoot: repo,
+        ticket: ticket(),
+        base: 'release',
+        worktreeRoot: join(temp('anvil-remote-base-'), 'wt'),
+      })
+      assert.equal(claim.baseRef, 'origin/release')
+      assert.equal(execFileSync('git', ['branch', '--list', 'release'], { cwd: repo, encoding: 'utf8' }).trim(), '')
+      writeFileSync(join(claim.worktreePath, 'change.txt'), 'change\n')
+      execFileSync('git', ['add', 'change.txt'], { cwd: claim.worktreePath })
+      execFileSync('git', ['commit', '-m', 'change'], { cwd: claim.worktreePath, stdio: 'pipe' })
+      const transport = recordingTransport({})
+      let target: string | undefined
+      transport.upsertPullRequest = async (options) => {
+        target = options.base
+        return { number: 42, url: 'https://example.com/pr/42', created: true }
+      }
+      const options = {
+        ...shipOptions(repo, claim.worktreePath, transport),
+        branch: claim.branch,
+        baseBranch: claim.baseBranch,
+        ...(explicitRef ? { baseRef: claim.baseRef } : {}),
+      }
+      options.profile.risk = [{ glob: 'change.txt', level: 'high', reason: 'fixture', origin: 'heuristic' }]
+      const result = await ship(options)
+      assert.equal(result.ok, true)
+      assert.equal(target, 'release')
+      assert.deepEqual(result.risk.highPaths, ['change.txt'], 'diff must use the resolved ref too')
+    })
+  }
 
   test('push succeeds, PR fails — branch pushed but no PR (documented partial failure)', async () => {
     const { repo } = makeRepoWithOrigin()

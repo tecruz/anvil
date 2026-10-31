@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -32,6 +32,8 @@ import {
   findOrphanWorktrees,
   readClaims,
   releaseClaim,
+  updateClaims,
+  writeClaims,
 } from '@anvil/worktrees'
 
 const temps: string[] = []
@@ -47,6 +49,90 @@ function temp(prefix: string): string {
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
+}
+
+function fakeLock(repo: string, name: string, pid: number): string {
+  const path = join(repo, '.git', 'anvil-locks', `${name}.lock`, `${pid}-00000000-0000-0000-0000-000000000001`)
+  mkdirSync(path, { recursive: true })
+  writeFileSync(join(path, 'ticket-1'), '')
+  return path
+}
+
+/** The link kind that needs no elevation: a junction on Windows, a directory symlink elsewhere. */
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
+
+/**
+ * Whether this machine can create a directory link at all.
+ *
+ * Windows only allows symlinks with Developer Mode or elevation; junctions usually work but
+ * can be blocked by policy. The containment test skips rather than failing where the
+ * capability is absent, because the guard's behaviour is only meaningful if a link can exist.
+ */
+function canCreateDirectoryLink(): boolean {
+  const probe = temp('anvil-link-probe-')
+  const target = join(probe, 'target')
+  mkdirSync(target)
+  try {
+    symlinkSync(target, join(probe, 'link'), directoryLinkType)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Run one registry append in a separate process.
+ *
+ * The write is a real read-modify-write against shared state, and the sync sleep widens the
+ * window between the read and the write. Without a cross-process lock every writer reads
+ * the same registry and only the last one survives; with it, the appends serialize.
+ */
+function appendClaimFromAnotherProcess(repo: string, key: string): Promise<void> {
+  const moduleUrl = new URL('../src/index.ts', import.meta.url).href
+  // A shared start time lines the reads up, so a missing lock loses updates instead of
+  // sometimes winning by process-startup order.
+  const startAt = Date.now() + 2_500
+  const script = `
+import { updateClaims } from ${JSON.stringify(moduleUrl)}
+const key = process.env.ANVIL_TEST_KEY
+const startAt = Number(process.env.ANVIL_TEST_START_AT)
+await new Promise((resolve) => setTimeout(resolve, Math.max(0, startAt - Date.now())))
+await updateClaims(process.env.ANVIL_TEST_REPO, (registry) => {
+  registry.claims.push({
+    key,
+    ticket: { provider: 'local', id: key, key },
+    branch: 'feat/' + key,
+    baseBranch: 'main',
+    baseRef: 'refs/heads/main',
+    worktreePath: process.env.ANVIL_TEST_REPO + '-wt-' + key,
+    worktreeId: null,
+    state: 'active',
+    createdAt: new Date().toISOString(),
+  })
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
+})
+`
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+      env: {
+        ...process.env,
+        ANVIL_TEST_REPO: repo,
+        ANVIL_TEST_KEY: key,
+        ANVIL_TEST_START_AT: String(startAt),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`writer for ${key} exited ${String(code)}: ${stderr}`))
+    })
+  })
 }
 
 /** A real repository with one commit, so worktrees can branch from it. */
@@ -357,6 +443,27 @@ describe('worktree lifecycle', () => {
     }
     await Promise.all([withFetchLock({ cwd: repo }, task), withFetchLock({ cwd: repo }, task)])
     assert.equal(maxConcurrent, 1, 'the lock must serialize, not just exist')
+  })
+
+  test('a lock left by a dead process is broken, so a later fetch does not block', async () => {
+    const repo = makeRepo()
+    const stale = fakeLock(repo, 'fetch', 999999999)
+
+    const result = await withFetchLock({ cwd: repo, timeoutMs: 2_000, pollMs: 10 }, async () => 'ran')
+    assert.equal(result, 'ran')
+    assert.equal(existsSync(stale), false, 'the stale record is removed')
+    assert.deepEqual(readdirSync(join(repo, '.git', 'anvil-locks', 'fetch.lock')), [])
+  })
+
+  test('a lock held by a live process is not broken', async () => {
+    const repo = makeRepo()
+    const held = fakeLock(repo, 'fetch', process.pid)
+
+    await assert.rejects(
+      () => withFetchLock({ cwd: repo, timeoutMs: 80, pollMs: 10 }, async () => 'ran'),
+      /Timed out waiting for the fetch lock/,
+    )
+    assert.ok(existsSync(held), 'a live owner keeps its record')
   })
 })
 
@@ -688,6 +795,107 @@ describe('claims', () => {
     assert.equal(readClaims(repo).claims.length, 0)
   })
 
+  test('a claim that fails while warming the worktree removes the worktree and branch it created', async () => {
+    const repo = makeRepo()
+    // A committed file named `.anvil` makes the first warm-up write fail after
+    // `git worktree add` has already succeeded. No permission change is needed.
+    writeFileSync(join(repo, '.anvil'), 'a file, not a directory\n', 'utf8')
+    git(repo, 'add', '.anvil')
+    git(repo, 'commit', '-m', 'block the state directory')
+    const wtRoot = join(temp('anvil-m3-cfail-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false, 'the half-warm worktree must be gone')
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
+    assert.equal(readClaims(repo).claims.length, 0, 'a failed claim must register nothing')
+    assert.deepEqual(await findOrphanWorktrees(repo), [], 'no unregistered worktree may survive')
+  })
+
+  test('a claim that cannot record itself removes the worktree and branch', async () => {
+    const repo = makeRepo()
+    // A directory where claims.json belongs makes the atomic registry write fail. The
+    // worktree is warm by then, so this is the late boundary after every other write.
+    mkdirSync(join(repo, '.anvil', 'claims.json'), { recursive: true })
+    const wtRoot = join(temp('anvil-m3-cfail2-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false)
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
+    assert.equal(readClaims(repo).claims.length, 0)
+    assert.deepEqual(await findOrphanWorktrees(repo), [])
+  })
+
+  test('the registry writer refuses a linked .anvil instead of writing through it', (t) => {
+    if (!canCreateDirectoryLink()) {
+      t.skip('this machine cannot create a directory link without elevation')
+      return
+    }
+    const repo = makeRepo()
+    const outside = temp('anvil-m3-link-out-')
+    symlinkSync(outside, join(repo, '.anvil'), directoryLinkType)
+
+    assert.throws(() => writeClaims(repo, { schemaVersion: 1, claims: [] }), /through a link/)
+    assert.deepEqual(readdirSync(outside), [], 'a linked state directory must receive nothing')
+  })
+
+  test('a claim that would write through a linked .anvil removes the worktree and branch', async (t) => {
+    if (!canCreateDirectoryLink()) {
+      t.skip('this machine cannot create a directory link without elevation')
+      return
+    }
+    const repo = makeRepo()
+    const outside = temp('anvil-m3-link-out2-')
+    symlinkSync(outside, join(repo, '.anvil'), directoryLinkType)
+    const wtRoot = join(temp('anvil-m3-clink-'), 'wt')
+
+    await assert.rejects(
+      () => claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: wtRoot }),
+      /worktree and branch were removed/,
+    )
+
+    assert.deepEqual(readdirSync(outside), [], 'the claim wrote nothing outside the repository')
+    assert.equal(existsSync(join(wtRoot, 'local-1')), false)
+    assert.equal(await branchExists(repo, 'feat/local-1-add-login-redirect'), false)
+    assert.deepEqual(await findOrphanWorktrees(repo), [])
+  })
+
+  test('concurrent registrations from separate processes do not lose a claim', async () => {
+    const repo = makeRepo()
+    const keys = Array.from({ length: 6 }, (_, i) => `proc-${i + 1}`)
+
+    await Promise.all(keys.map((key) => appendClaimFromAnotherProcess(repo, key)))
+
+    const stored = readClaims(repo)
+      .claims.map((c) => c.key)
+      .sort()
+    assert.deepEqual(stored, keys, 'every process-owned claim must survive')
+    assert.deepEqual(
+      readdirSync(join(repo, '.git', 'anvil-locks', 'claims.lock')),
+      [],
+      'every lock record must be released',
+    )
+  })
+
+  test('a claims lock left by a dead process is broken instead of blocking the next writer', async () => {
+    const repo = makeRepo()
+    const stale = fakeLock(repo, 'claims', 999999999)
+
+    await updateClaims(repo, (registry) => {
+      registry.claims = []
+    })
+
+    assert.equal(existsSync(stale), false, 'the stale record is removed')
+    assert.deepEqual(readdirSync(join(repo, '.git', 'anvil-locks', 'claims.lock')), [])
+  })
+
   test('status reports uncommitted and unpushed separately', async () => {
     const repo = makeRepo()
     const result = await claimTicket({
@@ -783,6 +991,135 @@ describe('claims', () => {
     const rel = await releaseClaim({ repoRoot: repo, key: 'local-1' })
     assert.equal(rel.worktreeRemoved, true)
     assert.equal(existsSync(result.claim.worktreePath), false)
+  })
+
+  test('a forced release of a locked worktree preserves the worktree, branch and active claim', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel5-'), 'wt'),
+    })
+    const path = result.claim.worktreePath
+    git(repo, 'worktree', 'lock', path)
+
+    await assert.rejects(
+      () => releaseClaim({ repoRoot: repo, key: 'local-1', force: true, deleteBranch: true }),
+      /worktree remove failed/,
+    )
+
+    // The removal failed, so nothing else may have happened: the branch is still in use,
+    // the worktree is still on disk, and the registry still says the claim is active.
+    assert.ok(existsSync(path))
+    assert.equal(await branchExists(repo, result.claim.branch), true)
+    assert.equal(readClaims(repo).claims[0]?.state, 'active')
+
+    git(repo, 'worktree', 'unlock', path)
+    const retry = await releaseClaim({ repoRoot: repo, key: 'local-1', force: true, deleteBranch: true })
+    assert.equal(retry.worktreeRemoved, true, 'unlocking makes the same release retryable')
+    assert.equal(retry.branchDeleted, true)
+    assert.equal(existsSync(path), false)
+  })
+
+  test('a failed branch deletion is reported without pretending the release failed', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel6-'), 'wt'),
+    })
+
+    const rel = await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      deleteBranch: true,
+      operations: {
+        deleteBranch: async () => ({ exitCode: 1, stdout: '', stderr: 'branch is protected' }),
+      },
+    })
+
+    assert.equal(rel.worktreeRemoved, true)
+    assert.equal(rel.branchDeleted, false)
+    assert.match(rel.branchRetainedBecause ?? '', /branch is protected/)
+    assert.equal(existsSync(result.claim.worktreePath), false)
+    assert.equal(readClaims(repo).claims[0]?.state, 'released')
+  })
+
+  test('a failed registry write after removal names the stale claim it leaves behind', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-rel7-'), 'wt'),
+    })
+
+    await assert.rejects(
+      () =>
+        releaseClaim({
+          repoRoot: repo,
+          key: 'local-1',
+          operations: {
+            writeRegistry: () => {
+              throw new Error('disk full')
+            },
+          },
+        }),
+      /Released local-1 but could not update the claim registry: disk full/,
+    )
+
+    assert.equal(existsSync(result.claim.worktreePath), false, 'the worktree was already removed')
+    const [status] = await claimStatuses(repo)
+    assert.equal(status?.claim.state, 'active', 'the old registry survived the failed write')
+    assert.equal(status?.orphaned, true, 'status identifies the stale claim for cleanup')
+  })
+
+  test('release does not replace a newer claim registered after its worktree was removed', async () => {
+    const repo = makeRepo()
+    const worktreeRoot = join(temp('anvil-release-reclaim-'), 'wt')
+    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot })
+    let replacementBranch: string | undefined
+    await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      operations: {
+        removeWorktree: async (...args) => {
+          const removed = await removeWorktree(...args)
+          assert.equal(removed.exitCode, 0)
+          const replacement = await claimTicket({
+            repoRoot: repo,
+            ticket: ticket({ title: 'Replacement' }),
+            worktreeRoot,
+          })
+          replacementBranch = replacement.claim.branch
+          return removed
+        },
+      },
+    })
+    const saved = readClaims(repo).claims[0]
+    assert.equal(saved?.branch, replacementBranch)
+    assert.equal(saved?.state, 'active')
+    assert.ok(existsSync(saved!.worktreePath))
+    assert.equal((await claimStatuses(repo))[0]?.branchMismatch, false)
+  })
+
+  test('release merges its state without losing concurrent launch metadata on the same claim', async () => {
+    const repo = makeRepo()
+    await claimTicket({ repoRoot: repo, ticket: ticket(), worktreeRoot: join(temp('anvil-release-launch-'), 'wt') })
+    await releaseClaim({
+      repoRoot: repo,
+      key: 'local-1',
+      operations: {
+        removeWorktree: async (...args) => {
+          await updateClaims(repo, (registry) => {
+            registry.claims[0]!.agent = { runner: 'opencode', pid: 12345 }
+          })
+          return removeWorktree(...args)
+        },
+      },
+    })
+    const saved = readClaims(repo).claims[0]
+    assert.equal(saved?.state, 'released')
+    assert.equal(saved?.agent?.pid, 12345)
   })
 
   test('three claims coexist with no cross-contamination', async () => {

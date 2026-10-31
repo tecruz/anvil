@@ -70,7 +70,7 @@ export const shipCommand: Command = {
   summary: 'Verify, push, open a pull request, and update the ticket.',
   usage: 'anvil ship <key> [--draft] [--probe] [--skip-verify] [--reviewers a,b]',
   details: [
-    'Order matters and is deliberate: refuse, verify, push, pull request, ticket. The',
+    'Order matters and is deliberate: refuse, verify, diff, push, pull request, ticket. The',
     'stages that could lose work or leave debris on the remote run last, so a failed',
     'verification means nothing reached the remote at all.',
     '',
@@ -153,6 +153,7 @@ export const shipCommand: Command = {
       worktreePath: claim.worktreePath,
       branch,
       baseBranch: claim.baseBranch,
+      baseRef: claim.baseRef,
       ticket,
       profile,
       transport,
@@ -184,8 +185,9 @@ export const shipCommand: Command = {
 
     if (!result.ok) {
       const failed = result.stages.find((s) => !s.ok)
+      const hint = failed?.hint ?? hintForStage(failed?.name)
       const err = new AnvilError(ErrorCode.PreflightFailed, failed?.detail ?? 'ship did not complete', {
-        ...(hintForStage(failed?.name) === undefined ? {} : { hint: hintForStage(failed?.name) as string }),
+        ...(hint === undefined ? {} : { hint }),
         details: { stages: result.stages },
       })
       // The stage report is the answer even when a stage failed (the plan says a failed
@@ -234,6 +236,8 @@ function hintForStage(stage: string | undefined): string | undefined {
       return 'Commit your work in the worktree, or re-claim the ticket.'
     case 'verify':
       return 'Fix the failing command, or re-run with --skip-verify if it is not a real signal.'
+    case 'diff':
+      return 'Fetch the missing history, or choose a base that shares history with the branch.'
     case 'push':
       return 'Check the remote and your credentials: git push -u origin <branch>.'
     case 'pr':
