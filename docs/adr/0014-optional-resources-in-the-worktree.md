@@ -31,11 +31,15 @@ not support.
 2. **Publisher evidence is a field, not an inference from the tier.** Discovery entries and
    plan suggestions carry `trust`: `official-publisher`, `local-install` or `third-party`.
    A local skill stays useful (tier `official`, ranked normally) and is labelled
-   `installed locally` rather than presented as first-party.
+   `installed locally` rather than presented as first-party. A curated community resource
+   whose repository owner is in the playbook's `officialOrgs` is `official-publisher` too:
+   community is where a resource ranks, not who publishes it.
 3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
    string — the ticket's title, body, acceptance criteria and labels — against resource
-   titles and details, and returns at most five, excluding derived repository fixes. Scoring
-   is deterministic and offline.
+   titles and details, and returns at most five. Only external resources are eligible
+   (a suggestion marked `external`); repository changes — derived fixes, a missing verify
+   command, a high-risk glob — are work rather than reading and are left out. Scoring is
+   deterministic and offline.
 4. **`claim`, `crew up` and `issue refresh` put the shortlist in the bundle** as
    `## Recommended resources (optional)`, labelled as aids that were not installed or run
    and that never replace the verify commands. The bundle stays a bundle: values are
@@ -47,6 +51,8 @@ not support.
 
 - A stale cache now costs the remote half of discovery only; the machine's own skills keep
   working. The warning says exactly that.
+- A `brief` lists an installed skill too, cited by its `SKILL.md` path rather than dropped
+  for having no URL.
 - The plan JSON and terminal output gain a `trust` value per suggestion and a
   `[installed locally]` / `[official publisher]` marker on live rows.
 - The context bundle has one more short section, bounded at five entries. It is the only

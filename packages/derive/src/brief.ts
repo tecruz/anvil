@@ -84,6 +84,13 @@ export interface Brief {
       url: string
       why: string
       provenance: 'curated' | 'live'
+      /**
+       * Install path, for a resource that is a file on this machine rather than a link.
+       *
+       * A locally installed skill has no URL at all; dropping it for that would hide the one
+       * source that works offline. Its path is the citation instead.
+       */
+      install?: string
       /** Who vouches for it. Absent on entries written before the field existed. */
       trust?: string
     }>
@@ -162,6 +169,15 @@ export interface LiveGuidance {
   section: string
   /** Who vouches for it: `official-publisher`, `local-install` or `third-party`. */
   trust?: string
+  /**
+   * Install path, when the resource is a file on this machine rather than a link.
+   *
+   * A local-scan skill has an empty `url` and its `SKILL.md` path here. Carried through so a
+   * brief can cite it by path instead of dropping it for having no URL.
+   */
+  install?: string | null
+  /** Which source produced it: `github-search`, `mcp-registry`, `local-scan`. */
+  source?: string
 }
 
 export function buildBrief(options: BuildBriefOptions): Brief {
@@ -279,7 +295,15 @@ function flattenGuidance(
     community?: unknown[]
   },
   live: readonly LiveGuidance[] = [],
-): Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live'; trust?: string }> {
+): Array<{
+  kind: string
+  label: string
+  url: string
+  why: string
+  provenance: 'curated' | 'live'
+  install?: string
+  trust?: string
+}> {
   const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
     [
       'doc',
@@ -336,6 +360,7 @@ function flattenGuidance(
     url: string
     why: string
     provenance: 'curated' | 'live'
+    install?: string
     trust?: string
   }> = groups.flatMap(([kind, resources]) =>
     resources.map((r) => ({
@@ -354,24 +379,45 @@ function flattenGuidance(
   // rule as the plan: a person-reviewed entry outranks a fetched one, and a brief is the
   // text an agent will read as authoritative, so a duplicate there is worse than a duplicate
   // in a terminal.
-  const cited = new Set(curated.map((r) => r.url.toLowerCase().replace(/\/+$/, '')))
+  //
+  // Identity is the URL, or the install path when there is no URL: a locally installed skill
+  // hrefs at nothing, and its `SKILL.md` path is what a reader would open. Its empty URL is
+  // not a reason to drop it -- it is the one source that works with no network at all.
+  const cited = new Set(curated.map((r) => citationKey(r.url, '')))
   const added = live
     .filter((r) => {
-      const key = r.url.trim().toLowerCase().replace(/\/+$/, '')
+      const key = citationKey(r.url, r.install ?? '')
       if (key === '' || cited.has(key)) return false
       cited.add(key)
       return true
     })
-    .map((r) => ({
-      kind: `live ${r.section}`,
-      label: r.label,
-      url: r.url,
-      why: r.why,
-      provenance: 'live' as const,
-      ...(r.trust === undefined ? {} : { trust: r.trust }),
-    }))
+    .map((r) => {
+      const install = (r.install ?? '').trim()
+      return {
+        kind: `live ${r.section}`,
+        label: r.label,
+        url: r.url,
+        why: r.why,
+        provenance: 'live' as const,
+        ...(install === '' ? {} : { install }),
+        ...(r.trust === undefined ? {} : { trust: r.trust }),
+      }
+    })
 
   return [...curated, ...added]
+}
+
+/**
+ * Dedupe identity for guidance: the URL, else the install path, else nothing.
+ *
+ * Prefixing keeps a URL that happens to look like a path from colliding with one, and the
+ * trailing-slash strip matches how the plan normalises the same link.
+ */
+function citationKey(url: string, install: string): string {
+  const trimmedUrl = url.trim().toLowerCase().replace(/\/+$/, '')
+  if (trimmedUrl !== '') return `url:${trimmedUrl}`
+  const trimmedInstall = install.trim().toLowerCase()
+  return trimmedInstall === '' ? '' : `install:${trimmedInstall}`
 }
 
 /**

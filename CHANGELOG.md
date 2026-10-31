@@ -21,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - `plan` and `brief` no longer merge a discovery cache older than seven days. A stale cache is reported with the command that refreshes it, while the cache and `discover` keep the old entries. See [ADR-0013](docs/adr/0013-stale-discovery-is-reported-not-merged.md).
 - Installed agent skills are re-scanned on every `plan` and `brief`, including `--offline`, because they are files on this machine rather than a fetch. A stale discovery cache now costs only its cached remote entries.
 - Locally installed skills are labelled `installed locally` rather than presented as first-party guidance; the plan JSON carries a per-suggestion `trust` value.
+- A curated community resource published by one of a playbook's official orgs (for example `android/nowinandroid`) is labelled `official publisher`, not `third party`. The worktree shortlist offers only external resources, so repository changes such as "add a lint command" no longer appear as optional reading.
 
 ## [0.1.0] - 2026-04-14
 

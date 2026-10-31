@@ -191,7 +191,8 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
     out.push(s.bold('Playbooks'))
     for (const p of brief.playbooks) {
       out.push(`  ${p.title} ${s.dim(`(${p.id})`)}`)
-      for (const g of p.guidance.slice(0, 3)) out.push(`    ${g.kind}: ${s.cyan(g.url)}`)
+      for (const g of p.guidance.slice(0, 3))
+        out.push(`    ${g.kind}: ${s.cyan(g.url === '' ? (g.install ?? '') : g.url)}`)
     }
   }
   if (brief.risk.length > 0) {

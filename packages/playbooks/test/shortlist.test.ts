@@ -18,6 +18,9 @@ function resource(over: Partial<Suggestion> & Pick<Suggestion, 'id' | 'title'>):
     confidence: 0.65,
     provenance: 'curated',
     playbook: 'android',
+    // Something to read or consult, which is what the shortlist is for. A repository change
+    // omits this; see the test below.
+    external: true,
     ...over,
   }
 }
@@ -92,6 +95,29 @@ describe('shortlistSuggestions', () => {
     assert.deepEqual(
       shortlist.map((s) => s.id),
       [relevant.id],
+    )
+  })
+
+  test('a repository change is not offered as reading', () => {
+    // `verify:` and `risk:` suggestions carry a playbook but are work in this repository,
+    // not a resource to read. Marked by the absence of `external`, they must not appear --
+    // an agent handed "add a lint command" as an aid would treat a repo fix as optional.
+    const addLint: Suggestion = {
+      id: 'verify:android:lint',
+      tier: 'official',
+      playbook: 'android',
+      title: 'Add a lint command for Android (Jetpack Compose)',
+      detail: 'Android (Jetpack Compose) projects conventionally use: ./gradlew lint',
+      evidence: ['registry/playbooks/android.yaml'],
+      confidence: 0.7,
+      provenance: 'curated',
+    }
+
+    const shortlist = shortlistSuggestions([addLint, docs], { focus: 'lint' })
+
+    assert.deepEqual(
+      shortlist.map((s) => s.id),
+      [docs.id],
     )
   })
 

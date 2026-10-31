@@ -73,6 +73,15 @@ export interface Suggestion {
    */
   trust?: SuggestionTrust
   /**
+   * True for an external resource: something to read, consult or install.
+   *
+   * Absent on a change to this repository -- a missing verify command, a high-risk glob.
+   * The worktree shortlist wants only the former, because "add a lint command" is work, not
+   * reading, and offering it as an aid invites an agent to skip it. Derived fixes carry no
+   * playbook and no `external`, so they are excluded on both counts.
+   */
+  external?: boolean
+  /**
    * Where the guidance came from.
    *
    * `curated` is a playbook a human wrote and a reviewer read. `live` was fetched at
@@ -302,6 +311,7 @@ function playbookSuggestions(
         ...(resource.install === undefined ? {} : { install: resource.install }),
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
         provenance: 'curated',
+        external: true,
         trust: 'official-publisher',
       })
     }
@@ -326,11 +336,29 @@ function playbookSuggestions(
       // starred" is not "correct for your repo".
       confidence: communityConfidence(resource),
       provenance: 'curated',
-      trust: 'third-party',
+      external: true,
+      // Community is where the resource ranks, not who publishes it. A repo the playbook's
+      // own orgs own (`android/nowinandroid`) is first-party even though it ranks below the
+      // hand-written official list, so the publisher is read from the repo owner, not the
+      // tier.
+      trust: ownerIsOfficial(resource.repo, playbook.discover.officialOrgs) ? 'official-publisher' : 'third-party',
     })
   }
 
   return { suggestions: out, satisfied }
+}
+
+/**
+ * True when a curated repository is owned by an org the playbook already trusts.
+ *
+ * The same seed list `discover` uses to promote a search result, applied to a hand-written
+ * community entry: a community resource's `repo` is `owner/name`, and its owner is what the
+ * playbook's `officialOrgs` speaks to. Case-insensitive, because GitHub logins are.
+ */
+function ownerIsOfficial(repo: string, orgs: readonly string[]): boolean {
+  const owner = repo.split('/')[0]?.trim().toLowerCase()
+  if (owner === undefined || owner === '') return false
+  return orgs.some((org) => org.trim().toLowerCase() === owner)
 }
 
 /**
@@ -415,6 +443,7 @@ function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
           Math.max(0.3, Number((communityConfidence(entry) - 0.05).toFixed(2))),
     provenance: 'live',
     fetchedAt: entry.fetchedAt,
+    external: true,
     trust,
   }
 }
@@ -526,15 +555,15 @@ const SHORTLIST_STOPWORDS = new Set([
  * at most a handful of external resources, ranked by how many of the ticket's own words they
  * mention, with tier and confidence as tie-breakers.
  *
- * Only resources with a playbook are eligible. A derived fix is a change to this repository,
- * not an aid to read, and putting one in a worktree's resource list would invite an agent to
- * treat a plan item as optional reading.
+ * Only external resources are eligible (`external` set): something to read or consult. A
+ * change to this repository -- a missing verify command, a high-risk glob, or a derived fix
+ * -- is work, not an aid, and offering it as optional reading invites an agent to skip it.
  */
 export function shortlistSuggestions(suggestions: readonly Suggestion[], options: ShortlistOptions = {}): Suggestion[] {
   const limit = Math.max(1, Math.floor(options.limit ?? DEFAULT_SHORTLIST_LIMIT))
   const terms = focusTerms(options.focus ?? '')
   const scored = suggestions
-    .filter((s) => s.playbook !== undefined)
+    .filter((s) => s.external === true)
     .map((s) => ({ suggestion: s, score: scoreSuggestion(s, terms) }))
 
   scored.sort((a, b) => {

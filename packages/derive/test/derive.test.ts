@@ -1116,6 +1116,41 @@ describe('brief', () => {
     assert.ok(brief.playbooks[0]!.guidance.length > 0)
   })
 
+  test('a locally installed skill is cited by path, not dropped for having no url', () => {
+    // A local-scan skill has an empty url: dropping it for that hid the one source that
+    // works with no network. Its SKILL.md path is the citation instead.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'node-review',
+              url: '',
+              why: 'Installed on this machine at ~/.agents/skills/node-review/SKILL.md.',
+              section: 'skills',
+              trust: 'local-install',
+              install: '~/.agents/skills/node-review/SKILL.md',
+              source: 'local-scan',
+            },
+          ],
+        ],
+      ]),
+    })
+
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.label, 'node-review')
+    assert.equal(live[0]?.install, '~/.agents/skills/node-review/SKILL.md')
+  })
+
   test('carries warnings through, so a dropped cache is not silent', () => {
     const dir = materialize('node-npm')
     const profile = profileIn(dir)

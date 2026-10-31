@@ -316,6 +316,17 @@ describe('plan merge', () => {
     )
   })
 
+  test('a community resource published by a seeded org is labelled first-party', () => {
+    // `gradle/gradle` is owned by `gradle`, a seeded official org; `square/okio` is not.
+    // Community is where a resource ranks, not who publishes it, so the publisher is read
+    // from the repo owner rather than assumed from the tier.
+    const plan = planWith(new Map())
+    const gradle = plan.suggestions.find((s) => s.id === 'community:jvm:gradle/gradle')
+    const okio = plan.suggestions.find((s) => s.id === 'community:jvm:square/okio')
+    assert.equal(gradle?.trust, 'official-publisher')
+    assert.equal(okio?.trust, 'third-party')
+  })
+
   test('tier ordering survives the merge: derived, then official, then community', () => {
     const plan = planWith(
       new Map([
