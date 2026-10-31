@@ -311,6 +311,12 @@ last edited the file — and writes a cache under `~/.anvil/cache/discovery`. It
 writes to the registry itself: `--propose` prints YAML for a human to merge by hand, and
 a fetched suggestion is always ranked below one a person reviewed.
 
+The cache expires after seven days. `plan` and `brief` read only a fresh cache: a stale
+one is reported with the age and the command that replaces it, because an old search
+result in the ranked list reads as advice long after it stopped being true. The entries
+stay in the cache, so `anvil playbook discover` can still show them, and `--refresh` is
+the explicit request for a new answer.
+
 Your own playbooks live in your home directory, never in the repository you are standing
 in: a company playbook is shared by being installed, not by being committed to someone
 else's project.

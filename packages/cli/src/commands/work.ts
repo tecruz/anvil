@@ -15,6 +15,7 @@ import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
 import { type NormalizedState, parseRef, type Ticket } from '@anvil/tickets'
 import { AGENTS_OVERLAY, CONTEXT_FILE, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
 import { claimStatuses, claimTicket, findOrphanWorktrees, releaseClaim } from '@anvil/worktrees'
+import { recommendForProfile, recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
 /**
@@ -119,9 +120,12 @@ export const claimCommand: Command = {
     const ticket = await loadTicket(ctx, ref, mainRoot)
     const { config } = loadConfig({ repoRoot: mainRoot })
 
+    // Optional aids for the worktree's context bundle. Ranked against the worktree that is
+    // created, not this checkout: the claim may fork from a base branch with a different stack.
     const result = await claimTicket({
       repoRoot,
       ticket,
+      recommend: (worktreePath) => recommendForWorktree(worktreePath, ticket),
       ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
       ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
       ...(typeof args.values.runner === 'string' ? { runner: args.values.runner } : {}),
@@ -555,6 +559,7 @@ export const issueCommand: Command = {
       ticket,
       profile,
       branch: branch ?? 'HEAD',
+      resources: recommendForProfile(profile, ticket),
     })
     const overlay = renderAgentsOverlay({ ticket, profile })
     mkdirSync(join(target, '.anvil'), { recursive: true })

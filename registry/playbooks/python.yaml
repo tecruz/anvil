@@ -94,6 +94,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['python', 'pypa']
+  officialDomains: ['docs.python.org', 'peps.python.org', 'docs.djangoproject.com']
   keywords:
     - 'python mcp server'
     - 'django agent'

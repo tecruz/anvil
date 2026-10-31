@@ -50,6 +50,7 @@ official:
 # notice the difference, which is what `discover` is for.
 discover:
   officialOrgs: ['android', 'google']
+  officialDomains: ['developer.android.com']
   keywords:
     - 'android agent skills'
     - 'android cli'

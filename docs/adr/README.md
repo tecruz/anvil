@@ -21,6 +21,8 @@ that supersedes it. The status line at the top is the source of truth.
 | [0010](0010-cost-is-read-from-the-hosts-ledger.md) | Cost is read from the host's ledger; anvil records nothing | accepted |
 | [0011](0011-mcp-for-the-control-surface.md) | The MCP control surface runs the CLI, not a second contract | accepted |
 | [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | accepted |
+| [0013](0013-stale-discovery-is-reported-not-merged.md) | A stale discovery cache is reported, not merged | accepted |
+| [0014](0014-optional-resources-in-the-worktree.md) | A worktree gets a shortlist of optional resources, with publisher evidence | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

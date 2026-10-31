@@ -1115,4 +1115,143 @@ describe('brief', () => {
     assert.ok(brief.playbooks.some((p) => p.id === 'node'))
     assert.ok(brief.playbooks[0]!.guidance.length > 0)
   })
+
+  test('a locally installed skill is cited by path, not dropped for having no url', () => {
+    // A local-scan skill has an empty url: dropping it for that hid the one source that
+    // works with no network. Its SKILL.md path is the citation instead.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'node-review',
+              url: '',
+              why: 'Installed on this machine at ~/.agents/skills/node-review/SKILL.md.',
+              section: 'skills',
+              trust: 'local-install',
+              install: '~/.agents/skills/node-review/SKILL.md',
+              source: 'local-scan',
+            },
+          ],
+        ],
+      ]),
+    })
+
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.label, 'node-review')
+    assert.equal(live[0]?.install, '~/.agents/skills/node-review/SKILL.md')
+  })
+
+  test('a live entry from an older cache is still attributed, not left unlabelled', () => {
+    // `trust` was added after the first discovery caches existed, so a cache entry can carry
+    // none. The brief must fall back to the tier and source the way the plan does, rather
+    // than print a live row with no publisher at all.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'some/tool',
+              url: 'https://github.com/some/tool',
+              why: 'A community helper found by search.',
+              section: 'community',
+              tier: 'community',
+              source: 'github-search',
+            },
+            {
+              label: 'nodejs/skills',
+              url: 'https://github.com/nodejs/skills',
+              why: 'Published by one of the node seeds.',
+              section: 'skills',
+              tier: 'official',
+              source: 'github-search',
+            },
+          ],
+        ],
+      ]),
+    })
+
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.find((g) => g.label === 'some/tool')?.trust, 'third-party')
+    assert.equal(live.find((g) => g.label === 'nodejs/skills')?.trust, 'official-publisher')
+  })
+
+  test('a brief reads a publisher from the resource URL, not from the official list', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+    })
+    const guidance = brief.playbooks.flatMap((p) => p.guidance)
+    // Context7 (`official.mcp`) is hosted by upstash and typescript-eslint is its own project;
+    // neither is a node seed. A URL on a declared official host is first-party.
+    assert.equal(guidance.find((g) => g.url === 'https://github.com/upstash/context7')?.trust, 'third-party')
+    assert.equal(guidance.find((g) => g.url === 'https://typescript-eslint.io/rules/')?.trust, 'third-party')
+    assert.equal(guidance.find((g) => g.url === 'https://nodejs.org/docs/latest/api/')?.trust, 'official-publisher')
+  })
+
+  test('a malformed install path is ignored rather than thrown on', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'node tooling',
+              url: 'https://example.org/tool',
+              why: 'A helper whose install field is corrupt.',
+              section: 'skills',
+              install: 42 as unknown as string,
+              source: 'github-search',
+            },
+          ],
+        ],
+      ]),
+    })
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.install, undefined)
+  })
+
+  test('carries warnings through, so a dropped cache is not silent', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: () => null,
+      warnings: ['discovery cache for node is stale; its entries were ignored'],
+    })
+    assert.deepEqual(brief.warnings, ['discovery cache for node is stale; its entries were ignored'])
+  })
 })

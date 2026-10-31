@@ -26,6 +26,7 @@ import { spawnArgv } from '@anvil/core'
 import { mainWorktreeRoot } from '@anvil/git'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
+import type { RecommendedResource } from '@anvil/tickets/context'
 import { type Claim, claimTicket, readClaims, updateClaims } from './index.ts'
 
 // ---------------------------------------------------------------------------
@@ -218,6 +219,14 @@ export interface CrewUpOptions {
   /** Injected so tests never spawn a process. */
   launcher?: AgentLauncher
   fetchFirst?: boolean
+  /**
+   * Optional aids per ticket, for its context bundle.
+   *
+   * A function rather than a list because relevance is per ticket and depends on the tree that
+   * ticket is worked in; the path is the created worktree, passed through from `claimTicket`
+   * after the base ref is checked out. This package does not load playbooks to work it out.
+   */
+  recommend?: (ticket: Ticket, worktreePath: string) => readonly RecommendedResource[]
 }
 
 export interface AgentLaunch {
@@ -262,6 +271,7 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
 
   for (const ticket of options.tickets) {
     try {
+      const recommend = options.recommend
       const result = await claimTicket({
         repoRoot,
         ticket,
@@ -269,6 +279,7 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
         ...(options.base === undefined ? {} : { base: options.base }),
         worktreeRoot: options.worktreeRoot ?? null,
         runner: options.launch ? options.runner : 'none',
+        ...(recommend === undefined ? {} : { recommend: (worktreePath: string) => recommend(ticket, worktreePath) }),
       })
       claims.push(result.claim)
     } catch (err) {

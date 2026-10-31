@@ -108,6 +108,9 @@ export function discoverLocal(
       url: '',
       why: `Installed on this machine at ${first.path}. ${first.description || 'No description in its SKILL.md.'} Found by scanning the agent skills directories; this proves it is installed, not who maintains it.${locations}`,
       tier: 'official',
+      // A file on disk proves it is installed, not who wrote it. Saying so here is the whole
+      // reason `trust` exists next to `tier`.
+      trust: 'local-install',
       section: 'skills',
       source: 'local-scan' satisfies DiscoverySource,
       fetchedAt,
@@ -185,6 +188,7 @@ export async function runDiscovery(
           ? `${description} Published by ${repo.owner}, one of this playbook's official orgs. ${registryNote}`
           : `${description} ${registryNote}`,
         tier: official ? 'official' : 'community',
+        trust: official ? 'official-publisher' : 'third-party',
         section: 'mcp',
         source: 'mcp-registry',
         fetchedAt: new Date().toISOString(),

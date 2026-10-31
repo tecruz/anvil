@@ -13,10 +13,20 @@ All notable changes to this project will be documented in this file.
 - **Untrusted ticket framing**: context bundles fence the task, acceptance criteria, links and discussion as untrusted data, and quote instruction-like ticket lines as evidence. `claim` and `issue pull` report the findings in text and JSON without removing the text from the task.
 - **Provider test seam**: `GhOptions.runGit` lets a test assert the ship marker and push argv without a remote.
 - **Claim provenance**: a claim now records the `opencode` version that will run it, alongside the runner path, so a result can be reproduced later.
+- **Worktree resource shortlist**: `anvil claim`, `anvil crew up` and `anvil issue refresh` rank up to five optional resources for the ticket and write them into `.anvil/ticket.md`, each labelled by who publishes it (`installed locally`, `official publisher`, `third party`). Nothing is installed or run. See [ADR-0014](docs/adr/0014-optional-resources-in-the-worktree.md).
 
 ### Changed
 - Generated `AGENTS.md` command rows now cite the line they occupy in the regenerated file, so self-citations cannot drift when the layout above them changes.
 - The agent prompt now names the hook instead of only asking the agent not to push.
+- `plan` and `brief` no longer merge a discovery cache older than seven days. A stale cache is reported with the command that refreshes it, while the cache and `discover` keep the old entries. See [ADR-0013](docs/adr/0013-stale-discovery-is-reported-not-merged.md).
+- Installed agent skills are re-scanned on every `plan` and `brief`, including `--offline`, because they are files on this machine rather than a fetch. A stale discovery cache now costs only its cached remote entries.
+- Locally installed skills are labelled `installed locally` rather than presented as first-party guidance; the plan JSON carries a per-suggestion `trust` value.
+- A curated community resource published by one of a playbook's official orgs (for example `android/nowinandroid`) is labelled `official publisher`, not `third party`. The same evidence rule applies inside the official list — a GitHub owner in the seeds, or a declared `officialDomains` host or `host/path` namespace — so a resource owned by someone else, on an unrecognised host, or a third-party package on a shared host such as `hexdocs.pm` or `registry.terraform.io`, is `third party` there too. The worktree shortlist offers only external resources, so repository changes such as "add a lint command" no longer appear as optional reading.
+- A claim's optional resources are ranked against the worktree it created rather than the checkout the command ran in, so a claim that forks from a different stack gets that stack's guidance. A malformed `install` value in a discovery cache is ignored rather than breaking `brief`.
+- `brief` labels a live resource from an older discovery cache the same way `plan` does, falling back to the entry's source and tier when the cache predates the `trust` field, instead of printing an unattributed row.
+- The worktree shortlist matches a focus string against a resource's title and only the head of its detail. A live entry's detail is an unbounded GitHub description, and a keyword buried deep inside one no longer lets an unrelated repository displace a resource that is actually about the task.
+- Shortlist relevance matches whole words in resource labels and details, not display prefixes or substrings: `unit` no longer matches `community:` and `line` no longer matches `pipeline`. Hyphens, underscores and other punctuation separate words, so skill names such as `testing-setup` still match their topic.
+- A tailored shortlist now offers only a resource that answers the focus — a focus word in its own label, or two distinct focus words in its text — so a coverage ticket is no longer handed a CI triage agent, nor a Compose performance ticket a generic "high-performance workspace", for sharing one common word. The list can be shorter than five; precision beats padding.
 
 ## [0.1.0] - 2026-04-14
 

@@ -23,6 +23,16 @@ import type { LiveResource, Playbook, Resource } from './schema.ts'
 
 export type PlanTier = 'derived' | 'official' | 'community'
 
+/** Who vouches for a resource, as opposed to which tier it ranks in. */
+export type SuggestionTrust = 'official-publisher' | 'local-install' | 'third-party'
+
+/** Short, unambiguous label for a trust value, for terminals and context bundles. */
+export function trustLabel(trust: SuggestionTrust): string {
+  if (trust === 'official-publisher') return 'official publisher'
+  if (trust === 'local-install') return 'installed locally'
+  return 'third party'
+}
+
 /** How to build the plan. */
 export interface PlanOptions {
   /**
@@ -53,6 +63,24 @@ export interface Suggestion {
   severity?: Finding['severity']
   /** The playbook that supplied this, for official/community entries. */
   playbook?: string
+  /**
+   * Who vouches for a resource, kept apart from the tier.
+   *
+   * Absent on derived fixes: those come from this repository's own facts, so there is no
+   * outside publisher to name. `official-publisher` means the technology's own orgs publish
+   * it; `local-install` means it is on this machine and nothing more; `third-party` is
+   * everyone else.
+   */
+  trust?: SuggestionTrust
+  /**
+   * True for an external resource: something to read, consult or install.
+   *
+   * Absent on a change to this repository -- a missing verify command, a high-risk glob.
+   * The worktree shortlist wants only the former, because "add a lint command" is work, not
+   * reading, and offering it as an aid invites an agent to skip it. Derived fixes carry no
+   * playbook and no `external`, so they are excluded on both counts.
+   */
+  external?: boolean
   /**
    * Where the guidance came from.
    *
@@ -283,6 +311,11 @@ function playbookSuggestions(
         ...(resource.install === undefined ? {} : { install: resource.install }),
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
         provenance: 'curated',
+        external: true,
+        // The publisher is read from the URL, not assumed because the entry is in the official
+        // list: `Context7` is filed under `official.mcp` and hosted by upstash, which the node
+        // playbook's seeds do not name.
+        trust: curatedTrust({ url: resource.url }, playbook.discover),
       })
     }
   }
@@ -306,10 +339,125 @@ function playbookSuggestions(
       // starred" is not "correct for your repo".
       confidence: communityConfidence(resource),
       provenance: 'curated',
+      external: true,
+      // Community is where the resource ranks, not who publishes it: a repo the playbook's own
+      // orgs own (`android/nowinandroid`) is first-party even though it ranks below the
+      // hand-written official list.
+      trust: curatedTrust({ repo: resource.repo }, playbook.discover),
     })
   }
 
   return { suggestions: out, satisfied }
+}
+
+/**
+ * True when an owner is one a playbook's seeds call official.
+ *
+ * Case-insensitive, because GitHub logins are, and applies the same way whether the owner came
+ * from a community entry's `repo` or a URL.
+ */
+export function ownerIsOfficial(owner: string, orgs: readonly string[]): boolean {
+  const normalized = owner.trim().toLowerCase()
+  if (normalized === '') return false
+  return orgs.some((org) => org.trim().toLowerCase() === normalized)
+}
+
+/** The `owner` segment of a GitHub repository URL, or null when the URL is not one. */
+function githubOwnerFromUrl(url: string): string | null {
+  if (hostFromUrl(url) !== 'github.com') return null
+  const owner = pathFromUrl(url)
+    .split('/')
+    .find((segment) => segment !== '')
+  return owner === undefined ? null : owner
+}
+
+/** The lower-cased host of a URL, with a leading `www.` removed, or null when it has none. */
+function hostFromUrl(url: string): string | null {
+  const trimmed = url.trim()
+  if (trimmed === '') return null
+  try {
+    return new URL(trimmed).hostname.toLowerCase().replace(/^www\./, '')
+  } catch {
+    return null
+  }
+}
+
+/** The path of a URL, or empty when it cannot be parsed. */
+function pathFromUrl(url: string): string {
+  try {
+    return new URL(url.trim()).pathname
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * True when a URL's host and path match a declared official domain.
+ *
+ * A declaration is `host` or `host/path`:
+ *
+ *   - `host` matches that exact host at any path. Subdomains do not match, so `go.dev` does not
+ *     cover `pkg.go.dev`: the two publish different things, and a shared host is not evidence
+ *     of a shared publisher.
+ *   - `host/path` scopes to a namespace -- the URL path must be `path` or under it. This is how
+ *     a shared host carries publisher evidence: `hexdocs.pm/elixir`, `pkg.go.dev/golang.org/x`.
+ *   - `host/` (a trailing slash and nothing after) matches only the root, for a registry whose
+ *     landing page is official but whose contents are third-party.
+ *
+ * Both host sides are normalised the same way, so a declared `www.acme.dev` matches a URL
+ * on `acme.dev` and the reverse. Only the host is case-folded: a URL path is case-sensitive,
+ * so a declared `AcmeSDK` namespace is not widened to `acmesdk`.
+ */
+function isOfficialDomain(host: string, urlPath: string, domains: readonly string[]): boolean {
+  const path = urlPath.replace(/^\/+/, '').replace(/\/+$/, '')
+  return domains.some((raw) => {
+    const entry = raw.trim()
+    const slash = entry.indexOf('/')
+    const entryHost = (slash === -1 ? entry : entry.slice(0, slash)).toLowerCase().replace(/^www\./, '')
+    if (entryHost === '' || entryHost !== host) return false
+    if (slash === -1) return true
+    const entryPath = entry.slice(slash + 1).replace(/\/+$/, '')
+    if (entryPath === '') return path === ''
+    return path === entryPath || path.startsWith(`${entryPath}/`)
+  })
+}
+
+/** The evidence a playbook offers about who publishes on its behalf. */
+export interface PublisherEvidence {
+  /** GitHub orgs the seeds call official. */
+  officialOrgs: readonly string[]
+  /** Hostnames, or `host/path` namespaces, the technology publishes its own docs on. */
+  officialDomains?: readonly string[]
+}
+
+/**
+ * Who publishes a curated resource, read from its evidence rather than its tier.
+ *
+ * The evidence is an owner or a domain, never the list an entry sits in:
+ *
+ *   - A community entry names its `repo`; an official entry may cite a GitHub URL. An owner
+ *     among the playbook's `officialOrgs` is `official-publisher`; any other owner is
+ *     `third-party`, so a first-party-looking URL is not taken at face value.
+ *   - With no owner to read, the URL host and path are checked against the playbook's declared
+ *     `officialDomains`. A match is `official-publisher`.
+ *   - Neither available -- an unrecognised host -- is `third-party`. An unknown publisher is
+ *     not an official one; the honest label is the one that makes no claim.
+ */
+export function curatedTrust(
+  input: { repo?: string | null; url?: string | null },
+  evidence: PublisherEvidence,
+): SuggestionTrust {
+  const repo = (input.repo ?? '').trim()
+  const owner = repo !== '' ? (repo.split('/')[0] ?? '') : (githubOwnerFromUrl(input.url ?? '') ?? '')
+  if (owner.trim() !== '') {
+    return ownerIsOfficial(owner, evidence.officialOrgs) ? 'official-publisher' : 'third-party'
+  }
+  const url = input.url ?? ''
+  const host = hostFromUrl(url)
+  if (host !== null && isOfficialDomain(host, pathFromUrl(url), evidence.officialDomains ?? [])) {
+    return 'official-publisher'
+  }
+  return 'third-party'
 }
 
 /**
@@ -368,14 +516,38 @@ const LIVE_SECTION_LABEL: Record<LiveResource['section'], string> = {
  */
 const LIVE_OFFICIAL_CAP = 0.65
 
+/**
+ * Who vouches for a live resource, read from `trust` and falling back to its source.
+ *
+ * `trust` was added after the first discovery caches existed, so an entry written before
+ * then carries none. A reader that finds it absent must read the evidence rather than leave
+ * the attribution blank: a `local-scan` entry is a file on this machine (`local-install`),
+ * an entry the seeds matched to an official org is `official-publisher`, and anything else
+ * is `third-party`. The plan and the brief share this one rule so the same cache cannot
+ * produce a labelled suggestion on one screen and an unlabelled one on the other.
+ */
+export function liveTrust(entry: {
+  trust?: string | null
+  source?: string | null
+  tier?: string | null
+}): SuggestionTrust {
+  if (entry.trust === 'official-publisher' || entry.trust === 'local-install' || entry.trust === 'third-party') {
+    return entry.trust
+  }
+  if (entry.source === 'local-scan') return 'local-install'
+  return entry.tier === 'official' ? 'official-publisher' : 'third-party'
+}
+
 function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
   // A local skill is a file on this machine, not a link. `url` is omitted rather than
   // pointing at `file://`, which renders as a broken href in every consumer that takes one
   // -- and the evidence line already carries the path, which is the part a reader needs.
   const url = entry.url.trim()
+  const trust = liveTrust(entry)
   return {
     id: `live:${playbookId}:${url === '' ? (entry.install ?? entry.label) : normalizeUrl(url)}`,
     tier: entry.tier,
+    playbook: playbookId,
     title: `${LIVE_SECTION_LABEL[entry.section]}: ${entry.label}`,
     detail: entry.why,
     // The evidence is the fetch itself: which source produced this and when. A live entry
@@ -390,6 +562,8 @@ function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
           Math.max(0.3, Number((communityConfidence(entry) - 0.05).toFixed(2))),
     provenance: 'live',
     fetchedAt: entry.fetchedAt,
+    external: true,
+    trust,
   }
 }
 
@@ -435,4 +609,196 @@ export function rankSuggestions(suggestions: readonly Suggestion[]): Suggestion[
     if (a.confidence !== b.confidence) return b.confidence - a.confidence
     return a.id < b.id ? -1 : 1
   })
+}
+
+/** How many resources a claim, crew launch or ticket refresh carries into a worktree. */
+export const DEFAULT_SHORTLIST_LIMIT = 5
+
+export interface ShortlistOptions {
+  /**
+   * Free text describing the work: a ticket title, body, labels, or a goal.
+   *
+   * Matched against resource labels and details by whole word. A resource is offered only
+   * when it answers the focus -- a focus word in its own label, or two distinct focus words
+   * in its text. Absent focus produces a tier/confidence list instead, which is still small
+   * and still optional -- it just is not tailored.
+   */
+  focus?: string
+  /** Maximum entries. Defaults to [DEFAULT_SHORTLIST_LIMIT]; never fewer than one. */
+  limit?: number
+}
+
+/** Grammatical words that would match almost every resource and rank nothing. */
+const SHORTLIST_STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'this',
+  'that',
+  'from',
+  'into',
+  'your',
+  'will',
+  'must',
+  'should',
+  'when',
+  'then',
+  'than',
+  'have',
+  'has',
+  'are',
+  'was',
+  'were',
+  'not',
+  'but',
+  'all',
+  'any',
+  'can',
+  'may',
+  'use',
+  'using',
+  'add',
+  'make',
+  'need',
+  'needs',
+  'want',
+  'work',
+  'repo',
+  'repository',
+])
+
+/**
+ * A small, ranked reading list for one piece of work.
+ *
+ * The plan is a catalogue: useful when you are deciding what to improve, and far too long
+ * to put in front of an agent that is already working on a ticket. This is the other view --
+ * at most a handful of external resources, ranked by how many of the ticket's own words they
+ * mention, with tier and confidence as tie-breakers.
+ *
+ * Only external resources are eligible (`external` set): something to read or consult. A
+ * change to this repository -- a missing verify command, a high-risk glob, or a derived fix
+ * -- is work, not an aid, and offering it as optional reading invites an agent to skip it.
+ *
+ * With a focus, the list is tailored rather than padded: a resource that does not answer the
+ * focus is left out even when that means fewer than `limit`. Precision is the point -- a
+ * coverage ticket handed a CI triage agent because both mention "tests" is the failure this
+ * avoids, and a short honest list is better than a full misleading one.
+ */
+export function shortlistSuggestions(suggestions: readonly Suggestion[], options: ShortlistOptions = {}): Suggestion[] {
+  const limit = Math.max(1, Math.floor(options.limit ?? DEFAULT_SHORTLIST_LIMIT))
+  const terms = focusTerms(options.focus ?? '')
+  const scored: Array<{ suggestion: Suggestion; score: number }> = []
+  for (const suggestion of suggestions) {
+    if (suggestion.external !== true) continue
+    // With a focus, only a resource that actually answers it is offered -- the list is
+    // tailored, not a tier/confidence catalogue padded to the limit. See `focusRelevance`.
+    const relevance = focusRelevance(suggestion, terms)
+    if (relevance === null) continue
+    scored.push({ suggestion, score: scoreSuggestion(suggestion, relevance) })
+  }
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score
+    const tier = TIER_ORDER[a.suggestion.tier] - TIER_ORDER[b.suggestion.tier]
+    if (tier !== 0) return tier
+    if (a.suggestion.confidence !== b.suggestion.confidence) return b.suggestion.confidence - a.suggestion.confidence
+    return a.suggestion.title.localeCompare(b.suggestion.title)
+  })
+
+  const seen = new Set<string>()
+  const out: Suggestion[] = []
+  for (const { suggestion } of scored) {
+    const key = shortlistKey(suggestion)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(suggestion)
+    if (out.length === limit) break
+  }
+  return out
+}
+
+/** Shared word boundaries: punctuation separates names such as `testing-setup` and `unit_tests`. */
+function shortlistWords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+/g) ?? []
+}
+
+/** Lower-cased, de-duplicated words long enough to mean something. */
+function focusTerms(focus: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of shortlistWords(focus)) {
+    if (raw.length < 4 || SHORTLIST_STOPWORDS.has(raw) || seen.has(raw)) continue
+    seen.add(raw)
+    out.push(raw)
+    if (out.length === 20) break
+  }
+  return out
+}
+
+/**
+ * How much of a resource's detail participates in a shortlist match.
+ *
+ * A curated `why` is a sentence or two -- the registry's longest is under 500 characters. A
+ * live entry's detail is the repository's own GitHub description, which can run to tens of
+ * thousands of characters and list every topic the maintainer could think of. Matching
+ * against all of it let a description that happened to mention the ticket's words 20,000
+ * characters in outrank a resource actually about the task, so the match is bounded to the
+ * part a reader would take as the summary. The bound sits well above every curated `why`, so
+ * no hand-written reason is ever truncated.
+ */
+const SHORTLIST_DETAIL_CHARS = 1000
+
+/** How many distinct focus words a suggestion matches, or null when it does not earn a place. */
+function focusRelevance(suggestion: Suggestion, terms: readonly string[]): number | null {
+  // No focus is the untailored case: every resource qualifies and the tie-breakers order it.
+  if (terms.length === 0) return 0
+
+  // The kind in the title is display metadata, not the resource's topic. In particular, every
+  // `community:` row used to match a ticket asking for `unit` tests.
+  const label = new Set(
+    shortlistWords(suggestion.title.replace(/^(?:doc|skill|agent|mcp|style|migration|community):\s*/i, '')),
+  )
+  const detail = new Set(shortlistWords(boundedDetail(suggestion.detail)))
+
+  let matches = 0
+  let inLabel = false
+  for (const term of terms) {
+    const inLabelHit = label.has(term)
+    if (inLabelHit || detail.has(term)) matches++
+    if (inLabelHit) inLabel = true
+    if (matches === 3) break
+  }
+
+  // A focus word in the resource's own label is the strongest signal. Otherwise a resource
+  // must match two distinct focus words: one word in a long description is a coincidence,
+  // and coincidence is what put a "high-performance workspace" in a Compose performance list
+  // and a CI triage agent in a coverage list. A one-word focus is the exception -- there is
+  // only one word, so one match is all the corroboration the ticket could offer.
+  const needed = Math.min(2, terms.length)
+  return inLabel || matches >= needed ? matches : null
+}
+
+/** The head of a resource's detail, without a word cut by the bound (`testimony` -> `test`). */
+function boundedDetail(detail: string): string {
+  if (detail.length <= SHORTLIST_DETAIL_CHARS) return detail
+  const head = detail.slice(0, SHORTLIST_DETAIL_CHARS)
+  const cut = /[a-z0-9]/i.test(detail[SHORTLIST_DETAIL_CHARS] ?? '')
+  return cut ? head.replace(/[a-z0-9]+$/i, '') : head
+}
+
+function scoreSuggestion(suggestion: Suggestion, relevance: number): number {
+  // Relevance dominates confidence: a resource that mentions the ticket's own words is the
+  // point of the list, and a high-confidence unrelated doc is exactly the noise this removes.
+  const tierBonus = suggestion.tier === 'official' ? 0.5 : 0
+  return relevance * 2 + tierBonus + suggestion.confidence
+}
+
+/** A stable identity for de-duplication: install path, then URL, then id. */
+function shortlistKey(suggestion: Suggestion): string {
+  const install = (suggestion.install ?? '').trim().toLowerCase()
+  if (install !== '') return `install:${install}`
+  const url = (suggestion.url ?? '').trim()
+  if (url !== '') return `url:${normalizeUrl(url)}`
+  return `id:${suggestion.id}`
 }

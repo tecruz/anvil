@@ -25,6 +25,17 @@ import { type FetchImpl, requestJson } from './transport.ts'
 export type DiscoverySource = 'github-search' | 'mcp-registry' | 'local-scan' | 'cache'
 
 /**
+ * Who vouches for an entry, kept separate from the ranking tier.
+ *
+ * The tier says how *useful* an entry is; trust says who stands behind it, and the two are
+ * not the same claim. A skill installed in `~/.agents/skills` is useful and worth listing,
+ * but the file on disk proves only that someone installed it -- not that the technology's
+ * maintainers wrote it. Folding that into `tier: official` reads as "first-party" and is
+ * false, so the publisher evidence gets its own field.
+ */
+export type DiscoveryTrust = 'official-publisher' | 'local-install' | 'third-party'
+
+/**
  * The subset of `gh` this module uses. Injected so no test shells out.
  *
  * The live suite exists because of a defect this seam could not catch: a mocked runner
@@ -50,6 +61,14 @@ export interface DiscoveryEntry {
   url: string
   why: string
   tier: 'official' | 'community'
+  /**
+   * Who vouches for it: the technology's orgs, this machine, or nobody in particular.
+   *
+   * Optional because caches and fixtures written before the field existed still load. Every
+   * producer in this package sets it; a reader that finds it absent must fall back to the
+   * source rather than assume a publisher.
+   */
+  trust?: DiscoveryTrust
   section: LiveResource['section']
   source: DiscoverySource
   fetchedAt: string
@@ -357,6 +376,7 @@ function classifyRepo(
     url: repo.url,
     why: `${description}${evidence}`,
     tier: official ? 'official' : 'community',
+    trust: official ? 'official-publisher' : 'third-party',
     // A community repo is always community guidance, whatever it is about. Reclassifying it
     // into `official.mcp` would assert the project maintains it, which the org check just
     // said it does not.

@@ -83,6 +83,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['openjdk', 'gradle', 'apache']
+  officialDomains: ['docs.gradle.org', 'docs.oracle.com', 'google.github.io']
   keywords:
     - 'java mcp server'
     - 'gradle agent skills'

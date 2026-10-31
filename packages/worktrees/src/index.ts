@@ -41,7 +41,12 @@ import {
 } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
-import { type InjectionFinding, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import {
+  type InjectionFinding,
+  type RecommendedResource,
+  renderAgentsOverlay,
+  renderContextBundle,
+} from '@anvil/tickets/context'
 import { installPushGuard, type PushGuardResult } from './hooks.ts'
 import { checkedStatePath, createStateDirectory } from './state.ts'
 
@@ -256,6 +261,17 @@ export interface ClaimOptions {
   runner?: string
   /** Environment for the version probe; tests point PATHEXT/PATH at a stub runner. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Optional aids for the ticket's context bundle, as a function of the worktree that was
+   * created.
+   *
+   * A callback, not a list: the resources depend on the tree the work is done in, and the
+   * caller's checkout may be a different branch than the claim's base. The worktree path is
+   * only known here, after `git worktree add` has checked the base ref out, so the ranking is
+   * handed the path it must read. This package does not load playbooks itself -- the CLI does,
+   * inside the callback.
+   */
+  recommend?: (worktreePath: string) => readonly RecommendedResource[]
 }
 
 export interface ClaimResult {
@@ -350,7 +366,15 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
       defaultBranch: null,
     }).profile
 
-    const context = renderContextBundle({ ticket, profile, branch })
+    // The recommendation is computed from the worktree that was just created, not the
+    // caller's checkout: a claim forks from a base ref that may be a different stack.
+    const resources = options.recommend === undefined ? undefined : options.recommend(worktreePath)
+    const context = renderContextBundle({
+      ticket,
+      profile,
+      branch,
+      ...(resources === undefined ? {} : { resources }),
+    })
     const overlay = renderAgentsOverlay({ ticket, profile })
     // Validate both outputs before the first write: a real parent does not make linked
     // leaf files safe. The hook installer checks its own complete output batch too.

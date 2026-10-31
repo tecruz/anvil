@@ -1,0 +1,97 @@
+# 0014 — A worktree gets a shortlist of optional resources, with publisher evidence
+
+**Status:** accepted
+
+## Context
+
+The plan is a catalogue. `anvil plan` ranks every fix and every playbook resource for a
+repository, and on a real Android project that is ~150 suggestions across docs, skills,
+agents, MCP servers and community repositories. That is the right shape for "what should I
+improve here?" and the wrong shape for "I am working on this ticket right now".
+
+`anvil claim` already writes a warm context bundle (`.anvil/ticket.md`) with the task, the
+acceptance criteria, the repository's own verify commands and its high-risk paths. It said
+nothing about the ecosystem resources the plan had just found, so an agent that would have
+benefited from an installed `testing-setup` skill never learned it was there — and a human
+reviewing the claim could not see which resources anvil considered relevant.
+
+Two more defects surfaced while looking at why: the discovery cache was treated as the only
+source of live guidance, so installed skills disappeared whenever the cached *network* half
+went stale, and every locally installed skill was labelled `official`. The first makes anvil
+less useful the longer it runs unattended; the second asserts a publisher the evidence does
+not support.
+
+## Decision
+
+1. **Installed skills are re-scanned on every `plan`, `brief`, `claim` and `refresh`.** The
+   local scan reads files; it cannot be stale and it needs no network. A cached `local-scan`
+   entry is never reused, so an uninstalled skill does not come back from the cache and a
+   newly installed one appears immediately. Remote entries still come from the cache and are
+   still dropped when the cache is stale.
+2. **Publisher evidence is a field, not an inference from the tier.** Discovery entries and
+   plan suggestions carry `trust`: `official-publisher`, `local-install` or `third-party`.
+   A local skill stays useful (tier `official`, ranked normally) and is labelled
+   `installed locally` rather than presented as first-party. The field was added after the
+   first discovery caches existed, so both the plan and the brief fall back to the entry's
+   source and tier when a cache carries none, rather than render a live row with no
+   publisher. For every curated resource the
+   publisher is read from evidence: a community entry's `repo`, or an official entry's GitHub
+   URL owner, against the playbook's `officialOrgs`; failing that, the URL host and path
+   against the playbook's declared `officialDomains`. A declaration is an exact host or a
+   `host/path` namespace — a bare host does not cover its subdomains, and a shared host such
+   as `hexdocs.pm` or `registry.terraform.io` is scoped to its own packages rather than
+   trusted wholesale. The host is compared case-insensitively; the path is not, because a
+   URL path is case-sensitive. A resource filed under `official` but owned by someone else (Context7,
+   hosted by upstash) is `third-party`, and so is any host with no owner and no matching
+   declaration — an unrecognised publisher is not an official one.
+3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
+   string — the ticket's title, body, acceptance criteria and labels — against resource
+   labels and the head of their details, and returns at most five. Matching uses whole
+   words, with punctuation separating compounds such as `testing-setup` and `unit_tests`.
+   Display prefixes such as `community:` do not contribute relevance: `unit` must not match
+   `community`, nor `line` match `pipeline`. A resource is offered only when it **answers**
+   the focus — a focus word in its own label, or two distinct focus words in its text — so a
+   tailored list is shorter rather than padded to five with near-misses. One generic word is
+   not relevance, and treating it as such put a "high-performance workspace" in a Compose
+   performance list and a CI triage agent in a coverage list. The detail match is
+   bounded because a live entry's detail is the repository's own GitHub description, which
+   can run to tens of thousands of characters; a keyword appearing deep inside it is not
+   relevance, and letting it count let an unrelated aggregator repository displace a resource
+   actually about the task. Only external resources are eligible
+   (a suggestion marked `external`); repository changes — derived fixes, a missing verify
+   command, a high-risk glob — are work rather than reading and are left out. Scoring is
+   deterministic and offline.
+4. **`claim`, `crew up` and `issue refresh` put the shortlist in the bundle** as
+   `## Recommended resources (optional)`, labelled as aids that were not installed or run
+   and that never replace the verify commands. `claim` and `crew up` rank against the worktree
+   that was created, not the caller's checkout, because the claim may fork from a base branch
+   with a different stack. The bundle stays a bundle: values are collapsed to one line and
+   clamped.
+5. **Nothing is installed or executed.** A recommendation is a line of text. anvil does not
+   `npx` a skill, clone a repository or run a resource's own instructions.
+
+## Consequences
+
+- A stale cache now costs the remote half of discovery only; the machine's own skills keep
+  working. The warning says exactly that.
+- A `brief` lists an installed skill too, cited by its `SKILL.md` path rather than dropped
+  for having no URL.
+- The plan JSON and terminal output gain a `trust` value per suggestion and a
+  `[installed locally]` / `[official publisher]` marker on live rows.
+- The context bundle has one more short section, bounded at five entries. It is the only
+  part of the bundle that comes from outside the repository.
+- Ranking is a keyword match, not a model. It is cheap, explainable and reproducible, and it
+  can be wrong; that is why the list is capped, labelled optional, and never a command.
+
+## Alternatives rejected
+
+- **Put the whole plan in the bundle.** A worktree would carry a catalogue whose items it
+  cannot act on, and the verify commands would stop being the thing an agent reads first.
+- **Let the plan itself filter to the ticket.** `plan` does not take a ticket and must not
+  start; it answers a question about a repository.
+- **Install the recommended skills.** Convenient once, a supply-chain change made by a tool
+  nobody reviewed. Installing a skill is the user's decision.
+- **Keep labelling local skills `official`.** It reads as first-party, which the evidence —
+  a file in a directory — does not establish.
+- **Drop a stale cache's local entries along with its remote ones.** They did not go stale;
+  the search did. Re-scanning is cheaper than reconciling ages.

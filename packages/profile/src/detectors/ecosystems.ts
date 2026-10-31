@@ -72,6 +72,29 @@ function gradleChangedTestTask(
   return null
 }
 
+/**
+ * The first Gradle build file that applies a plugin.
+ *
+ * Tooling is configured in the module that uses it (`app/build.gradle.kts`) and usually has
+ * no config file of its own, so probing only root-level `spotless.gradle` / `config/checkstyle`
+ * reported "no linter configured" for a repository whose module applies detekt and whose
+ * AGENTS.md documents `./gradlew detekt`. The plugin id (or version-catalog alias) is matched
+ * rather than any mention, and `apply false` declarations are skipped: `ktlint(...)` inside a
+ * Spotless block configures formatting, it does not create the ktlint plugin's `ktlintCheck`
+ * task.
+ */
+function gradlePluginFile(ctx: DetectorContext, buildFiles: readonly string[], plugin: RegExp): string | null {
+  for (const file of buildFiles) {
+    const text = read(ctx, file)
+    if (text === null) continue
+    for (const line of text.split('\n')) {
+      if (/apply\s+false/.test(line)) continue
+      if (plugin.test(line)) return file
+    }
+  }
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // Go
 // ---------------------------------------------------------------------------
@@ -289,6 +312,33 @@ export const jvmDetector: Detector = {
           version: null,
           evidence: ['(gradlew absent)'],
         })
+      }
+
+      // Tooling applied by a Gradle plugin. The task each plugin contributes is what makes
+      // the command runnable, so the tool and the command are recorded together.
+      const buildFiles = [...ctx.files].filter((f) => /(^|\/)build\.gradle(?:\.kts)?$/.test(f))
+      const source = wrapper ? 'detected' : 'inferred'
+      const detekt = gradlePluginFile(ctx, buildFiles, /(?:io\.gitlab\.arturbosch\.detekt|libs\.plugins\.detekt)\b/)
+      if (detekt !== null) {
+        addTool(draft, 'lint', 'detekt')
+        addCommand(draft, 'lint', { cmd: `${cmd} detekt`, source, evidence: detekt })
+      }
+      const spotless = gradlePluginFile(ctx, buildFiles, /(?:com\.diffplug\.spotless|libs\.plugins\.spotless)\b/)
+      if (spotless !== null) {
+        addTool(draft, 'formatter', 'spotless')
+        addCommand(draft, 'format', { cmd: `${cmd} spotlessCheck`, source, evidence: spotless })
+      }
+      const ktlint = gradlePluginFile(ctx, buildFiles, /(?:org\.jlleitschuh\.gradle\.ktlint|libs\.plugins\.ktlint)\b/)
+      if (ktlint !== null) {
+        addTool(draft, 'lint', 'ktlint')
+        addTool(draft, 'formatter', 'ktlint')
+        addCommand(draft, 'lint', { cmd: `${cmd} ktlintCheck`, source, evidence: ktlint })
+        addCommand(draft, 'format', { cmd: `${cmd} ktlintFormat`, source, evidence: ktlint })
+      }
+      const checkstyle = gradlePluginFile(ctx, buildFiles, /\bcheckstyle\b/)
+      if (checkstyle !== null) {
+        addTool(draft, 'lint', 'checkstyle')
+        addCommand(draft, 'lint', { cmd: `${cmd} checkstyleMain`, source, evidence: checkstyle })
       }
     }
 

@@ -53,6 +53,7 @@ export {
   type DiscoveryEntry,
   type DiscoveryReport,
   type DiscoverySource,
+  type DiscoveryTrust,
   discover,
   discoverAll,
   type GhRun,

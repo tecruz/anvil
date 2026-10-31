@@ -9,7 +9,7 @@ import { resolve } from 'node:path'
 import { audit, type ReadinessReport } from '@anvil/audit'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
-import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier } from '@anvil/playbooks'
+import { buildPlan, loadPlaybooks, matchPlaybooks, type Plan, type PlanTier, trustLabel } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile, profileWarnings } from '@anvil/profile'
 import { liveEntriesForPlan } from './discover.ts'
 import { toPlaybookMatchInfo } from './matches.ts'
@@ -60,9 +60,13 @@ export const planCommand: Command = {
     'Reads only. Nothing is written to the repository.',
     '',
     'Guidance from `anvil playbook discover` is merged in, marked live and ranked below the',
-    'curated entries of the same tier. It reads a cache in your home directory, so it costs',
-    'no network here; run `anvil playbook discover` to populate it, or --refresh to fetch it',
-    'now.',
+    'curated entries of the same tier. Installed agent skills are re-scanned on every run,',
+    'including with --offline, because they are files on this machine rather than a fetch.',
+    'Remote results come from a cache in your home directory and are used only while fresh;',
+    'run `anvil playbook discover` to populate it, or --refresh to fetch it now. A cache older',
+    'than seven days is reported and its remote half left out rather than merged, because a',
+    'stale search result is noise dressed as guidance; --refresh replaces it with a new',
+    'answer.',
     '',
     'A suggestion the repository already satisfies is left out, and the count of those is',
     'printed. --include-satisfied keeps them.',
@@ -232,7 +236,14 @@ function renderPlan(ctx: CommandContext, plan: Plan, includeSatisfied: boolean):
     out.push(
       renderTable(
         ['#', 'suggestion', 'conf', 'detail'],
-        items.map((item, i) => [String(i + 1), item.title, item.confidence.toFixed(2), item.detail]),
+        items.map((item, i) => [
+          String(i + 1),
+          item.provenance === 'live' && item.trust !== undefined
+            ? `${item.title} ${s.dim(`[${trustLabel(item.trust)}]`)}`
+            : item.title,
+          item.confidence.toFixed(2),
+          item.detail,
+        ]),
         s,
       ),
     )

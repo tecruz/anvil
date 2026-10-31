@@ -71,6 +71,18 @@ export interface OfficialResources {
 export interface DiscoverSeeds {
   /** GitHub orgs or users that publish on behalf of the technology. */
   officialOrgs: string[]
+  /**
+   * Hosts, or `host/path` namespaces, the technology publishes its own documentation on.
+   *
+   * Publisher evidence, alongside `officialOrgs`. A resource in the official list whose URL
+   * carries no GitHub owner is only `official-publisher` when its host matches one of these;
+   * otherwise the publisher cannot be established from evidence and it is `third-party`. A
+   * bare host matches exactly -- subdomains do not, so a shared host is not read as a shared
+   * publisher -- and an optional `/path` scopes the match to a namespace
+   * (`hexdocs.pm/elixir`, `pkg.go.dev/golang.org/x`). A trailing `host/` matches only the root.
+   * The host is case-insensitive; the path is not, because a URL path is case-sensitive.
+   */
+  officialDomains?: string[]
   /** Repository-search terms. Kept generic enough that new repos match too. */
   keywords: string[]
   /** Search terms for the MCP registry. */
@@ -112,6 +124,13 @@ export interface LiveResource {
   why: string
   /** `official` only when the owner is a seeded official org; otherwise `community`. */
   tier: 'official' | 'community'
+  /**
+   * Who vouches for it, separate from the ranking tier.
+   *
+   * Optional because it was added after the first live caches existed; a reader that finds it
+   * absent must fall back to the source rather than assume a publisher.
+   */
+  trust?: 'official-publisher' | 'local-install' | 'third-party'
   /** The playbook section this belongs in, which is also its label prefix in the plan. */
   section: 'docs' | 'skills' | 'agents' | 'mcp' | 'styleGuides' | 'migrationGuides' | 'community'
   /** Star count at fetch time. `null` when the source has no such number. */
@@ -202,6 +221,32 @@ function strArray(value: YamlValue | undefined, path: string, issues: Validation
  * has published nothing, which is indistinguishable from the truth.
  */
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/
+
+/**
+ * A hostname, which is what the host half of a declared official domain is.
+ *
+ * Dotted labels, no scheme, no port and no path. Checked because a typo here is silent in the
+ * worst way: the publisher rule then matches nothing and a first-party resource is quietly
+ * labelled third-party, which reads as an attribution rather than a mistake.
+ */
+const HOSTNAME = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/
+
+/** The characters a path prefix in an official domain may use; no whitespace, `?` or `#`. */
+const DOMAIN_PATH = /^[A-Za-z0-9._~%:@!$&'()*+,;=/-]*$/
+
+/** Hosts, or `host/path` namespaces, a technology publishes its own documentation on. */
+function domainArray(value: YamlValue | undefined, path: string, issues: ValidationIssue[]): string[] {
+  const out = strArray(value, path, issues)
+  for (const item of out) {
+    const slash = item.indexOf('/')
+    const host = slash === -1 ? item : item.slice(0, slash)
+    const rest = slash === -1 ? '' : item.slice(slash + 1)
+    if (!HOSTNAME.test(host) || !DOMAIN_PATH.test(rest)) {
+      issues.push({ path, message: `not a host or host/path: "${item}"` })
+    }
+  }
+  return out
+}
 
 /**
  * The orgs a technology speaks through.
@@ -374,7 +419,8 @@ export function validatePlaybook(
   checkKeys(c, ['moduleLayout', 'testNaming', 'reviewFocus'], 'conventions', issues)
 
   const d = optionalSection(doc.discover)
-  checkKeys(d, ['officialOrgs', 'keywords', 'mcp'], 'discover', issues)
+  checkKeys(d, ['officialOrgs', 'officialDomains', 'keywords', 'mcp'], 'discover', issues)
+  const officialDomains = domainArray(d.officialDomains, 'discover.officialDomains', issues)
 
   const communityRaw = doc.community
   const community: CommunityResource[] = []
@@ -456,6 +502,7 @@ export function validatePlaybook(
       riskGlobs: strArray(doc.riskGlobs, 'riskGlobs', issues),
       discover: {
         officialOrgs: loginArray(d.officialOrgs, 'discover.officialOrgs', issues),
+        ...(officialDomains.length === 0 ? {} : { officialDomains }),
         keywords: nonEmptyStrArray(d.keywords, 'discover.keywords', issues),
         mcp: nonEmptyStrArray(d.mcp, 'discover.mcp', issues),
       },

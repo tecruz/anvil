@@ -16,7 +16,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
-import type { MatchResult } from '@anvil/playbooks'
+import { curatedTrust, liveTrust, type MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
 export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
@@ -78,7 +78,22 @@ export interface Brief {
       reviewFocus: string[]
     }
     verify: Record<string, string[]>
-    guidance: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }>
+    guidance: Array<{
+      kind: string
+      label: string
+      url: string
+      why: string
+      provenance: 'curated' | 'live'
+      /**
+       * Install path, for a resource that is a file on this machine rather than a link.
+       *
+       * A locally installed skill has no URL at all; dropping it for that would hide the one
+       * source that works offline. Its path is the citation instead.
+       */
+      install?: string
+      /** Who vouches for it. Absent on entries written before the field existed. */
+      trust?: string
+    }>
   }>
   findings: Array<{
     id: string
@@ -91,6 +106,13 @@ export interface Brief {
   excerpts: BriefFileExcerpt[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
   gaps: string[]
+  /**
+   * Conditions worth stating, such as a stale discovery cache that was left out.
+   *
+   * A brief that quietly lost guidance would read as a brief that found less, and the
+   * reader would have no way to tell the difference.
+   */
+  warnings: string[]
 }
 
 /**
@@ -128,6 +150,8 @@ export interface BuildBriefOptions {
    * `anvil playbook discover` builds exactly as before.
    */
   live?: ReadonlyMap<string, readonly LiveGuidance[]>
+  /** Conditions the caller already knows about, carried through to the output unchanged. */
+  warnings?: readonly string[]
 }
 
 /**
@@ -143,6 +167,24 @@ export interface LiveGuidance {
   url: string
   why: string
   section: string
+  /** Who vouches for it: `official-publisher`, `local-install` or `third-party`. */
+  trust?: string
+  /**
+   * The ranking tier, `official` when the technology's own orgs publish it.
+   *
+   * Read only to fill in `trust` for an entry from a cache written before that field
+   * existed; the publisher of a live entry is otherwise already decided by discovery.
+   */
+  tier?: string
+  /**
+   * Install path, when the resource is a file on this machine rather than a link.
+   *
+   * A local-scan skill has an empty `url` and its `SKILL.md` path here. Carried through so a
+   * brief can cite it by path instead of dropping it for having no URL.
+   */
+  install?: string | null
+  /** Which source produced it: `github-search`, `mcp-registry`, `local-scan`. */
+  source?: string
 }
 
 export function buildBrief(options: BuildBriefOptions): Brief {
@@ -243,6 +285,7 @@ export function buildBrief(options: BuildBriefOptions): Brief {
     findings,
     excerpts,
     gaps: computeGaps(report, profile),
+    warnings: [...(options.warnings ?? [])],
   }
 }
 
@@ -257,9 +300,19 @@ function flattenGuidance(
       migrationGuides: unknown[]
     }
     community?: unknown[]
+    /** The playbook's publisher evidence, so a resource's publisher can be read from its URL. */
+    discover?: { officialOrgs?: string[]; officialDomains?: string[] }
   },
   live: readonly LiveGuidance[] = [],
-): Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> {
+): Array<{
+  kind: string
+  label: string
+  url: string
+  why: string
+  provenance: 'curated' | 'live'
+  install?: string
+  trust?: string
+}> {
   const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
     [
       'doc',
@@ -310,26 +363,89 @@ function flattenGuidance(
       }>,
     ],
   ]
-  const curated: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> =
-    groups.flatMap(([kind, resources]) =>
-      resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why, provenance: 'curated' as const })),
-    )
+  const curated: Array<{
+    kind: string
+    label: string
+    url: string
+    why: string
+    provenance: 'curated' | 'live'
+    install?: string
+    trust?: string
+  }> = groups.flatMap(([kind, resources]) =>
+    resources.map((r) => ({
+      kind,
+      label: r.label,
+      url: r.url,
+      why: r.why,
+      provenance: 'curated' as const,
+      // The publisher is read from the resource's evidence, not assumed because the playbook
+      // filed it as official: `Context7` sits under `official.mcp` and is hosted by upstash.
+      trust: curatedTrust(
+        { url: r.url },
+        {
+          officialOrgs: playbook.discover?.officialOrgs ?? [],
+          officialDomains: playbook.discover?.officialDomains ?? [],
+        },
+      ),
+    })),
+  )
 
   // Live entries go last, and only when the curated list does not already cite them. Same
   // rule as the plan: a person-reviewed entry outranks a fetched one, and a brief is the
   // text an agent will read as authoritative, so a duplicate there is worse than a duplicate
   // in a terminal.
-  const cited = new Set(curated.map((r) => r.url.toLowerCase().replace(/\/+$/, '')))
+  //
+  // Identity is the URL, or the install path when there is no URL: a locally installed skill
+  // hrefs at nothing, and its `SKILL.md` path is what a reader would open. Its empty URL is
+  // not a reason to drop it -- it is the one source that works with no network at all.
+  const cited = new Set(curated.map((r) => citationKey(r.url, '')))
   const added = live
     .filter((r) => {
-      const key = r.url.trim().toLowerCase().replace(/\/+$/, '')
+      const key = citationKey(r.url, installOf(r.install))
       if (key === '' || cited.has(key)) return false
       cited.add(key)
       return true
     })
-    .map((r) => ({ kind: `live ${r.section}`, label: r.label, url: r.url, why: r.why, provenance: 'live' as const }))
+    .map((r) => {
+      const install = installOf(r.install)
+      return {
+        kind: `live ${r.section}`,
+        label: r.label,
+        url: r.url,
+        why: r.why,
+        provenance: 'live' as const,
+        ...(install === '' ? {} : { install }),
+        // A cache written before `trust` existed has none; the same fallback the plan uses
+        // fills it in, so a live row is never left without a publisher.
+        trust: liveTrust(r),
+      }
+    })
 
   return [...curated, ...added]
+}
+
+/**
+ * A usable install path: a trimmed string, or empty when the field is absent or malformed.
+ *
+ * The live map is typed, but its values can come from a cache file any process may have
+ * written, and a caller can hand `buildBrief` anything. A non-string install is treated as no
+ * install rather than allowed to throw where a reader expects a line of guidance.
+ */
+function installOf(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * Dedupe identity for guidance: the URL, else the install path, else nothing.
+ *
+ * Prefixing keeps a URL that happens to look like a path from colliding with one, and the
+ * trailing-slash strip matches how the plan normalises the same link.
+ */
+function citationKey(url: string, install: string): string {
+  const trimmedUrl = url.trim().toLowerCase().replace(/\/+$/, '')
+  if (trimmedUrl !== '') return `url:${trimmedUrl}`
+  const trimmedInstall = install.trim().toLowerCase()
+  return trimmedInstall === '' ? '' : `install:${trimmedInstall}`
 }
 
 /**

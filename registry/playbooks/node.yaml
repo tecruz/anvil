@@ -76,6 +76,7 @@ riskGlobs: ['**/package.json', '**/package-lock.json', '**/pnpm-lock.yaml', '**/
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['nodejs', 'vercel']
+  officialDomains: ['nodejs.org', 'typescriptlang.org']
   keywords:
     - 'javascript mcp server'
     - 'typescript agent skills'

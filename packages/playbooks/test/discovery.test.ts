@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url'
 import { audit } from '@anvil/audit'
 import {
   buildPlan,
+  curatedTrust,
   type LiveResource,
+  liveTrust,
   loadBuiltins,
   matchPlaybooks,
   normalizeUrl,
@@ -178,6 +180,104 @@ describe('discover section validation', () => {
     const pb = parsePlaybook(`${MINIMAL}discover:\n  officialOrgs: ['acme']\n`, 'toy.yaml')
     assert.deepEqual(pb.discover.officialOrgs, ['acme'])
   })
+
+  test('accepts official domains, including a host/path namespace', () => {
+    const { playbook, issues } = validatePlaybook(
+      parseYamlSubset(
+        `${MINIMAL}discover:\n  officialOrgs: ['acme']\n  officialDomains: ['acme.dev', 'docs.acme.dev', 'hex.pm/acme', 'registry.acme.dev/']\n`,
+      ),
+    )
+    assert.deepEqual(issues, [])
+    assert.deepEqual(playbook?.discover.officialDomains, [
+      'acme.dev',
+      'docs.acme.dev',
+      'hex.pm/acme',
+      'registry.acme.dev/',
+    ])
+  })
+
+  test('rejects a domain that is not a host or host/path, so a typo cannot hide a first-party resource', () => {
+    // A bad entry here silently matches nothing and turns a first-party resource third-party.
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${MINIMAL}discover:\n  officialDomains: ['https://acme.dev', 'not a host', 'acme.dev?x']\n`),
+    )
+    assert.equal(issues.filter((i) => i.path === 'discover.officialDomains').length, 3)
+  })
+})
+
+describe('curatedTrust', () => {
+  const evidence = { officialOrgs: ['nodejs', 'vercel'], officialDomains: ['nodejs.org', 'docs.gradle.org'] }
+
+  test('an owner among the seeds is official, and any other owner is third-party', () => {
+    assert.equal(curatedTrust({ repo: 'nodejs/undici' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ repo: 'upstash/context7' }, evidence), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://github.com/nodejs/node' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://github.com/upstash/context7' }, evidence), 'third-party')
+  })
+
+  test('a declared host matches exactly, and www is insignificant on either side', () => {
+    assert.equal(curatedTrust({ url: 'https://nodejs.org/docs/latest/api/' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://www.nodejs.org/x' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://docs.gradle.org/current/userguide/' }, evidence), 'official-publisher')
+    assert.equal(
+      curatedTrust({ url: 'https://acme.dev/x' }, { officialOrgs: [], officialDomains: ['www.acme.dev'] }),
+      'official-publisher',
+    )
+    // A subdomain is not covered by a bare host: a shared host is not a shared publisher.
+    assert.equal(curatedTrust({ url: 'https://evil.nodejs.org/x' }, evidence), 'third-party')
+  })
+
+  test('a host/path namespace scopes a shared host to its own packages', () => {
+    const scoped = { officialOrgs: [], officialDomains: ['hexdocs.pm/elixir', 'pkg.go.dev/golang.org/x'] }
+    assert.equal(curatedTrust({ url: 'https://hexdocs.pm/elixir/GenServer.html' }, scoped), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://hexdocs.pm/phoenix/overview.html' }, scoped), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://pkg.go.dev/golang.org/x/tools/gopls' }, scoped), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://pkg.go.dev/github.com/third-party/lib' }, scoped), 'third-party')
+  })
+
+  test('a namespace path is case-sensitive, because a URL path is', () => {
+    // The host is case-folded, but a path is not: lowercasing the declaration would quietly
+    // match `/acmesdk`, which is a different namespace.
+    const cased = { officialOrgs: [], officialDomains: ['docs.acme.dev/AcmeSDK'] }
+    assert.equal(curatedTrust({ url: 'https://docs.acme.dev/AcmeSDK/guide' }, cased), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://docs.acme.dev/acmesdk/guide' }, cased), 'third-party')
+    // The host half is still case- and `www`-insensitive.
+    assert.equal(curatedTrust({ url: 'https://WWW.DOCS.ACME.DEV/AcmeSDK/x' }, cased), 'official-publisher')
+  })
+
+  test('a trailing slash matches only the root', () => {
+    const root = { officialOrgs: [], officialDomains: ['registry.acme.dev/'] }
+    assert.equal(curatedTrust({ url: 'https://registry.acme.dev/' }, root), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://registry.acme.dev/providers/x/y' }, root), 'third-party')
+  })
+
+  test('an unrecognised host is third-party, not assumed official', () => {
+    // The whole point: no owner and no declared domain is not evidence of a publisher.
+    assert.equal(curatedTrust({ url: 'https://typescript-eslint.io/rules/' }, evidence), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://upstash.com/context7' }, evidence), 'third-party')
+    assert.equal(curatedTrust({}, evidence), 'third-party')
+  })
+})
+
+describe('liveTrust', () => {
+  test('a stored trust value wins, even when the source could read differently', () => {
+    assert.equal(
+      liveTrust({ trust: 'official-publisher', source: 'github-search', tier: 'community' }),
+      'official-publisher',
+    )
+  })
+
+  test('a cache written before the field falls back to the source and tier', () => {
+    // The rule the schema states: a reader that finds `trust` absent must read the evidence
+    // rather than leave the attribution blank.
+    assert.equal(liveTrust({ source: 'local-scan', tier: 'official' }), 'local-install')
+    assert.equal(liveTrust({ source: 'github-search', tier: 'official' }), 'official-publisher')
+    assert.equal(liveTrust({ source: 'github-search', tier: 'community' }), 'third-party')
+  })
+
+  test('an unknown shape is third-party, never assumed official', () => {
+    assert.equal(liveTrust({}), 'third-party')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -193,6 +293,18 @@ describe('plan merge', () => {
     assert.equal(entry.fetchedAt, NOW)
     assert.equal(entry.tier, 'official')
     assert.match(entry.title, /^skill: /)
+    // The playbook id is what the shortlist filter keys on; without it a live resource would
+    // never reach a worktree. And an official-org fetch is labelled as such.
+    assert.equal(entry.playbook, 'jvm')
+    assert.equal(entry.trust, 'official-publisher')
+  })
+
+  test('a locally installed skill is labelled installed, not official', () => {
+    const plan = planWith(
+      new Map([['jvm', [live({ source: 'local-scan', url: '', install: '/home/dev/.agents/skills/x/SKILL.md' })]]]),
+    )
+    const entry = plan.suggestions.find((s) => s.id.startsWith('live:jvm:'))
+    assert.equal(entry?.trust, 'local-install')
   })
 
   test('every curated suggestion is marked curated', () => {
@@ -302,6 +414,30 @@ describe('plan merge', () => {
       withEmptyLive.suggestions.map((s) => s.id),
       withoutLive.suggestions.map((s) => s.id),
     )
+  })
+
+  test('a community resource published by a seeded org is labelled first-party', () => {
+    // `gradle/gradle` is owned by `gradle`, a seeded official org; `square/okio` is not.
+    // Community is where a resource ranks, not who publishes it, so the publisher is read
+    // from the repo owner rather than assumed from the tier.
+    const plan = planWith(new Map())
+    const gradle = plan.suggestions.find((s) => s.id === 'community:jvm:gradle/gradle')
+    const okio = plan.suggestions.find((s) => s.id === 'community:jvm:square/okio')
+    assert.equal(gradle?.trust, 'official-publisher')
+    assert.equal(okio?.trust, 'third-party')
+  })
+
+  test('an official-list resource is labelled by its URL, not by the list it sits in', () => {
+    // Context7 is filed under `official.mcp` for node and hosted by upstash; typescript-eslint
+    // is a separate project from the node seeds. Both are third-party. A documentation URL on
+    // a declared official host is first-party.
+    const plan = planWith(new Map(), 'node-npm')
+    const context7 = plan.suggestions.find((s) => s.url === 'https://github.com/upstash/context7')
+    const eslint = plan.suggestions.find((s) => s.url === 'https://typescript-eslint.io/rules/')
+    const docs = plan.suggestions.find((s) => s.url === 'https://nodejs.org/docs/latest/api/')
+    assert.equal(context7?.trust, 'third-party')
+    assert.equal(eslint?.trust, 'third-party')
+    assert.equal(docs?.trust, 'official-publisher')
   })
 
   test('tier ordering survives the merge: derived, then official, then community', () => {

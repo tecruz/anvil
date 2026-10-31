@@ -92,6 +92,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['php', 'laravel']
+  officialDomains: ['php.net', 'php-fig.org', 'laravel.com']
   keywords:
     - 'php mcp server'
     - 'laravel agent'

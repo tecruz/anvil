@@ -181,7 +181,23 @@ export function isEntry(value: unknown): value is DiscoveryEntry {
   if (typeof e.label !== 'string' || e.label === '') return false
   if (typeof e.why !== 'string' || e.why.trim() === '') return false
   if (e.tier !== 'official' && e.tier !== 'community') return false
+  // `trust` is optional so a cache written before the field existed still loads. When it is
+  // present it must be one of the three known values: a cache is a file any process may have
+  // written, so an unknown publisher label is rejected rather than rendered.
+  if (
+    e.trust !== undefined &&
+    e.trust !== 'official-publisher' &&
+    e.trust !== 'local-install' &&
+    e.trust !== 'third-party'
+  ) {
+    return false
+  }
   if (typeof e.url !== 'string') return false
+  // `install` is optional, but when present it must be a string (or an explicit null). A
+  // consumer renders it as a path, and a number or object would throw somewhere far from the
+  // cache that caused it. A cache is a file any process may have written, so it is checked
+  // here rather than trusted.
+  if (e.install !== undefined && e.install !== null && typeof e.install !== 'string') return false
   if (e.url === '') return e.source === 'local-scan' && typeof e.install === 'string'
   return e.url.startsWith('https://')
 }

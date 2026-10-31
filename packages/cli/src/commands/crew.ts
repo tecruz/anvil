@@ -21,6 +21,7 @@ import { parseRef, type Ticket } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import { formatCost, lookupSessionCosts } from '../cost.ts'
+import { recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
@@ -132,12 +133,16 @@ async function crewUpFlow(
 
   const { config } = loadConfig({ repoRoot })
   const runner = typeof args.values.runner === 'string' ? args.values.runner : 'opencode'
+
   const result = await crewUp({
     repoRoot,
     tickets,
     launch: args.values.launch === true,
     runner,
     worktreeRoot: config.git.worktreeRoot,
+    // Ranked per ticket, against the worktree it is created in -- not this checkout, which may
+    // be a different branch than the claim's base.
+    recommend: (ticket, worktreePath) => recommendForWorktree(worktreePath, ticket),
     ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
     ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
   })
