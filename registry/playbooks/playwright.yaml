@@ -89,6 +89,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['microsoft']
+  officialDomains: ['playwright.dev']
   keywords:
     - 'playwright agent'
     - 'playwright test agent'

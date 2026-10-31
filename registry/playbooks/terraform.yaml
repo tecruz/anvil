@@ -74,6 +74,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['hashicorp']
+  officialDomains: ['developer.hashicorp.com', 'registry.terraform.io/']
   keywords:
     - 'terraform mcp server'
     - 'opentofu agents'

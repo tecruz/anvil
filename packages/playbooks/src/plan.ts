@@ -315,7 +315,7 @@ function playbookSuggestions(
         // The publisher is read from the URL, not assumed because the entry is in the official
         // list: `Context7` is filed under `official.mcp` and hosted by upstash, which the node
         // playbook's seeds do not name.
-        trust: curatedTrust({ url: resource.url }, playbook.discover.officialOrgs),
+        trust: curatedTrust({ url: resource.url }, playbook.discover),
       })
     }
   }
@@ -343,7 +343,7 @@ function playbookSuggestions(
       // Community is where the resource ranks, not who publishes it: a repo the playbook's own
       // orgs own (`android/nowinandroid`) is first-party even though it ranks below the
       // hand-written official list.
-      trust: curatedTrust({ repo: resource.repo }, playbook.discover.officialOrgs),
+      trust: curatedTrust({ repo: resource.repo }, playbook.discover),
     })
   }
 
@@ -364,38 +364,102 @@ export function ownerIsOfficial(owner: string, orgs: readonly string[]): boolean
 
 /** The `owner` segment of a GitHub repository URL, or null when the URL is not one. */
 function githubOwnerFromUrl(url: string): string | null {
+  if (hostFromUrl(url) !== 'github.com') return null
+  const owner = pathFromUrl(url)
+    .split('/')
+    .find((segment) => segment !== '')
+  return owner === undefined ? null : owner
+}
+
+/** The lower-cased host of a URL, with a leading `www.` removed, or null when it has none. */
+function hostFromUrl(url: string): string | null {
   const trimmed = url.trim()
   if (trimmed === '') return null
-  let parsed: URL
   try {
-    parsed = new URL(trimmed)
+    return new URL(trimmed).hostname.toLowerCase().replace(/^www\./, '')
   } catch {
     return null
   }
-  const host = parsed.hostname.toLowerCase().replace(/^www\./, '')
-  if (host !== 'github.com') return null
-  const owner = parsed.pathname.split('/').find((segment) => segment !== '')
-  return owner === undefined ? null : owner
+}
+
+/** The path of a URL, or empty when it cannot be parsed. */
+function pathFromUrl(url: string): string {
+  try {
+    return new URL(url.trim()).pathname
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * True when a URL's host and path match a declared official domain.
+ *
+ * A declaration is `host` or `host/path`:
+ *
+ *   - `host` matches that exact host at any path. Subdomains do not match, so `go.dev` does not
+ *     cover `pkg.go.dev`: the two publish different things, and a shared host is not evidence
+ *     of a shared publisher.
+ *   - `host/path` scopes to a namespace -- the URL path must be `path` or under it. This is how
+ *     a shared host carries publisher evidence: `hexdocs.pm/elixir`, `pkg.go.dev/golang.org/x`.
+ *   - `host/` (a trailing slash and nothing after) matches only the root, for a registry whose
+ *     landing page is official but whose contents are third-party.
+ *
+ * Both sides are normalised the same way, so a declared `www.acme.dev` matches a URL on
+ * `acme.dev` and the reverse.
+ */
+function isOfficialDomain(host: string, urlPath: string, domains: readonly string[]): boolean {
+  const path = urlPath.replace(/^\/+/, '').replace(/\/+$/, '')
+  return domains.some((raw) => {
+    const entry = raw
+      .trim()
+      .toLowerCase()
+      .replace(/^www\./, '')
+    const slash = entry.indexOf('/')
+    const entryHost = slash === -1 ? entry : entry.slice(0, slash)
+    if (entryHost === '' || entryHost !== host) return false
+    if (slash === -1) return true
+    const entryPath = entry.slice(slash + 1).replace(/\/+$/, '')
+    if (entryPath === '') return path === ''
+    return path === entryPath || path.startsWith(`${entryPath}/`)
+  })
+}
+
+/** The evidence a playbook offers about who publishes on its behalf. */
+export interface PublisherEvidence {
+  /** GitHub orgs the seeds call official. */
+  officialOrgs: readonly string[]
+  /** Hostnames, or `host/path` namespaces, the technology publishes its own docs on. */
+  officialDomains?: readonly string[]
 }
 
 /**
  * Who publishes a curated resource, read from its evidence rather than its tier.
  *
- * The evidence is the repository owner: a community entry names its `repo`, and an official
- * entry may cite a GitHub URL. A resource the playbook's own orgs own is `official-publisher`;
- * a GitHub resource owned by anyone else is `third-party`, even when it sits in the official
- * list -- being filed as official guidance is not a claim that the technology wrote it. A
- * resource with no owner to read (the technology's own documentation site) is
- * `official-publisher`.
+ * The evidence is an owner or a domain, never the list an entry sits in:
+ *
+ *   - A community entry names its `repo`; an official entry may cite a GitHub URL. An owner
+ *     among the playbook's `officialOrgs` is `official-publisher`; any other owner is
+ *     `third-party`, so a first-party-looking URL is not taken at face value.
+ *   - With no owner to read, the URL host and path are checked against the playbook's declared
+ *     `officialDomains`. A match is `official-publisher`.
+ *   - Neither available -- an unrecognised host -- is `third-party`. An unknown publisher is
+ *     not an official one; the honest label is the one that makes no claim.
  */
 export function curatedTrust(
   input: { repo?: string | null; url?: string | null },
-  officialOrgs: readonly string[],
+  evidence: PublisherEvidence,
 ): SuggestionTrust {
   const repo = (input.repo ?? '').trim()
   const owner = repo !== '' ? (repo.split('/')[0] ?? '') : (githubOwnerFromUrl(input.url ?? '') ?? '')
-  if (owner.trim() === '') return 'official-publisher'
-  return ownerIsOfficial(owner, officialOrgs) ? 'official-publisher' : 'third-party'
+  if (owner.trim() !== '') {
+    return ownerIsOfficial(owner, evidence.officialOrgs) ? 'official-publisher' : 'third-party'
+  }
+  const url = input.url ?? ''
+  const host = hostFromUrl(url)
+  if (host !== null && isOfficialDomain(host, pathFromUrl(url), evidence.officialDomains ?? [])) {
+    return 'official-publisher'
+  }
+  return 'third-party'
 }
 
 /**

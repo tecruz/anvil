@@ -86,6 +86,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['dotnet', 'microsoft']
+  officialDomains: ['learn.microsoft.com']
   keywords:
     - 'dotnet mcp server'
     - 'csharp agent skills'

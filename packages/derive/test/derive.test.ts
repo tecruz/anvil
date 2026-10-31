@@ -1162,8 +1162,10 @@ describe('brief', () => {
       read: () => null,
     })
     const guidance = brief.playbooks.flatMap((p) => p.guidance)
-    // Context7 is `official.mcp` for node and hosted by upstash, which the seeds do not name.
+    // Context7 (`official.mcp`) is hosted by upstash and typescript-eslint is its own project;
+    // neither is a node seed. A URL on a declared official host is first-party.
     assert.equal(guidance.find((g) => g.url === 'https://github.com/upstash/context7')?.trust, 'third-party')
+    assert.equal(guidance.find((g) => g.url === 'https://typescript-eslint.io/rules/')?.trust, 'third-party')
     assert.equal(guidance.find((g) => g.url === 'https://nodejs.org/docs/latest/api/')?.trust, 'official-publisher')
   })
 

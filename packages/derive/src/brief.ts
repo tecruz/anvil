@@ -293,8 +293,8 @@ function flattenGuidance(
       migrationGuides: unknown[]
     }
     community?: unknown[]
-    /** The playbook's official orgs, so a resource's publisher can be read from its URL. */
-    discover?: { officialOrgs?: string[] }
+    /** The playbook's publisher evidence, so a resource's publisher can be read from its URL. */
+    discover?: { officialOrgs?: string[]; officialDomains?: string[] }
   },
   live: readonly LiveGuidance[] = [],
 ): Array<{
@@ -373,7 +373,13 @@ function flattenGuidance(
       provenance: 'curated' as const,
       // The publisher is read from the resource's evidence, not assumed because the playbook
       // filed it as official: `Context7` sits under `official.mcp` and is hosted by upstash.
-      trust: curatedTrust({ url: r.url }, playbook.discover?.officialOrgs ?? []),
+      trust: curatedTrust(
+        { url: r.url },
+        {
+          officialOrgs: playbook.discover?.officialOrgs ?? [],
+          officialDomains: playbook.discover?.officialDomains ?? [],
+        },
+      ),
     })),
   )
 

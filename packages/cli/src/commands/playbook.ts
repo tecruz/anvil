@@ -533,10 +533,12 @@ function runShow(ctx: CommandContext, playbooks: readonly Playbook[], id: string
     out.push(s.bold(`Resources (${resourceRows(playbook).length})`))
     out.push(renderTable(['kind', 'label', 'url'], resourceRows(playbook), s))
     const seeds = playbook.discover
-    if (seeds.officialOrgs.length + seeds.keywords.length + seeds.mcp.length > 0) {
+    const domains = seeds.officialDomains ?? []
+    if (seeds.officialOrgs.length + seeds.keywords.length + seeds.mcp.length + domains.length > 0) {
       out.push('')
       out.push(s.bold('Discovery seeds'))
       if (seeds.officialOrgs.length > 0) out.push(`  orgs      ${seeds.officialOrgs.join(', ')}`)
+      if (domains.length > 0) out.push(`  domains   ${domains.join(', ')}`)
       if (seeds.keywords.length > 0) out.push(`  keywords  ${seeds.keywords.join(', ')}`)
       if (seeds.mcp.length > 0) out.push(`  mcp       ${seeds.mcp.join(', ')}`)
       out.push(s.dim('  `anvil playbook discover` searches these; results stay in a cache.'))

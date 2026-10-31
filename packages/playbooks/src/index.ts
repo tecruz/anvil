@@ -34,6 +34,7 @@ export {
   ownerIsOfficial,
   type Plan,
   type PlanTier,
+  type PublisherEvidence,
   rankSuggestions,
   type ShortlistOptions,
   type Suggestion,

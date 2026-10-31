@@ -49,6 +49,7 @@ riskGlobs: []
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['webdriverio']
+  officialDomains: ['webdriver.io']
   keywords:
     - 'webdriverio agent'
   mcp: ['webdriverio']

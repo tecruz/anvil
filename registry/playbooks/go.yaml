@@ -84,6 +84,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['golang']
+  officialDomains: ['go.dev', 'pkg.go.dev/golang.org/x']
   keywords:
     - 'go mcp server'
     - 'golang agent skills'

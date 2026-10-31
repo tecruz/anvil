@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { audit } from '@anvil/audit'
 import {
   buildPlan,
+  curatedTrust,
   type LiveResource,
   loadBuiltins,
   matchPlaybooks,
@@ -178,6 +179,73 @@ describe('discover section validation', () => {
     const pb = parsePlaybook(`${MINIMAL}discover:\n  officialOrgs: ['acme']\n`, 'toy.yaml')
     assert.deepEqual(pb.discover.officialOrgs, ['acme'])
   })
+
+  test('accepts official domains, including a host/path namespace', () => {
+    const { playbook, issues } = validatePlaybook(
+      parseYamlSubset(
+        `${MINIMAL}discover:\n  officialOrgs: ['acme']\n  officialDomains: ['acme.dev', 'docs.acme.dev', 'hex.pm/acme', 'registry.acme.dev/']\n`,
+      ),
+    )
+    assert.deepEqual(issues, [])
+    assert.deepEqual(playbook?.discover.officialDomains, [
+      'acme.dev',
+      'docs.acme.dev',
+      'hex.pm/acme',
+      'registry.acme.dev/',
+    ])
+  })
+
+  test('rejects a domain that is not a host or host/path, so a typo cannot hide a first-party resource', () => {
+    // A bad entry here silently matches nothing and turns a first-party resource third-party.
+    const { issues } = validatePlaybook(
+      parseYamlSubset(`${MINIMAL}discover:\n  officialDomains: ['https://acme.dev', 'not a host', 'acme.dev?x']\n`),
+    )
+    assert.equal(issues.filter((i) => i.path === 'discover.officialDomains').length, 3)
+  })
+})
+
+describe('curatedTrust', () => {
+  const evidence = { officialOrgs: ['nodejs', 'vercel'], officialDomains: ['nodejs.org', 'docs.gradle.org'] }
+
+  test('an owner among the seeds is official, and any other owner is third-party', () => {
+    assert.equal(curatedTrust({ repo: 'nodejs/undici' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ repo: 'upstash/context7' }, evidence), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://github.com/nodejs/node' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://github.com/upstash/context7' }, evidence), 'third-party')
+  })
+
+  test('a declared host matches exactly, and www is insignificant on either side', () => {
+    assert.equal(curatedTrust({ url: 'https://nodejs.org/docs/latest/api/' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://www.nodejs.org/x' }, evidence), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://docs.gradle.org/current/userguide/' }, evidence), 'official-publisher')
+    assert.equal(
+      curatedTrust({ url: 'https://acme.dev/x' }, { officialOrgs: [], officialDomains: ['www.acme.dev'] }),
+      'official-publisher',
+    )
+    // A subdomain is not covered by a bare host: a shared host is not a shared publisher.
+    assert.equal(curatedTrust({ url: 'https://evil.nodejs.org/x' }, evidence), 'third-party')
+  })
+
+  test('a host/path namespace scopes a shared host to its own packages', () => {
+    const scoped = { officialOrgs: [], officialDomains: ['hexdocs.pm/elixir', 'pkg.go.dev/golang.org/x'] }
+    assert.equal(curatedTrust({ url: 'https://hexdocs.pm/elixir/GenServer.html' }, scoped), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://hexdocs.pm/phoenix/overview.html' }, scoped), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://pkg.go.dev/golang.org/x/tools/gopls' }, scoped), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://pkg.go.dev/github.com/third-party/lib' }, scoped), 'third-party')
+  })
+
+  test('a trailing slash matches only the root', () => {
+    const root = { officialOrgs: [], officialDomains: ['registry.acme.dev/'] }
+    assert.equal(curatedTrust({ url: 'https://registry.acme.dev/' }, root), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://registry.acme.dev/providers/x/y' }, root), 'third-party')
+  })
+
+  test('an unrecognised host is third-party, not assumed official', () => {
+    // The whole point: no owner and no declared domain is not evidence of a publisher.
+    assert.equal(curatedTrust({ url: 'https://typescript-eslint.io/rules/' }, evidence), 'third-party')
+    assert.equal(curatedTrust({ url: 'https://upstash.com/context7' }, evidence), 'third-party')
+    assert.equal(curatedTrust({}, evidence), 'third-party')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -328,12 +396,15 @@ describe('plan merge', () => {
   })
 
   test('an official-list resource is labelled by its URL, not by the list it sits in', () => {
-    // Context7 is filed under `official.mcp` for node and hosted by upstash, which the node
-    // playbook's seeds do not name. A plain documentation URL is first-party.
+    // Context7 is filed under `official.mcp` for node and hosted by upstash; typescript-eslint
+    // is a separate project from the node seeds. Both are third-party. A documentation URL on
+    // a declared official host is first-party.
     const plan = planWith(new Map(), 'node-npm')
     const context7 = plan.suggestions.find((s) => s.url === 'https://github.com/upstash/context7')
+    const eslint = plan.suggestions.find((s) => s.url === 'https://typescript-eslint.io/rules/')
     const docs = plan.suggestions.find((s) => s.url === 'https://nodejs.org/docs/latest/api/')
     assert.equal(context7?.trust, 'third-party')
+    assert.equal(eslint?.trust, 'third-party')
     assert.equal(docs?.trust, 'official-publisher')
   })
 

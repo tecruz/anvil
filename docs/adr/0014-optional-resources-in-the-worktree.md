@@ -32,10 +32,14 @@ not support.
    plan suggestions carry `trust`: `official-publisher`, `local-install` or `third-party`.
    A local skill stays useful (tier `official`, ranked normally) and is labelled
    `installed locally` rather than presented as first-party. For every curated resource the
-   publisher is read from its evidence — a community entry's `repo`, an official entry's
-   GitHub URL — so a resource the playbook's own orgs own is `official-publisher` and one
-   filed under `official` but owned by someone else (Context7, hosted by upstash) is
-   `third-party`.
+   publisher is read from evidence: a community entry's `repo`, or an official entry's GitHub
+   URL owner, against the playbook's `officialOrgs`; failing that, the URL host and path
+   against the playbook's declared `officialDomains`. A declaration is an exact host or a
+   `host/path` namespace — a bare host does not cover its subdomains, and a shared host such
+   as `hexdocs.pm` or `registry.terraform.io` is scoped to its own packages rather than
+   trusted wholesale. A resource filed under `official` but owned by someone else (Context7,
+   hosted by upstash) is `third-party`, and so is any host with no owner and no matching
+   declaration — an unrecognised publisher is not an official one.
 3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
    string — the ticket's title, body, acceptance criteria and labels — against resource
    titles and details, and returns at most five. Only external resources are eligible

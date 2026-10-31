@@ -84,6 +84,7 @@ riskGlobs:
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['ruby', 'rails']
+  officialDomains: ['guides.rubyonrails.org', 'ruby-doc.org']
   keywords:
     - 'ruby mcp server'
     - 'rails agents'
