@@ -280,6 +280,102 @@ describe('jvm-gradle', () => {
   })
 })
 
+describe('a Gradle module that configures its own tooling', () => {
+  // Found by auditing an Android repository that applies detekt and spotless in
+  // `app/build.gradle.kts` and documents `./gradlew detekt` / `./gradlew spotlessApply`.
+  // It was still told "No linter configured" and "No formatter configured": the probe only
+  // looked for root-level config files, which neither plugin uses.
+  function ciYaml(runs: readonly string[]): string {
+    return [
+      'name: CI',
+      'on: [push]',
+      'jobs:',
+      '  build:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      ...runs.map((r) => `      - run: ${r}`),
+      '',
+    ].join('\n')
+  }
+
+  function gradleModule(runs: readonly string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'anvil-gradle-tools-'))
+    writeFileSync(join(dir, 'settings.gradle.kts'), 'rootProject.name = "app"\ninclude(":app")\n')
+    writeFileSync(
+      join(dir, 'build.gradle.kts'),
+      [
+        'plugins {',
+        '    alias(libs.plugins.detekt) apply false',
+        '    alias(libs.plugins.spotless) apply false',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    mkdirSync(join(dir, 'app', 'src', 'main', 'java', 'com', 'acme'), { recursive: true })
+    writeFileSync(
+      join(dir, 'app', 'build.gradle.kts'),
+      [
+        'plugins {',
+        '    alias(libs.plugins.detekt)',
+        '    alias(libs.plugins.spotless)',
+        '}',
+        '',
+        'detekt {',
+        '    buildUponDefaultConfig = true',
+        '}',
+        '',
+        'spotless {',
+        '    kotlin {',
+        '        ktlint("1.5.0")',
+        '    }',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    writeFileSync(join(dir, 'app', 'src', 'main', 'java', 'com', 'acme', 'Main.kt'), 'fun main() {}\n')
+    writeFileSync(join(dir, 'gradlew'), '#!/bin/sh\nexec gradle "$@"\n')
+    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), ciYaml(runs))
+    return dir
+  }
+
+  test('detects the plugins and the tasks they contribute', () => {
+    const dir = gradleModule([])
+    try {
+      const p = buildProfile(dir, { ...VCS, root: dir }).profile
+      assert.ok(p.tooling.lint.includes('detekt'), `lint: ${p.tooling.lint.join(', ')}`)
+      assert.ok(p.tooling.formatter.includes('spotless'), `formatter: ${p.tooling.formatter.join(', ')}`)
+      assert.equal(p.commands.lint?.find((c) => c.source === 'detected')?.cmd, './gradlew detekt')
+      assert.equal(p.commands.format?.find((c) => c.source === 'detected')?.cmd, './gradlew spotlessCheck')
+      // `ktlint(...)` inside Spotless is the formatter's engine, not the ktlint Gradle
+      // plugin. Reporting it separately would name `./gradlew ktlintCheck`, a task that
+      // does not exist in this build.
+      assert.ok(!p.tooling.lint.includes('ktlint'), `unexpected ktlint: ${p.tooling.lint.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CI that assembles, runs kover and detekt satisfies build, test and lint', () => {
+    // Gradle's CI commands do not spell the documented task: `assembleDebug` is a build,
+    // `koverXmlReport` runs the tests, and neither contained the old `gradlew build` /
+    // `gradlew test` tokens. That produced "CI does not appear to run: test, build".
+    const dir = gradleModule(['./gradlew assembleDebug', './gradlew koverXmlReport', './gradlew detekt'])
+    const f = findFinding(auditDir(dir), 'CI_PARITY')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.match(f.detail, /test \(gradlew kover\)/)
+    assert.match(f.detail, /build \(gradlew assemble\)/)
+    assert.match(f.detail, /lint \(gradlew detekt\)/)
+  })
+
+  test('CI that never runs the detected linter is still a real gap', () => {
+    const dir = gradleModule(['./gradlew assembleDebug', './gradlew koverXmlReport'])
+    const f = findFinding(auditDir(dir), 'CI_PARITY')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /lint/)
+  })
+})
+
 describe('dotnet-sln', () => {
   const p = profileOf('dotnet-sln')
 

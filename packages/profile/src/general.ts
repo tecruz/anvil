@@ -533,11 +533,15 @@ const DOC_PATTERNS: ReadonlyArray<{ kind: string; re: RegExp }> = [
   },
   {
     kind: 'build',
-    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? build|mvnw? package|go build|make (build|all)|mix (compile|release)|swift build|bazel build|docker build)/,
+    re: /(npm (run )?build|yarn build|pnpm build|cargo build|dotnet build|gradlew? (build|assemble\w*)|mvnw? package|go build|make (build|all)|mix (compile|release)|swift build|bazel build|docker build)/,
   },
   {
     kind: 'lint',
-    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format|make lint|mix credo|bundle exec rubocop|rubocop|swiftlint|tflint\b|helm lint|hadolint|actionlint|biome (check|lint))/,
+    re: /(npm (run )?lint|eslint\b|ruff check|golangci-lint|cargo clippy|dotnet format|make lint|mix credo|bundle exec rubocop|rubocop|swiftlint|tflint\b|helm lint|hadolint|actionlint|biome (check|lint)|gradlew? (detekt|lint\w*|ktlint\w*Check))/,
+  },
+  {
+    kind: 'format',
+    re: /(npm (run )?format|biome format|cargo fmt|dotnet format|make format|ruff format|gradlew? (spotless(?:Check|Apply)|ktlintFormat))/,
   },
   { kind: 'typecheck', re: /(tsc --noEmit|typecheck|pyright|mypy|phpstan)/ },
 ]
@@ -604,14 +608,24 @@ function looksLikeCommandLine(line: string, inFence = false): boolean {
   return mentionsRunner(line) && (line.includes('`') || fenced)
 }
 
+/**
+ * A runnable command starts with a binary name, optionally written as a relative path.
+ *
+ * `./gradlew test` is the ordinary way a Gradle repository documents a command, and the
+ * older `[a-z]` anchor dropped every one of them: the profile then reported only the
+ * detected `./gradlew test`, and `init` rewrote a good AGENTS.md without the build,
+ * lint and format commands it plainly contained.
+ */
+const RUNNABLE_START = /^(?:\.{1,2}\/)?[a-z][\w./-]*\s+\S/
+
 /** Pull the runnable command out of a line, preferring an inline code span. */
 function extractCommand(line: string): string | null {
   const inline = /`([^`]{3,140})`/.exec(line)
   if (inline !== null) {
     const candidate = firstCommand((inline[1] as string).trim())
-    if (/^[a-z][\w.-]*\s+\S/.test(candidate)) return candidate
+    if (RUNNABLE_START.test(candidate)) return candidate
   }
-  const plain = /^\s{0,4}(?:\$\s*)?([a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
+  const plain = /^\s{0,4}(?:\$\s*)?((?:\.{1,2}\/)?[a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
   if (plain !== null) {
     const candidate = firstCommand((plain[1] as string).trim())
     if (candidate.includes(' ')) return candidate

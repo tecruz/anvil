@@ -572,6 +572,34 @@ describe('a documented command is the command that was extracted, not the line i
     assert.ok(found.includes('build: bazel build //...'), `missing bazel build: ${found.join(', ')}`)
     assert.ok(found.includes('test: bazel test //...'), `missing bazel test: ${found.join(', ')}`)
   })
+
+  test('a command written through a relative path is extracted, not dropped', () => {
+    // Found by running `init` against an Android repository whose AGENTS.md documents every
+    // command as `./gradlew ...`. The runner was recognised, but the extractor required the
+    // first character to be a letter, so every one was discarded and `init` proposed replacing
+    // a complete AGENTS.md with one that named only the guessed `./gradlew test`.
+    const found = documented({
+      'AGENTS.md': [
+        '# Repo',
+        '',
+        '```bash',
+        './gradlew assembleDebug',
+        './gradlew testDebugUnitTest',
+        './gradlew detekt',
+        './gradlew spotlessApply',
+        '```',
+        '',
+      ].join('\n'),
+      'build.gradle.kts': 'plugins { java }\n',
+      gradlew: '#!/bin/sh\nexec gradle "$@"\n',
+    })
+    assert.deepEqual(found, [
+      'build: ./gradlew assembleDebug',
+      'test: ./gradlew testDebugUnitTest',
+      'lint: ./gradlew detekt',
+      'format: ./gradlew spotlessApply',
+    ])
+  })
 })
 
 describe('the skip lists do not overlap', () => {
