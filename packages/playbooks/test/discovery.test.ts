@@ -234,6 +234,16 @@ describe('curatedTrust', () => {
     assert.equal(curatedTrust({ url: 'https://pkg.go.dev/github.com/third-party/lib' }, scoped), 'third-party')
   })
 
+  test('a namespace path is case-sensitive, because a URL path is', () => {
+    // The host is case-folded, but a path is not: lowercasing the declaration would quietly
+    // match `/acmesdk`, which is a different namespace.
+    const cased = { officialOrgs: [], officialDomains: ['docs.acme.dev/AcmeSDK'] }
+    assert.equal(curatedTrust({ url: 'https://docs.acme.dev/AcmeSDK/guide' }, cased), 'official-publisher')
+    assert.equal(curatedTrust({ url: 'https://docs.acme.dev/acmesdk/guide' }, cased), 'third-party')
+    // The host half is still case- and `www`-insensitive.
+    assert.equal(curatedTrust({ url: 'https://WWW.DOCS.ACME.DEV/AcmeSDK/x' }, cased), 'official-publisher')
+  })
+
   test('a trailing slash matches only the root', () => {
     const root = { officialOrgs: [], officialDomains: ['registry.acme.dev/'] }
     assert.equal(curatedTrust({ url: 'https://registry.acme.dev/' }, root), 'official-publisher')

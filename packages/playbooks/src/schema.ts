@@ -80,6 +80,7 @@ export interface DiscoverSeeds {
    * bare host matches exactly -- subdomains do not, so a shared host is not read as a shared
    * publisher -- and an optional `/path` scopes the match to a namespace
    * (`hexdocs.pm/elixir`, `pkg.go.dev/golang.org/x`). A trailing `host/` matches only the root.
+   * The host is case-insensitive; the path is not, because a URL path is case-sensitive.
    */
   officialDomains?: string[]
   /** Repository-search terms. Kept generic enough that new repos match too. */

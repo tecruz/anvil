@@ -404,18 +404,16 @@ function pathFromUrl(url: string): string {
  *   - `host/` (a trailing slash and nothing after) matches only the root, for a registry whose
  *     landing page is official but whose contents are third-party.
  *
- * Both sides are normalised the same way, so a declared `www.acme.dev` matches a URL on
- * `acme.dev` and the reverse.
+ * Both host sides are normalised the same way, so a declared `www.acme.dev` matches a URL
+ * on `acme.dev` and the reverse. Only the host is case-folded: a URL path is case-sensitive,
+ * so a declared `AcmeSDK` namespace is not widened to `acmesdk`.
  */
 function isOfficialDomain(host: string, urlPath: string, domains: readonly string[]): boolean {
   const path = urlPath.replace(/^\/+/, '').replace(/\/+$/, '')
   return domains.some((raw) => {
-    const entry = raw
-      .trim()
-      .toLowerCase()
-      .replace(/^www\./, '')
+    const entry = raw.trim()
     const slash = entry.indexOf('/')
-    const entryHost = slash === -1 ? entry : entry.slice(0, slash)
+    const entryHost = (slash === -1 ? entry : entry.slice(0, slash)).toLowerCase().replace(/^www\./, '')
     if (entryHost === '' || entryHost !== host) return false
     if (slash === -1) return true
     const entryPath = entry.slice(slash + 1).replace(/\/+$/, '')

@@ -37,7 +37,8 @@ not support.
    against the playbook's declared `officialDomains`. A declaration is an exact host or a
    `host/path` namespace — a bare host does not cover its subdomains, and a shared host such
    as `hexdocs.pm` or `registry.terraform.io` is scoped to its own packages rather than
-   trusted wholesale. A resource filed under `official` but owned by someone else (Context7,
+   trusted wholesale. The host is compared case-insensitively; the path is not, because a
+   URL path is case-sensitive. A resource filed under `official` but owned by someone else (Context7,
    hosted by upstash) is `third-party`, and so is any host with no owner and no matching
    declaration — an unrecognised publisher is not an official one.
 3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
