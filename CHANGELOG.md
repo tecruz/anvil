@@ -13,11 +13,14 @@ All notable changes to this project will be documented in this file.
 - **Untrusted ticket framing**: context bundles fence the task, acceptance criteria, links and discussion as untrusted data, and quote instruction-like ticket lines as evidence. `claim` and `issue pull` report the findings in text and JSON without removing the text from the task.
 - **Provider test seam**: `GhOptions.runGit` lets a test assert the ship marker and push argv without a remote.
 - **Claim provenance**: a claim now records the `opencode` version that will run it, alongside the runner path, so a result can be reproduced later.
+- **Worktree resource shortlist**: `anvil claim`, `anvil crew up` and `anvil issue refresh` rank up to five optional resources for the ticket and write them into `.anvil/ticket.md`, each labelled by who publishes it (`installed locally`, `official publisher`, `third party`). Nothing is installed or run. See [ADR-0014](docs/adr/0014-optional-resources-in-the-worktree.md).
 
 ### Changed
 - Generated `AGENTS.md` command rows now cite the line they occupy in the regenerated file, so self-citations cannot drift when the layout above them changes.
 - The agent prompt now names the hook instead of only asking the agent not to push.
 - `plan` and `brief` no longer merge a discovery cache older than seven days. A stale cache is reported with the command that refreshes it, while the cache and `discover` keep the old entries. See [ADR-0013](docs/adr/0013-stale-discovery-is-reported-not-merged.md).
+- Installed agent skills are re-scanned on every `plan` and `brief`, including `--offline`, because they are files on this machine rather than a fetch. A stale discovery cache now costs only its cached remote entries.
+- Locally installed skills are labelled `installed locally` rather than presented as first-party guidance; the plan JSON carries a per-suggestion `trust` value.
 
 ## [0.1.0] - 2026-04-14
 

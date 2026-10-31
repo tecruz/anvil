@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -691,6 +701,30 @@ describe('claims', () => {
     const registry = readClaims(repo)
     assert.equal(registry.claims.length, 1)
     assert.equal(registry.claims[0]?.key, 'local-1')
+  })
+
+  test('a claim can warm the worktree with optional resources', async () => {
+    const repo = makeRepo()
+    const result = await claimTicket({
+      repoRoot: repo,
+      ticket: ticket(),
+      worktreeRoot: join(temp('anvil-m3-cwr-'), 'wt'),
+      resources: [
+        {
+          kind: 'skill',
+          label: 'testing-setup',
+          why: 'Android test strategy and coverage.',
+          location: 'C:/skills/testing-setup/SKILL.md',
+          trust: 'installed locally',
+          provenance: 'live',
+        },
+      ],
+    })
+
+    const bundle = readFileSync(join(result.claim.worktreePath, CONTEXT_FILE), 'utf8')
+    assert.match(bundle, /## Recommended resources \(optional\)/)
+    assert.match(bundle, /\*\*skill: testing-setup\*\* \(installed locally\)/)
+    assert.match(bundle, /C:\/skills\/testing-setup\/SKILL\.md/)
   })
 
   test('a claim records the runner version, so the state is reproducible later', async () => {

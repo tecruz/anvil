@@ -41,7 +41,12 @@ import {
 } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { branchNameFor, type Ticket, type TicketRef } from '@anvil/tickets'
-import { type InjectionFinding, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import {
+  type InjectionFinding,
+  type RecommendedResource,
+  renderAgentsOverlay,
+  renderContextBundle,
+} from '@anvil/tickets/context'
 import { installPushGuard, type PushGuardResult } from './hooks.ts'
 import { checkedStatePath, createStateDirectory } from './state.ts'
 
@@ -256,6 +261,13 @@ export interface ClaimOptions {
   runner?: string
   /** Environment for the version probe; tests point PATHEXT/PATH at a stub runner. */
   env?: NodeJS.ProcessEnv
+  /**
+   * Optional aids for the ticket's context bundle, already ranked and capped by the caller.
+   *
+   * Passed in rather than computed here so this package keeps its dependency set: the CLI
+   * already loads playbooks to rank them, and a worktree does not need to.
+   */
+  resources?: readonly RecommendedResource[]
 }
 
 export interface ClaimResult {
@@ -350,7 +362,12 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
       defaultBranch: null,
     }).profile
 
-    const context = renderContextBundle({ ticket, profile, branch })
+    const context = renderContextBundle({
+      ticket,
+      profile,
+      branch,
+      ...(options.resources === undefined ? {} : { resources: options.resources }),
+    })
     const overlay = renderAgentsOverlay({ ticket, profile })
     // Validate both outputs before the first write: a real parent does not make linked
     // leaf files safe. The hook installer checks its own complete output batch too.

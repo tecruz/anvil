@@ -193,6 +193,18 @@ describe('plan merge', () => {
     assert.equal(entry.fetchedAt, NOW)
     assert.equal(entry.tier, 'official')
     assert.match(entry.title, /^skill: /)
+    // The playbook id is what the shortlist filter keys on; without it a live resource would
+    // never reach a worktree. And an official-org fetch is labelled as such.
+    assert.equal(entry.playbook, 'jvm')
+    assert.equal(entry.trust, 'official-publisher')
+  })
+
+  test('a locally installed skill is labelled installed, not official', () => {
+    const plan = planWith(
+      new Map([['jvm', [live({ source: 'local-scan', url: '', install: '/home/dev/.agents/skills/x/SKILL.md' })]]]),
+    )
+    const entry = plan.suggestions.find((s) => s.id.startsWith('live:jvm:'))
+    assert.equal(entry?.trust, 'local-install')
   })
 
   test('every curated suggestion is marked curated', () => {

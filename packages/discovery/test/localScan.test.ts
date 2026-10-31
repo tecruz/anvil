@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
-import { scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
+import { discoverLocal, scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'anvil-scan-'))
@@ -222,5 +222,28 @@ describe('skillMatchesSeeds', () => {
 
   test('an empty skill list matches nothing rather than everything', () => {
     assert.equal(skillMatchesSeeds(skillOf('anything'), []), false)
+  })
+})
+
+describe('discoverLocal: publisher evidence', () => {
+  test('an installed skill is official-tiered but labelled local-install', () => {
+    const h = home()
+    try {
+      skill(join(h, '.agents', 'skills'), 'adaptive', FLAT_SCALAR)
+
+      const { entries } = discoverLocal(
+        'android',
+        { officialOrgs: ['android'], keywords: [], mcp: [] },
+        { env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv },
+      )
+
+      assert.equal(entries.length, 1)
+      // A file on disk proves it is installed, not who wrote it. Both facts are reported.
+      assert.equal(entries[0]?.tier, 'official')
+      assert.equal(entries[0]?.trust, 'local-install')
+      assert.equal(entries[0]?.source, 'local-scan')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
   })
 })

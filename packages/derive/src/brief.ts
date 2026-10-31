@@ -78,7 +78,15 @@ export interface Brief {
       reviewFocus: string[]
     }
     verify: Record<string, string[]>
-    guidance: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }>
+    guidance: Array<{
+      kind: string
+      label: string
+      url: string
+      why: string
+      provenance: 'curated' | 'live'
+      /** Who vouches for it. Absent on entries written before the field existed. */
+      trust?: string
+    }>
   }>
   findings: Array<{
     id: string
@@ -152,6 +160,8 @@ export interface LiveGuidance {
   url: string
   why: string
   section: string
+  /** Who vouches for it: `official-publisher`, `local-install` or `third-party`. */
+  trust?: string
 }
 
 export function buildBrief(options: BuildBriefOptions): Brief {
@@ -269,7 +279,7 @@ function flattenGuidance(
     community?: unknown[]
   },
   live: readonly LiveGuidance[] = [],
-): Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> {
+): Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live'; trust?: string }> {
   const groups: Array<[string, Array<{ label: string; url: string; why: string }>]> = [
     [
       'doc',
@@ -320,10 +330,25 @@ function flattenGuidance(
       }>,
     ],
   ]
-  const curated: Array<{ kind: string; label: string; url: string; why: string; provenance: 'curated' | 'live' }> =
-    groups.flatMap(([kind, resources]) =>
-      resources.map((r) => ({ kind, label: r.label, url: r.url, why: r.why, provenance: 'curated' as const })),
-    )
+  const curated: Array<{
+    kind: string
+    label: string
+    url: string
+    why: string
+    provenance: 'curated' | 'live'
+    trust?: string
+  }> = groups.flatMap(([kind, resources]) =>
+    resources.map((r) => ({
+      kind,
+      label: r.label,
+      url: r.url,
+      why: r.why,
+      provenance: 'curated' as const,
+      // Curated official resources come from the technology's own docs and repos, which the
+      // playbook cites by hand. A community resource is not in these groups.
+      trust: 'official-publisher',
+    })),
+  )
 
   // Live entries go last, and only when the curated list does not already cite them. Same
   // rule as the plan: a person-reviewed entry outranks a fetched one, and a brief is the
@@ -337,7 +362,14 @@ function flattenGuidance(
       cited.add(key)
       return true
     })
-    .map((r) => ({ kind: `live ${r.section}`, label: r.label, url: r.url, why: r.why, provenance: 'live' as const }))
+    .map((r) => ({
+      kind: `live ${r.section}`,
+      label: r.label,
+      url: r.url,
+      why: r.why,
+      provenance: 'live' as const,
+      ...(r.trust === undefined ? {} : { trust: r.trust }),
+    }))
 
   return [...curated, ...added]
 }

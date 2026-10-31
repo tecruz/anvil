@@ -10,11 +10,20 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs, renderTable } from '@anvil/core'
 import { currentBranch, mainWorktreeRoot } from '@anvil/git'
-import { buildProfile } from '@anvil/profile'
+import { loadPlaybooks, matchPlaybooks } from '@anvil/playbooks'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
 import { type NormalizedState, parseRef, type Ticket } from '@anvil/tickets'
-import { AGENTS_OVERLAY, CONTEXT_FILE, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
+import {
+  AGENTS_OVERLAY,
+  CONTEXT_FILE,
+  type RecommendedResource,
+  renderAgentsOverlay,
+  renderContextBundle,
+} from '@anvil/tickets/context'
 import { claimStatuses, claimTicket, findOrphanWorktrees, releaseClaim } from '@anvil/worktrees'
+import { liveEntriesForPlan } from './discover.ts'
+import { recommendResources } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
 /**
@@ -41,6 +50,38 @@ function ticketsDirFor(_ctx: CommandContext, mainRoot: string): string {
   const configured = process.env.ANVIL_TICKETS_DIR
   if (configured !== undefined && configured !== '') return resolve(configured)
   return join(mainRoot, DEFAULT_TICKETS_DIR)
+}
+
+/**
+ * Optional resources for a ticket, matched against the repository it will be worked in.
+ *
+ * Cache-and-local only: claiming must not spend a network request, and the local skill scan
+ * is a directory read. The shortlist is capped inside `recommendResources`, so the bundle
+ * stays a reading list rather than a catalogue.
+ */
+async function resourcesFor(
+  profile: ProjectProfile,
+  ticket: Ticket,
+  cwd: string,
+): Promise<readonly RecommendedResource[]> {
+  const { playbooks } = loadPlaybooks(process.env)
+  const matches = matchPlaybooks(profile, playbooks)
+  const { live } = await liveEntriesForPlan(
+    matches.map((match) => match.playbook),
+    { offline: false, refresh: false, cwd },
+  )
+  return recommendResources({ profile, matches, live, ticket })
+}
+
+/** The same recommendation, for a repository that has not been profiled yet. */
+async function resourcesForRepo(root: string, ticket: Ticket, cwd: string): Promise<readonly RecommendedResource[]> {
+  const profile = buildProfile(root, {
+    root,
+    host: null,
+    remote: null,
+    defaultBranch: null,
+  }).profile
+  return resourcesFor(profile, ticket, cwd)
 }
 
 function providerFor(ctx: CommandContext, mainRoot: string): LocalTicketProvider {
@@ -119,9 +160,14 @@ export const claimCommand: Command = {
     const ticket = await loadTicket(ctx, ref, mainRoot)
     const { config } = loadConfig({ repoRoot: mainRoot })
 
+    // Optional aids for the worktree's context bundle. Capped and ranked here, where the
+    // repository and the ticket are both in hand, rather than inside `claimTicket`.
+    const resources = await resourcesForRepo(repoRoot, ticket, ctx.cwd)
+
     const result = await claimTicket({
       repoRoot,
       ticket,
+      resources,
       ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
       ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
       ...(typeof args.values.runner === 'string' ? { runner: args.values.runner } : {}),
@@ -555,6 +601,7 @@ export const issueCommand: Command = {
       ticket,
       profile,
       branch: branch ?? 'HEAD',
+      resources: await resourcesFor(profile, ticket, target),
     })
     const overlay = renderAgentsOverlay({ ticket, profile })
     mkdirSync(join(target, '.anvil'), { recursive: true })

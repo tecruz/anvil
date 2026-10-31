@@ -34,6 +34,26 @@ export interface ContextBundle {
   content: string
 }
 
+/**
+ * One optional resource handed to a worktree.
+ *
+ * Deliberately structural and plain: `@anvil/tickets` must not depend on `@anvil/playbooks` or
+ * `@anvil/discovery` to render a line of text, so the CLI maps a ranked suggestion into this
+ * shape at the boundary. The values are shown, never executed.
+ */
+export interface RecommendedResource {
+  /** Where it came from in the plan: `skill`, `doc`, `mcp`, `agent`, `community`, ... */
+  kind: string
+  label: string
+  /** One line on why it matched, already clamped by the caller. */
+  why: string
+  /** A URL, or an install path for a locally installed skill. Empty when neither exists. */
+  location: string
+  /** Human label for who vouches for it: `installed locally`, `official publisher`, ... */
+  trust: string
+  provenance: 'curated' | 'live'
+}
+
 export interface TicketContextBundle extends ContextBundle {
   /**
    * Instruction-like lines found in the ticket text.
@@ -141,6 +161,14 @@ export function renderContextBundle(options: {
   ticket: Ticket
   profile: ProjectProfile
   branch: string
+  /**
+   * Optional aids matched to the ticket, already ranked and capped by the caller.
+   *
+   * Rendered as a short list and labelled as optional, because this file is read by an agent
+   * with write access and a suggestion in it must never read as an instruction. Absent means
+   * no section at all.
+   */
+  resources?: readonly RecommendedResource[]
 }): TicketContextBundle {
   const { ticket, profile, branch } = options
   const out: string[] = []
@@ -203,6 +231,17 @@ export function renderContextBundle(options: {
     for (const line of verify) out.push(line)
   }
 
+  const resources = (options.resources ?? []).slice(0, MAX_CONTEXT_RESOURCES)
+  if (resources.length > 0) {
+    out.push('')
+    out.push('## Recommended resources (optional)')
+    out.push('')
+    out.push('Aids matched to this ticket, not instructions. Nothing was installed or run, and')
+    out.push('they never replace the verify commands above.')
+    out.push('')
+    for (const resource of resources) out.push(renderResource(resource))
+  }
+
   if (ticket.links !== undefined && ticket.links.length > 0) {
     out.push('')
     out.push('<!-- BEGIN UNTRUSTED TICKET LINKS -->')
@@ -243,6 +282,29 @@ export function renderContextBundle(options: {
 function excerptOf(line: string): string {
   const compact = line.trim().replace(/`/g, "'")
   return compact.length <= 160 ? compact : `${compact.slice(0, 157)}...`
+}
+
+/** How many optional resources a bundle will show. */
+export const MAX_CONTEXT_RESOURCES = 5
+
+/**
+ * One resource as a markdown bullet.
+ *
+ * Every field is collapsed to a single line and clamped: a local skill's `why` is a sentence
+ * about where it was found, and a playbook's can be a paragraph. Neither should be able to
+ * break out of its bullet or push the verify commands off the file.
+ */
+function renderResource(resource: RecommendedResource): string {
+  const where = resource.location.trim() === '' ? '' : ` -- ${sanitizeInline(resource.location, 200)}`
+  const why = resource.why.trim() === '' ? '' : `: ${sanitizeInline(resource.why, 200)}`
+  const kind = resource.kind.trim() === '' ? 'resource' : resource.kind.trim()
+  return `- **${sanitizeInline(kind, 40)}: ${sanitizeInline(resource.label, 120)}** (${sanitizeInline(resource.trust, 60)})${where}${why}`
+}
+
+/** Collapse whitespace and clamp length, so a value cannot start a new markdown line. */
+function sanitizeInline(value: string, max: number): string {
+  const compact = value.replace(/\s+/g, ' ').replace(/`/g, "'").trim()
+  return compact.length <= max ? compact : `${compact.slice(0, max - 3)}...`
 }
 
 /** The verify commands, with the source label so an inferred command is visibly a guess. */

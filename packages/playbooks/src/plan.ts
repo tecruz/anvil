@@ -23,6 +23,16 @@ import type { LiveResource, Playbook, Resource } from './schema.ts'
 
 export type PlanTier = 'derived' | 'official' | 'community'
 
+/** Who vouches for a resource, as opposed to which tier it ranks in. */
+export type SuggestionTrust = 'official-publisher' | 'local-install' | 'third-party'
+
+/** Short, unambiguous label for a trust value, for terminals and context bundles. */
+export function trustLabel(trust: SuggestionTrust): string {
+  if (trust === 'official-publisher') return 'official publisher'
+  if (trust === 'local-install') return 'installed locally'
+  return 'third party'
+}
+
 /** How to build the plan. */
 export interface PlanOptions {
   /**
@@ -53,6 +63,15 @@ export interface Suggestion {
   severity?: Finding['severity']
   /** The playbook that supplied this, for official/community entries. */
   playbook?: string
+  /**
+   * Who vouches for a resource, kept apart from the tier.
+   *
+   * Absent on derived fixes: those come from this repository's own facts, so there is no
+   * outside publisher to name. `official-publisher` means the technology's own orgs publish
+   * it; `local-install` means it is on this machine and nothing more; `third-party` is
+   * everyone else.
+   */
+  trust?: SuggestionTrust
   /**
    * Where the guidance came from.
    *
@@ -283,6 +302,7 @@ function playbookSuggestions(
         ...(resource.install === undefined ? {} : { install: resource.install }),
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
         provenance: 'curated',
+        trust: 'official-publisher',
       })
     }
   }
@@ -306,6 +326,7 @@ function playbookSuggestions(
       // starred" is not "correct for your repo".
       confidence: communityConfidence(resource),
       provenance: 'curated',
+      trust: 'third-party',
     })
   }
 
@@ -373,9 +394,13 @@ function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
   // pointing at `file://`, which renders as a broken href in every consumer that takes one
   // -- and the evidence line already carries the path, which is the part a reader needs.
   const url = entry.url.trim()
+  const trust: SuggestionTrust =
+    entry.trust ??
+    (entry.source === 'local-scan' ? 'local-install' : entry.tier === 'official' ? 'official-publisher' : 'third-party')
   return {
     id: `live:${playbookId}:${url === '' ? (entry.install ?? entry.label) : normalizeUrl(url)}`,
     tier: entry.tier,
+    playbook: playbookId,
     title: `${LIVE_SECTION_LABEL[entry.section]}: ${entry.label}`,
     detail: entry.why,
     // The evidence is the fetch itself: which source produced this and when. A live entry
@@ -390,6 +415,7 @@ function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
           Math.max(0.3, Number((communityConfidence(entry) - 0.05).toFixed(2))),
     provenance: 'live',
     fetchedAt: entry.fetchedAt,
+    trust,
   }
 }
 
@@ -435,4 +461,134 @@ export function rankSuggestions(suggestions: readonly Suggestion[]): Suggestion[
     if (a.confidence !== b.confidence) return b.confidence - a.confidence
     return a.id < b.id ? -1 : 1
   })
+}
+
+/** How many resources a claim, crew launch or ticket refresh carries into a worktree. */
+export const DEFAULT_SHORTLIST_LIMIT = 5
+
+export interface ShortlistOptions {
+  /**
+   * Free text describing the work: a ticket title, body, labels, or a goal.
+   *
+   * Matched against resource titles and details. Absent focus produces a tier/confidence
+   * list, which is still small and still optional -- it just is not tailored.
+   */
+  focus?: string
+  /** Maximum entries. Defaults to [DEFAULT_SHORTLIST_LIMIT]; never fewer than one. */
+  limit?: number
+}
+
+/** Grammatical words that would match almost every resource and rank nothing. */
+const SHORTLIST_STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'this',
+  'that',
+  'from',
+  'into',
+  'your',
+  'will',
+  'must',
+  'should',
+  'when',
+  'then',
+  'than',
+  'have',
+  'has',
+  'are',
+  'was',
+  'were',
+  'not',
+  'but',
+  'all',
+  'any',
+  'can',
+  'may',
+  'use',
+  'using',
+  'add',
+  'make',
+  'need',
+  'needs',
+  'want',
+  'work',
+  'repo',
+  'repository',
+])
+
+/**
+ * A small, ranked reading list for one piece of work.
+ *
+ * The plan is a catalogue: useful when you are deciding what to improve, and far too long
+ * to put in front of an agent that is already working on a ticket. This is the other view --
+ * at most a handful of external resources, ranked by how many of the ticket's own words they
+ * mention, with tier and confidence as tie-breakers.
+ *
+ * Only resources with a playbook are eligible. A derived fix is a change to this repository,
+ * not an aid to read, and putting one in a worktree's resource list would invite an agent to
+ * treat a plan item as optional reading.
+ */
+export function shortlistSuggestions(suggestions: readonly Suggestion[], options: ShortlistOptions = {}): Suggestion[] {
+  const limit = Math.max(1, Math.floor(options.limit ?? DEFAULT_SHORTLIST_LIMIT))
+  const terms = focusTerms(options.focus ?? '')
+  const scored = suggestions
+    .filter((s) => s.playbook !== undefined)
+    .map((s) => ({ suggestion: s, score: scoreSuggestion(s, terms) }))
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score
+    const tier = TIER_ORDER[a.suggestion.tier] - TIER_ORDER[b.suggestion.tier]
+    if (tier !== 0) return tier
+    if (a.suggestion.confidence !== b.suggestion.confidence) return b.suggestion.confidence - a.suggestion.confidence
+    return a.suggestion.title.localeCompare(b.suggestion.title)
+  })
+
+  const seen = new Set<string>()
+  const out: Suggestion[] = []
+  for (const { suggestion } of scored) {
+    const key = shortlistKey(suggestion)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(suggestion)
+    if (out.length === limit) break
+  }
+  return out
+}
+
+/** Lower-cased, de-duplicated words long enough to mean something. */
+function focusTerms(focus: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of focus.toLowerCase().match(/[a-z0-9][a-z0-9-]+/g) ?? []) {
+    if (raw.length < 4 || SHORTLIST_STOPWORDS.has(raw) || seen.has(raw)) continue
+    seen.add(raw)
+    out.push(raw)
+    if (out.length === 20) break
+  }
+  return out
+}
+
+function scoreSuggestion(suggestion: Suggestion, terms: readonly string[]): number {
+  const haystack = `${suggestion.title} ${suggestion.detail}`.toLowerCase()
+  let matches = 0
+  for (const term of terms) {
+    if (haystack.includes(term)) matches++
+    if (matches === 3) break
+  }
+  // Relevance dominates confidence: a resource that mentions the ticket's own words is the
+  // point of the list, and a high-confidence unrelated doc is exactly the noise this removes.
+  const relevance = matches * 2
+  const tierBonus = suggestion.tier === 'official' ? 0.5 : 0
+  return relevance + tierBonus + suggestion.confidence
+}
+
+/** A stable identity for de-duplication: install path, then URL, then id. */
+function shortlistKey(suggestion: Suggestion): string {
+  const install = (suggestion.install ?? '').trim().toLowerCase()
+  if (install !== '') return `install:${install}`
+  const url = (suggestion.url ?? '').trim()
+  if (url !== '') return `url:${normalizeUrl(url)}`
+  return `id:${suggestion.id}`
 }

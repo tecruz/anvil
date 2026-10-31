@@ -112,6 +112,13 @@ export interface LiveResource {
   why: string
   /** `official` only when the owner is a seeded official org; otherwise `community`. */
   tier: 'official' | 'community'
+  /**
+   * Who vouches for it, separate from the ranking tier.
+   *
+   * Optional because it was added after the first live caches existed; a reader that finds it
+   * absent must fall back to the source rather than assume a publisher.
+   */
+  trust?: 'official-publisher' | 'local-install' | 'third-party'
   /** The playbook section this belongs in, which is also its label prefix in the plan. */
   section: 'docs' | 'skills' | 'agents' | 'mcp' | 'styleGuides' | 'migrationGuides' | 'community'
   /** Star count at fetch time. `null` when the source has no such number. */

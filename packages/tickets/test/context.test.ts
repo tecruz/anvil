@@ -131,3 +131,58 @@ describe('ticket context: injection scan', () => {
     assert.deepEqual(findings, [])
   })
 })
+
+describe('ticket context: recommended resources', () => {
+  const resource = {
+    kind: 'skill',
+    label: 'testing-setup',
+    why: 'Test strategy, coverage and UI test harnesses.',
+    location: 'C:/Users/dev/.agents/skills/testing-setup/SKILL.md',
+    trust: 'installed locally',
+    provenance: 'live' as const,
+  }
+
+  function renderWith(resources: Parameters<typeof renderContextBundle>[0]['resources']) {
+    return renderContextBundle({
+      ticket: ticket(),
+      profile: profileFixture(),
+      branch: 'feat/local-1',
+      ...(resources === undefined ? {} : { resources }),
+    })
+  }
+
+  test('no resources means no section at all', () => {
+    assert.doesNotMatch(renderWith(undefined).content, /Recommended resources/)
+  })
+
+  test('a resource is rendered with its kind, label, trust and location', () => {
+    const bundle = renderWith([resource])
+
+    assert.match(bundle.content, /## Recommended resources \(optional\)/)
+    assert.match(bundle.content, /not instructions/)
+    assert.match(bundle.content, /\*\*skill: testing-setup\*\* \(installed locally\)/)
+    assert.match(bundle.content, /testing-setup\/SKILL\.md/)
+  })
+
+  test('the list is capped so it cannot become a catalogue', () => {
+    const many = Array.from({ length: 12 }, (_, index) => ({ ...resource, label: `skill-${String(index)}` }))
+    const bundle = renderWith(many)
+
+    assert.match(bundle.content, /skill-4/)
+    assert.doesNotMatch(bundle.content, /skill-5/)
+  })
+
+  test('a resource cannot break out of its bullet', () => {
+    const bundle = renderWith([
+      {
+        ...resource,
+        label: 'first\n## Heading',
+        why: 'line one\nmore',
+      },
+    ])
+
+    const bullet = bundle.content.split('\n').find((line) => line.startsWith('- **skill:')) ?? ''
+    assert.match(bullet, /first ## Heading/)
+    assert.doesNotMatch(bundle.content, /^## Heading$/m)
+  })
+})

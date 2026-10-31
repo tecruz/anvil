@@ -24,6 +24,7 @@
 import { AnvilError, ErrorCode, renderTable } from '@anvil/core'
 import {
   type DiscoveryEntry,
+  discoverLocal,
   type FetchImpl,
   loadCache,
   mergeBySource,
@@ -322,43 +323,70 @@ function renderProposals(ctx: CommandContext, blocks: readonly string[], warning
 }
 
 /**
- * Cached entries for the playbooks that matched, for `plan` and `brief` to merge.
+ * Local skills already installed for the matched playbooks.
  *
- * Read-only and quiet: a missing or corrupt cache produces an empty map and a warning, and
- * neither is an error. `plan` has to keep working on a machine that has never run
- * `discover`, which is every machine on the first day.
+ * Always available, including under `--offline`: it reads files and cannot fail. This is why
+ * `plan` and `brief` can list an installed Android skill on a machine with no network and no
+ * cache at all -- the source that answers the question cannot be stale, because it is not a
+ * fetch.
+ */
+export function loadLocalForPlan(
+  playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
+  env: NodeJS.ProcessEnv = process.env,
+): Map<string, DiscoveryEntry[]> {
+  const live = new Map<string, DiscoveryEntry[]>()
+  for (const playbook of playbooks) {
+    const entries = discoverLocal(playbook.id, playbook.discover, { env }).entries
+    if (entries.length > 0) live.set(playbook.id, entries)
+  }
+  return live
+}
+
+/**
+ * The live entries a plan or a brief should merge, and the warnings that came with them.
  *
- * A stale cache is different: it is reported and *not* merged. The cache itself keeps its
- * entries, and `discover` can still show them, but a plan that silently presents a
- * week-old search result as live guidance is a plan that gets noisier as it gets less
- * reliable. The warning names the command that replaces the old answer with a new one.
+ * Two halves with different lifetimes, which is the point of splitting them here:
+ *
+ *   - **Local skills are re-scanned every time.** They are files on this machine, so a skill
+ *     installed after the last fetch appears, and one deleted since does not come back from
+ *     the cache. A stale cache cannot take them away.
+ *   - **Remote entries come from the cache, and only when it is fresh.** A stale cache is
+ *     reported and left out -- a week-old search result presented as live guidance is noise
+ *     dressed as advice. `--refresh` replaces it with a new answer.
+ *
+ * A missing or corrupt cache produces a warning and no remote entries, and is not an error.
+ * `plan` has to keep working on a machine that has never run `discover`, which is every
+ * machine on the first day.
  */
 export function loadLiveForPlan(
-  playbookIds: readonly string[],
+  playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
   env: NodeJS.ProcessEnv = process.env,
 ): {
   live: Map<string, DiscoveryEntry[]>
   warnings: string[]
 } {
-  const live = new Map<string, DiscoveryEntry[]>()
+  const live = loadLocalForPlan(playbooks, env)
   const warnings: string[] = []
-  for (const id of playbookIds) {
-    const read = loadCache(id, env)
+  for (const playbook of playbooks) {
+    const read = loadCache(playbook.id, env)
     if (read.status === 'absent') continue
     if (read.status === 'unreadable') {
       warnings.push(
-        `discovery cache for ${id} is unreadable (${read.detail}); run \`anvil playbook discover ${id} --refresh\``,
+        `discovery cache for ${playbook.id} is unreadable (${read.detail}); run \`anvil playbook discover ${playbook.id} --refresh\``,
       )
       continue
     }
     if (read.status === 'stale') {
       warnings.push(
-        `discovery cache for ${id} is stale (${read.detail}); its entries were ignored. Re-run with --refresh to fetch a new answer.`,
+        `discovery cache for ${playbook.id} is stale (${read.detail}); its cached remote entries were ignored. Installed skills are still listed. Re-run with --refresh to fetch a new answer.`,
       )
       continue
     }
-    const entries = usableEntries(read)
-    if (entries.length > 0) live.set(id, entries)
+    // Fresh: the remote half only. The local half was just re-scanned, so keeping the cached
+    // copy of it would resurrect an uninstalled skill and double-list an installed one.
+    const remote = usableEntries(read).filter((entry) => entry.source !== 'local-scan')
+    if (remote.length === 0) continue
+    live.set(playbook.id, [...(live.get(playbook.id) ?? []), ...remote])
   }
   return { live, warnings }
 }
@@ -368,12 +396,12 @@ export function loadLiveForPlan(
  *
  * Three ways to get them, and the flags choose:
  *
- *   - `--offline`: none at all. No cache, no network.
+ *   - `--offline`: installed skills only. No cache, no network.
  *   - `--refresh`: fetched now, for the playbooks that matched. A refresh that finds
  *     nothing keeps the entries the cache already had, so a registry that is briefly
  *     unreachable costs guidance rather than removing it.
- *   - the default: the cache, read from the home directory. No network, which is what makes
- *     `plan` cheap enough to run on every question.
+ *   - the default: installed skills plus a fresh cache, read from the home directory. No
+ *     network, which is what makes `plan` cheap enough to run on every question.
  */
 export async function liveEntriesForPlan(
   playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
@@ -390,21 +418,56 @@ export async function liveEntriesForPlan(
     ) => Promise<RefreshResult>
   },
 ): Promise<{ live: Map<string, DiscoveryEntry[]>; warnings: string[] }> {
-  if (options.offline) return { live: new Map(), warnings: [] }
+  const env = options.env ?? process.env
+  if (options.offline) return { live: loadLocalForPlan(playbooks, env), warnings: [] }
 
-  if (!options.refresh) {
-    return loadLiveForPlan(
-      playbooks.map((p) => p.id),
-      options.env ?? process.env,
-    )
-  }
+  if (!options.refresh) return loadLiveForPlan(playbooks, env)
 
   const refresh = options.refreshLive ?? refreshLive
   const result = await refresh(playbooks, {
     cwd: options.cwd,
     online: true,
-    env: options.env ?? process.env,
+    env,
     fetchImpl: liveFetch,
   })
-  return { live: result.live, warnings: result.warnings }
+  return { live: mergeLocalInto(result.live, loadLocalForPlan(playbooks, env)), warnings: result.warnings }
+}
+
+/**
+ * Fold re-scanned local skills into a refreshed map without duplicating them.
+ *
+ * A refresh already runs the local scan, so this normally changes nothing. It matters when
+ * the refresh could not answer for a playbook that still has an installed skill: the machine
+ * knows the skill is there, and a failed fetch must not hide it.
+ */
+function mergeLocalInto(
+  live: ReadonlyMap<string, DiscoveryEntry[]>,
+  local: ReadonlyMap<string, DiscoveryEntry[]>,
+): Map<string, DiscoveryEntry[]> {
+  const out = new Map<string, DiscoveryEntry[]>()
+  for (const [id, entries] of live) out.set(id, [...entries])
+  for (const [id, entries] of local) {
+    const existing = out.get(id)
+    if (existing === undefined) {
+      out.set(id, [...entries])
+      continue
+    }
+    const keys = new Set(existing.map(entryKey))
+    for (const entry of entries) {
+      const key = entryKey(entry)
+      if (keys.has(key)) continue
+      keys.add(key)
+      existing.push(entry)
+    }
+  }
+  return out
+}
+
+/** Identity for the local/remote merge: URL, then install path, then label. */
+function entryKey(entry: DiscoveryEntry): string {
+  const url = entry.url.trim()
+  if (url !== '') return `url:${url.toLowerCase()}`
+  const install = (entry.install ?? '').trim()
+  if (install !== '') return `install:${install.toLowerCase()}`
+  return `label:${entry.label.toLowerCase()}`
 }

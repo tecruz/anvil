@@ -28,11 +28,16 @@ export {
 export {
   buildPlan,
   communityConfidence,
+  DEFAULT_SHORTLIST_LIMIT,
   normalizeUrl,
   type Plan,
   type PlanTier,
   rankSuggestions,
+  type ShortlistOptions,
   type Suggestion,
+  type SuggestionTrust,
+  shortlistSuggestions,
+  trustLabel,
 } from './plan.ts'
 export {
   BUILTIN_PLAYBOOK_SOURCE,
