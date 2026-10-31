@@ -5,6 +5,8 @@
 - Milestone: post-M6
 - Extends: [ADR-0002](0002-gh-cli-as-first-transport.md) — the same reasoning puts `gh`
   first for discovery, with the REST API as a fallback rather than the default.
+- Extended by: [ADR-0013](0013-stale-discovery-is-reported-not-merged.md) — a stale cache
+  is reported, not merged into `plan`/`brief`.
 
 ## Context
 

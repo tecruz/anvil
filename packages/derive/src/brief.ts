@@ -91,6 +91,13 @@ export interface Brief {
   excerpts: BriefFileExcerpt[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
   gaps: string[]
+  /**
+   * Conditions worth stating, such as a stale discovery cache that was left out.
+   *
+   * A brief that quietly lost guidance would read as a brief that found less, and the
+   * reader would have no way to tell the difference.
+   */
+  warnings: string[]
 }
 
 /**
@@ -128,6 +135,8 @@ export interface BuildBriefOptions {
    * `anvil playbook discover` builds exactly as before.
    */
   live?: ReadonlyMap<string, readonly LiveGuidance[]>
+  /** Conditions the caller already knows about, carried through to the output unchanged. */
+  warnings?: readonly string[]
 }
 
 /**
@@ -243,6 +252,7 @@ export function buildBrief(options: BuildBriefOptions): Brief {
     findings,
     excerpts,
     gaps: computeGaps(report, profile),
+    warnings: [...(options.warnings ?? [])],
   }
 }
 

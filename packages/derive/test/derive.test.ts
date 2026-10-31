@@ -1115,4 +1115,18 @@ describe('brief', () => {
     assert.ok(brief.playbooks.some((p) => p.id === 'node'))
     assert.ok(brief.playbooks[0]!.guidance.length > 0)
   })
+
+  test('carries warnings through, so a dropped cache is not silent', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: () => null,
+      warnings: ['discovery cache for node is stale; its entries were ignored'],
+    })
+    assert.deepEqual(brief.warnings, ['discovery cache for node is stale; its entries were ignored'])
+  })
 })

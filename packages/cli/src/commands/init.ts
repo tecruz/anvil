@@ -110,6 +110,9 @@ export const briefCommand: Command = {
     '',
     '--offline      ignore the discovery cache; the guidance is curated only',
     '--refresh      fetch live guidance now and cache it, instead of reading the cache',
+    '',
+    'A discovery cache older than seven days is reported and left out; --refresh replaces',
+    'it with a new answer.',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -141,7 +144,7 @@ export const briefCommand: Command = {
         hint: '--offline asks for no network at all; --refresh asks for a fetch. Pick one.',
       })
     }
-    const { live } = await liveEntriesForPlan(
+    const { live, warnings: liveWarnings } = await liveEntriesForPlan(
       matches.map((m) => m.playbook),
       { offline, refresh, cwd: ctx.cwd },
     )
@@ -152,6 +155,7 @@ export const briefCommand: Command = {
       target: target as BriefTarget,
       read: (rel) => readRepoFile(root, rel),
       live,
+      warnings: liveWarnings,
     })
 
     ctx.out(brief, () => renderBrief(ctx, brief))
@@ -197,6 +201,11 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
   out.push('')
   out.push(s.bold('Gaps the generated guidance must not contradict'))
   out.push(brief.gaps.length === 0 ? s.dim('  (none)') : brief.gaps.map((g) => `  - ${g}`).join('\n'))
+  if (brief.warnings.length > 0) {
+    out.push('')
+    out.push(s.yellow('Warnings'))
+    for (const w of brief.warnings) out.push(`  ${w}`)
+  }
   out.push('')
   out.push(s.dim(`Full JSON: anvil brief --for ${brief.target} --json`))
   return out.join('\n')

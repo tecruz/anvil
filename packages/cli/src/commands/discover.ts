@@ -327,15 +327,23 @@ function renderProposals(ctx: CommandContext, blocks: readonly string[], warning
  * Read-only and quiet: a missing or corrupt cache produces an empty map and a warning, and
  * neither is an error. `plan` has to keep working on a machine that has never run
  * `discover`, which is every machine on the first day.
+ *
+ * A stale cache is different: it is reported and *not* merged. The cache itself keeps its
+ * entries, and `discover` can still show them, but a plan that silently presents a
+ * week-old search result as live guidance is a plan that gets noisier as it gets less
+ * reliable. The warning names the command that replaces the old answer with a new one.
  */
-export function loadLiveForPlan(playbookIds: readonly string[]): {
+export function loadLiveForPlan(
+  playbookIds: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): {
   live: Map<string, DiscoveryEntry[]>
   warnings: string[]
 } {
   const live = new Map<string, DiscoveryEntry[]>()
   const warnings: string[] = []
   for (const id of playbookIds) {
-    const read = loadCache(id, process.env)
+    const read = loadCache(id, env)
     if (read.status === 'absent') continue
     if (read.status === 'unreadable') {
       warnings.push(
@@ -344,7 +352,10 @@ export function loadLiveForPlan(playbookIds: readonly string[]): {
       continue
     }
     if (read.status === 'stale') {
-      warnings.push(read.detail)
+      warnings.push(
+        `discovery cache for ${id} is stale (${read.detail}); its entries were ignored. Re-run with --refresh to fetch a new answer.`,
+      )
+      continue
     }
     const entries = usableEntries(read)
     if (entries.length > 0) live.set(id, entries)
@@ -370,6 +381,8 @@ export async function liveEntriesForPlan(
     offline: boolean
     refresh: boolean
     cwd: string
+    /** Injected in the unit test; the real `process.env` in every other call. */
+    env?: NodeJS.ProcessEnv
     /** Injected in the unit test; the real one in every other call. */
     refreshLive?: (
       playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
@@ -380,14 +393,17 @@ export async function liveEntriesForPlan(
   if (options.offline) return { live: new Map(), warnings: [] }
 
   if (!options.refresh) {
-    return loadLiveForPlan(playbooks.map((p) => p.id))
+    return loadLiveForPlan(
+      playbooks.map((p) => p.id),
+      options.env ?? process.env,
+    )
   }
 
   const refresh = options.refreshLive ?? refreshLive
   const result = await refresh(playbooks, {
     cwd: options.cwd,
     online: true,
-    env: process.env,
+    env: options.env ?? process.env,
     fetchImpl: liveFetch,
   })
   return { live: result.live, warnings: result.warnings }

@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Generated `AGENTS.md` command rows now cite the line they occupy in the regenerated file, so self-citations cannot drift when the layout above them changes.
 - The agent prompt now names the hook instead of only asking the agent not to push.
+- `plan` and `brief` no longer merge a discovery cache older than seven days. A stale cache is reported with the command that refreshes it, while the cache and `discover` keep the old entries. See [ADR-0013](docs/adr/0013-stale-discovery-is-reported-not-merged.md).
 
 ## [0.1.0] - 2026-04-14
 
