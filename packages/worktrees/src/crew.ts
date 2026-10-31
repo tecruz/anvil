@@ -222,10 +222,11 @@ export interface CrewUpOptions {
   /**
    * Optional aids per ticket, for its context bundle.
    *
-   * A function rather than a list because relevance is per ticket, and this package does not
-   * load playbooks to work it out.
+   * A function rather than a list because relevance is per ticket and depends on the tree that
+   * ticket is worked in; the path is the created worktree, passed through from `claimTicket`
+   * after the base ref is checked out. This package does not load playbooks to work it out.
    */
-  recommend?: (ticket: Ticket) => readonly RecommendedResource[]
+  recommend?: (ticket: Ticket, worktreePath: string) => readonly RecommendedResource[]
 }
 
 export interface AgentLaunch {
@@ -270,7 +271,7 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
 
   for (const ticket of options.tickets) {
     try {
-      const resources = options.recommend === undefined ? undefined : options.recommend(ticket)
+      const recommend = options.recommend
       const result = await claimTicket({
         repoRoot,
         ticket,
@@ -278,7 +279,7 @@ export async function crewUp(options: CrewUpOptions): Promise<CrewUpResult> {
         ...(options.base === undefined ? {} : { base: options.base }),
         worktreeRoot: options.worktreeRoot ?? null,
         runner: options.launch ? options.runner : 'none',
-        ...(resources === undefined ? {} : { resources }),
+        ...(recommend === undefined ? {} : { recommend: (worktreePath: string) => recommend(ticket, worktreePath) }),
       })
       claims.push(result.claim)
     } catch (err) {

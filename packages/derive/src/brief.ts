@@ -16,7 +16,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
-import type { MatchResult } from '@anvil/playbooks'
+import { curatedTrust, type MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
 export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
@@ -293,6 +293,8 @@ function flattenGuidance(
       migrationGuides: unknown[]
     }
     community?: unknown[]
+    /** The playbook's official orgs, so a resource's publisher can be read from its URL. */
+    discover?: { officialOrgs?: string[] }
   },
   live: readonly LiveGuidance[] = [],
 ): Array<{
@@ -369,9 +371,9 @@ function flattenGuidance(
       url: r.url,
       why: r.why,
       provenance: 'curated' as const,
-      // Curated official resources come from the technology's own docs and repos, which the
-      // playbook cites by hand. A community resource is not in these groups.
-      trust: 'official-publisher',
+      // The publisher is read from the resource's evidence, not assumed because the playbook
+      // filed it as official: `Context7` sits under `official.mcp` and is hosted by upstash.
+      trust: curatedTrust({ url: r.url }, playbook.discover?.officialOrgs ?? []),
     })),
   )
 
@@ -386,13 +388,13 @@ function flattenGuidance(
   const cited = new Set(curated.map((r) => citationKey(r.url, '')))
   const added = live
     .filter((r) => {
-      const key = citationKey(r.url, r.install ?? '')
+      const key = citationKey(r.url, installOf(r.install))
       if (key === '' || cited.has(key)) return false
       cited.add(key)
       return true
     })
     .map((r) => {
-      const install = (r.install ?? '').trim()
+      const install = installOf(r.install)
       return {
         kind: `live ${r.section}`,
         label: r.label,
@@ -405,6 +407,17 @@ function flattenGuidance(
     })
 
   return [...curated, ...added]
+}
+
+/**
+ * A usable install path: a trimmed string, or empty when the field is absent or malformed.
+ *
+ * The live map is typed, but its values can come from a cache file any process may have
+ * written, and a caller can hand `buildBrief` anything. A non-string install is treated as no
+ * install rather than allowed to throw where a reader expects a line of guidance.
+ */
+function installOf(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 /**

@@ -244,6 +244,13 @@ describe('isEntry', () => {
     assert.equal(isEntry(entry({ tier: 'vibes' as never })), false)
   })
 
+  test('rejects a non-string install, rather than letting it reach a renderer that trims it', () => {
+    // A cache is a file any process may have written. A numeric install used to pass the URL
+    // check and then throw in `brief`, far from the cache that caused it.
+    assert.equal(isEntry(entry({ url: 'https://example.org/tool', install: 42 as never })), false)
+    assert.equal(isEntry(entry({ url: 'https://example.org/tool', install: {} as never })), false)
+  })
+
   test('rejects non-objects', () => {
     for (const value of [null, undefined, 'x', 42, []]) assert.equal(isEntry(value), false)
   })

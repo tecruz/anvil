@@ -16,15 +16,12 @@ import {
   runProcess,
   tokenizeCommand,
 } from '@anvil/core'
-import { loadPlaybooks, matchPlaybooks } from '@anvil/playbooks'
-import { buildProfile } from '@anvil/profile'
 import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
 import { parseRef, type Ticket } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import { formatCost, lookupSessionCosts } from '../cost.ts'
-import { liveEntriesForPlan } from './discover.ts'
-import { recommendResources } from './recommend.ts'
+import { recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
@@ -137,28 +134,15 @@ async function crewUpFlow(
   const { config } = loadConfig({ repoRoot })
   const runner = typeof args.values.runner === 'string' ? args.values.runner : 'opencode'
 
-  // Ranked once for the repository, applied per ticket: relevance is per ticket, but the
-  // profile, matches and live entries are not.
-  const profile = buildProfile(repoRoot, {
-    root: repoRoot,
-    host: null,
-    remote: null,
-    defaultBranch: null,
-  }).profile
-  const { playbooks } = loadPlaybooks(process.env)
-  const matches = matchPlaybooks(profile, playbooks)
-  const { live } = await liveEntriesForPlan(
-    matches.map((match) => match.playbook),
-    { offline: false, refresh: false, cwd: ctx.cwd },
-  )
-
   const result = await crewUp({
     repoRoot,
     tickets,
     launch: args.values.launch === true,
     runner,
     worktreeRoot: config.git.worktreeRoot,
-    recommend: (ticket) => recommendResources({ profile, matches, live, ticket }),
+    // Ranked per ticket, against the worktree it is created in -- not this checkout, which may
+    // be a different branch than the claim's base.
+    recommend: (ticket, worktreePath) => recommendForWorktree(worktreePath, ticket),
     ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
     ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
   })

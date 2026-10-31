@@ -705,22 +705,30 @@ describe('claims', () => {
 
   test('a claim can warm the worktree with optional resources', async () => {
     const repo = makeRepo()
+    const seen: string[] = []
     const result = await claimTicket({
       repoRoot: repo,
       ticket: ticket(),
       worktreeRoot: join(temp('anvil-m3-cwr-'), 'wt'),
-      resources: [
-        {
-          kind: 'skill',
-          label: 'testing-setup',
-          why: 'Android test strategy and coverage.',
-          location: 'C:/skills/testing-setup/SKILL.md',
-          trust: 'installed locally',
-          provenance: 'live',
-        },
-      ],
+      recommend: (worktreePath) => {
+        seen.push(worktreePath)
+        return [
+          {
+            kind: 'skill',
+            label: 'testing-setup',
+            why: 'Android test strategy and coverage.',
+            location: 'C:/skills/testing-setup/SKILL.md',
+            trust: 'installed locally',
+            provenance: 'live',
+          },
+        ]
+      },
     })
 
+    // The callback is handed the worktree that was created, not the caller's checkout, so the
+    // ranking reads the tree the work actually happens in.
+    assert.deepEqual(seen, [result.claim.worktreePath])
+    assert.ok(existsSync(seen[0] ?? ''))
     const bundle = readFileSync(join(result.claim.worktreePath, CONTEXT_FILE), 'utf8')
     assert.match(bundle, /## Recommended resources \(optional\)/)
     assert.match(bundle, /\*\*skill: testing-setup\*\* \(installed locally\)/)

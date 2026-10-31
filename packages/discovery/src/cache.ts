@@ -193,6 +193,11 @@ export function isEntry(value: unknown): value is DiscoveryEntry {
     return false
   }
   if (typeof e.url !== 'string') return false
+  // `install` is optional, but when present it must be a string (or an explicit null). A
+  // consumer renders it as a path, and a number or object would throw somewhere far from the
+  // cache that caused it. A cache is a file any process may have written, so it is checked
+  // here rather than trusted.
+  if (e.install !== undefined && e.install !== null && typeof e.install !== 'string') return false
   if (e.url === '') return e.source === 'local-scan' && typeof e.install === 'string'
   return e.url.startsWith('https://')
 }

@@ -312,7 +312,10 @@ function playbookSuggestions(
         confidence: kind === 'doc' || kind === 'style' ? 0.75 : 0.7,
         provenance: 'curated',
         external: true,
-        trust: 'official-publisher',
+        // The publisher is read from the URL, not assumed because the entry is in the official
+        // list: `Context7` is filed under `official.mcp` and hosted by upstash, which the node
+        // playbook's seeds do not name.
+        trust: curatedTrust({ url: resource.url }, playbook.discover.officialOrgs),
       })
     }
   }
@@ -337,11 +340,10 @@ function playbookSuggestions(
       confidence: communityConfidence(resource),
       provenance: 'curated',
       external: true,
-      // Community is where the resource ranks, not who publishes it. A repo the playbook's
-      // own orgs own (`android/nowinandroid`) is first-party even though it ranks below the
-      // hand-written official list, so the publisher is read from the repo owner, not the
-      // tier.
-      trust: ownerIsOfficial(resource.repo, playbook.discover.officialOrgs) ? 'official-publisher' : 'third-party',
+      // Community is where the resource ranks, not who publishes it: a repo the playbook's own
+      // orgs own (`android/nowinandroid`) is first-party even though it ranks below the
+      // hand-written official list.
+      trust: curatedTrust({ repo: resource.repo }, playbook.discover.officialOrgs),
     })
   }
 
@@ -349,16 +351,51 @@ function playbookSuggestions(
 }
 
 /**
- * True when a curated repository is owned by an org the playbook already trusts.
+ * True when an owner is one a playbook's seeds call official.
  *
- * The same seed list `discover` uses to promote a search result, applied to a hand-written
- * community entry: a community resource's `repo` is `owner/name`, and its owner is what the
- * playbook's `officialOrgs` speaks to. Case-insensitive, because GitHub logins are.
+ * Case-insensitive, because GitHub logins are, and applies the same way whether the owner came
+ * from a community entry's `repo` or a URL.
  */
-function ownerIsOfficial(repo: string, orgs: readonly string[]): boolean {
-  const owner = repo.split('/')[0]?.trim().toLowerCase()
-  if (owner === undefined || owner === '') return false
-  return orgs.some((org) => org.trim().toLowerCase() === owner)
+export function ownerIsOfficial(owner: string, orgs: readonly string[]): boolean {
+  const normalized = owner.trim().toLowerCase()
+  if (normalized === '') return false
+  return orgs.some((org) => org.trim().toLowerCase() === normalized)
+}
+
+/** The `owner` segment of a GitHub repository URL, or null when the URL is not one. */
+function githubOwnerFromUrl(url: string): string | null {
+  const trimmed = url.trim()
+  if (trimmed === '') return null
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return null
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, '')
+  if (host !== 'github.com') return null
+  const owner = parsed.pathname.split('/').find((segment) => segment !== '')
+  return owner === undefined ? null : owner
+}
+
+/**
+ * Who publishes a curated resource, read from its evidence rather than its tier.
+ *
+ * The evidence is the repository owner: a community entry names its `repo`, and an official
+ * entry may cite a GitHub URL. A resource the playbook's own orgs own is `official-publisher`;
+ * a GitHub resource owned by anyone else is `third-party`, even when it sits in the official
+ * list -- being filed as official guidance is not a claim that the technology wrote it. A
+ * resource with no owner to read (the technology's own documentation site) is
+ * `official-publisher`.
+ */
+export function curatedTrust(
+  input: { repo?: string | null; url?: string | null },
+  officialOrgs: readonly string[],
+): SuggestionTrust {
+  const repo = (input.repo ?? '').trim()
+  const owner = repo !== '' ? (repo.split('/')[0] ?? '') : (githubOwnerFromUrl(input.url ?? '') ?? '')
+  if (owner.trim() === '') return 'official-publisher'
+  return ownerIsOfficial(owner, officialOrgs) ? 'official-publisher' : 'third-party'
 }
 
 /**

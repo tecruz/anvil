@@ -1151,6 +1151,52 @@ describe('brief', () => {
     assert.equal(live[0]?.install, '~/.agents/skills/node-review/SKILL.md')
   })
 
+  test('a brief reads a publisher from the resource URL, not from the official list', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+    })
+    const guidance = brief.playbooks.flatMap((p) => p.guidance)
+    // Context7 is `official.mcp` for node and hosted by upstash, which the seeds do not name.
+    assert.equal(guidance.find((g) => g.url === 'https://github.com/upstash/context7')?.trust, 'third-party')
+    assert.equal(guidance.find((g) => g.url === 'https://nodejs.org/docs/latest/api/')?.trust, 'official-publisher')
+  })
+
+  test('a malformed install path is ignored rather than thrown on', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'node tooling',
+              url: 'https://example.org/tool',
+              why: 'A helper whose install field is corrupt.',
+              section: 'skills',
+              install: 42 as unknown as string,
+              source: 'github-search',
+            },
+          ],
+        ],
+      ]),
+    })
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.length, 1)
+    assert.equal(live[0]?.install, undefined)
+  })
+
   test('carries warnings through, so a dropped cache is not silent', () => {
     const dir = materialize('node-npm')
     const profile = profileIn(dir)

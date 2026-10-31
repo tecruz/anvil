@@ -262,12 +262,16 @@ export interface ClaimOptions {
   /** Environment for the version probe; tests point PATHEXT/PATH at a stub runner. */
   env?: NodeJS.ProcessEnv
   /**
-   * Optional aids for the ticket's context bundle, already ranked and capped by the caller.
+   * Optional aids for the ticket's context bundle, as a function of the worktree that was
+   * created.
    *
-   * Passed in rather than computed here so this package keeps its dependency set: the CLI
-   * already loads playbooks to rank them, and a worktree does not need to.
+   * A callback, not a list: the resources depend on the tree the work is done in, and the
+   * caller's checkout may be a different branch than the claim's base. The worktree path is
+   * only known here, after `git worktree add` has checked the base ref out, so the ranking is
+   * handed the path it must read. This package does not load playbooks itself -- the CLI does,
+   * inside the callback.
    */
-  resources?: readonly RecommendedResource[]
+  recommend?: (worktreePath: string) => readonly RecommendedResource[]
 }
 
 export interface ClaimResult {
@@ -362,11 +366,14 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
       defaultBranch: null,
     }).profile
 
+    // The recommendation is computed from the worktree that was just created, not the
+    // caller's checkout: a claim forks from a base ref that may be a different stack.
+    const resources = options.recommend === undefined ? undefined : options.recommend(worktreePath)
     const context = renderContextBundle({
       ticket,
       profile,
       branch,
-      ...(options.resources === undefined ? {} : { resources: options.resources }),
+      ...(resources === undefined ? {} : { resources }),
     })
     const overlay = renderAgentsOverlay({ ticket, profile })
     // Validate both outputs before the first write: a real parent does not make linked

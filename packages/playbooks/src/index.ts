@@ -28,8 +28,10 @@ export {
 export {
   buildPlan,
   communityConfidence,
+  curatedTrust,
   DEFAULT_SHORTLIST_LIMIT,
   normalizeUrl,
+  ownerIsOfficial,
   type Plan,
   type PlanTier,
   rankSuggestions,

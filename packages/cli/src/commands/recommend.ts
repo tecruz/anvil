@@ -14,14 +14,17 @@ import { audit } from '@anvil/audit'
 import {
   buildPlan,
   type LiveResource,
+  loadPlaybooks,
   type MatchResult,
+  matchPlaybooks,
   type Suggestion,
   shortlistSuggestions,
   trustLabel,
 } from '@anvil/playbooks'
-import type { ProjectProfile } from '@anvil/profile'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import type { Ticket } from '@anvil/tickets'
 import type { RecommendedResource } from '@anvil/tickets/context'
+import { loadLiveForPlan } from './discover.ts'
 import { toPlaybookMatchInfo } from './matches.ts'
 
 /** How many resources a worktree carries by default. */
@@ -66,6 +69,36 @@ export function recommendResources(options: {
       : shortlistSuggestions(plan.suggestions, { focus: ticketFocus(options.ticket), limit })
 
   return shortlist.map(toRecommendedResource)
+}
+
+/**
+ * Rank external resources for a ticket against an already-built profile.
+ *
+ * Reads installed skills and a fresh discovery cache only -- no network, which is what makes
+ * it safe on the claim path. `plan` and `brief` merge the same two sources.
+ */
+export function recommendForProfile(profile: ProjectProfile, ticket: Ticket): RecommendedResource[] {
+  const { playbooks } = loadPlaybooks(process.env)
+  const matches = matchPlaybooks(profile, playbooks)
+  const { live } = loadLiveForPlan(matches.map((match) => match.playbook))
+  return recommendResources({ profile, matches, live, ticket })
+}
+
+/**
+ * Rank external resources against the tree the work will actually happen in.
+ *
+ * The profile is read from `worktreePath`, not the caller's checkout: a claim branches from a
+ * base ref that may be a different stack than the branch that was open, and recommending the
+ * wrong language's docs is worse than recommending nothing.
+ */
+export function recommendForWorktree(worktreePath: string, ticket: Ticket): RecommendedResource[] {
+  const profile = buildProfile(worktreePath, {
+    root: worktreePath,
+    host: null,
+    remote: null,
+    defaultBranch: null,
+  }).profile
+  return recommendForProfile(profile, ticket)
 }
 
 /** One ranked suggestion, reduced to what the bundle shows. */

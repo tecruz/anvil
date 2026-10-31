@@ -327,6 +327,16 @@ describe('plan merge', () => {
     assert.equal(okio?.trust, 'third-party')
   })
 
+  test('an official-list resource is labelled by its URL, not by the list it sits in', () => {
+    // Context7 is filed under `official.mcp` for node and hosted by upstash, which the node
+    // playbook's seeds do not name. A plain documentation URL is first-party.
+    const plan = planWith(new Map(), 'node-npm')
+    const context7 = plan.suggestions.find((s) => s.url === 'https://github.com/upstash/context7')
+    const docs = plan.suggestions.find((s) => s.url === 'https://nodejs.org/docs/latest/api/')
+    assert.equal(context7?.trust, 'third-party')
+    assert.equal(docs?.trust, 'official-publisher')
+  })
+
   test('tier ordering survives the merge: derived, then official, then community', () => {
     const plan = planWith(
       new Map([

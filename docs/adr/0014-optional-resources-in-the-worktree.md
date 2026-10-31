@@ -31,9 +31,11 @@ not support.
 2. **Publisher evidence is a field, not an inference from the tier.** Discovery entries and
    plan suggestions carry `trust`: `official-publisher`, `local-install` or `third-party`.
    A local skill stays useful (tier `official`, ranked normally) and is labelled
-   `installed locally` rather than presented as first-party. A curated community resource
-   whose repository owner is in the playbook's `officialOrgs` is `official-publisher` too:
-   community is where a resource ranks, not who publishes it.
+   `installed locally` rather than presented as first-party. For every curated resource the
+   publisher is read from its evidence — a community entry's `repo`, an official entry's
+   GitHub URL — so a resource the playbook's own orgs own is `official-publisher` and one
+   filed under `official` but owned by someone else (Context7, hosted by upstash) is
+   `third-party`.
 3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
    string — the ticket's title, body, acceptance criteria and labels — against resource
    titles and details, and returns at most five. Only external resources are eligible
@@ -42,8 +44,10 @@ not support.
    deterministic and offline.
 4. **`claim`, `crew up` and `issue refresh` put the shortlist in the bundle** as
    `## Recommended resources (optional)`, labelled as aids that were not installed or run
-   and that never replace the verify commands. The bundle stays a bundle: values are
-   collapsed to one line and clamped.
+   and that never replace the verify commands. `claim` and `crew up` rank against the worktree
+   that was created, not the caller's checkout, because the claim may fork from a base branch
+   with a different stack. The bundle stays a bundle: values are collapsed to one line and
+   clamped.
 5. **Nothing is installed or executed.** A recommendation is a line of text. anvil does not
    `npx` a skill, clone a repository or run a resource's own instructions.
 
