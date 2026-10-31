@@ -60,6 +60,111 @@ describe('shortlistSuggestions', () => {
     assert.equal(shortlist[0]?.id, relevant.id)
   })
 
+  test('display kind prefixes do not contribute relevance', () => {
+    for (const kind of ['skill', 'agent', 'style', 'migration', 'community']) {
+      const distractor = resource({
+        id: `distractor:${kind}`,
+        title: `${kind}: unrelated/tool`,
+        detail: 'A database reference.',
+        confidence: 0.9,
+      })
+      const actual = resource({
+        id: `actual:${kind}`,
+        title: 'doc: Reference',
+        detail: `Guidance about ${kind}.`,
+        confidence: 0.3,
+      })
+
+      const shortlist = shortlistSuggestions([distractor, actual], { focus: kind, limit: 1 })
+
+      assert.equal(shortlist[0]?.id, actual.id, `${kind}: is display metadata, not a topic`)
+    }
+  })
+
+  test('focus words do not match substrings of unrelated words', () => {
+    for (const [term, word] of [
+      ['line', 'pipeline'],
+      ['unit', 'community'],
+      ['test', 'contest'],
+    ] as const) {
+      const distractor = resource({
+        id: `distractor:${word}`,
+        title: 'doc: Unrelated tool',
+        detail: `A ${word} reference.`,
+        confidence: 0.9,
+      })
+      const actual = resource({
+        id: `actual:${term}`,
+        title: 'doc: Reference',
+        detail: `Guidance about ${term}.`,
+        confidence: 0.3,
+      })
+
+      const shortlist = shortlistSuggestions([distractor, actual], { focus: term, limit: 1 })
+
+      assert.equal(shortlist[0]?.id, actual.id, `${term} must not match ${word}`)
+    }
+  })
+
+  test('case and compound separators do not hide relevant resource words', () => {
+    const actual = resource({
+      id: 'actual:testing',
+      title: 'skill: team/testing-setup',
+      detail: 'Tools for unit-tests and line_coverage.',
+      confidence: 0.3,
+    })
+
+    for (const focus of ['TESTING setup', 'testing-setup', 'testing_setup', 'unit tests', 'line coverage']) {
+      const shortlist = shortlistSuggestions([unrelated, actual], { focus, limit: 1 })
+
+      assert.equal(shortlist[0]?.id, actual.id, focus)
+    }
+  })
+
+  test('the detail bound does not turn a partial word into a match', () => {
+    const distractor = resource({
+      id: 'distractor:truncated',
+      title: 'doc: Unrelated reference',
+      detail: `${' '.repeat(996)}testimony`,
+      confidence: 0.9,
+    })
+    const actual = resource({
+      id: 'actual:test',
+      title: 'doc: Reference',
+      detail: 'A test reference.',
+      confidence: 0.3,
+    })
+
+    const shortlist = shortlistSuggestions([distractor, actual], { focus: 'test', limit: 1 })
+
+    assert.equal(shortlist[0]?.id, actual.id)
+  })
+
+  test('the CountryTracker coverage ticket prefers Android tests over CI pipeline triage', () => {
+    const triage = resource({
+      id: 'live:ci:triage',
+      title: 'community: Vasishtha15/ai-cicd-failure-triage-agent',
+      detail:
+        'AI-powered GitHub Actions agent that analyses CI/CD pipeline failures (tests, lint, dependencies, Docker).',
+      tier: 'community',
+      confidence: 0.3,
+      provenance: 'live',
+    })
+    const testing = resource({
+      ...relevant,
+      // The installed skill does not mention coverage: `unit` and `tests` are its real hits.
+      detail:
+        'Analyze and create a testing strategy for native Android apps with unit tests, UI tests and screenshot tests.',
+    })
+
+    const shortlist = shortlistSuggestions([triage, testing], {
+      focus: 'Raise combined JaCoCo line coverage with stronger unit and UI tests',
+      limit: 1,
+    })
+
+    assert.equal(shortlist[0]?.id, testing.id)
+  })
+
   test('no focus still returns a small tier and confidence list', () => {
     const shortlist = shortlistSuggestions([unrelated, docs])
 
@@ -113,11 +218,111 @@ describe('shortlistSuggestions', () => {
       provenance: 'curated',
     }
 
-    const shortlist = shortlistSuggestions([addLint, docs], { focus: 'lint' })
+    const shortlist = shortlistSuggestions([addLint, docs], { focus: 'android documentation' })
 
     assert.deepEqual(
       shortlist.map((s) => s.id),
       [docs.id],
+    )
+  })
+
+  test('a tailored list is not padded with resources that do not answer the focus', () => {
+    // `addLint` matches the focus strongly. It is a repository change, so it is excluded --
+    // and the list must not then fall back to `docs`, which answers none of it. A short
+    // honest list beats a padded misleading one.
+    const addLint: Suggestion = {
+      id: 'verify:android:lint',
+      tier: 'official',
+      playbook: 'android',
+      title: 'Add a lint command for Android (Jetpack Compose)',
+      detail: 'Android (Jetpack Compose) projects conventionally use: ./gradlew lint',
+      evidence: ['registry/playbooks/android.yaml'],
+      confidence: 0.7,
+      provenance: 'curated',
+    }
+
+    const shortlist = shortlistSuggestions([addLint, docs], { focus: 'lint' })
+
+    assert.deepEqual(shortlist, [])
+  })
+
+  test('one common word in a description is not relevance', () => {
+    // Apache Maka is a "high-performance agent workspace": it shares only `performance` with
+    // a Compose performance ticket, and that must not put it on the list.
+    const maka = resource({
+      id: 'live:jvm:maka',
+      title: 'agent: apache/maka',
+      detail: 'Apache Maka (Incubating) is a high-performance agent workspace that keeps a complete record.',
+      tier: 'official',
+      confidence: 0.65,
+      provenance: 'live',
+    })
+    const composeDocs = resource({
+      id: 'official:android:compose',
+      title: 'doc: Jetpack Compose documentation',
+      detail: 'The official guide to the UI toolkit and recomposition.',
+      confidence: 0.75,
+    })
+
+    const shortlist = shortlistSuggestions([maka, composeDocs], { focus: 'Improve Compose performance' })
+
+    assert.deepEqual(
+      shortlist.map((s) => s.id),
+      [composeDocs.id],
+    )
+  })
+
+  test('a focus word in the resource label is enough on its own', () => {
+    const labelled = resource({
+      id: 'official:android:compose',
+      title: 'doc: Jetpack Compose documentation',
+      detail: 'Everything else.',
+      confidence: 0.3,
+    })
+    const distractor = resource({
+      id: 'live:android:other',
+      title: 'agent: some/other-tool',
+      detail: 'Compose is mentioned here once.',
+      confidence: 0.9,
+      provenance: 'live',
+    })
+
+    const shortlist = shortlistSuggestions([distractor, labelled], { focus: 'Compose performance' })
+
+    assert.equal(shortlist.filter((s) => s.id === labelled.id).length, 1)
+    assert.ok(!shortlist.some((s) => s.id === distractor.id))
+  })
+
+  test('two distinct words in the text are enough without a label match', () => {
+    const twoWords = resource({
+      id: 'official:android:perf',
+      title: 'doc: Reference guide',
+      detail: 'Improve Compose performance by reading what triggers recomposition.',
+      confidence: 0.7,
+    })
+
+    const shortlist = shortlistSuggestions([twoWords], { focus: 'Improve Compose performance' })
+
+    assert.deepEqual(
+      shortlist.map((s) => s.id),
+      [twoWords.id],
+    )
+  })
+
+  test('a one-word focus still matches on that one word', () => {
+    // With a focus of one word there is nothing to corroborate it, so a single match counts.
+    const camera = resource({
+      id: 'live:android:camera',
+      title: 'skill: camera1-to-camerax',
+      detail: 'Migrate legacy camera implementations to CameraX.',
+      provenance: 'live',
+    })
+
+    const shortlist = shortlistSuggestions([camera], { focus: 'camera' })
+
+    assert.deepEqual(
+      shortlist.map((s) => s.id),
+      [camera.id],
     )
   })
 
@@ -132,6 +337,45 @@ describe('shortlistSuggestions', () => {
     const shortlist = shortlistSuggestions([relevant, duplicate], { focus: 'tests' })
 
     assert.equal(shortlist.length, 1)
+  })
+
+  test('a keyword buried in a long live description does not outrank a relevant resource', () => {
+    // A live entry's detail is the repository's own GitHub description, which can run to
+    // tens of thousands of characters and mention a topic in passing. Only the head of the
+    // text counts, so a match thousands of characters in is not relevance.
+    const noise = resource({
+      id: 'live:android:noise',
+      title: 'community: noise/aggregator',
+      detail: `${'filler '.repeat(1000)}coverage tests`,
+      confidence: 0.9,
+      provenance: 'live',
+      url: 'https://github.com/noise/aggregator',
+    })
+    assert.ok(noise.detail.includes('coverage'), 'the noise description does contain the words')
+
+    const shortlist = shortlistSuggestions([noise, relevant], { focus: 'coverage tests', limit: 1 })
+
+    assert.deepEqual(
+      shortlist.map((s) => s.id),
+      [relevant.id],
+    )
+  })
+
+  test('a detail match within the bound still counts', () => {
+    // The bound must not disable detail matching entirely: a genuinely relevant description
+    // is short, and its words still rank it.
+    const shortDetail = resource({
+      id: 'live:android:coverage',
+      title: 'community: some/coverage-tool',
+      detail: 'Measures coverage across unit tests.',
+      confidence: 0.3,
+      provenance: 'live',
+      url: 'https://github.com/some/coverage-tool',
+    })
+
+    const shortlist = shortlistSuggestions([unrelated, shortDetail], { focus: 'coverage tests', limit: 1 })
+
+    assert.equal(shortlist[0]?.id, shortDetail.id)
   })
 
   test('trust is labelled separately from the tier', () => {

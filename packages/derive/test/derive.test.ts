@@ -1151,6 +1151,48 @@ describe('brief', () => {
     assert.equal(live[0]?.install, '~/.agents/skills/node-review/SKILL.md')
   })
 
+  test('a live entry from an older cache is still attributed, not left unlabelled', () => {
+    // `trust` was added after the first discovery caches existed, so a cache entry can carry
+    // none. The brief must fall back to the tier and source the way the plan does, rather
+    // than print a live row with no publisher at all.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: () => null,
+      live: new Map([
+        [
+          'node',
+          [
+            {
+              label: 'some/tool',
+              url: 'https://github.com/some/tool',
+              why: 'A community helper found by search.',
+              section: 'community',
+              tier: 'community',
+              source: 'github-search',
+            },
+            {
+              label: 'nodejs/skills',
+              url: 'https://github.com/nodejs/skills',
+              why: 'Published by one of the node seeds.',
+              section: 'skills',
+              tier: 'official',
+              source: 'github-search',
+            },
+          ],
+        ],
+      ]),
+    })
+
+    const live = brief.playbooks.flatMap((p) => p.guidance).filter((g) => g.provenance === 'live')
+    assert.equal(live.find((g) => g.label === 'some/tool')?.trust, 'third-party')
+    assert.equal(live.find((g) => g.label === 'nodejs/skills')?.trust, 'official-publisher')
+  })
+
   test('a brief reads a publisher from the resource URL, not from the official list', () => {
     const dir = materialize('node-npm')
     const profile = profileIn(dir)

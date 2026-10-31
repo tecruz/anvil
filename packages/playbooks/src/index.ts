@@ -30,6 +30,7 @@ export {
   communityConfidence,
   curatedTrust,
   DEFAULT_SHORTLIST_LIMIT,
+  liveTrust,
   normalizeUrl,
   ownerIsOfficial,
   type Plan,

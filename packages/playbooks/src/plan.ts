@@ -516,14 +516,34 @@ const LIVE_SECTION_LABEL: Record<LiveResource['section'], string> = {
  */
 const LIVE_OFFICIAL_CAP = 0.65
 
+/**
+ * Who vouches for a live resource, read from `trust` and falling back to its source.
+ *
+ * `trust` was added after the first discovery caches existed, so an entry written before
+ * then carries none. A reader that finds it absent must read the evidence rather than leave
+ * the attribution blank: a `local-scan` entry is a file on this machine (`local-install`),
+ * an entry the seeds matched to an official org is `official-publisher`, and anything else
+ * is `third-party`. The plan and the brief share this one rule so the same cache cannot
+ * produce a labelled suggestion on one screen and an unlabelled one on the other.
+ */
+export function liveTrust(entry: {
+  trust?: string | null
+  source?: string | null
+  tier?: string | null
+}): SuggestionTrust {
+  if (entry.trust === 'official-publisher' || entry.trust === 'local-install' || entry.trust === 'third-party') {
+    return entry.trust
+  }
+  if (entry.source === 'local-scan') return 'local-install'
+  return entry.tier === 'official' ? 'official-publisher' : 'third-party'
+}
+
 function liveSuggestion(playbookId: string, entry: LiveResource): Suggestion {
   // A local skill is a file on this machine, not a link. `url` is omitted rather than
   // pointing at `file://`, which renders as a broken href in every consumer that takes one
   // -- and the evidence line already carries the path, which is the part a reader needs.
   const url = entry.url.trim()
-  const trust: SuggestionTrust =
-    entry.trust ??
-    (entry.source === 'local-scan' ? 'local-install' : entry.tier === 'official' ? 'official-publisher' : 'third-party')
+  const trust = liveTrust(entry)
   return {
     id: `live:${playbookId}:${url === '' ? (entry.install ?? entry.label) : normalizeUrl(url)}`,
     tier: entry.tier,
@@ -598,8 +618,10 @@ export interface ShortlistOptions {
   /**
    * Free text describing the work: a ticket title, body, labels, or a goal.
    *
-   * Matched against resource titles and details. Absent focus produces a tier/confidence
-   * list, which is still small and still optional -- it just is not tailored.
+   * Matched against resource labels and details by whole word. A resource is offered only
+   * when it answers the focus -- a focus word in its own label, or two distinct focus words
+   * in its text. Absent focus produces a tier/confidence list instead, which is still small
+   * and still optional -- it just is not tailored.
    */
   focus?: string
   /** Maximum entries. Defaults to [DEFAULT_SHORTLIST_LIMIT]; never fewer than one. */
@@ -657,13 +679,24 @@ const SHORTLIST_STOPWORDS = new Set([
  * Only external resources are eligible (`external` set): something to read or consult. A
  * change to this repository -- a missing verify command, a high-risk glob, or a derived fix
  * -- is work, not an aid, and offering it as optional reading invites an agent to skip it.
+ *
+ * With a focus, the list is tailored rather than padded: a resource that does not answer the
+ * focus is left out even when that means fewer than `limit`. Precision is the point -- a
+ * coverage ticket handed a CI triage agent because both mention "tests" is the failure this
+ * avoids, and a short honest list is better than a full misleading one.
  */
 export function shortlistSuggestions(suggestions: readonly Suggestion[], options: ShortlistOptions = {}): Suggestion[] {
   const limit = Math.max(1, Math.floor(options.limit ?? DEFAULT_SHORTLIST_LIMIT))
   const terms = focusTerms(options.focus ?? '')
-  const scored = suggestions
-    .filter((s) => s.external === true)
-    .map((s) => ({ suggestion: s, score: scoreSuggestion(s, terms) }))
+  const scored: Array<{ suggestion: Suggestion; score: number }> = []
+  for (const suggestion of suggestions) {
+    if (suggestion.external !== true) continue
+    // With a focus, only a resource that actually answers it is offered -- the list is
+    // tailored, not a tier/confidence catalogue padded to the limit. See `focusRelevance`.
+    const relevance = focusRelevance(suggestion, terms)
+    if (relevance === null) continue
+    scored.push({ suggestion, score: scoreSuggestion(suggestion, relevance) })
+  }
 
   scored.sort((a, b) => {
     if (a.score !== b.score) return b.score - a.score
@@ -685,11 +718,16 @@ export function shortlistSuggestions(suggestions: readonly Suggestion[], options
   return out
 }
 
+/** Shared word boundaries: punctuation separates names such as `testing-setup` and `unit_tests`. */
+function shortlistWords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+/g) ?? []
+}
+
 /** Lower-cased, de-duplicated words long enough to mean something. */
 function focusTerms(focus: string): string[] {
   const out: string[] = []
   const seen = new Set<string>()
-  for (const raw of focus.toLowerCase().match(/[a-z0-9][a-z0-9-]+/g) ?? []) {
+  for (const raw of shortlistWords(focus)) {
     if (raw.length < 4 || SHORTLIST_STOPWORDS.has(raw) || seen.has(raw)) continue
     seen.add(raw)
     out.push(raw)
@@ -698,18 +736,62 @@ function focusTerms(focus: string): string[] {
   return out
 }
 
-function scoreSuggestion(suggestion: Suggestion, terms: readonly string[]): number {
-  const haystack = `${suggestion.title} ${suggestion.detail}`.toLowerCase()
+/**
+ * How much of a resource's detail participates in a shortlist match.
+ *
+ * A curated `why` is a sentence or two -- the registry's longest is under 500 characters. A
+ * live entry's detail is the repository's own GitHub description, which can run to tens of
+ * thousands of characters and list every topic the maintainer could think of. Matching
+ * against all of it let a description that happened to mention the ticket's words 20,000
+ * characters in outrank a resource actually about the task, so the match is bounded to the
+ * part a reader would take as the summary. The bound sits well above every curated `why`, so
+ * no hand-written reason is ever truncated.
+ */
+const SHORTLIST_DETAIL_CHARS = 1000
+
+/** How many distinct focus words a suggestion matches, or null when it does not earn a place. */
+function focusRelevance(suggestion: Suggestion, terms: readonly string[]): number | null {
+  // No focus is the untailored case: every resource qualifies and the tie-breakers order it.
+  if (terms.length === 0) return 0
+
+  // The kind in the title is display metadata, not the resource's topic. In particular, every
+  // `community:` row used to match a ticket asking for `unit` tests.
+  const label = new Set(
+    shortlistWords(suggestion.title.replace(/^(?:doc|skill|agent|mcp|style|migration|community):\s*/i, '')),
+  )
+  const detail = new Set(shortlistWords(boundedDetail(suggestion.detail)))
+
   let matches = 0
+  let inLabel = false
   for (const term of terms) {
-    if (haystack.includes(term)) matches++
+    const inLabelHit = label.has(term)
+    if (inLabelHit || detail.has(term)) matches++
+    if (inLabelHit) inLabel = true
     if (matches === 3) break
   }
+
+  // A focus word in the resource's own label is the strongest signal. Otherwise a resource
+  // must match two distinct focus words: one word in a long description is a coincidence,
+  // and coincidence is what put a "high-performance workspace" in a Compose performance list
+  // and a CI triage agent in a coverage list. A one-word focus is the exception -- there is
+  // only one word, so one match is all the corroboration the ticket could offer.
+  const needed = Math.min(2, terms.length)
+  return inLabel || matches >= needed ? matches : null
+}
+
+/** The head of a resource's detail, without a word cut by the bound (`testimony` -> `test`). */
+function boundedDetail(detail: string): string {
+  if (detail.length <= SHORTLIST_DETAIL_CHARS) return detail
+  const head = detail.slice(0, SHORTLIST_DETAIL_CHARS)
+  const cut = /[a-z0-9]/i.test(detail[SHORTLIST_DETAIL_CHARS] ?? '')
+  return cut ? head.replace(/[a-z0-9]+$/i, '') : head
+}
+
+function scoreSuggestion(suggestion: Suggestion, relevance: number): number {
   // Relevance dominates confidence: a resource that mentions the ticket's own words is the
   // point of the list, and a high-confidence unrelated doc is exactly the noise this removes.
-  const relevance = matches * 2
   const tierBonus = suggestion.tier === 'official' ? 0.5 : 0
-  return relevance + tierBonus + suggestion.confidence
+  return relevance * 2 + tierBonus + suggestion.confidence
 }
 
 /** A stable identity for de-duplication: install path, then URL, then id. */

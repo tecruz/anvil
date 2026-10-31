@@ -31,7 +31,10 @@ not support.
 2. **Publisher evidence is a field, not an inference from the tier.** Discovery entries and
    plan suggestions carry `trust`: `official-publisher`, `local-install` or `third-party`.
    A local skill stays useful (tier `official`, ranked normally) and is labelled
-   `installed locally` rather than presented as first-party. For every curated resource the
+   `installed locally` rather than presented as first-party. The field was added after the
+   first discovery caches existed, so both the plan and the brief fall back to the entry's
+   source and tier when a cache carries none, rather than render a live row with no
+   publisher. For every curated resource the
    publisher is read from evidence: a community entry's `repo`, or an official entry's GitHub
    URL owner, against the playbook's `officialOrgs`; failing that, the URL host and path
    against the playbook's declared `officialDomains`. A declaration is an exact host or a
@@ -43,7 +46,18 @@ not support.
    declaration — an unrecognised publisher is not an official one.
 3. **`shortlistSuggestions` ranks resources for one piece of work.** It matches a focus
    string — the ticket's title, body, acceptance criteria and labels — against resource
-   titles and details, and returns at most five. Only external resources are eligible
+   labels and the head of their details, and returns at most five. Matching uses whole
+   words, with punctuation separating compounds such as `testing-setup` and `unit_tests`.
+   Display prefixes such as `community:` do not contribute relevance: `unit` must not match
+   `community`, nor `line` match `pipeline`. A resource is offered only when it **answers**
+   the focus — a focus word in its own label, or two distinct focus words in its text — so a
+   tailored list is shorter rather than padded to five with near-misses. One generic word is
+   not relevance, and treating it as such put a "high-performance workspace" in a Compose
+   performance list and a CI triage agent in a coverage list. The detail match is
+   bounded because a live entry's detail is the repository's own GitHub description, which
+   can run to tens of thousands of characters; a keyword appearing deep inside it is not
+   relevance, and letting it count let an unrelated aggregator repository displace a resource
+   actually about the task. Only external resources are eligible
    (a suggestion marked `external`); repository changes — derived fixes, a missing verify
    command, a high-risk glob — are work rather than reading and are left out. Scoring is
    deterministic and offline.

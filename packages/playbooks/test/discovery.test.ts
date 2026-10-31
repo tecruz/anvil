@@ -21,6 +21,7 @@ import {
   buildPlan,
   curatedTrust,
   type LiveResource,
+  liveTrust,
   loadBuiltins,
   matchPlaybooks,
   normalizeUrl,
@@ -255,6 +256,27 @@ describe('curatedTrust', () => {
     assert.equal(curatedTrust({ url: 'https://typescript-eslint.io/rules/' }, evidence), 'third-party')
     assert.equal(curatedTrust({ url: 'https://upstash.com/context7' }, evidence), 'third-party')
     assert.equal(curatedTrust({}, evidence), 'third-party')
+  })
+})
+
+describe('liveTrust', () => {
+  test('a stored trust value wins, even when the source could read differently', () => {
+    assert.equal(
+      liveTrust({ trust: 'official-publisher', source: 'github-search', tier: 'community' }),
+      'official-publisher',
+    )
+  })
+
+  test('a cache written before the field falls back to the source and tier', () => {
+    // The rule the schema states: a reader that finds `trust` absent must read the evidence
+    // rather than leave the attribution blank.
+    assert.equal(liveTrust({ source: 'local-scan', tier: 'official' }), 'local-install')
+    assert.equal(liveTrust({ source: 'github-search', tier: 'official' }), 'official-publisher')
+    assert.equal(liveTrust({ source: 'github-search', tier: 'community' }), 'third-party')
+  })
+
+  test('an unknown shape is third-party, never assumed official', () => {
+    assert.equal(liveTrust({}), 'third-party')
   })
 })
 

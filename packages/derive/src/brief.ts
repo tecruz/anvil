@@ -16,7 +16,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
-import { curatedTrust, type MatchResult } from '@anvil/playbooks'
+import { curatedTrust, liveTrust, type MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
 export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
@@ -169,6 +169,13 @@ export interface LiveGuidance {
   section: string
   /** Who vouches for it: `official-publisher`, `local-install` or `third-party`. */
   trust?: string
+  /**
+   * The ranking tier, `official` when the technology's own orgs publish it.
+   *
+   * Read only to fill in `trust` for an entry from a cache written before that field
+   * existed; the publisher of a live entry is otherwise already decided by discovery.
+   */
+  tier?: string
   /**
    * Install path, when the resource is a file on this machine rather than a link.
    *
@@ -408,7 +415,9 @@ function flattenGuidance(
         why: r.why,
         provenance: 'live' as const,
         ...(install === '' ? {} : { install }),
-        ...(r.trust === undefined ? {} : { trust: r.trust }),
+        // A cache written before `trust` existed has none; the same fallback the plan uses
+        // fills it in, so a live row is never left without a publisher.
+        trust: liveTrust(r),
       }
     })
 
