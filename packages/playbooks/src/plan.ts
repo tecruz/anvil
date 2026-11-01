@@ -718,17 +718,39 @@ export function shortlistSuggestions(suggestions: readonly Suggestion[], options
   return out
 }
 
+/**
+ * Technology names short enough that the length filter would otherwise drop them.
+ *
+ * The four-character minimum exists to drop English noise (`and`, `the`, `for`), and it also
+ * dropped the entire focus of a ticket about Go, PHP, C# or .NET: `go` and `php` are three
+ * characters, `.NET` tokenises to `net`, and `C#` to `c`. With every term gone the focus
+ * matched nothing, so `focusRelevance` admitted everything and the "tailored" list quietly
+ * degenerated into the unfocused tier/confidence list -- the exact padding the shortlist
+ * exists to avoid.
+ *
+ * This is a curated allowlist, not a lower threshold, because a threshold of two or three
+ * would readmit the noise the filter is for. Each entry is a name a repository is really
+ * known by, and a whole-word match keeps `c` out of `ci` and `net` out of `network`.
+ */
+const SHORTLIST_SHORT_TECH_TERMS = new Set(['go', 'php', 'c', 'js', 'ts', 'cs', 'sql', 'css', 'ios', 'k8s', 'net'])
+
 /** Shared word boundaries: punctuation separates names such as `testing-setup` and `unit_tests`. */
 function shortlistWords(text: string): string[] {
   return text.toLowerCase().match(/[a-z0-9]+/g) ?? []
 }
 
-/** Lower-cased, de-duplicated words long enough to mean something. */
+/**
+ * Lower-cased, de-duplicated words long enough to mean something.
+ *
+ * A short word is kept only when it is a technology name (see `SHORTLIST_SHORT_TECH_TERMS`);
+ * everything else must clear the four-character bar.
+ */
 function focusTerms(focus: string): string[] {
   const out: string[] = []
   const seen = new Set<string>()
   for (const raw of shortlistWords(focus)) {
-    if (raw.length < 4 || SHORTLIST_STOPWORDS.has(raw) || seen.has(raw)) continue
+    if (SHORTLIST_STOPWORDS.has(raw) || seen.has(raw)) continue
+    if (raw.length < 4 && !SHORTLIST_SHORT_TECH_TERMS.has(raw)) continue
     seen.add(raw)
     out.push(raw)
     if (out.length === 20) break

@@ -247,3 +247,64 @@ describe('discoverLocal: publisher evidence', () => {
     }
   })
 })
+
+describe('local skill matching uses identity terms, not search phrases', () => {
+  // The defect these pin, found on the authoring machine: a CI playbook whose keyword was
+  // "workflow validation" matched a Jetpack Compose skill because its description contained
+  // the ordinary word "workflow", and a Terraform playbook matched a testing skill through
+  // "infrastructure". The keyword is what the network is asked; it is not what a skill is.
+  function withSkill(dir: string, body: string): { env: NodeJS.ProcessEnv } {
+    const h = home()
+    skill(join(h, '.agents', 'skills'), dir, body)
+    return { env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv }
+  }
+
+  test('a search keyword head does not match a local skill', () => {
+    const { env } = withSkill(
+      'compose-skill',
+      '---\nname: compose-skill\ndescription: Compose UI for Android apps, with a flexible workflow.\n---\n',
+    )
+    const result = discoverLocal(
+      'ci',
+      { officialOrgs: [], keywords: ['workflow validation'], mcp: [], localMatch: [] },
+      { env },
+    )
+    assert.equal(result.entries.length, 0, 'the word "workflow" is not evidence of a CI skill')
+  })
+
+  test('a keyword head that names another technology does not leak in', () => {
+    const { env } = withSkill(
+      'testing-setup',
+      '---\nname: testing-setup\ndescription: Set up a testing infrastructure with unit tests.\n---\n',
+    )
+    const result = discoverLocal(
+      'terraform',
+      { officialOrgs: [], keywords: ['infrastructure agent skills'], mcp: [], localMatch: [] },
+      { env },
+    )
+    assert.equal(result.entries.length, 0, 'the word "infrastructure" is not Terraform evidence')
+  })
+
+  test('an explicit local-match term is what surfaces a skill', () => {
+    const { env } = withSkill(
+      'ts-tools',
+      '---\nname: ts-tools\ndescription: Everyday helpers for a TypeScript monorepo.\n---\n',
+    )
+    const result = discoverLocal(
+      'node',
+      { officialOrgs: [], keywords: [], mcp: [], localMatch: ['typescript'] },
+      { env },
+    )
+    assert.equal(result.entries.length, 1)
+    assert.equal(result.entries[0]?.label, 'ts-tools')
+  })
+
+  test('the playbook id alone still matches a skill named after it', () => {
+    const { env } = withSkill(
+      'navigation',
+      '---\nname: navigation\ndescription: Navigation patterns for Android apps.\n---\n',
+    )
+    const result = discoverLocal('android', { officialOrgs: [], keywords: [], mcp: [], localMatch: [] }, { env })
+    assert.equal(result.entries.length, 1)
+  })
+})

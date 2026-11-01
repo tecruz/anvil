@@ -1,0 +1,92 @@
+# Flutter playbook.
+#
+# Flutter is Dart plus an SDK, and it hides the platform completely: a Flutter app has no
+# `AndroidManifest.xml` under version control in the way a native app does, and no Xcode project
+# either. The `pubspec.yaml` declaring the Flutter SDK is the whole signal.
+
+id: flutter
+title: Flutter
+priority: 58
+
+match:
+  files: ['pubspec.yaml', '**/pubspec.yaml']
+  deps: ['flutter']
+  importPrefixes: ['package:flutter/']
+
+official:
+  docs:
+    - label: Flutter documentation
+      url: 'https://docs.flutter.dev/'
+      why: >-
+        The framework guide, organised by task. Widget lifecycle and the build/render model are
+        not inferable from examples, and they are what most layout and performance bugs turn on.
+    - label: Dart API reference
+      url: 'https://api.dart.dev/'
+      why: >-
+        The language and core-library reference. Dart's async, null-safety and collection
+        semantics decide most compiler errors, and the reference settles them precisely.
+  skills:
+    - label: Flutter cookbook
+      url: 'https://docs.flutter.dev/cookbook'
+      why: >-
+        Task-shaped recipes -- state, navigation, networking, persistence. The fastest route to
+        the idiom the framework expects rather than one ported from another stack.
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: Effective Dart
+      url: 'https://dart.dev/effective-dart'
+      why: >-
+        The style guide the ecosystem and the analyzer assume. Prefer a repository's own
+        analysis_options.yaml when one exists; this is the fallback.
+      satisfiedBy: ['**/analysis_options.yaml']
+  migrationGuides:
+    - label: Flutter breaking changes
+      url: 'https://docs.flutter.dev/release/breaking-changes'
+      why: >-
+        Required before an SDK bump. Flutter removes deprecated APIs on a schedule, and the
+        removal is listed here with the replacement.
+
+community:
+  - repo: 'flutter/flutter'
+    label: Flutter
+    why: >-
+      The framework source and its issue tracker. The answer for what a widget actually does is
+      usually the widget's own source, which is short and readable.
+  - repo: 'dart-lang/linter'
+    label: Dart linter
+    why: >-
+      The lint rules `flutter analyze` runs, each with the reason. Useful for telling a real
+      defect from a style preference.
+
+verify:
+  build: ['flutter build apk']
+  test: ['flutter test']
+  testFast: []
+  lint: ['flutter analyze']
+  format: ['dart format .']
+  typecheck: ['flutter analyze']
+
+conventions:
+  moduleLayout: 'lib/ for the app -- feature folders or layers inside it; test/ mirrors lib/'
+  testNaming: '*_test.dart, with widget tests alongside unit tests'
+  reviewFocus:
+    - 'a StatefulWidget that rebuilds a subtree it does not own'
+    - 'a platform channel, which is two runtimes agreeing on a message shape'
+    - 'pubspec.yaml SDK constraints and dependency changes'
+    - 'a synchronous call on the UI isolate'
+
+riskGlobs:
+  - '**/pubspec.yaml'
+  - '**/pubspec.lock'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['flutter', 'dart-lang']
+  officialDomains: ['docs.flutter.dev', 'api.flutter.dev', 'dart.dev', 'pub.dev']
+  localMatch: ['flutter', 'dart']
+  keywords:
+    - 'flutter agent skills'
+    - 'dart mcp server'
+    - 'flutter testing agent'
+  mcp: ['flutter', 'dart']

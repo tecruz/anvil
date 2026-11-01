@@ -1,13 +1,15 @@
 # Swift / Apple-platform playbook.
 
 id: swift
-title: Swift / Apple platforms
+title: Swift / SwiftPM
 priority: 55
 
 match:
-  files: ['Package.swift', '**/Package.swift', '**/*.xcodeproj/project.pbxproj', 'Podfile']
-  deps: ['swift']
-  importPrefixes: ['import SwiftUI', 'import UIKit', 'import Foundation']
+  # SwiftPM only. An Xcode project or a CocoaPods app is the `ios` playbook's job: it builds with
+  # `xcodebuild` and a scheme, not `swift build`. Matching on the `swift` *language* here put the
+  # SwiftPM commands in front of an Xcode project that cannot run them.
+  files: ['Package.swift', '**/Package.swift']
+  importPrefixes: ['import Foundation']
 
 official:
   docs:
@@ -68,10 +70,6 @@ conventions:
 riskGlobs:
   - '**/Package.swift'
   - '**/Package.resolved'
-  - '**/Podfile'
-  - '**/Podfile.lock'
-  - '**/*.entitlements'
-  - '**/Info.plist'
 # Live-discovery seeds; see android.yaml for why this section exists.
 discover:
   officialOrgs: ['swiftlang', 'apple']

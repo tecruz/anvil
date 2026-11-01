@@ -28,7 +28,7 @@ export {
   setFlag,
   setMonorepo,
 } from './detector.ts'
-export { ecosystemDetectors } from './detectors/ecosystems.ts'
+export { androidDetector, ecosystemDetectors, kotlinMultiplatformDetector } from './detectors/ecosystems.ts'
 export {
   additionalDetectors,
   elixirDetector,

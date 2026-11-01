@@ -118,11 +118,11 @@ describe('built-in registry', () => {
   })
 
   test('covers every ecosystem the detectors emit, plus the file-only ones', () => {
-    // The registry grew from 3 to 15, so this is now a coverage claim rather than a
-    // snapshot. A new ecosystem with no playbook shows up in `plan` as a matched stack
-    // with no guidance at all, which is worse than not detecting it. The QA playbooks are
-    // one per tool, because a repository that runs Playwright has no use for the Cypress
-    // documentation.
+    // The registry grew from 3 to 24, so this is now a coverage claim rather than a snapshot. A
+    // new ecosystem with no playbook shows up in `plan` as a matched stack with no guidance at
+    // all, which is worse than not detecting it. The QA and mobile frameworks are one playbook
+    // per tool, because a repository that runs Playwright has no use for the Cypress
+    // documentation, and a Flutter app has none for Xcode's.
     const ids = playbooks.map((p) => p.id).sort()
     assert.deepEqual(ids, [
       'android',
@@ -131,15 +131,19 @@ describe('built-in registry', () => {
       'docker',
       'dotnet',
       'elixir',
+      'flutter',
       'go',
+      'ios',
       'jvm',
       'kubernetes',
       'maestro',
+      'maui',
       'node',
       'php',
       'playwright',
       'python',
       'qa',
+      'react-native',
       'ruby',
       'rust',
       'swift',

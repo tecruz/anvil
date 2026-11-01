@@ -84,6 +84,9 @@ riskGlobs:
 discover:
   officialOrgs: ['openjdk', 'gradle', 'apache']
   officialDomains: ['docs.gradle.org', 'docs.oracle.com', 'google.github.io']
+  # Identity terms for the local skill scan; `jvm` is below the matcher's length floor, so an
+  # installed Kotlin or Gradle skill is found by the language and build-tool names instead.
+  localMatch: ['java', 'kotlin', 'gradle', 'maven']
   keywords:
     - 'java mcp server'
     - 'gradle agent skills'

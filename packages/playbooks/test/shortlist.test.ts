@@ -384,3 +384,61 @@ describe('shortlistSuggestions', () => {
     assert.equal(trustLabel('third-party'), 'third party')
   })
 })
+
+describe('short technology names survive the focus filter', () => {
+  // A ticket titled "Fix Go TLS" is entirely three- and two-letter words. The four-character
+  // floor dropped every one of them, the focus matched nothing, and the "tailored" list
+  // degenerated into the unfocused tier/confidence list -- exactly the padding the shortlist
+  // is for. A curated allowlist of short *technology* names keeps them without readmitting
+  // English noise.
+  const go = resource({
+    id: 'go:effective',
+    title: 'doc: Effective Go',
+    detail: 'The conventions the Go project follows.',
+    url: 'https://go.dev/doc/effective_go',
+  })
+  const ci = resource({
+    id: 'ci:actions',
+    title: 'doc: GitHub Actions documentation',
+    detail: 'The workflow syntax and contexts.',
+    url: 'https://docs.github.com/en/actions',
+    confidence: 0.9,
+  })
+
+  test('a one-word Go focus keeps the Go resources and drops the rest', () => {
+    const focused = shortlistSuggestions([ci, go], { focus: 'Go' })
+    assert.deepEqual(
+      focused.map((s) => s.id),
+      ['go:effective'],
+    )
+    // And it is genuinely tailored, not the fallback list in disguise.
+    assert.notDeepEqual(
+      focused.map((s) => s.id),
+      shortlistSuggestions([ci, go]).map((s) => s.id),
+    )
+  })
+
+  test('.NET and PHP are recognised, not dropped', () => {
+    const dotnet = resource({ id: 'dotnet', title: 'doc: .NET documentation', detail: 'API reference.' })
+    const php = resource({ id: 'php', title: 'doc: PHP manual', detail: 'The language reference.' })
+    assert.deepEqual(
+      shortlistSuggestions([ci, dotnet], { focus: '.NET' }).map((s) => s.id),
+      ['dotnet'],
+    )
+    assert.deepEqual(
+      shortlistSuggestions([ci, php], { focus: 'PHP' }).map((s) => s.id),
+      ['php'],
+    )
+  })
+
+  test('a short non-technology word is still dropped', () => {
+    // The allowlist is the point: `do`/`of`/`to` are two letters and must not become terms, or
+    // the filter is meaningless. With only such words the focus is empty and the list falls
+    // back, which is the honest answer.
+    const a = resource({ id: 'a', title: 'doc: Alpha', detail: 'Of to do.' })
+    assert.deepEqual(
+      shortlistSuggestions([a], { focus: 'do to of' }).map((s) => s.id),
+      ['a'],
+    )
+  })
+})

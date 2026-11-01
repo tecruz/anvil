@@ -23,6 +23,8 @@ that supersedes it. The status line at the top is the source of truth.
 | [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | accepted |
 | [0013](0013-stale-discovery-is-reported-not-merged.md) | A stale discovery cache is reported, not merged | accepted |
 | [0014](0014-optional-resources-in-the-worktree.md) | A worktree gets a shortlist of optional resources, with publisher evidence | accepted |
+| [0015](0015-framework-evidence-is-the-framework.md) | A framework is matched by its own evidence, not its build system | accepted |
+| [0016](0016-mobile-platforms-are-their-own-stacks.md) | Mobile platforms are their own stacks, and Apple's two are two playbooks | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

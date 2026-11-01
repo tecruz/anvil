@@ -26,6 +26,7 @@ import {
 } from '../detector.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
+import { mobileDetectors } from './mobile.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
   return readText(join(ctx.root, ctx.resolve(rel))).text
@@ -400,18 +401,43 @@ export const browserTestDetector: Detector = {
 // Swift / iOS
 // ---------------------------------------------------------------------------
 
+/**
+ * The file that makes a repository an Xcode project rather than a SwiftPM package.
+ *
+ * `matches` used to test `hasFile('*.xcodeproj')` -- a literal string, which matched nothing --
+ * and `hasFile('project.pbxproj')`, which matched only a root-level file. Every Xcode project
+ * that exists puts the project at `App.xcodeproj/project.pbxproj`, so none of them were seen,
+ * and the repository was left with no stack while the plan still recommended `swift build`.
+ * Matching is by suffix now, at any depth.
+ */
+function appleProjectEvidence(ctx: DetectorContext): string | null {
+  return (
+    filesUnder(ctx, '').find(
+      (f) =>
+        f.endsWith('.xcodeproj/project.pbxproj') ||
+        f.endsWith('.xcworkspace/contents.xcworkspacedata') ||
+        f === 'Podfile' ||
+        f.endsWith('/Podfile'),
+    ) ?? null
+  )
+}
+
 export const swiftDetector: Detector = {
   id: 'swift',
   title: 'Swift / iOS',
   priority: 50,
-  matches: (ctx) => hasFile(ctx, 'Package.swift') || hasFile(ctx, '*.xcodeproj') || hasFile(ctx, 'project.pbxproj'),
+  matches: (ctx) => hasFile(ctx, 'Package.swift') || appleProjectEvidence(ctx) !== null,
   detect(ctx, draft) {
-    addStack(draft, {
-      id: 'swift',
-      version: null,
-      evidence: ['Package.swift'],
-    })
+    // SwiftPM and Xcode are two ecosystems with two different toolchains, and they are told
+    // apart by which manifest is present. A `Package.swift` is a SwiftPM package; an Xcode
+    // project is an `.xcodeproj`/`.xcworkspace` or a CocoaPods `Podfile`. They can coexist in
+    // one repository, so both stacks may be emitted.
     if (hasFile(ctx, 'Package.swift')) {
+      addStack(draft, {
+        id: 'swift',
+        version: null,
+        evidence: ['Package.swift'],
+      })
       // `swift build` / `swift test` are the toolchain's own subcommands, and the
       // manifest is what makes them applicable to this package.
       addCommand(draft, 'build', {
@@ -425,6 +451,16 @@ export const swiftDetector: Detector = {
         evidence: 'Package.swift',
       })
     }
+
+    const project = appleProjectEvidence(ctx)
+    if (project !== null) {
+      // No `swift build` here: an Xcode project builds through `xcodebuild` and a scheme, which
+      // is not a single runnable command without knowing the scheme. The playbook carries no
+      // verify command for that reason; inventing one is the confidently-wrong output this tool
+      // exists to avoid.
+      addStack(draft, { id: 'xcode', version: null, evidence: [project] })
+    }
+
     if (hasFile(ctx, '.swiftlint.yml')) addTool(draft, 'lint', 'swiftlint')
     if (hasFile(ctx, '.swiftformat')) addTool(draft, 'formatter', 'swiftformat')
   },
@@ -602,4 +638,5 @@ export const additionalDetectors: readonly Detector[] = [
   frontendDetector,
   browserTestDetector,
   bazelDetector,
+  ...mobileDetectors,
 ]

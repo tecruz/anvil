@@ -171,6 +171,23 @@ describe('discover section validation', () => {
     assert.ok(issues.some((i) => i.path === 'discover.mcp' && /non-empty/.test(i.message)))
   })
 
+  test('accepts an explicit local-match list, and rejects a blank entry', () => {
+    // `localMatch` is the local skill scan's terms, kept separate from the search keywords.
+    const ok = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  localMatch: ['kotlin', 'gradle']\n`))
+    assert.deepEqual(ok.issues, [])
+    assert.deepEqual(ok.playbook?.discover.localMatch, ['kotlin', 'gradle'])
+
+    const blank = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  localMatch: [' ']\n`))
+    assert.ok(blank.issues.some((i) => i.path === 'discover.localMatch' && /non-empty/.test(i.message)))
+  })
+
+  test('an absent local-match list is omitted, not an empty array', () => {
+    // Omitting it keeps the existing deep-equality assertions and any consumer's shape stable;
+    // a playbook that declares no terms simply matches on its id.
+    const { playbook } = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['acme']\n`))
+    assert.equal('localMatch' in (playbook?.discover ?? {}), false)
+  })
+
   test('accepts a login with a hyphen, because GitHub allows one', () => {
     const { issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['google-deepmind']\n`))
     assert.deepEqual(issues, [])

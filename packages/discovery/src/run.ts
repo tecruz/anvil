@@ -39,18 +39,26 @@ export interface RunResult {
   kept: number
 }
 
-/** Terms a local skill is matched against: the playbook id, its words, and its keywords. */
+/**
+ * Terms a local skill is matched against: the playbook's own name, plus the identity terms
+ * it declares in `localMatch`.
+ *
+ * The seeds' `keywords` are deliberately *not* used here, and that is the whole point of the
+ * split. A keyword is a repository-search phrase, and its leading word is an ordinary English
+ * word often enough to matter: the head of `workflow validation` is `workflow`, which matched
+ * a Jetpack Compose skill whose description contained the word, and the head of
+ * `infrastructure agent skills` is `infrastructure`, which matched a testing skill. A local
+ * skill is a file *about the technology*, so the only honest terms are the technology's own
+ * names -- the id, and the curated `localMatch` list.
+ *
+ * The id is added whole and split on hyphens, so `play-billing` matches both halves: a skill
+ * is as likely to say "billing" as the full name.
+ */
 export function matchTerms(playbookId: string, seeds: DiscoverSeeds): string[] {
   const terms = new Set<string>()
   terms.add(playbookId)
   for (const part of playbookId.split('-')) if (part.length >= 4) terms.add(part)
-  for (const keyword of seeds.keywords) {
-    // The leading word of each keyword is the technology name; the rest is the qualifier
-    // ("android agent skills" -> "android"). Matching on the whole phrase would miss a skill
-    // described as "Skills for Android development".
-    const head = keyword.trim().split(/\s+/)[0]
-    if (head !== undefined && head.length >= 4) terms.add(head)
-  }
+  for (const term of seeds.localMatch ?? []) terms.add(term)
   return [...terms]
 }
 

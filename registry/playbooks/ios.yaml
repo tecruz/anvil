@@ -1,0 +1,94 @@
+# iOS / Xcode playbook.
+#
+# Separate from `swift` on purpose. A SwiftPM package builds with `swift build`; an Xcode app
+# builds with `xcodebuild` and a scheme. They share a language and nothing else, and matching an
+# Xcode project as `swift` is what put `swift build` in front of a repository that cannot run it.
+
+id: ios
+title: iOS / Xcode
+priority: 56
+
+match:
+  files:
+    - '**/*.xcodeproj/project.pbxproj'
+    - '**/*.xcworkspace/contents.xcworkspacedata'
+    - 'Podfile'
+    - '**/Podfile'
+  deps: ['xcode']
+  importPrefixes: ['import UIKit', 'import SwiftUI']
+
+official:
+  docs:
+    - label: Apple Developer documentation
+      url: 'https://developer.apple.com/documentation/'
+      why: >-
+        The platform reference, per OS version. Behaviour that differs by deployment target --
+        availability, deprecations, entitlements -- is stated here and nowhere else.
+    - label: Xcode build settings reference
+      url: 'https://developer.apple.com/documentation/xcode/build-settings-reference'
+      why: >-
+        Every build setting a target relies on. A wrong setting fails in a way that reads like a
+        code bug, and the reference is the only place the defaulting is written down.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Xcode release notes
+      url: 'https://developer.apple.com/documentation/xcode-release-notes'
+      why: >-
+        Required before an Xcode upgrade. Each release moves the toolchain, the SDK and the
+        simulator runtimes together, and a project that builds on one can fail on the next.
+
+community:
+  - repo: 'CocoaPods/CocoaPods'
+    label: CocoaPods
+    why: >-
+      The dependency manager a `Podfile` implies. Its Podfile syntax reference is the honest
+      answer for what a pod declaration does, and `pod install` regenerates the workspace.
+    satisfiedBy: ['**/Podfile.lock']
+  - repo: 'realm/SwiftLint'
+    label: SwiftLint
+    why: >-
+      The de-facto Swift linter. Its rule directory explains what each rule enforces, which is
+      more useful than a bare lint failure.
+    satisfiedBy: ['**/.swiftlint.yml']
+
+verify:
+  # Deliberately empty. `xcodebuild` requires a scheme, a scheme belongs to the project, and
+  # there is no single command that runs against an arbitrary Xcode project without one.
+  # Inventing `xcodebuild build` would hand an agent a command that fails with "requires a
+  # scheme", which is the confidently-wrong output this project exists to avoid.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'sources live in Xcode groups; Pods/ is generated and never edited by hand'
+  testNaming: '*Tests.swift, with XCTest or swift-testing, in the test target'
+  reviewFocus:
+    - 'the project file, which Xcode rewrites and a merge conflict magnet'
+    - 'the Info.plist and entitlements, particularly a new permission'
+    - 'anything touching a deployment target or an availability check'
+    - 'Podfile or Package.resolved changes, which move the dependency graph'
+
+riskGlobs:
+  - '**/*.xcodeproj/project.pbxproj'
+  - '**/Info.plist'
+  - '**/*.entitlements'
+  - '**/Podfile'
+  - '**/Podfile.lock'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['apple', 'swiftlang']
+  officialDomains: ['developer.apple.com']
+  localMatch: ['xcode', 'swiftui', 'uikit']
+  keywords:
+    - 'ios mcp server'
+    - 'xcode agent skills'
+    - 'swiftui agents'
+  mcp: ['xcode', 'ios']

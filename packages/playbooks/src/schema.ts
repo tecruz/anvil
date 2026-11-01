@@ -83,6 +83,18 @@ export interface DiscoverSeeds {
    * The host is case-insensitive; the path is not, because a URL path is case-sensitive.
    */
   officialDomains?: string[]
+  /**
+   * Identity terms a *locally installed skill* is matched against.
+   *
+   * Kept apart from `keywords` on purpose. A keyword is a repository-search phrase, and its
+   * head is an ordinary English word often enough to matter: the head of `workflow
+   * validation` is `workflow`, which matched a Jetpack Compose skill whose description
+   * happened to contain the word, and the head of `infrastructure agent skills` is
+   * `infrastructure`, which matched a testing skill. These are the technology's own names --
+   * what a skill's frontmatter would actually say it is about -- and nothing else. Small and
+   * unambiguous by construction; the playbook id is always matched too.
+   */
+  localMatch?: string[]
   /** Repository-search terms. Kept generic enough that new repos match too. */
   keywords: string[]
   /** Search terms for the MCP registry. */
@@ -419,8 +431,9 @@ export function validatePlaybook(
   checkKeys(c, ['moduleLayout', 'testNaming', 'reviewFocus'], 'conventions', issues)
 
   const d = optionalSection(doc.discover)
-  checkKeys(d, ['officialOrgs', 'officialDomains', 'keywords', 'mcp'], 'discover', issues)
+  checkKeys(d, ['officialOrgs', 'officialDomains', 'localMatch', 'keywords', 'mcp'], 'discover', issues)
   const officialDomains = domainArray(d.officialDomains, 'discover.officialDomains', issues)
+  const localMatch = nonEmptyStrArray(d.localMatch, 'discover.localMatch', issues)
 
   const communityRaw = doc.community
   const community: CommunityResource[] = []
@@ -503,6 +516,7 @@ export function validatePlaybook(
       discover: {
         officialOrgs: loginArray(d.officialOrgs, 'discover.officialOrgs', issues),
         ...(officialDomains.length === 0 ? {} : { officialDomains }),
+        ...(localMatch.length === 0 ? {} : { localMatch }),
         keywords: nonEmptyStrArray(d.keywords, 'discover.keywords', issues),
         mcp: nonEmptyStrArray(d.mcp, 'discover.mcp', issues),
       },

@@ -62,7 +62,7 @@ function writeSkill(home: string, root: string, dir: string, body: string): void
 }
 
 describe('matchTerms', () => {
-  test('includes the playbook id and the head of each keyword', () => {
+  test('includes the playbook id', () => {
     const terms = matchTerms('android', ANDROID)
     assert.ok(terms.includes('android'))
     assert.ok(terms.includes('jetpack') === false, 'not seeded, so not a term')
@@ -74,12 +74,26 @@ describe('matchTerms', () => {
     assert.ok(terms.includes('billing'))
   })
 
-  test('takes the leading word of a multi-word keyword', () => {
-    // "android agent skills" must match a skill described as "Skills for Android
-    // development", so the head is the term rather than the whole phrase.
-    assert.ok(
+  test('does not take a term from a search keyword', () => {
+    // The keyword head is an ordinary English word far too often -- `workflow` from "workflow
+    // validation", `infrastructure` from "infrastructure agent skills" -- and matching a local
+    // skill on it put a Play Engage SDK skill in the CI plan and a testing skill in the
+    // Terraform one. Search phrases are what the *network* is asked; `localMatch` is what a
+    // skill's own frontmatter is matched against.
+    assert.equal(
       matchTerms('node', { officialOrgs: [], keywords: ['typescript agent skills'], mcp: [] }).includes('typescript'),
+      false,
     )
+  })
+
+  test('includes an explicitly declared local-match term', () => {
+    const terms = matchTerms('node', {
+      officialOrgs: [],
+      keywords: [],
+      mcp: [],
+      localMatch: ['typescript'],
+    })
+    assert.ok(terms.includes('typescript'))
   })
 })
 
