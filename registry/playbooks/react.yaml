@@ -1,0 +1,81 @@
+# React (web) playbook.
+#
+# Matched on the `react` stack, which the detector emits only when `react` and `react-dom` are
+# both declared. React Native depends on `react` without `react-dom`, so an app is offered this
+# playbook only when it is a web React app.
+
+id: react
+title: React
+priority: 59
+
+match:
+  deps: ['react']
+  importPrefixes: ['react']
+
+official:
+  docs:
+    - label: React documentation
+      url: 'https://react.dev/learn'
+      why: >-
+        The task-oriented guide, including the mental model for state and rendering. The rules it
+        states are what the compiler and the linter cannot check.
+    - label: React API reference
+      url: 'https://react.dev/reference/react'
+      why: >-
+        Every hook and component API, with the rules for calling them. Hook order and effect
+        cleanup are the two mistakes that pass review and fail at runtime.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: Rules of React
+      url: 'https://react.dev/reference/rules'
+      why: >-
+        The invariants the runtime relies on: purity in render, no mutation of props or state,
+        and hooks called unconditionally. A violation is a bug even when it renders today.
+  migrationGuides:
+    - label: React blog and release notes
+      url: 'https://react.dev/blog'
+      why: >-
+        Required before a major upgrade. Behaviour changes and new compiler assumptions are
+        announced here, not in the changelog of the package you depend on.
+
+community:
+  - repo: 'facebook/react'
+    label: React
+    why: >-
+      The framework source and its issue tracker. The reconciler and the compiler live here, so
+      a "why does this re-render" question is answered by reading them.
+  - repo: 'reactjs/react.dev'
+    label: React documentation source
+    why: >-
+      The documentation repository, where an ambiguous page is discussed before it is edited.
+
+verify:
+  build: []
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'components/ or features/; hooks in their own module; no fetch in a component body'
+  testNaming: '*.test.tsx with @testing-library/react, asserting on the rendered output'
+  reviewFocus:
+    - 'a hook called conditionally or after an early return'
+    - 'state derived from props, which goes stale when the props change'
+    - 'an effect without a cleanup, or one that depends on a new object every render'
+    - 'keys on a list, where an index key reorders component state'
+
+riskGlobs: []
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['facebook', 'reactjs']
+  officialDomains: ['react.dev']
+  localMatch: ['react']
+  keywords:
+    - 'react agent skills'
+    - 'react mcp server'
+  mcp: ['react']

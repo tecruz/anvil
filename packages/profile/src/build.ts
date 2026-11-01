@@ -56,6 +56,7 @@ const EXTENSION_LANGUAGES: ReadonlyArray<[ext: string, lang: string]> = [
   ['.psm1', 'powershell'],
   ['.psd1', 'powershell'],
   ['.sql', 'sql'],
+  ['.ipynb', 'jupyter'],
   ['.vue', 'vue'],
   ['.svelte', 'svelte'],
   ['.tf', 'terraform'],

@@ -455,6 +455,19 @@ export const jvmDetector: Detector = {
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
     }
 
+    // Spring Boot is a framework on top of the build, and the marker is the starter it pulls in.
+    // A plain JVM project that happens to be a web service is not a Spring project: the framework's
+    // conventions -- auto-configuration, the application context, the request lifecycle -- are not
+    // inferable from `build.gradle`.
+    for (const file of [...(maven ? ['pom.xml'] : []), ...gradleFiles]) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      const line = findLine(text, /spring-boot-starter|org\.springframework\.boot/)
+      if (line === null) continue
+      addStack(draft, { id: 'spring-boot', version: null, evidence: [evidence(file, line)] })
+      break
+    }
+
     for (const f of ctx.files) {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
     }
@@ -488,6 +501,19 @@ export const dotnetDetector: Detector = {
       const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
       addModule(draft, { id, path: dir, kind: 'project', deps: [] })
     }
+
+    // ASP.NET Core is a .NET workload with its own SDK marker. A plain .NET project is not a web
+    // application, and the framework's guidance -- middleware order, the request pipeline, the
+    // hosting model -- does not apply to a console app.
+    for (const p of projects) {
+      const text = read(ctx, p)
+      if (text === null) continue
+      const line = findLine(text, /Microsoft\.NET\.Sdk\.Web/i)
+      if (line === null) continue
+      addStack(draft, { id: 'aspnet', version: null, evidence: [evidence(p, line)] })
+      break
+    }
+
     if (hasFile(ctx, 'global.json')) {
       setMonorepo(draft, { tool: 'sln', evidence: 'global.json', members: [] })
     }

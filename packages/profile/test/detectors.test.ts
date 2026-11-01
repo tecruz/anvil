@@ -268,3 +268,87 @@ describe('Shell and PowerShell are projects only when they signal it', () => {
     assert.ok(!ids.includes('powershell-project'), ids.join(', '))
   })
 })
+
+describe('frontend frameworks are matched from dependencies, not from "it is Node"', () => {
+  test('a React web app is react', () => {
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ dependencies: { react: '19.0.0', 'react-dom': '19.0.0' } }),
+      'src/App.tsx': 'export default function App() { return null }\n',
+    })
+    assert.ok(ids.includes('react'), ids.join(', '))
+  })
+
+  test('a React Native app is not React web', () => {
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ dependencies: { react: '19.0.0', 'react-native': '0.79.0' } }),
+      'App.tsx': 'export default 1\n',
+    })
+    assert.ok(!ids.includes('react'), `React Native matched the web React stack: ${ids.join(', ')}`)
+    assert.ok(ids.includes('react-native'), ids.join(', '))
+  })
+
+  test('a next.config.ts file is Next.js', () => {
+    const ids = stacksOf({ 'next.config.ts': 'export default {}\n' })
+    assert.ok(ids.includes('nextjs'), ids.join(', '))
+  })
+
+  test('an @angular/core dependency is Angular', () => {
+    const ids = stacksOf({ 'package.json': JSON.stringify({ dependencies: { '@angular/core': '20.0.0' } }) })
+    assert.ok(ids.includes('angular'), ids.join(', '))
+  })
+
+  test('an Express service matches no frontend framework', () => {
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ dependencies: { express: '5.0.0' } }),
+      'src/server.js': 'const express = require("express")\n',
+    })
+    for (const id of ['react', 'nextjs', 'angular', 'vue', 'svelte', 'astro', 'nestjs']) {
+      assert.ok(!ids.includes(id), `${id} matched an Express service: ${ids.join(', ')}`)
+    }
+  })
+})
+
+describe('AI and backend frameworks are matched from their own marker', () => {
+  test('a notebook is jupyter', () => {
+    const ids = stacksOf({ 'analysis.ipynb': '{"cells":[],"nbformat":4,"nbformat_minor":5}\n' })
+    assert.ok(ids.includes('jupyter'), ids.join(', '))
+  })
+
+  test('a declared torch dependency is pytorch', () => {
+    const ids = stacksOf({ 'pyproject.toml': '[project]\nname="m"\nversion="0.1.0"\ndependencies=["torch>=2.5"]\n' })
+    assert.ok(ids.includes('pytorch'), ids.join(', '))
+  })
+
+  test('a Spring Boot starter is spring-boot', () => {
+    const ids = stacksOf({
+      'pom.xml':
+        '<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.0</version></parent></project>\n',
+      'src/main/java/App.java': 'class App {}\n',
+    })
+    assert.ok(ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('a plain Maven project is not Spring Boot', () => {
+    const ids = stacksOf({
+      'pom.xml': '<project><groupId>com.acme</groupId><artifactId>app</artifactId></project>\n',
+      'src/main/java/App.java': 'class App {}\n',
+    })
+    assert.ok(!ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('Microsoft.NET.Sdk.Web is aspnet', () => {
+    const ids = stacksOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+    })
+    assert.ok(ids.includes('aspnet'), ids.join(', '))
+  })
+
+  test('a plain .NET console app is not aspnet', () => {
+    const ids = stacksOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+    })
+    assert.ok(!ids.includes('aspnet'), ids.join(', '))
+  })
+})

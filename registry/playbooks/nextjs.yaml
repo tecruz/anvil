@@ -1,0 +1,74 @@
+# Next.js playbook.
+#
+# Matched on the `nextjs` stack, emitted from a `next` dependency or a `next.config.*` file (all
+# four extensions). A Node service is not a Next.js app, and the routing and rendering model is
+# the part that differs from plain React.
+
+id: nextjs
+title: Next.js
+priority: 62
+
+match:
+  files: ['**/next.config.*']
+  deps: ['nextjs']
+  importPrefixes: ['next/']
+
+official:
+  docs:
+    - label: Next.js documentation
+      url: 'https://nextjs.org/docs'
+      why: >-
+        The routing, rendering and data-fetching model. Whether a page is static, dynamic or
+        streamed decides what runs on the server, and it is configured, not inferred.
+    - label: Next.js App Router
+      url: 'https://nextjs.org/docs/app'
+      why: >-
+        The App Router layout: layouts, loading and error boundaries, and server components. The
+        client/server split is the rule most other React habits violate.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Next.js upgrade guides
+      url: 'https://nextjs.org/docs/app/guides/upgrading'
+      why: >-
+        Required before a major upgrade. The App Router migration and the async request APIs
+        changed in ways that compile and then fail at request time.
+
+community:
+  - repo: 'vercel/next.js'
+    label: Next.js
+    why: >-
+      The framework source. Build output and caching behaviour are settled by reading it, and the
+      examples are maintained next to it.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'app/ for the App Router (route folders), or pages/ in the older model; never both'
+  testNaming: '*.test.tsx for components, with an end-to-end test for a route'
+  reviewFocus:
+    - 'a server component importing a client-only API, or the reverse'
+    - 'caching and revalidation directives, which decide how stale a page can be'
+    - 'anything under app/ that adds a route or changes its params'
+    - 'environment variables read at build time, which bake into the bundle'
+
+riskGlobs:
+  - '**/next.config.*'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['vercel']
+  officialDomains: ['nextjs.org']
+  localMatch: ['nextjs', 'next.js']
+  keywords:
+    - 'nextjs agent skills'
+    - 'next.js mcp server'
+  mcp: ['nextjs']

@@ -1,0 +1,76 @@
+# ASP.NET Core playbook.
+#
+# Matched on the `aspnet` stack, emitted from the `Microsoft.NET.Sdk.Web` SDK marker in a csproj.
+# A plain .NET project is not a web application, and the framework's guidance -- middleware order,
+# the request pipeline, the hosting model -- does not apply to a console app.
+
+id: aspnet
+title: ASP.NET Core
+priority: 64
+
+match:
+  deps: ['aspnet']
+  importPrefixes: ['Microsoft.AspNetCore']
+
+official:
+  docs:
+    - label: ASP.NET Core documentation
+      url: 'https://learn.microsoft.com/en-us/aspnet/core/'
+      why: >-
+        The framework guide, versioned per .NET release. The hosting model and the request pipeline
+        changed across major versions, so read the page for the target framework in the csproj.
+    - label: ASP.NET Core middleware
+      url: 'https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/'
+      why: >-
+        Ordering and the terminal-vs-pass-through distinction. A middleware registered in the wrong
+        position is the most common cause of an authorization check that does not run.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: ASP.NET Core migration guides
+      url: 'https://learn.microsoft.com/en-us/aspnet/core/migration/'
+      why: >-
+        Required before a major version bump. Startup changes, hosting changes and middleware
+        renames are listed per version, and they fail at startup rather than at compile time.
+
+community:
+  - repo: 'dotnet/aspnetcore'
+    label: ASP.NET Core
+    why: >-
+      The framework source and issue tracker. Middleware, routing and the Kestrel server live here,
+      which is where a pipeline question is settled.
+
+verify:
+  # Empty on purpose: the `dotnet` playbook and detector already carry `dotnet build` /
+  # `dotnet test`. Repeating them here would print the same advice twice.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'Program.cs for the pipeline; one endpoint group or controller per feature'
+  testNaming: '*Tests.cs with WebApplicationFactory for the HTTP surface'
+  reviewFocus:
+    - 'middleware order, particularly authentication and authorization'
+    - 'a route or endpoint change, which changes the public surface'
+    - 'the target framework in the csproj, which decides what compiles'
+    - 'configuration binding, where a renamed key silently takes a default'
+
+riskGlobs:
+  - '**/Program.cs'
+  - '**/Startup.cs'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['dotnet']
+  officialDomains: ['learn.microsoft.com']
+  localMatch: ['aspnet', 'asp.net core', 'kestrel']
+  keywords:
+    - 'aspnet core agent skills'
+    - 'aspnet mcp server'
+  mcp: ['aspnetcore', 'dotnet']

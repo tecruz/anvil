@@ -1,0 +1,79 @@
+# Svelte / SvelteKit playbook.
+#
+# One playbook for both: SvelteKit is the application framework on top of Svelte, and the
+# component model, reactivity and store rules are Svelte's. Matched on the `svelte`/`sveltekit`
+# stacks, a `.svelte` file, or `svelte.config.*`.
+
+id: svelte
+title: Svelte / SvelteKit
+priority: 60
+
+match:
+  files: ['**/*.svelte', '**/svelte.config.*']
+  deps: ['svelte', 'sveltekit']
+  importPrefixes: ['svelte', '$app/']
+
+official:
+  docs:
+    - label: Svelte documentation
+      url: 'https://svelte.dev/docs/svelte/overview'
+      why: >-
+        The component model: runes, reactivity and lifecycle. Svelte 5 changed reactivity
+        substantially, so check which model the repository targets before editing.
+    - label: SvelteKit documentation
+      url: 'https://svelte.dev/docs/kit/introduction'
+      why: >-
+        Routing, load functions and the server/client boundary. A `+page.server.ts` and a
+        `+page.ts` behave differently, and the difference is not visible from the component.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Svelte migration guides
+      url: 'https://svelte.dev/docs/svelte/v5-migration-guide'
+      why: >-
+        The Svelte 4 to 5 changes, including the runes and event-handler renames. Required before
+        a major upgrade, and useful when reading older components.
+
+community:
+  - repo: 'sveltejs/svelte'
+    label: Svelte
+    why: >-
+      The compiler source. Most Svelte questions are "what did the compiler emit", and the source
+      answers that directly.
+  - repo: 'sveltejs/kit'
+    label: SvelteKit
+    why: >-
+      The framework, including the adapter and routing rules. A deployment problem is usually an
+      adapter decision documented here.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npm run check']
+
+conventions:
+  moduleLayout: 'src/routes/ for routes (+page.svelte, +page.server.ts); src/lib/ for shared code'
+  testNaming: '*.test.ts with Vitest, and a browser test for a route'
+  reviewFocus:
+    - 'a load function that runs on both server and client and assumes one of them'
+    - 'server-only data reaching the client, which is a leak as well as a bug'
+    - 'store subscription without unsubscribing'
+    - 'a form action or endpoint whose validation exists only on the client'
+
+riskGlobs:
+  - '**/svelte.config.*'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['sveltejs']
+  officialDomains: ['svelte.dev']
+  localMatch: ['svelte', 'sveltekit']
+  keywords:
+    - 'svelte agent skills'
+    - 'sveltekit mcp server'
+  mcp: ['svelte', 'sveltekit']
