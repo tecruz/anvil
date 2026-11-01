@@ -231,3 +231,40 @@ describe('the C/C++ detector keys on the build system', () => {
     assert.ok(!ids.includes('cmake'), ids.join(', '))
   })
 })
+
+describe('Shell and PowerShell are projects only when they signal it', () => {
+  test('a lone script is not a shell project', () => {
+    const ids = stacksOf({ 'scripts/deploy.sh': '#!/bin/sh\necho deploy\n' })
+    assert.ok(!ids.includes('shell-project'), ids.join(', '))
+  })
+
+  test('a .shellcheckrc is a shell project', () => {
+    const ids = stacksOf({ '.shellcheckrc': 'shell=bash\n', 'bin/tool.sh': '#!/bin/bash\n' })
+    assert.ok(ids.includes('shell-project'), ids.join(', '))
+  })
+
+  test('a Bats suite is a shell project', () => {
+    const ids = stacksOf({ 'test/app.bats': '#!/usr/bin/env bats\n' })
+    assert.ok(ids.includes('shell-project'), ids.join(', '))
+  })
+
+  test('five scripts are a shell project', () => {
+    const files: Record<string, string> = {}
+    for (let i = 0; i < 5; i++) files[`scripts/s${String(i)}.sh`] = '#!/bin/sh\n'
+    const ids = stacksOf(files)
+    assert.ok(ids.includes('shell-project'), ids.join(', '))
+  })
+
+  test('a PowerShell module manifest is a PowerShell project', () => {
+    const ids = stacksOf({
+      'Module.psd1': "@{RootModule='Module.psm1'}\n",
+      'Module.psm1': 'function Get-Thing {}\n',
+    })
+    assert.ok(ids.includes('powershell-project'), ids.join(', '))
+  })
+
+  test('a lone .ps1 is not a PowerShell project', () => {
+    const ids = stacksOf({ 'install.ps1': 'Write-Host "hi"\n' })
+    assert.ok(!ids.includes('powershell-project'), ids.join(', '))
+  })
+})

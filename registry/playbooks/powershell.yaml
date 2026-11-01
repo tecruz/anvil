@@ -1,0 +1,95 @@
+# PowerShell playbook.
+#
+# PowerShell is a .NET language with its own object pipeline, and the failure modes are not the
+# shell ones: `$null` propagating through a pipeline, `-ErrorAction` being ignored, and a module
+# manifest that does not list what the module actually exports. The commands are cmdlets, not
+# shell programs, so no command is invented -- a repository documenting `Invoke-Pester` gets it
+# from its own instructions.
+
+id: powershell
+title: PowerShell
+priority: 49
+
+match:
+  # A module manifest or module file is an explicit PowerShell project. A lone `.ps1` is not:
+  # `deps: [powershell]` would match the inferred language anywhere, so the stack id carries the
+  # signal instead.
+  files: ['**/*.psd1', '**/*.psm1']
+  deps: ['powershell-project']
+  importPrefixes: []
+
+official:
+  docs:
+    - label: PowerShell documentation
+      url: 'https://learn.microsoft.com/en-us/powershell/'
+      why: >-
+        The cmdlet reference and the language guide. Cmdlet behaviour differs between Windows
+        PowerShell 5.1 and PowerShell 7, so check the version the repository targets.
+    - label: about_Scripts
+      url: 'https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_scripts'
+      why: >-
+        Execution policy, script scope and how a script is invoked. Most "it runs here but not
+        there" failures are one of these three.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: PSScriptAnalyzer rules
+      url: 'https://learn.microsoft.com/en-us/powershell/utility-modules/psscriptanalyzer/rules/readme'
+      why: >-
+        Every rule the standard linter enforces, with the reason. A PSScriptAnalyzer warning is
+        the project's own convention, not a matter of taste.
+      satisfiedBy: ['**/PSScriptAnalyzerSettings.psd1', '**/.editorconfig']
+  migrationGuides: []
+
+community:
+  - repo: 'PowerShell/PowerShell'
+    label: PowerShell
+    why: >-
+      The engine source and its issue tracker. The answer for how a cmdlet actually behaves is
+      usually here, and the difference between 5.1 and 7 is documented in the same place.
+  - repo: 'PowerShell/PSScriptAnalyzer'
+    label: PSScriptAnalyzer
+    why: >-
+      The linter and its settings format. A `PSScriptAnalyzerSettings.psd1` is how a project
+      states which rules it has chosen, which is what a reviewer should follow.
+  - repo: 'pester/Pester'
+    label: Pester
+    why: >-
+      The test framework, and the reference for `Describe`/`It`/`Should`. A module without a
+      Pester suite has no way to check a change beyond running it.
+
+verify:
+  # Empty on purpose: `Invoke-Pester` and `Invoke-ScriptAnalyzer` are cmdlets, not shell programs,
+  # and how a repository invokes them (a `tests/` runner, a module manifest, a build script) is
+  # its own choice.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'a .psd1 manifest beside a .psm1 module; Public/ and Private/ split the functions'
+  testNaming: '*.Tests.ps1 with Pester, one Describe per public function'
+  reviewFocus:
+    - 'a `$null` flowing into a pipeline, which silently produces no output'
+    - '`-ErrorAction` on a cmdlet that does not support it'
+    - 'the module manifest, which must list the functions the module exports'
+    - 'anything taking a path or a credential from a parameter without validation'
+
+riskGlobs:
+  - '**/*.psd1'
+  - '**/*.psm1'
+  - '**/*.ps1'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['powershell', 'pester']
+  officialDomains: ['learn.microsoft.com', 'pester.dev']
+  localMatch: ['powershell', 'pwsh', 'pester']
+  keywords:
+    - 'powershell agent skills'
+    - 'pester mcp server'
+  mcp: ['powershell', 'pester']

@@ -28,6 +28,7 @@ import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 import { cppDetector } from './cpp.ts'
 import { mobileDetectors } from './mobile.ts'
+import { shellDetectors } from './shell.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
   return readText(join(ctx.root, ctx.resolve(rel))).text
@@ -641,4 +642,5 @@ export const additionalDetectors: readonly Detector[] = [
   bazelDetector,
   cppDetector,
   ...mobileDetectors,
+  ...shellDetectors,
 ]

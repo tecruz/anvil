@@ -1566,16 +1566,13 @@ describe('the six additional detectors', () => {
     }
   })
 
-  test('detector count reaches twenty', () => {
-    // Thirteen, plus the browser-test detector (a Playwright suite with no package script was
-    // invisible on a polyglot repository), plus the Android and Kotlin Multiplatform detectors
-    // (a Gradle build is not an Android build, and a KMP module is not one either), plus the
-    // three mobile-framework detectors (Flutter, React Native/Expo, .NET MAUI -- each hides the
-    // platform behind a manifest), plus C/C++ (a build system, not a source extension, is the
-    // marker). The `Set` also asserts every id is unique: two detectors sharing an id would
+  test('detector count reaches twenty-two', () => {
+    // Thirteen, plus the browser-test detector, plus Android and Kotlin Multiplatform, plus the
+    // three mobile frameworks (Flutter, React Native/Expo, .NET MAUI), plus C/C++, plus Shell and
+    // PowerShell. The `Set` also asserts every id is unique: two detectors sharing an id would
     // silently shadow one another.
     const ids = new Set([...ecosystemDetectors, ...additionalDetectors].map((d) => d.id))
-    assert.equal(ids.size, 20)
+    assert.equal(ids.size, 22)
   })
 })
 
