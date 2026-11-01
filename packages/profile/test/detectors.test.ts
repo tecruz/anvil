@@ -43,6 +43,11 @@ function stacksOf(files: Record<string, string>): string[] {
   return profile.stacks.map((s) => s.id)
 }
 
+function profileOf(files: Record<string, string>) {
+  const dir = repo(files)
+  return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+}
+
 const MANIFEST = '<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application /></manifest>\n'
 
 describe('the Android detector claims Android, and only Android', () => {
@@ -180,6 +185,30 @@ describe('the mobile framework detectors do not overreach', () => {
     assert.ok(ids.includes('maui'), ids.join(', '))
   })
 
+  test('Microsoft.Maui.Graphics alone is not a MAUI application', () => {
+    // The drawing library is usable from a plain console app; it does not enable the workload.
+    const ids = stacksOf({
+      'Console.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include="Microsoft.Maui.Graphics" Version="10.0.0" /></ItemGroup></Project>\n',
+    })
+    assert.ok(!ids.includes('maui'), ids.join(', '))
+  })
+
+  test('the MAUI SDK and a MauiProgram entry point are application evidence', () => {
+    assert.ok(
+      stacksOf({
+        'App.csproj': '<Project Sdk="Microsoft.Maui.Sdk/10.0.0"><PropertyGroup /></Project>\n',
+      }).includes('maui'),
+    )
+    assert.ok(
+      stacksOf({
+        'App.csproj':
+          '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0-android</TargetFramework></PropertyGroup></Project>\n',
+        'MauiProgram.cs': 'public static class MauiProgram { }\n',
+      }).includes('maui'),
+    )
+  })
+
   test('an Xcode project is xcode, not swift', () => {
     const ids = stacksOf({
       'App.xcodeproj/project.pbxproj': '// !$*UTF8*$!\n{ objects = {}; }\n',
@@ -201,12 +230,18 @@ describe('the C/C++ detector keys on the build system', () => {
   })
 
   test('a nested CMakeLists.txt is found, not only the root one', () => {
-    const ids = stacksOf({ 'libs/core/CMakeLists.txt': 'project(core LANGUAGES CXX)\n' })
+    const ids = stacksOf({
+      'libs/core/CMakeLists.txt': 'project(core LANGUAGES CXX)\n',
+      'libs/core/main.cpp': 'int main() { return 0; }\n',
+    })
     assert.ok(ids.includes('cpp'), ids.join(', '))
   })
 
   test('a Meson project is cpp and meson', () => {
-    const ids = stacksOf({ 'meson.build': "project('app', 'cpp')\n" })
+    const ids = stacksOf({
+      'meson.build': "project('app', 'cpp')\n",
+      'main.cpp': 'int main() { return 0; }\n',
+    })
     assert.ok(ids.includes('cpp'), ids.join(', '))
     assert.ok(ids.includes('meson'), ids.join(', '))
   })
@@ -214,6 +249,7 @@ describe('the C/C++ detector keys on the build system', () => {
   test('a vcpkg manifest is a package manager stack, not a build system', () => {
     const ids = stacksOf({
       'CMakeLists.txt': 'project(app LANGUAGES CXX)\n',
+      'main.cpp': 'int main() { return 0; }\n',
       'vcpkg.json': '{ "name": "app", "version": "1.0.0" }\n',
     })
     assert.ok(ids.includes('vcpkg'), ids.join(', '))
@@ -226,6 +262,35 @@ describe('the C/C++ detector keys on the build system', () => {
     const ids = stacksOf({
       'src/thing.cpp': 'int f() { return 1; }\n',
       'src/thing.h': 'int f();\n',
+    })
+    assert.ok(!ids.includes('cpp'), ids.join(', '))
+    assert.ok(!ids.includes('cmake'), ids.join(', '))
+  })
+
+  test('a CMake project that builds only Swift is not a C/C++ project', () => {
+    // swift-argument-parser enables C in CMake only to work around GNUInstallDirs.
+    const ids = stacksOf({
+      'CMakeLists.txt': 'project(swift-argument-parser LANGUAGES C Swift)\n',
+      'Package.swift': '// swift-tools-version: 6.0\n',
+      'Sources/App/main.swift': 'print("hello")\n',
+    })
+    assert.ok(!ids.includes('cpp'), ids.join(', '))
+    assert.ok(!ids.includes('cmake'), ids.join(', '))
+    assert.ok(ids.includes('swift'), ids.join(', '))
+  })
+
+  test('a Meson project with no C/C++ source is not a C/C++ project', () => {
+    const ids = stacksOf({ 'meson.build': "project('app', 'swift')\n" })
+    assert.ok(!ids.includes('cpp'), ids.join(', '))
+    assert.ok(!ids.includes('meson'), ids.join(', '))
+  })
+
+  test('a Node native addon with C++ sources but no build system is not C/C++', () => {
+    // node-addon-api's integration is node-gyp/npm, not CMake.
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ name: 'addon', gypfile: true }),
+      'binding.gyp': '{ "targets": [] }\n',
+      'src/addon.cpp': 'int f() { return 1; }\n',
     })
     assert.ok(!ids.includes('cpp'), ids.join(', '))
     assert.ok(!ids.includes('cmake'), ids.join(', '))
@@ -308,6 +373,65 @@ describe('frontend frameworks are matched from dependencies, not from "it is Nod
   })
 })
 
+describe('workspace application manifests contribute framework stacks', () => {
+  test('npm workspaces are read from their member manifests, with their real paths', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ private: true, workspaces: ['apps/*'] }),
+      'apps/web/package.json': JSON.stringify({ dependencies: { react: '19.0.0', 'react-dom': '19.0.0' } }),
+      'apps/mobile/package.json': JSON.stringify({
+        dependencies: { react: '19.0.0', 'react-native': '0.81.0', expo: '54.0.0' },
+      }),
+    })
+    const ids = profile.stacks.map((s) => s.id)
+    for (const id of ['react', 'react-native', 'expo']) {
+      assert.ok(ids.includes(id), `expected ${id} in ${ids.join(', ')}`)
+    }
+    const react = profile.stacks.find((s) => s.id === 'react')
+    assert.ok(
+      react?.evidence.some((e) => e.startsWith('apps/web/package.json')),
+      `React evidence should name the workspace member: ${JSON.stringify(react?.evidence)}`,
+    )
+  })
+
+  test('pnpm-workspace.yaml is read, not only the npm workspaces field', () => {
+    // create-t3-turbo's shape: the root package.json has orchestration scripts only, and
+    // pnpm-workspace.yaml is where the members are named.
+    const profile = profileOf({
+      'package.json': JSON.stringify({ private: true, packageManager: 'pnpm@10.19.0' }),
+      'pnpm-workspace.yaml': 'packages:\n  - apps/*\n  - packages/*\n\ncatalog:\n  react: 19.1.4\n',
+      'apps/nextjs/package.json': JSON.stringify({
+        dependencies: { next: '16.0.0', react: '19.1.4', 'react-dom': '19.1.4' },
+      }),
+      'apps/expo/package.json': JSON.stringify({
+        dependencies: { expo: '54.0.0', 'react-native': '0.81.0', react: '19.1.4' },
+      }),
+    })
+    const ids = profile.stacks.map((s) => s.id)
+    for (const id of ['nextjs', 'react', 'react-native', 'expo']) {
+      assert.ok(ids.includes(id), `expected ${id} in ${ids.join(', ')}`)
+    }
+  })
+
+  test('a repository with no root package.json is a collection of applications', () => {
+    // expo/examples: independent example apps, no workspace owner.
+    const ids = stacksOf({
+      'blank/package.json': JSON.stringify({ dependencies: { expo: '57.0.1', 'react-native': '0.86.0' } }),
+      'with-router/package.json': JSON.stringify({ dependencies: { expo: '57.0.1', 'react-native': '0.86.0' } }),
+    })
+    assert.ok(ids.includes('expo'), ids.join(', '))
+    assert.ok(ids.includes('react-native'), ids.join(', '))
+  })
+
+  test('a nested manifest no workspace declares is not selected', () => {
+    // The root is a single package. A fixture or example tree must not claim its stacks.
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ name: 'tool', dependencies: { express: '5.0.0' } }),
+      'examples/demo/package.json': JSON.stringify({ dependencies: { react: '19.0.0', 'react-dom': '19.0.0' } }),
+    })
+    assert.ok(!ids.includes('react'), `an undeclared nested manifest matched react: ${ids.join(', ')}`)
+  })
+})
+
 describe('AI and backend frameworks are matched from their own marker', () => {
   test('a notebook is jupyter', () => {
     const ids = stacksOf({ 'analysis.ipynb': '{"cells":[],"nbformat":4,"nbformat_minor":5}\n' })
@@ -317,6 +441,65 @@ describe('AI and backend frameworks are matched from their own marker', () => {
   test('a declared torch dependency is pytorch', () => {
     const ids = stacksOf({ 'pyproject.toml': '[project]\nname="m"\nversion="0.1.0"\ndependencies=["torch>=2.5"]\n' })
     assert.ok(ids.includes('pytorch'), ids.join(', '))
+  })
+
+  test('a comment that mentions torch is not a dependency declaration', () => {
+    const ids = stacksOf({
+      'pyproject.toml':
+        '[project]\nname="plain"\nversion="0.1.0"\ndependencies=[]\n# Does not use torch or transformers.\n',
+    })
+    assert.ok(!ids.includes('pytorch'), ids.join(', '))
+    assert.ok(!ids.includes('huggingface'), ids.join(', '))
+  })
+
+  test('a linter tool table is not a dependency declaration', () => {
+    const ids = stacksOf({
+      'pyproject.toml':
+        '[project]\nname="plain"\nversion="0.1.0"\ndependencies=[]\n\n[tool.ruff.lint.isort]\nknown-third-party=["torch", "transformers"]\n',
+    })
+    assert.ok(!ids.includes('pytorch'), ids.join(', '))
+    assert.ok(!ids.includes('huggingface'), ids.join(', '))
+  })
+
+  test('optional dependencies, dependency groups and Poetry tables are declarations', () => {
+    assert.ok(
+      stacksOf({
+        'pyproject.toml':
+          '[project]\nname="m"\nversion="0.1.0"\ndependencies=[]\n[project.optional-dependencies]\ntrain=["torch>=2.5"]\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      stacksOf({
+        'pyproject.toml': '[dependency-groups]\ndev=["transformers>=4"]\n',
+      }).includes('huggingface'),
+    )
+    assert.ok(
+      stacksOf({
+        'pyproject.toml': '[tool.poetry.dependencies]\npython="^3.12"\ntorch="^2.5"\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('requirements.txt ignores comments and options', () => {
+    assert.ok(
+      !stacksOf({
+        'requirements.txt': '# torch is not used\n-r other.txt\n--index-url https://example.test\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(stacksOf({ 'requirements.txt': 'torch>=2.5\n' }).includes('pytorch'))
+  })
+
+  test('a setup.py literal requirement is read, but unrelated strings are not', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': 'from setuptools import setup\nsetup(name="m", install_requires=["torch>=2.5"])\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      !stacksOf({
+        'setup.py': 'from setuptools import setup\nsetup(name="m", description="does not use torch")\n',
+      }).includes('pytorch'),
+    )
   })
 
   test('a Spring Boot starter is spring-boot', () => {
@@ -332,6 +515,38 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     const ids = stacksOf({
       'pom.xml': '<project><groupId>com.acme</groupId><artifactId>app</artifactId></project>\n',
       'src/main/java/App.java': 'class App {}\n',
+    })
+    assert.ok(!ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('a Spring Boot starter in a Maven reactor module is detected, with its path', () => {
+    const profile = profileOf({
+      'pom.xml': '<project><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>\n',
+    })
+    const spring = profile.stacks.find((s) => s.id === 'spring-boot')
+    assert.ok(spring, `expected spring-boot in ${profile.stacks.map((s) => s.id).join(', ')}`)
+    assert.ok(
+      spring.evidence.some((e) => e.startsWith('api/pom.xml:')),
+      `evidence should name the module POM: ${JSON.stringify(spring.evidence)}`,
+    )
+  })
+
+  test('a nested Maven reactor is followed recursively', () => {
+    const ids = stacksOf({
+      'pom.xml': '<project><packaging>pom</packaging><modules><module>services</module></modules></project>\n',
+      'services/pom.xml': '<project><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'services/api/pom.xml':
+        '<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter</artifactId></dependency></dependencies></project>\n',
+    })
+    assert.ok(ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('a plain Maven reactor is still not Spring Boot', () => {
+    const ids = stacksOf({
+      'pom.xml': '<project><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'api/pom.xml': '<project><groupId>com.acme</groupId><artifactId>api</artifactId></project>\n',
     })
     assert.ok(!ids.includes('spring-boot'), ids.join(', '))
   })

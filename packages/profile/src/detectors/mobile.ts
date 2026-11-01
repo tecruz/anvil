@@ -15,7 +15,8 @@
 
 import { join } from 'node:path'
 import { addCommand, addStack, type Detector, type DetectorContext, filesUnder, hasFile } from '../detector.ts'
-import { asObject, asString, evidence, findLine, looseVersion, readJson } from '../manifest.ts'
+import { asString, evidence, findLine, looseVersion } from '../manifest.ts'
+import { applicationManifests, firstNamedFile } from '../packageManifests.ts'
 import { readText } from '../walk.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
@@ -54,40 +55,50 @@ export const reactNativeDetector: Detector = {
   id: 'react-native',
   title: 'React Native / Expo',
   priority: 52,
-  matches: (ctx) => hasFile(ctx, 'package.json'),
+  matches: (ctx) => filesUnder(ctx, '').some((f) => f === 'package.json' || f.endsWith('/package.json')),
   detect(ctx, draft) {
-    const manifest = readJson(ctx, 'package.json')
-    const text = read(ctx, 'package.json')
-    if (manifest === null || text === null) return
-    const deps = { ...asObject(manifest.dependencies ?? null), ...asObject(manifest.devDependencies ?? null) }
+    for (const manifest of applicationManifests(ctx)) {
+      if ('react-native' in manifest.deps || 'expo' in manifest.deps) {
+        addStack(draft, {
+          id: 'react-native',
+          version: looseVersion(asString(manifest.deps['react-native'] ?? manifest.deps.expo ?? null)),
+          evidence: [evidence(manifest.path, findLine(manifest.text, /"react-native"\s*:|"expo"\s*:/))],
+        })
+      }
 
-    if ('react-native' in deps || 'expo' in deps) {
-      addStack(draft, {
-        id: 'react-native',
-        version: looseVersion(asString(deps['react-native'] ?? deps.expo ?? null)),
-        evidence: [evidence('package.json', findLine(text, /"react-native"\s*:|"expo"\s*:/))],
-      })
+      // Expo is a stack of its own: a managed Expo app has no native project to detect, so the
+      // dependency (or the `expo` key in `app.json`) is the only evidence it exists.
+      if ('expo' in manifest.deps) {
+        addStack(draft, {
+          id: 'expo',
+          version: looseVersion(asString(manifest.deps.expo ?? null)),
+          evidence: [evidence(manifest.path, findLine(manifest.text, /"expo"\s*:/))],
+        })
+      }
     }
 
-    // Expo is a stack of its own: a managed Expo app has no native project to detect, so the
-    // dependency (or the `expo` key in `app.json`) is the only evidence it exists.
-    const expoConfig = EXPO_CONFIGS.find((f) => hasFile(ctx, f))
-    const expoInConfig = expoConfig !== undefined && /"expo"\s*:/.test(read(ctx, expoConfig) ?? '')
-    if ('expo' in deps || expoInConfig) {
-      const where = 'expo' in deps ? evidence('package.json', findLine(text, /"expo"\s*:/)) : (expoConfig as string)
-      addStack(draft, { id: 'expo', version: looseVersion(asString(deps.expo ?? null)), evidence: [where] })
+    const expoConfig = firstNamedFile(ctx, EXPO_CONFIGS)
+    if (expoConfig !== null && /"expo"\s*:/.test(read(ctx, expoConfig) ?? '')) {
+      addStack(draft, { id: 'expo', version: null, evidence: [expoConfig] })
     }
   },
 }
 
-/** `<UseMaui>true</UseMaui>`, the `Microsoft.Maui` SDK, or a `MauiProgram` entry point. */
-const MAUI_MARKER = /<UseMaui>\s*true\s*<\/UseMaui>|Microsoft\.Maui|MauiProgram/
+/**
+ * A MAUI application marker, not just any package whose name starts with `Microsoft.Maui`.
+ *
+ * `Microsoft.Maui.Graphics` is a drawing library usable from a plain console app, and matching
+ * the bare prefix classified exactly that as a MAUI application. A project is MAUI when it
+ * enables the workload (`<UseMaui>true</UseMaui>`), uses the MAUI SDK, or has the `MauiProgram`
+ * entry point the workload requires.
+ */
+const MAUI_MARKER = /<UseMaui>\s*true\s*<\/UseMaui>|<Project[^>]*Sdk\s*=\s*["'][^"']*Microsoft\.Maui\.Sdk|MauiProgram/
 
 export const mauiDetector: Detector = {
   id: 'maui',
   title: '.NET MAUI',
   priority: 52,
-  matches: (ctx) => filesUnder(ctx, '').some((f) => f.endsWith('.csproj')),
+  matches: (ctx) => filesUnder(ctx, '').some((f) => f.endsWith('.csproj') || f.endsWith('.cs')),
   detect(ctx, draft) {
     for (const file of filesUnder(ctx, '').filter((f) => f.endsWith('.csproj'))) {
       const text = read(ctx, file)
@@ -96,6 +107,17 @@ export const mauiDetector: Detector = {
       if (line === null) continue
       // No build/test command: MAUI is a .NET workload, and the `dotnet` detector already emits
       // the `dotnet build` / `dotnet test` the SDK provides.
+      addStack(draft, { id: 'maui', version: null, evidence: [evidence(file, line)] })
+      return
+    }
+
+    // `MauiProgram` is the entry point the workload generates into a `.cs` file, so a project
+    // that only enables the workload through it has no marker in the csproj at all.
+    for (const file of filesUnder(ctx, '').filter((f) => f.endsWith('.cs'))) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      const line = findLine(text, /\bMauiProgram\b/)
+      if (line === null) continue
       addStack(draft, { id: 'maui', version: null, evidence: [evidence(file, line)] })
       return
     }

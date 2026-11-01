@@ -625,6 +625,50 @@ describe('matching', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('bare C++ sources do not match the cpp playbook', () => {
+    // The language is inferred from `.cpp`; that is not a project with a build system.
+    const dir = tempDir()
+    try {
+      mkdirSync(join(dir, 'reference'), { recursive: true })
+      writeFileSync(join(dir, 'reference', 'sample.cpp'), 'int main() { return 0; }\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(!ids.includes('cpp'), `bare C++ source matched cpp: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CMake for a Swift project does not match the cpp playbook', () => {
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'CMakeLists.txt'), 'project(app LANGUAGES C Swift)\n')
+      writeFileSync(join(dir, 'Package.swift'), '// swift-tools-version: 6.0\n')
+      mkdirSync(join(dir, 'Sources'), { recursive: true })
+      writeFileSync(join(dir, 'Sources', 'main.swift'), 'print("hello")\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(!ids.includes('cpp'), `CMake for Swift matched cpp: ${ids.join(', ')}`)
+      assert.ok(ids.includes('swift'), `it is still a Swift project: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CMake plus a C++ source matches the cpp playbook', () => {
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'CMakeLists.txt'), 'project(app LANGUAGES CXX)\n')
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'main.cpp'), 'int main() { return 0; }\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(ids.includes('cpp'), `expected cpp, got ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

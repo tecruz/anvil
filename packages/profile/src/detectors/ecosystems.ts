@@ -324,6 +324,36 @@ export const rustDetector: Detector = {
 // JVM (Gradle / Maven)
 // ---------------------------------------------------------------------------
 
+/**
+ * The POMs a Maven reactor builds: the root plus every `<module>` it declares, recursively.
+ *
+ * A reactor parent commonly has `<packaging>pom</packaging>` and no dependencies of its own;
+ * the Spring Boot starter lives in `api/pom.xml`. Probing only the root therefore reports the
+ * repository as plain Maven/JVM. The module paths are relative to the POM that declares them,
+ * and nested reactors are followed the same way.
+ */
+function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const queue = [rootPom]
+  while (queue.length > 0) {
+    const pom = queue.shift() as string
+    if (seen.has(pom)) continue
+    seen.add(pom)
+    if (!ctx.files.has(pom)) continue
+    out.push(pom)
+
+    const text = read(ctx, pom)
+    if (text === null) continue
+    const dir = pom.slice(0, pom.lastIndexOf('/') + 1)
+    for (const match of text.matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+      const module = (match[1] as string).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+      if (module !== '') queue.push(`${dir}${module}/pom.xml`)
+    }
+  }
+  return out
+}
+
 export const jvmDetector: Detector = {
   id: 'jvm',
   title: 'JVM (Gradle / Maven)',
@@ -459,7 +489,17 @@ export const jvmDetector: Detector = {
     // A plain JVM project that happens to be a web service is not a Spring project: the framework's
     // conventions -- auto-configuration, the application context, the request lifecycle -- are not
     // inferable from `build.gradle`.
-    for (const file of [...(maven ? ['pom.xml'] : []), ...gradleFiles]) {
+    //
+    // A Maven reactor's parent POM usually declares only `<modules>`; the starter is in a module.
+    // Following the reactor is what makes `api/pom.xml` evidence, with its real path.
+    const springFiles = new Set<string>()
+    if (maven) {
+      for (const file of mavenReactorPoms(ctx, ctx.resolve('pom.xml'))) springFiles.add(file)
+    }
+    for (const file of ctx.files) {
+      if (/(^|\/)build\.gradle(?:\.kts)?$/.test(file)) springFiles.add(file)
+    }
+    for (const file of springFiles) {
       const text = read(ctx, file)
       if (text === null) continue
       const line = findLine(text, /spring-boot-starter|org\.springframework\.boot/)

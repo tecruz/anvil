@@ -19,7 +19,7 @@ import {
   ownerFromGitHubUrl,
   type SourceNote,
 } from './github.ts'
-import { type LocalSkill, scanLocalSkills, skillMatchesSeeds } from './localScan.ts'
+import { type CuratedSkillTerms, type LocalSkill, scanLocalSkills, skillMatchesSeeds } from './localScan.ts'
 import { DEFAULT_MCP_REGISTRY, fetchMcpServers } from './mcpRegistry.ts'
 
 export interface RunOptions extends DiscoverOptions {
@@ -54,12 +54,24 @@ export interface RunResult {
  * The id is added whole and split on hyphens, so `play-billing` matches both halves: a skill
  * is as likely to say "billing" as the full name.
  */
-export function matchTerms(playbookId: string, seeds: DiscoverSeeds): string[] {
+export function matchTerms(playbookId: string, seeds: DiscoverSeeds): CuratedSkillTerms {
   const terms = new Set<string>()
   terms.add(playbookId)
   for (const part of playbookId.split('-')) if (part.length >= 4) terms.add(part)
-  for (const term of seeds.localMatch ?? []) terms.add(term)
-  return [...terms]
+
+  // `localMatch` is the author's explicit identity list, so a term shorter than the general
+  // floor is still usable there. `vue` is the canonical case: the playbook id and the curated
+  // term are both three characters, and the previous length floor silently dropped both.
+  const curatedShortTerms = new Set<string>()
+  for (const term of seeds.localMatch ?? []) {
+    terms.add(term)
+    const needle = term.toLowerCase().trim()
+    if (needle.length > 0 && needle.length < 4) curatedShortTerms.add(needle)
+  }
+
+  const out = [...terms] as CuratedSkillTerms
+  out.curatedShortTerms = curatedShortTerms
+  return out
 }
 
 /**

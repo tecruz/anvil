@@ -52,7 +52,7 @@ verify:
   typecheck: ['npx tsc --noEmit']
 
 conventions:
-  moduleLayout: 'app/ for the App Router (route folders), or pages/ in the older model; never both'
+  moduleLayout: 'app/ for the App Router (route folders), or pages/ in the older model; both can coexist during a migration, but the same route path cannot'
   testNaming: '*.test.tsx for components, with an end-to-end test for a route'
   reviewFocus:
     - 'a server component importing a client-only API, or the reverse'

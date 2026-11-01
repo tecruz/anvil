@@ -10,16 +10,16 @@ title: C / C++
 priority: 62
 
 match:
+  # CMakeLists.txt and meson.build are build systems, not language evidence: a Swift project
+  # can use CMake, and a Node native addon can ship C++ sources with no build system at all.
+  # The detector emits `cpp-project` only when a C/C++ source file and a build system are both
+  # present, which is the declared-project marker this playbook matches.
   files:
-    - 'CMakeLists.txt'
-    - '**/CMakeLists.txt'
-    - 'meson.build'
-    - '**/meson.build'
     - '**/*.vcxproj'
     - 'conanfile.txt'
     - 'conanfile.py'
     - 'vcpkg.json'
-  deps: ['cpp', 'cmake', 'meson']
+  deps: ['cpp-project']
   importPrefixes: ['#include <']
 
 official:

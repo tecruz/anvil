@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
-import { discoverLocal, scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
+import { discoverLocal, matchTerms, scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
 import { loadBuiltins } from '@anvil/playbooks'
 
 function home(): string {
@@ -217,8 +217,25 @@ describe('skillMatchesSeeds', () => {
   })
 
   test('ignores a term too short to be meaningful', () => {
-    // "go" is three characters and would match "google", "django" and "mongo".
+    // "go" is two characters and would match "google", "django" and "mongo".
     assert.equal(skillMatchesSeeds(skillOf('a go and a django app'), ['go']), false)
+  })
+
+  test('an explicitly curated short term is usable', () => {
+    // `vue` is the whole technology name and is three characters. It is in the playbook's
+    // `localMatch`, so the author chose it; the general floor must not silently drop it.
+    const terms = matchTerms('vue', { officialOrgs: [], keywords: [], mcp: [], localMatch: ['vue', 'nuxt'] })
+    assert.ok(skillMatchesSeeds(skillOf('Vue components and reactivity patterns.'), terms))
+  })
+
+  test('a short term that is not curated still uses the general floor', () => {
+    assert.equal(
+      skillMatchesSeeds(
+        skillOf('a go and a django app'),
+        matchTerms('go', { officialOrgs: [], keywords: [], mcp: [] }),
+      ),
+      false,
+    )
   })
 
   test('an empty skill list matches nothing rather than everything', () => {

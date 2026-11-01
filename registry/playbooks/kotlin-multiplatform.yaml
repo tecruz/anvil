@@ -20,7 +20,7 @@ official:
         The source-set model: what belongs in `commonMain` and what has to move to a platform set.
         Most KMP build failures are a dependency declared in the wrong source set.
     - label: Compose Multiplatform
-      url: 'https://kotlinlang.org/docs/multiplatform-compose.html'
+      url: 'https://kotlinlang.org/docs/multiplatform/compose-multiplatform.html'
       why: >-
         The shared UI layer, when the project uses it. Its availability per target is not the same
         as Compose on Android, and the docs state which targets are supported.

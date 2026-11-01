@@ -58,7 +58,7 @@ verify:
   typecheck: ['npx tsc --noEmit']
 
 conventions:
-  moduleLayout: 'app code at the root or under src/; android/ and ios/ are generated, not hand-written'
+  moduleLayout: 'app code at the root or under src/; android/ and ios/ are generated in a managed Expo app and hand-maintained in a bare React Native app'
   testNaming: '*.test.tsx / *.test.ts, with @testing-library/react-native'
   reviewFocus:
     - 'a native module or permission, which needs Android and iOS updated together'

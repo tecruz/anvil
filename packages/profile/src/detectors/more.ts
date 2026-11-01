@@ -24,7 +24,8 @@ import {
   hasFile,
   hookFramework,
 } from '../detector.ts'
-import { asObject, asString, evidence, findLine, looseVersion, readJson } from '../manifest.ts'
+import { asString, evidence, findLine, looseVersion } from '../manifest.ts'
+import { applicationManifests, firstNamedFile } from '../packageManifests.ts'
 import { readText } from '../walk.ts'
 import { aiDetector } from './ai.ts'
 import { cppDetector } from './cpp.ts'
@@ -328,34 +329,37 @@ export const frontendDetector: Detector = {
   title: 'Frontend framework',
   priority: 45,
   matches(ctx) {
-    if (hasFile(ctx, 'package.json')) return true
-    if (FRONTEND_CONFIGS.some((c) => c.files.some((f) => hasFile(ctx, f)))) return true
+    if (filesUnder(ctx, '').some((f) => f === 'package.json' || f.endsWith('/package.json'))) return true
+    if (FRONTEND_CONFIGS.some((c) => firstNamedFile(ctx, c.files) !== null)) return true
     return filesUnder(ctx, '').some((f) => f.endsWith('.vue') || f.endsWith('.svelte'))
   },
   detect(ctx, draft) {
-    const manifest = readJson(ctx, 'package.json')
-    const text = read(ctx, 'package.json')
-    const deps =
-      manifest === null
-        ? {}
-        : { ...asObject(manifest.dependencies ?? null), ...asObject(manifest.devDependencies ?? null) }
+    const manifests = applicationManifests(ctx)
 
     for (const { stack, files } of FRONTEND_CONFIGS) {
-      const hit = files.find((f) => hasFile(ctx, f))
-      if (hit !== undefined) addStack(draft, { id: stack, version: null, evidence: [hit] })
+      const hit = firstNamedFile(ctx, files)
+      if (hit !== null) addStack(draft, { id: stack, version: null, evidence: [hit] })
     }
-    for (const { stack, deps: names } of FRONTEND_DEPENDENCIES) {
-      const dep = names.find((n) => n in deps)
-      if (dep === undefined) continue
-      const evidencePath = text === null ? 'package.json' : evidence('package.json', dependencyLine(text, dep))
-      addStack(draft, { id: stack, version: looseVersion(asString(deps[dep])), evidence: [evidencePath] })
-    }
+    for (const manifest of manifests) {
+      for (const { stack, deps: names } of FRONTEND_DEPENDENCIES) {
+        const dep = names.find((n) => n in manifest.deps)
+        if (dep === undefined) continue
+        addStack(draft, {
+          id: stack,
+          version: looseVersion(asString(manifest.deps[dep])),
+          evidence: [evidence(manifest.path, dependencyLine(manifest.text, dep))],
+        })
+      }
 
-    // React on the web: `react` together with `react-dom`. React Native has `react` without
-    // `react-dom`, so it must not be offered React's web documentation.
-    if ('react' in deps && 'react-dom' in deps) {
-      const evidencePath = text === null ? 'package.json' : evidence('package.json', dependencyLine(text, 'react'))
-      addStack(draft, { id: 'react', version: looseVersion(asString(deps.react)), evidence: [evidencePath] })
+      // React on the web: `react` together with `react-dom`. React Native has `react` without
+      // `react-dom`, so it must not be offered React's web documentation.
+      if ('react' in manifest.deps && 'react-dom' in manifest.deps) {
+        addStack(draft, {
+          id: 'react',
+          version: looseVersion(asString(manifest.deps.react)),
+          evidence: [evidence(manifest.path, dependencyLine(manifest.text, 'react'))],
+        })
+      }
     }
 
     if (filesUnder(ctx, '').some((f) => f.endsWith('.vue'))) {
@@ -364,16 +368,14 @@ export const frontendDetector: Detector = {
     if (filesUnder(ctx, '').some((f) => f.endsWith('.svelte'))) {
       addStack(draft, { id: 'svelte', version: null, evidence: ['*.svelte'] })
     }
-    if (hasFile(ctx, 'vite.config.ts') || hasFile(ctx, 'vite.config.js') || hasFile(ctx, 'vite.config.mts')) {
-      addStack(draft, { id: 'vite', version: null, evidence: ['vite.config.ts'] })
-    }
-    if (hasFile(ctx, 'tailwind.config.js') || hasFile(ctx, 'tailwind.config.ts')) {
-      addStack(draft, { id: 'tailwind', version: null, evidence: ['tailwind.config.js'] })
-    }
+    const vite = firstNamedFile(ctx, ['vite.config.ts', 'vite.config.js', 'vite.config.mts'])
+    if (vite !== null) addStack(draft, { id: 'vite', version: null, evidence: [vite] })
+    const tailwind = firstNamedFile(ctx, ['tailwind.config.js', 'tailwind.config.ts'])
+    if (tailwind !== null) addStack(draft, { id: 'tailwind', version: null, evidence: [tailwind] })
 
     // No build command can be claimed here: the bundler is often invoked through a
     // package script, and the node detector already read it properly.
-    if (hasFile(ctx, 'eslint.config.js') || hasFile(ctx, '.eslintrc.json')) addTool(draft, 'lint', 'eslint')
+    if (firstNamedFile(ctx, ['eslint.config.js', '.eslintrc.json']) !== null) addTool(draft, 'lint', 'eslint')
   },
 }
 
