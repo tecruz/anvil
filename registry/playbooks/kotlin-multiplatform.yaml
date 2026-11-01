@@ -1,0 +1,83 @@
+# Kotlin Multiplatform playbook.
+#
+# Matched on the `kotlin-multiplatform` stack the detector emits. A KMP module shares Gradle and
+# Kotlin with a JVM project and with Android, and neither playbook covers it: the source-set model
+# and what is actually shared are specific to KMP.
+
+id: kotlin-multiplatform
+title: Kotlin Multiplatform
+priority: 63
+
+match:
+  deps: ['kotlin-multiplatform']
+  importPrefixes: ['kotlinx.coroutines']
+
+official:
+  docs:
+    - label: Kotlin Multiplatform documentation
+      url: 'https://kotlinlang.org/docs/multiplatform.html'
+      why: >-
+        The source-set model: what belongs in `commonMain` and what has to move to a platform set.
+        Most KMP build failures are a dependency declared in the wrong source set.
+    - label: Compose Multiplatform
+      url: 'https://kotlinlang.org/docs/multiplatform-compose.html'
+      why: >-
+        The shared UI layer, when the project uses it. Its availability per target is not the same
+        as Compose on Android, and the docs state which targets are supported.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Kotlin Multiplatform compatibility guide
+      url: 'https://kotlinlang.org/docs/multiplatform-compatibility-guide.html'
+      why: >-
+        Required before a Kotlin or plugin version bump. The Gradle DSL and the target APIs change
+        between releases in ways that fail at configuration time.
+
+community:
+  - repo: 'JetBrains/kotlin'
+    label: Kotlin
+    why: >-
+      The compiler and the KMP Gradle plugin. Behaviour questions -- expect/actual, target
+      support -- are settled by the source and its tests.
+  - repo: 'JetBrains/compose-multiplatform'
+    label: Compose Multiplatform
+    why: >-
+      The shared UI implementation, including per-platform support and the samples that show the
+      expected project layout.
+
+verify:
+  # Empty on purpose: the `jvm` playbook and detector already carry the `./gradlew` build and test
+  # commands this module uses.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'commonMain/ for shared code; androidMain/, iosMain/ and jvmMain/ for platform code'
+  testNaming: '*Test.kt in commonTest/ for shared behaviour, and a platform test for platform code'
+  reviewFocus:
+    - 'a dependency added to commonMain that only one target provides'
+    - 'an expect/actual pair, where the actual must match the expect exactly'
+    - 'a Gradle target change, which changes what compiles and what ships'
+    - 'threading assumptions in shared code, which differ per target'
+
+riskGlobs:
+  - '**/commonMain/**'
+  - '**/androidMain/**'
+  - '**/iosMain/**'
+  - '**/jvmMain/**'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['jetbrains']
+  officialDomains: ['kotlinlang.org']
+  localMatch: ['kotlin multiplatform', 'kotlin-multiplatform', 'compose multiplatform']
+  keywords:
+    - 'kotlin multiplatform agent skills'
+    - 'compose multiplatform mcp server'
+  mcp: ['kotlin', 'kotlin-multiplatform']

@@ -1,0 +1,74 @@
+# Astro playbook.
+#
+# Matched on the `astro` stack or `astro.config.*`. Astro's model -- islands, server-first HTML,
+# zero client JavaScript by default -- is the opposite of a SPA's, so the React/Vue guidance is not
+# a substitute even when a .tsx component exists in the repository.
+
+id: astro
+title: Astro
+priority: 58
+
+match:
+  files: ['**/astro.config.*']
+  deps: ['astro']
+  importPrefixes: ['astro:']
+
+official:
+  docs:
+    - label: Astro documentation
+      url: 'https://docs.astro.build/'
+      why: >-
+        The islands model and the routing conventions. Whether a component ships JavaScript to the
+        browser is a per-component decision, and it is where most of the payload comes from.
+    - label: Astro component syntax
+      url: 'https://docs.astro.build/en/basics/astro-components/'
+      why: >-
+        The frontmatter-and-template component format, including how a framework component is
+        hydrated. The `client:` directive is the part that costs bytes.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Astro upgrade guides
+      url: 'https://docs.astro.build/en/guides/upgrade-to/v5/'
+      why: >-
+        Required before a major upgrade. Astro's integrations and content collections have changed
+        between versions, and the upgrade guide lists the breaking edits.
+
+community:
+  - repo: 'withastro/astro'
+    label: Astro
+    why: >-
+      The framework source and its integrations. The content-collection API and the adapters live
+      here, and they are what most upgrade questions are about.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx astro check']
+
+conventions:
+  moduleLayout: 'src/pages/ for routes; src/components/ for components; src/content/ for collections'
+  testNaming: '*.test.ts for logic, and a browser test for a hydrated island'
+  reviewFocus:
+    - 'a client:* directive on a component that does not need to hydrate'
+    - 'frontmatter code that runs on the server and is assumed to run in the browser'
+    - 'a content-collection schema change, which affects every entry that uses it'
+    - 'an adapter change, which decides where the site can be deployed'
+
+riskGlobs:
+  - '**/astro.config.*'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['withastro']
+  officialDomains: ['docs.astro.build']
+  localMatch: ['astro']
+  keywords:
+    - 'astro agent skills'
+    - 'astro mcp server'
+  mcp: ['astro']

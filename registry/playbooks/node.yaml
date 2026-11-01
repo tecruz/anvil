@@ -77,6 +77,8 @@ riskGlobs: ['**/package.json', '**/package-lock.json', '**/pnpm-lock.yaml', '**/
 discover:
   officialOrgs: ['nodejs', 'vercel']
   officialDomains: ['nodejs.org', 'typescriptlang.org']
+  # Identity terms for the local skill scan; see `discover.localMatch` in the schema.
+  localMatch: ['typescript', 'javascript']
   keywords:
     - 'javascript mcp server'
     - 'typescript agent skills'

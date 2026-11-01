@@ -1,0 +1,83 @@
+# Angular playbook.
+#
+# Matched on the `angular` stack, emitted from `@angular/core` or `angular.json`. Angular's
+# dependency injection and change detection are the parts a React habit gets wrong, so the
+# guidance is not the generic frontend one.
+
+id: angular
+title: Angular
+priority: 62
+
+match:
+  files: ['**/angular.json']
+  deps: ['angular']
+  importPrefixes: ['@angular/']
+
+official:
+  docs:
+    - label: Angular documentation
+      url: 'https://angular.dev/overview'
+      why: >-
+        The framework guide, including signals and the standalone-component model. The current
+        idioms differ from most Angular material written before v17.
+    - label: Angular component guide
+      url: 'https://angular.dev/guide/components'
+      why: >-
+        Inputs, outputs, lifecycle and change detection. Reading it before adding a component is
+        cheaper than debugging a change-detection loop.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: Angular style guide
+      url: 'https://angular.dev/style-guide'
+      why: >-
+        The naming and file-layout conventions the CLI assumes. A deviation is a review comment,
+        not a bug, so align with the repository's existing structure first.
+  migrationGuides:
+    - label: Angular update guide
+      url: 'https://angular.dev/update-guide'
+      why: >-
+        Required before a major upgrade. Angular removes APIs on a schedule and the update guide
+        lists the exact steps for the version pair.
+
+community:
+  - repo: 'angular/angular'
+    label: Angular
+    why: >-
+      The framework source and issue tracker. Change detection and DI behaviour are settled here.
+  - repo: 'angular/components'
+    label: Angular Material
+    why: >-
+      The component library most Angular apps use, and the reference for how a component is
+      expected to behave with the CDK.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'src/app/ with feature folders; standalone components by default in current versions'
+  testNaming: '*.spec.ts, one spec beside each component or service'
+  reviewFocus:
+    - 'a subscription that is never unsubscribed, or a signal read outside its context'
+    - 'change-detection strategy and anything that assumes it runs on every tick'
+    - 'a provider added at the wrong injector level, which changes the instance lifecycle'
+    - 'route guards and resolvers, which decide whether a page is reachable at all'
+
+riskGlobs:
+  - '**/angular.json'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['angular']
+  officialDomains: ['angular.dev']
+  localMatch: ['angular']
+  keywords:
+    - 'angular agent skills'
+    - 'angular mcp server'
+  mcp: ['angular']

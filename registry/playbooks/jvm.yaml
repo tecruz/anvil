@@ -84,6 +84,15 @@ riskGlobs:
 discover:
   officialOrgs: ['openjdk', 'gradle', 'apache']
   officialDomains: ['docs.gradle.org', 'docs.oracle.com', 'google.github.io']
+  # Identity terms for the local skill scan; `jvm` is below the matcher's length floor.
+  #
+  # Deliberately *not* `gradle` or `kotlin`: both are shared with Android and Kotlin
+  # Multiplatform, so an installed Android skill (AGP upgrade, Compose navigation) names one
+  # of them and was claimed here. A JVM-only repository was then shown Android skills as if
+  # they were relevant. `java` and `maven` are JVM-only; a Kotlin/JVM skill that names only
+  # Kotlin is missed, which is the safe direction -- a missing aid is recoverable, a wrong one
+  # teaches the reader to skip the list.
+  localMatch: ['java', 'maven']
   keywords:
     - 'java mcp server'
     - 'gradle agent skills'

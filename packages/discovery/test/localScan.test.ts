@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { discoverLocal, scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
+import { loadBuiltins } from '@anvil/playbooks'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'anvil-scan-'))
@@ -245,5 +246,94 @@ describe('discoverLocal: publisher evidence', () => {
     } finally {
       rmSync(h, { recursive: true, force: true })
     }
+  })
+})
+
+describe('local skill matching uses identity terms, not search phrases', () => {
+  // The defect these pin, found on the authoring machine: a CI playbook whose keyword was
+  // "workflow validation" matched a Jetpack Compose skill because its description contained
+  // the ordinary word "workflow", and a Terraform playbook matched a testing skill through
+  // "infrastructure". The keyword is what the network is asked; it is not what a skill is.
+  function withSkill(dir: string, body: string): { env: NodeJS.ProcessEnv } {
+    const h = home()
+    skill(join(h, '.agents', 'skills'), dir, body)
+    return { env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv }
+  }
+
+  test('a search keyword head does not match a local skill', () => {
+    const { env } = withSkill(
+      'compose-skill',
+      '---\nname: compose-skill\ndescription: Compose UI for Android apps, with a flexible workflow.\n---\n',
+    )
+    const result = discoverLocal(
+      'ci',
+      { officialOrgs: [], keywords: ['workflow validation'], mcp: [], localMatch: [] },
+      { env },
+    )
+    assert.equal(result.entries.length, 0, 'the word "workflow" is not evidence of a CI skill')
+  })
+
+  test('a keyword head that names another technology does not leak in', () => {
+    const { env } = withSkill(
+      'testing-setup',
+      '---\nname: testing-setup\ndescription: Set up a testing infrastructure with unit tests.\n---\n',
+    )
+    const result = discoverLocal(
+      'terraform',
+      { officialOrgs: [], keywords: ['infrastructure agent skills'], mcp: [], localMatch: [] },
+      { env },
+    )
+    assert.equal(result.entries.length, 0, 'the word "infrastructure" is not Terraform evidence')
+  })
+
+  test('an explicit local-match term is what surfaces a skill', () => {
+    const { env } = withSkill(
+      'ts-tools',
+      '---\nname: ts-tools\ndescription: Everyday helpers for a TypeScript monorepo.\n---\n',
+    )
+    const result = discoverLocal(
+      'node',
+      { officialOrgs: [], keywords: [], mcp: [], localMatch: ['typescript'] },
+      { env },
+    )
+    assert.equal(result.entries.length, 1)
+    assert.equal(result.entries[0]?.label, 'ts-tools')
+  })
+
+  test('the playbook id alone still matches a skill named after it', () => {
+    const { env } = withSkill(
+      'navigation',
+      '---\nname: navigation\ndescription: Navigation patterns for Android apps.\n---\n',
+    )
+    const result = discoverLocal('android', { officialOrgs: [], keywords: [], mcp: [], localMatch: [] }, { env })
+    assert.equal(result.entries.length, 1)
+  })
+
+  test('the JVM playbook does not claim an Android skill', () => {
+    // `gradle` and `kotlin` are shared with Android, so an installed Android skill (an AGP
+    // upgrade, Compose navigation) matched the JVM playbook and was listed in the plan for a
+    // plain JVM repository like Spring Petclinic. The JVM terms are JVM-only now.
+    const { env } = withSkill(
+      'agp-9-upgrade',
+      '---\nname: agp-9-upgrade\ndescription: Upgrades an Android project to the Android Gradle Plugin (AGP) v9, written in Kotlin.\n---\n',
+    )
+    const { playbooks } = loadBuiltins()
+    const jvm = playbooks.find((p) => p.id === 'jvm')
+    assert.ok(jvm !== undefined, 'the jvm playbook must exist')
+    const result = discoverLocal('jvm', jvm.discover, { env })
+    assert.equal(result.entries.length, 0, 'an Android skill must not appear in a JVM plan')
+  })
+
+  test('the JVM playbook still claims a Java skill', () => {
+    const { env } = withSkill(
+      'java-21',
+      '---\nname: java-21\ndescription: Modern Java features, virtual threads and pattern matching.\n---\n',
+    )
+    const { playbooks } = loadBuiltins()
+    const jvm = playbooks.find((p) => p.id === 'jvm')
+    assert.ok(jvm !== undefined)
+    const result = discoverLocal('jvm', jvm.discover, { env })
+    assert.equal(result.entries.length, 1)
+    assert.equal(result.entries[0]?.label, 'java-21')
   })
 })

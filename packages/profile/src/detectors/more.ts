@@ -24,8 +24,12 @@ import {
   hasFile,
   hookFramework,
 } from '../detector.ts'
-import { evidence, findLine, looseVersion } from '../manifest.ts'
+import { asObject, asString, evidence, findLine, looseVersion, readJson } from '../manifest.ts'
 import { readText } from '../walk.ts'
+import { aiDetector } from './ai.ts'
+import { cppDetector } from './cpp.ts'
+import { mobileDetectors } from './mobile.ts'
+import { shellDetectors } from './shell.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
   return readText(join(ctx.root, ctx.resolve(rel))).text
@@ -289,46 +293,87 @@ export const elixirDetector: Detector = {
 // Frontend frameworks
 // ---------------------------------------------------------------------------
 
+/**
+ * Frontend framework.
+ *
+ * Matched from the dependencies and the config files the frameworks write, not from "this is a
+ * Node repository": a React web app depends on `react` *and* `react-dom`, while React Native
+ * depends on `react` and `react-native` and is the `react-native` detector's business. Getting
+ * this wrong is how a plan recommends Next.js documentation to an Express service.
+ */
+const FRONTEND_CONFIGS: ReadonlyArray<{ stack: string; files: readonly string[] }> = [
+  { stack: 'nextjs', files: ['next.config.js', 'next.config.mjs', 'next.config.ts', 'next.config.cjs'] },
+  { stack: 'angular', files: ['angular.json'] },
+  { stack: 'astro', files: ['astro.config.mjs', 'astro.config.js', 'astro.config.ts'] },
+  { stack: 'sveltekit', files: ['svelte.config.js', 'svelte.config.ts'] },
+  { stack: 'nestjs', files: ['nest-cli.json'] },
+]
+
+const FRONTEND_DEPENDENCIES: ReadonlyArray<{ stack: string; deps: readonly string[] }> = [
+  { stack: 'nextjs', deps: ['next'] },
+  { stack: 'angular', deps: ['@angular/core'] },
+  { stack: 'vue', deps: ['vue'] },
+  { stack: 'svelte', deps: ['svelte'] },
+  { stack: 'astro', deps: ['astro'] },
+  { stack: 'nestjs', deps: ['@nestjs/core'] },
+]
+
+/** `"dep":` on the line that declares it, for evidence a reader can open. */
+function dependencyLine(text: string, dep: string): number | null {
+  return findLine(text, new RegExp(`"${dep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*:`))
+}
+
 export const frontendDetector: Detector = {
   id: 'frontend',
   title: 'Frontend framework',
   priority: 45,
   matches(ctx) {
-    if (hasFile(ctx, 'vite.config.ts') || hasFile(ctx, 'vite.config.js')) return true
-    if (hasFile(ctx, 'next.config.js') || hasFile(ctx, 'next.config.mjs')) return true
+    if (hasFile(ctx, 'package.json')) return true
+    if (FRONTEND_CONFIGS.some((c) => c.files.some((f) => hasFile(ctx, f)))) return true
     return filesUnder(ctx, '').some((f) => f.endsWith('.vue') || f.endsWith('.svelte'))
   },
   detect(ctx, draft) {
-    const hasVue = filesUnder(ctx, '').some((f) => f.endsWith('.vue'))
-    const hasSvelte = filesUnder(ctx, '').some((f) => f.endsWith('.svelte'))
+    const manifest = readJson(ctx, 'package.json')
+    const text = read(ctx, 'package.json')
+    const deps =
+      manifest === null
+        ? {}
+        : { ...asObject(manifest.dependencies ?? null), ...asObject(manifest.devDependencies ?? null) }
 
-    if (hasFile(ctx, 'next.config.js') || hasFile(ctx, 'next.config.mjs') || hasFile(ctx, 'next.config.ts')) {
-      addStack(draft, {
-        id: 'nextjs',
-        version: null,
-        evidence: ['next.config.js'],
-      })
+    for (const { stack, files } of FRONTEND_CONFIGS) {
+      const hit = files.find((f) => hasFile(ctx, f))
+      if (hit !== undefined) addStack(draft, { id: stack, version: null, evidence: [hit] })
     }
-    if (hasVue) addStack(draft, { id: 'vue', version: null, evidence: ['*.vue'] })
-    if (hasSvelte) addStack(draft, { id: 'svelte', version: null, evidence: ['*.svelte'] })
-    if (hasFile(ctx, 'vite.config.ts') || hasFile(ctx, 'vite.config.js')) {
-      addStack(draft, {
-        id: 'vite',
-        version: null,
-        evidence: ['vite.config.ts'],
-      })
+    for (const { stack, deps: names } of FRONTEND_DEPENDENCIES) {
+      const dep = names.find((n) => n in deps)
+      if (dep === undefined) continue
+      const evidencePath = text === null ? 'package.json' : evidence('package.json', dependencyLine(text, dep))
+      addStack(draft, { id: stack, version: looseVersion(asString(deps[dep])), evidence: [evidencePath] })
+    }
+
+    // React on the web: `react` together with `react-dom`. React Native has `react` without
+    // `react-dom`, so it must not be offered React's web documentation.
+    if ('react' in deps && 'react-dom' in deps) {
+      const evidencePath = text === null ? 'package.json' : evidence('package.json', dependencyLine(text, 'react'))
+      addStack(draft, { id: 'react', version: looseVersion(asString(deps.react)), evidence: [evidencePath] })
+    }
+
+    if (filesUnder(ctx, '').some((f) => f.endsWith('.vue'))) {
+      addStack(draft, { id: 'vue', version: null, evidence: ['*.vue'] })
+    }
+    if (filesUnder(ctx, '').some((f) => f.endsWith('.svelte'))) {
+      addStack(draft, { id: 'svelte', version: null, evidence: ['*.svelte'] })
+    }
+    if (hasFile(ctx, 'vite.config.ts') || hasFile(ctx, 'vite.config.js') || hasFile(ctx, 'vite.config.mts')) {
+      addStack(draft, { id: 'vite', version: null, evidence: ['vite.config.ts'] })
+    }
+    if (hasFile(ctx, 'tailwind.config.js') || hasFile(ctx, 'tailwind.config.ts')) {
+      addStack(draft, { id: 'tailwind', version: null, evidence: ['tailwind.config.js'] })
     }
 
     // No build command can be claimed here: the bundler is often invoked through a
     // package script, and the node detector already read it properly.
     if (hasFile(ctx, 'eslint.config.js') || hasFile(ctx, '.eslintrc.json')) addTool(draft, 'lint', 'eslint')
-    if (hasFile(ctx, 'tailwind.config.js') || hasFile(ctx, 'tailwind.config.ts')) {
-      addStack(draft, {
-        id: 'tailwind',
-        version: null,
-        evidence: ['tailwind.config.js'],
-      })
-    }
   },
 }
 
@@ -400,18 +445,43 @@ export const browserTestDetector: Detector = {
 // Swift / iOS
 // ---------------------------------------------------------------------------
 
+/**
+ * The file that makes a repository an Xcode project rather than a SwiftPM package.
+ *
+ * `matches` used to test `hasFile('*.xcodeproj')` -- a literal string, which matched nothing --
+ * and `hasFile('project.pbxproj')`, which matched only a root-level file. Every Xcode project
+ * that exists puts the project at `App.xcodeproj/project.pbxproj`, so none of them were seen,
+ * and the repository was left with no stack while the plan still recommended `swift build`.
+ * Matching is by suffix now, at any depth.
+ */
+function appleProjectEvidence(ctx: DetectorContext): string | null {
+  return (
+    filesUnder(ctx, '').find(
+      (f) =>
+        f.endsWith('.xcodeproj/project.pbxproj') ||
+        f.endsWith('.xcworkspace/contents.xcworkspacedata') ||
+        f === 'Podfile' ||
+        f.endsWith('/Podfile'),
+    ) ?? null
+  )
+}
+
 export const swiftDetector: Detector = {
   id: 'swift',
   title: 'Swift / iOS',
   priority: 50,
-  matches: (ctx) => hasFile(ctx, 'Package.swift') || hasFile(ctx, '*.xcodeproj') || hasFile(ctx, 'project.pbxproj'),
+  matches: (ctx) => hasFile(ctx, 'Package.swift') || appleProjectEvidence(ctx) !== null,
   detect(ctx, draft) {
-    addStack(draft, {
-      id: 'swift',
-      version: null,
-      evidence: ['Package.swift'],
-    })
+    // SwiftPM and Xcode are two ecosystems with two different toolchains, and they are told
+    // apart by which manifest is present. A `Package.swift` is a SwiftPM package; an Xcode
+    // project is an `.xcodeproj`/`.xcworkspace` or a CocoaPods `Podfile`. They can coexist in
+    // one repository, so both stacks may be emitted.
     if (hasFile(ctx, 'Package.swift')) {
+      addStack(draft, {
+        id: 'swift',
+        version: null,
+        evidence: ['Package.swift'],
+      })
       // `swift build` / `swift test` are the toolchain's own subcommands, and the
       // manifest is what makes them applicable to this package.
       addCommand(draft, 'build', {
@@ -425,6 +495,16 @@ export const swiftDetector: Detector = {
         evidence: 'Package.swift',
       })
     }
+
+    const project = appleProjectEvidence(ctx)
+    if (project !== null) {
+      // No `swift build` here: an Xcode project builds through `xcodebuild` and a scheme, which
+      // is not a single runnable command without knowing the scheme. The playbook carries no
+      // verify command for that reason; inventing one is the confidently-wrong output this tool
+      // exists to avoid.
+      addStack(draft, { id: 'xcode', version: null, evidence: [project] })
+    }
+
     if (hasFile(ctx, '.swiftlint.yml')) addTool(draft, 'lint', 'swiftlint')
     if (hasFile(ctx, '.swiftformat')) addTool(draft, 'formatter', 'swiftformat')
   },
@@ -602,4 +682,8 @@ export const additionalDetectors: readonly Detector[] = [
   frontendDetector,
   browserTestDetector,
   bazelDetector,
+  cppDetector,
+  aiDetector,
+  ...mobileDetectors,
+  ...shellDetectors,
 ]

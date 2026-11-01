@@ -185,13 +185,33 @@ export function addRiskHeuristics(draft: ProfileDraft, files: ReadonlySet<string
  * risk map, means flagging the entire repository.
  */
 export function globToRegExp(glob: string): RegExp {
-  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-  const body = escaped
-    // A double-star followed by a slash may match zero directories, so the pattern for
-    // "migrations anywhere" also matches a top-level migrations directory.
-    .replace(/\*\*\//g, '(?:.*/)?')
-    .replace(/\*\*/g, '.*')
-    .replace(/\*/g, '[^/]*')
+  // The three shapes are expanded in a single left-to-right pass rather than by three chained
+  // `replace` calls. The chained version rewrote the `.*` it had just inserted: the final
+  // `*` -> `[^/]*` step turned `**/`'s `(?:.*/)?` into `(?:.[^/]*/)?`, an optional *single*
+  // segment. Anything two levels deep was invisible to every `**/` pattern -- which hid
+  // `app/src/main/AndroidManifest.xml`, a nested `.maestro/flows/` flow and a deep
+  // `wdio.conf`. Inserting the pieces once means a later step cannot see them.
+  let body = ''
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i] as string
+    if (ch === '*') {
+      if (glob[i + 1] === '*') {
+        // A double-star followed by a slash may match zero directories, so the pattern for
+        // "migrations anywhere" also matches a top-level migrations directory.
+        if (glob[i + 2] === '/') {
+          body += '(?:.*/)?'
+          i += 2
+        } else {
+          body += '.*'
+          i += 1
+        }
+      } else {
+        body += '[^/]*'
+      }
+      continue
+    }
+    body += /[.+^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch
+  }
   return new RegExp(`^${body}$`)
 }
 

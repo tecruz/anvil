@@ -93,6 +93,9 @@ riskGlobs:
 discover:
   officialOrgs: ['php', 'laravel']
   officialDomains: ['php.net', 'php-fig.org', 'laravel.com']
+  # Identity terms for the local skill scan; `php` is below the matcher's length floor, so a
+  # framework name is what an installed skill is found by.
+  localMatch: ['laravel']
   keywords:
     - 'php mcp server'
     - 'laravel agent'

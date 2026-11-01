@@ -96,6 +96,93 @@ function gradlePluginFile(ctx: DetectorContext, buildFiles: readonly string[], p
 }
 
 // ---------------------------------------------------------------------------
+// Android and Kotlin Multiplatform
+// ---------------------------------------------------------------------------
+
+/** Every Gradle build file: the modules and the settings that enumerate them. */
+function gradleBuildFiles(ctx: DetectorContext): string[] {
+  return filesUnder(ctx, '').filter((f) => /(^|\/)(?:build|settings)\.gradle(?:\.kts)?$/.test(f))
+}
+
+/**
+ * The plugin that makes a Gradle build an *Android* build.
+ *
+ * This exists because `android.yaml` used to match on the `gradle` dependency and a bare
+ * `**\/build.gradle.kts`, which is every Gradle project ever written. Spring Petclinic -- a
+ * Gradle Java build -- was matched as Android and offered Compose performance guidance, and a
+ * Kotlin Multiplatform module with no Android target was matched the same way. The evidence
+ * for Android is the Android Gradle Plugin id, not the build system.
+ */
+const ANDROID_PLUGIN =
+  /com\.android\.(?:application|library|test|dynamic-feature|asset-pack)|com\.android\.tools\.build:gradle/
+
+/** One manifest or plugin line is Android evidence; the first found is the citation. */
+function androidEvidence(ctx: DetectorContext): string | null {
+  const manifest = filesUnder(ctx, '').find((f) => f === 'AndroidManifest.xml' || f.endsWith('/AndroidManifest.xml'))
+  if (manifest !== undefined) return manifest
+
+  for (const file of gradleBuildFiles(ctx)) {
+    const text = read(ctx, file)
+    if (text === null) continue
+    const plugin = findLine(text, ANDROID_PLUGIN)
+    if (plugin !== null) return evidence(file, plugin)
+    // An `android { }` block with no plugin line in this file: the plugin is applied by a
+    // convention plugin or a parent, and the block is still a statement about Android.
+    const block = findLine(text, /\bandroid\s*\{/)
+    if (block !== null) return evidence(file, block)
+  }
+
+  const props = read(ctx, 'gradle.properties')
+  if (props !== null) {
+    const line = findLine(props, /^\s*android\./)
+    if (line !== null) return evidence('gradle.properties', line)
+  }
+  return null
+}
+
+export const androidDetector: Detector = {
+  id: 'android',
+  title: 'Android',
+  // After `jvm`, so a shared Gradle build claims names first; the stack is additive either way.
+  priority: 65,
+  matches: (ctx) => androidEvidence(ctx) !== null,
+  detect(ctx, draft) {
+    const evidencePath = androidEvidence(ctx)
+    if (evidencePath === null) return
+    addStack(draft, { id: 'android', version: null, evidence: [evidencePath] })
+  },
+}
+
+/**
+ * Kotlin Multiplatform, detected separately so it is not mistaken for Android.
+ *
+ * A KMP module shares the Gradle build system and the `kotlin` language with an Android one,
+ * but it targets iOS, JVM and native too. The two are frequently *and* legitimately both
+ * (a KMP module with an `androidTarget`), which is why this is its own stack rather than a
+ * correction to `android`: a repository can be both, and the plan should say so.
+ */
+const KMP_PLUGIN =
+  /kotlin\s*\(\s*["']multiplatform["']\s*\)|kotlin-multiplatform|kotlin\.multiplatform|ios(?:Arm64|X64|SimulatorArm64)\s*\(/
+
+export const kotlinMultiplatformDetector: Detector = {
+  id: 'kotlin-multiplatform',
+  title: 'Kotlin Multiplatform',
+  priority: 66,
+  matches: (ctx) => gradleBuildFiles(ctx).length > 0,
+  detect(ctx, draft) {
+    for (const file of gradleBuildFiles(ctx)) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      const line = findLine(text, KMP_PLUGIN)
+      if (line !== null) {
+        addStack(draft, { id: 'kotlin-multiplatform', version: null, evidence: [evidence(file, line)] })
+        return
+      }
+    }
+  },
+}
+
+// ---------------------------------------------------------------------------
 // Go
 // ---------------------------------------------------------------------------
 
@@ -368,6 +455,19 @@ export const jvmDetector: Detector = {
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
     }
 
+    // Spring Boot is a framework on top of the build, and the marker is the starter it pulls in.
+    // A plain JVM project that happens to be a web service is not a Spring project: the framework's
+    // conventions -- auto-configuration, the application context, the request lifecycle -- are not
+    // inferable from `build.gradle`.
+    for (const file of [...(maven ? ['pom.xml'] : []), ...gradleFiles]) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      const line = findLine(text, /spring-boot-starter|org\.springframework\.boot/)
+      if (line === null) continue
+      addStack(draft, { id: 'spring-boot', version: null, evidence: [evidence(file, line)] })
+      break
+    }
+
     for (const f of ctx.files) {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
     }
@@ -401,6 +501,19 @@ export const dotnetDetector: Detector = {
       const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
       addModule(draft, { id, path: dir, kind: 'project', deps: [] })
     }
+
+    // ASP.NET Core is a .NET workload with its own SDK marker. A plain .NET project is not a web
+    // application, and the framework's guidance -- middleware order, the request pipeline, the
+    // hosting model -- does not apply to a console app.
+    for (const p of projects) {
+      const text = read(ctx, p)
+      if (text === null) continue
+      const line = findLine(text, /Microsoft\.NET\.Sdk\.Web/i)
+      if (line === null) continue
+      addStack(draft, { id: 'aspnet', version: null, evidence: [evidence(p, line)] })
+      break
+    }
+
     if (hasFile(ctx, 'global.json')) {
       setMonorepo(draft, { tool: 'sln', evidence: 'global.json', members: [] })
     }
@@ -418,6 +531,8 @@ export const dotnetDetector: Detector = {
 
 export const ecosystemDetectors: readonly Detector[] = [
   jvmDetector,
+  androidDetector,
+  kotlinMultiplatformDetector,
   nodeDetector,
   pythonDetector,
   goDetector,

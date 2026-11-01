@@ -27,6 +27,9 @@ match:
     - '**/cypress.config.*'
     - '**/wdio.conf.*'
     - '**/detox.config.*'
+    # Detox's documented config is `.detoxrc.js` (or `.detoxrc.json`); `detox.config.*` was a
+    # name it does not actually use, so a Detox repository matched nothing.
+    - '**/.detoxrc.*'
     - '**/.maestro/**'
   deps: []
   importPrefixes: []

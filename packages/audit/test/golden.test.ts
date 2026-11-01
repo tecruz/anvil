@@ -1566,12 +1566,14 @@ describe('the six additional detectors', () => {
     }
   })
 
-  test('detector count reaches fourteen', () => {
-    // Thirteen plus the browser-test detector: a Playwright suite with no package script was
-    // invisible on a polyglot repository. The `Set` also asserts every id is unique: two
+  test('detector count reaches twenty-three', () => {
+    // Thirteen, plus the browser-test detector, plus Android and Kotlin Multiplatform, plus the
+    // three mobile frameworks (Flutter, React Native/Expo, .NET MAUI), plus C/C++, Shell,
+    // PowerShell, and the AI detector (notebooks and declared ML packages; the web frameworks are
+    // stacks from the existing frontend detector). The `Set` also asserts every id is unique: two
     // detectors sharing an id would silently shadow one another.
     const ids = new Set([...ecosystemDetectors, ...additionalDetectors].map((d) => d.id))
-    assert.equal(ids.size, 14)
+    assert.equal(ids.size, 23)
   })
 })
 

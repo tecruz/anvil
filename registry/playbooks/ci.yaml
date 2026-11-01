@@ -76,6 +76,9 @@ riskGlobs:
 discover:
   officialOrgs: ['github', 'actions']
   officialDomains: ['docs.github.com', 'docs.gitlab.com']
+  # Identity terms for the local skill scan. Deliberately not a keyword head: `workflow` (from
+  # `workflow validation` below) put an unrelated Compose skill in the CI plan.
+  localMatch: ['github actions']
   keywords:
     - 'github actions agent'
     - 'ci pipeline linter'

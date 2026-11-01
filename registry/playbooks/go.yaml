@@ -85,6 +85,10 @@ riskGlobs:
 discover:
   officialOrgs: ['golang']
   officialDomains: ['go.dev', 'pkg.go.dev/golang.org/x']
+  # Identity terms for the local skill scan; see `discover.localMatch` in the schema for why
+  # this is separate from `keywords`. `go` itself is below the matcher's length floor, so the
+  # longer name is the one a skill is matched on.
+  localMatch: ['golang']
   keywords:
     - 'go mcp server'
     - 'golang agent skills'

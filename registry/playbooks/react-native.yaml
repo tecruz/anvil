@@ -1,0 +1,82 @@
+# React Native / Expo playbook.
+#
+# One playbook for both, because they are one ecosystem: an Expo app depends on `react-native`,
+# and the advice -- Metro, the native projects, a dependency bump that has to reach both platforms
+# -- is the same. Expo's managed workflow adds config and removes the native projects, which the
+# `why` on the Expo links covers rather than a second playbook.
+
+id: react-native
+title: React Native / Expo
+priority: 58
+
+match:
+  files: ['**/metro.config.js', '**/react-native.config.js']
+  deps: ['react-native', 'expo']
+  importPrefixes: ['react-native', 'expo']
+
+official:
+  docs:
+    - label: React Native documentation
+      url: 'https://reactnative.dev/docs/getting-started'
+      why: >-
+        The core components, the networking and the native-module model. The native side is the
+        part a web React habit gets wrong, so read the native-module guide before touching it.
+    - label: Expo documentation
+      url: 'https://docs.expo.dev/'
+      why: >-
+        The managed workflow, config plugins and EAS builds. In a managed app there is no native
+        project to edit, and the config plugin is where a native change is actually made.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: React Native upgrade helper
+      url: 'https://react-native-community.github.io/upgrade-helper/'
+      why: >-
+        A diff of the native project templates between two versions. An upgrade is mostly the
+        template changes, and this tool shows exactly which ones apply.
+
+community:
+  - repo: 'facebook/react-native'
+    label: React Native
+    why: >-
+      The framework source. The renderer and the native bridges live here, so an "is this a bug
+      or is it me" question is answered by reading them.
+  - repo: 'expo/expo'
+    label: Expo
+    why: >-
+      The Expo packages and config plugins. The prebuild output that a managed app generates is
+      produced by this code, so it is where a config-plugin question is settled.
+
+verify:
+  build: []
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'app code at the root or under src/; android/ and ios/ are generated, not hand-written'
+  testNaming: '*.test.tsx / *.test.ts, with @testing-library/react-native'
+  reviewFocus:
+    - 'a native module or permission, which needs Android and iOS updated together'
+    - 'AndroidManifest.xml and Info.plist, which are edited in place'
+    - 'package.json dependency changes, which can desync the native build'
+    - 'anything crossing the JS/native bridge, which is async and batched'
+
+riskGlobs:
+  - '**/android/app/src/main/AndroidManifest.xml'
+  - '**/ios/*.xcodeproj/project.pbxproj'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['facebook', 'react-native-community', 'expo']
+  officialDomains: ['reactnative.dev', 'docs.expo.dev', 'react.dev']
+  localMatch: ['react native', 'expo', 'metro']
+  keywords:
+    - 'react native agent skills'
+    - 'expo mcp server'
+    - 'metro bundler agent'
+  mcp: ['react-native', 'expo']
