@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { discoverLocal, scanLocalSkills, skillMatchesSeeds, skillSearchRoots } from '@anvil/discovery'
+import { loadBuiltins } from '@anvil/playbooks'
 
 function home(): string {
   return mkdtempSync(join(tmpdir(), 'anvil-scan-'))
@@ -306,5 +307,33 @@ describe('local skill matching uses identity terms, not search phrases', () => {
     )
     const result = discoverLocal('android', { officialOrgs: [], keywords: [], mcp: [], localMatch: [] }, { env })
     assert.equal(result.entries.length, 1)
+  })
+
+  test('the JVM playbook does not claim an Android skill', () => {
+    // `gradle` and `kotlin` are shared with Android, so an installed Android skill (an AGP
+    // upgrade, Compose navigation) matched the JVM playbook and was listed in the plan for a
+    // plain JVM repository like Spring Petclinic. The JVM terms are JVM-only now.
+    const { env } = withSkill(
+      'agp-9-upgrade',
+      '---\nname: agp-9-upgrade\ndescription: Upgrades an Android project to the Android Gradle Plugin (AGP) v9, written in Kotlin.\n---\n',
+    )
+    const { playbooks } = loadBuiltins()
+    const jvm = playbooks.find((p) => p.id === 'jvm')
+    assert.ok(jvm !== undefined, 'the jvm playbook must exist')
+    const result = discoverLocal('jvm', jvm.discover, { env })
+    assert.equal(result.entries.length, 0, 'an Android skill must not appear in a JVM plan')
+  })
+
+  test('the JVM playbook still claims a Java skill', () => {
+    const { env } = withSkill(
+      'java-21',
+      '---\nname: java-21\ndescription: Modern Java features, virtual threads and pattern matching.\n---\n',
+    )
+    const { playbooks } = loadBuiltins()
+    const jvm = playbooks.find((p) => p.id === 'jvm')
+    assert.ok(jvm !== undefined)
+    const result = discoverLocal('jvm', jvm.discover, { env })
+    assert.equal(result.entries.length, 1)
+    assert.equal(result.entries[0]?.label, 'java-21')
   })
 })

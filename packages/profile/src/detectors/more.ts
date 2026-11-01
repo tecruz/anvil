@@ -26,6 +26,7 @@ import {
 } from '../detector.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
+import { cppDetector } from './cpp.ts'
 import { mobileDetectors } from './mobile.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
@@ -638,5 +639,6 @@ export const additionalDetectors: readonly Detector[] = [
   frontendDetector,
   browserTestDetector,
   bazelDetector,
+  cppDetector,
   ...mobileDetectors,
 ]

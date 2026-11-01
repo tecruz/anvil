@@ -441,4 +441,23 @@ describe('short technology names survive the focus filter', () => {
       ['a'],
     )
   })
+
+  test('C, C++ and C# are distinct, not one stripped term', () => {
+    // The tokenizer keeps a trailing `#`/`+`, so a C# ticket no longer matches C and C++.
+    const c = resource({ id: 'c', title: 'doc: C language reference', detail: 'The C programming language.' })
+    const cpp = resource({ id: 'cpp', title: 'doc: C++ documentation', detail: 'The C++ standard library.' })
+    const cs = resource({ id: 'cs', title: 'doc: C# language guide', detail: 'The C# language reference.' })
+    assert.deepEqual(
+      shortlistSuggestions([c, cpp, cs], { focus: 'C#' }).map((s) => s.id),
+      ['cs'],
+    )
+    assert.deepEqual(
+      shortlistSuggestions([c, cpp, cs], { focus: 'C++' }).map((s) => s.id),
+      ['cpp'],
+    )
+    assert.deepEqual(
+      shortlistSuggestions([c, cpp, cs], { focus: 'C' }).map((s) => s.id),
+      ['c'],
+    )
+  })
 })

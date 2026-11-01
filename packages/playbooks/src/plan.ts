@@ -719,7 +719,8 @@ export function shortlistSuggestions(suggestions: readonly Suggestion[], options
 }
 
 /**
- * Technology names short enough that the length filter would otherwise drop them.
+ * Technology names short enough that the length filter would otherwise drop them, or whose
+ * identity is carried by a `#`/`+` suffix the tokenizer must keep.
  *
  * The four-character minimum exists to drop English noise (`and`, `the`, `for`), and it also
  * dropped the entire focus of a ticket about Go, PHP, C# or .NET: `go` and `php` are three
@@ -728,15 +729,38 @@ export function shortlistSuggestions(suggestions: readonly Suggestion[], options
  * degenerated into the unfocused tier/confidence list -- the exact padding the shortlist
  * exists to avoid.
  *
+ * The suffixes are here because stripping them made `C#`, `C++` and `C` one term: a ticket
+ * about C# was offered the C and C++ references, which is the confidently-wrong answer. The
+ * tokenizer keeps a trailing run of `#`/`+`, so `c#` and `c++` are distinct words.
+ *
  * This is a curated allowlist, not a lower threshold, because a threshold of two or three
  * would readmit the noise the filter is for. Each entry is a name a repository is really
  * known by, and a whole-word match keeps `c` out of `ci` and `net` out of `network`.
  */
-const SHORTLIST_SHORT_TECH_TERMS = new Set(['go', 'php', 'c', 'js', 'ts', 'cs', 'sql', 'css', 'ios', 'k8s', 'net'])
+const SHORTLIST_SHORT_TECH_TERMS = new Set([
+  'go',
+  'php',
+  'c',
+  'c#',
+  'c++',
+  'f#',
+  'vb',
+  'js',
+  'ts',
+  'cs',
+  'sql',
+  'css',
+  'ios',
+  'k8s',
+  'net',
+])
 
-/** Shared word boundaries: punctuation separates names such as `testing-setup` and `unit_tests`. */
+/**
+ * Shared word boundaries: punctuation separates names such as `testing-setup` and `unit_tests`,
+ * while a trailing `#`/`+` stays attached so `C#` and `C++` are not both read as `c`.
+ */
 function shortlistWords(text: string): string[] {
-  return text.toLowerCase().match(/[a-z0-9]+/g) ?? []
+  return text.toLowerCase().match(/[a-z0-9]+[#+]*/g) ?? []
 }
 
 /**

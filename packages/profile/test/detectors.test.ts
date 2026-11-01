@@ -189,3 +189,45 @@ describe('the mobile framework detectors do not overreach', () => {
     assert.ok(!ids.includes('swift'), 'no Package.swift, so this is not a SwiftPM package')
   })
 })
+
+describe('the C/C++ detector keys on the build system', () => {
+  test('a CMake project is cpp and cmake', () => {
+    const ids = stacksOf({
+      'CMakeLists.txt': 'cmake_minimum_required(VERSION 3.28)\nproject(app LANGUAGES CXX)\n',
+      'src/main.cpp': 'int main() { return 0; }\n',
+    })
+    assert.ok(ids.includes('cpp'), ids.join(', '))
+    assert.ok(ids.includes('cmake'), ids.join(', '))
+  })
+
+  test('a nested CMakeLists.txt is found, not only the root one', () => {
+    const ids = stacksOf({ 'libs/core/CMakeLists.txt': 'project(core LANGUAGES CXX)\n' })
+    assert.ok(ids.includes('cpp'), ids.join(', '))
+  })
+
+  test('a Meson project is cpp and meson', () => {
+    const ids = stacksOf({ 'meson.build': "project('app', 'cpp')\n" })
+    assert.ok(ids.includes('cpp'), ids.join(', '))
+    assert.ok(ids.includes('meson'), ids.join(', '))
+  })
+
+  test('a vcpkg manifest is a package manager stack, not a build system', () => {
+    const ids = stacksOf({
+      'CMakeLists.txt': 'project(app LANGUAGES CXX)\n',
+      'vcpkg.json': '{ "name": "app", "version": "1.0.0" }\n',
+    })
+    assert.ok(ids.includes('vcpkg'), ids.join(', '))
+    assert.ok(ids.includes('cpp'), ids.join(', '))
+  })
+
+  test('bare C++ sources with no build system are not a C/C++ project', () => {
+    // A vendored reference implementation or a native addon is the C/C++ *language*, not a
+    // project with a build and a test command to offer.
+    const ids = stacksOf({
+      'src/thing.cpp': 'int f() { return 1; }\n',
+      'src/thing.h': 'int f();\n',
+    })
+    assert.ok(!ids.includes('cpp'), ids.join(', '))
+    assert.ok(!ids.includes('cmake'), ids.join(', '))
+  })
+})

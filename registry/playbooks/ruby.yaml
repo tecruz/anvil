@@ -12,7 +12,12 @@ match:
   # `rails`, not `laravel`. The two names are close enough that a typo here silently
   # matched every PHP project, and the resulting plan confidently recommended Rails
   # security guides to a Laravel codebase.
-  deps: ['ruby', 'rails']
+  #
+  # No `ruby` dep. Playbook `deps` match inferred *languages* as well as detected stacks, and
+  # a lone `.rb` file -- ripgrep's Homebrew formula, a Fastlane `Fastfile` -- is the Ruby
+  # language, not a Ruby project. Matching it offered Rails guides to a Rust repository. The
+  # file list above is the real evidence; `rails` stays because it is a detected stack.
+  deps: ['rails']
   importPrefixes: ['active_record', 'action_controller', 'action_view']
 
 official:

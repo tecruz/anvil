@@ -9,7 +9,10 @@ title: Flutter
 priority: 58
 
 match:
-  files: ['pubspec.yaml', '**/pubspec.yaml']
+  # The `flutter` stack, not `pubspec.yaml` alone. A `pubspec.yaml` is a *Dart* package, and
+  # matching the file made a pure-Dart package a Flutter project: the plan offered the Flutter
+  # documentation, the cookbook, and `flutter build` to a repository that has no Flutter SDK.
+  # The detector emits `flutter` only when the pubspec declares the SDK.
   deps: ['flutter']
   importPrefixes: ['package:flutter/']
 
