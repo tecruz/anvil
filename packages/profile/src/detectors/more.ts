@@ -25,7 +25,7 @@ import {
   hookFramework,
 } from '../detector.ts'
 import { asString, evidence, findLine, looseVersion } from '../manifest.ts'
-import { applicationManifests, firstNamedFile } from '../packageManifests.ts'
+import { applicationDirs, applicationManifests, firstNamedFileInDirs, manifestDir } from '../packageManifests.ts'
 import { readText } from '../walk.ts'
 import { aiDetector } from './ai.ts'
 import { cppDetector } from './cpp.ts'
@@ -330,14 +330,16 @@ export const frontendDetector: Detector = {
   priority: 45,
   matches(ctx) {
     if (filesUnder(ctx, '').some((f) => f === 'package.json' || f.endsWith('/package.json'))) return true
-    if (FRONTEND_CONFIGS.some((c) => firstNamedFile(ctx, c.files) !== null)) return true
+    const dirs = applicationDirs(ctx)
+    if (FRONTEND_CONFIGS.some((c) => firstNamedFileInDirs(ctx, c.files, dirs) !== null)) return true
     return filesUnder(ctx, '').some((f) => f.endsWith('.vue') || f.endsWith('.svelte'))
   },
   detect(ctx, draft) {
     const manifests = applicationManifests(ctx)
+    const dirs = [...new Set(manifests.map((manifest) => manifestDir(manifest)))]
 
     for (const { stack, files } of FRONTEND_CONFIGS) {
-      const hit = firstNamedFile(ctx, files)
+      const hit = firstNamedFileInDirs(ctx, files, dirs)
       if (hit !== null) addStack(draft, { id: stack, version: null, evidence: [hit] })
     }
     for (const manifest of manifests) {
@@ -368,14 +370,15 @@ export const frontendDetector: Detector = {
     if (filesUnder(ctx, '').some((f) => f.endsWith('.svelte'))) {
       addStack(draft, { id: 'svelte', version: null, evidence: ['*.svelte'] })
     }
-    const vite = firstNamedFile(ctx, ['vite.config.ts', 'vite.config.js', 'vite.config.mts'])
+    const vite = firstNamedFileInDirs(ctx, ['vite.config.ts', 'vite.config.js', 'vite.config.mts'], dirs)
     if (vite !== null) addStack(draft, { id: 'vite', version: null, evidence: [vite] })
-    const tailwind = firstNamedFile(ctx, ['tailwind.config.js', 'tailwind.config.ts'])
+    const tailwind = firstNamedFileInDirs(ctx, ['tailwind.config.js', 'tailwind.config.ts'], dirs)
     if (tailwind !== null) addStack(draft, { id: 'tailwind', version: null, evidence: [tailwind] })
 
     // No build command can be claimed here: the bundler is often invoked through a
     // package script, and the node detector already read it properly.
-    if (firstNamedFile(ctx, ['eslint.config.js', '.eslintrc.json']) !== null) addTool(draft, 'lint', 'eslint')
+    if (firstNamedFileInDirs(ctx, ['eslint.config.js', '.eslintrc.json'], dirs) !== null)
+      addTool(draft, 'lint', 'eslint')
   },
 }
 

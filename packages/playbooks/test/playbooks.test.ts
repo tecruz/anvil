@@ -933,6 +933,44 @@ describe('qa playbooks', () => {
   })
 })
 
+describe('workspace boundaries reach the playbook match', () => {
+  /** A repository with the given files, which may live in subdirectories. */
+  function repoWith(files: Record<string, string>): ProjectProfile {
+    const dir = tempDir()
+    try {
+      for (const [name, body] of Object.entries(files)) {
+        const path = join(dir, name)
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, body)
+      }
+      return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('an undeclared example app does not match the React Native playbook', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({
+      'package.json': JSON.stringify({ name: 'api', dependencies: { express: '5.0.0' } }),
+      'examples/demo/package.json': JSON.stringify({ dependencies: { expo: '54.0.0' } }),
+      'examples/demo/app.json': JSON.stringify({ expo: { name: 'demo', slug: 'demo' } }),
+    })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(!ids.includes('react-native'), `undeclared example matched react-native: ${ids.join(', ')}`)
+  })
+
+  test('a declared workspace Expo app matches the React Native playbook', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({
+      'package.json': JSON.stringify({ private: true, workspaces: ['apps/*'] }),
+      'apps/mobile/package.json': JSON.stringify({ dependencies: { expo: '54.0.0' } }),
+    })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(ids.includes('react-native'), `expected react-native, saw ${ids.join(', ')}`)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Satisfaction: guidance the repository already follows
 // ---------------------------------------------------------------------------

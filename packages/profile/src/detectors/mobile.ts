@@ -15,12 +15,158 @@
 
 import { join } from 'node:path'
 import { addCommand, addStack, type Detector, type DetectorContext, filesUnder, hasFile } from '../detector.ts'
-import { asString, evidence, findLine, looseVersion } from '../manifest.ts'
-import { applicationManifests, firstNamedFile } from '../packageManifests.ts'
+import { asString, evidence, findLine, looseVersion, maskXmlComments } from '../manifest.ts'
+import { applicationManifests, firstNamedFileInDirs, manifestDir } from '../packageManifests.ts'
 import { readText } from '../walk.ts'
 
 function read(ctx: DetectorContext, rel: string): string | null {
   return readText(join(ctx.root, ctx.resolve(rel))).text
+}
+
+/**
+ * Blank C# comments and string/character literals without moving anything.
+ *
+ * `MauiProgram` appears in prose, in documentation strings, in log messages, and inside the
+ * expression of an interpolated string. None of those is the application entry point. Masking
+ * walks each literal the way C# tokenizes it -- verbatim, interpolated (including nested literals
+ * inside the interpolation) and raw (any number of quotes) -- so a real declaration survives and
+ * nothing else does.
+ */
+function maskCSharp(text: string): string {
+  const out = text.split('')
+  const blank = (from: number, to: number): void => {
+    for (let j = from; j < to; j++) if (out[j] !== '\n') out[j] = ' '
+  }
+
+  /** End offset of the interpolation expression that starts just past its opening `{`. */
+  function interpolationEnd(start: number): number {
+    let depth = 1
+    let i = start
+    while (i < text.length) {
+      const ch = text[i] as string
+      if (ch === '"' || ch === "'" || ch === '$' || ch === '@') {
+        const end = literalEnd(i)
+        if (end !== null) {
+          i = end
+          continue
+        }
+      }
+      if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) return i + 1
+      }
+      i++
+    }
+    return text.length
+  }
+
+  /** End offset of the literal starting at `start`, or null when none starts there. */
+  function literalEnd(start: number): number | null {
+    let i = start
+    let interpolated = false
+    let verbatim = false
+    while (i < text.length && (text[i] === '$' || text[i] === '@')) {
+      if (text[i] === '$') interpolated = true
+      else verbatim = true
+      i++
+    }
+    const quote = text[i]
+    if (quote !== '"' && quote !== "'") return null
+    if (quote === '"') {
+      let quotes = 0
+      while (text[i + quotes] === '"') quotes++
+      if (quotes >= 3) {
+        const delimiter = '"'.repeat(quotes)
+        i += quotes
+        while (i < text.length && !text.startsWith(delimiter, i)) i++
+        return Math.min(text.length, i + quotes)
+      }
+    }
+    if (quote === "'") {
+      i++
+      while (i < text.length) {
+        const ch = text[i] as string
+        if (ch === '\\') {
+          i += 2
+          continue
+        }
+        if (ch === "'") return i + 1
+        i++
+      }
+      return text.length
+    }
+    i++
+    while (i < text.length) {
+      const ch = text[i] as string
+      if (interpolated && ch === '{') {
+        if (text[i + 1] === '{') {
+          i += 2
+          continue
+        }
+        i = interpolationEnd(i + 1)
+        continue
+      }
+      if (interpolated && ch === '}' && text[i + 1] === '}') {
+        i += 2
+        continue
+      }
+      if (verbatim) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') {
+            i += 2
+            continue
+          }
+          return i + 1
+        }
+        i++
+        continue
+      }
+      if (ch === '\\') {
+        i += 2
+        continue
+      }
+      if (ch === '"') return i + 1
+      i++
+    }
+    return text.length
+  }
+
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i] as string
+    if (ch === '/' && text[i + 1] === '/') {
+      const start = i
+      while (i < text.length && text[i] !== '\n') i++
+      blank(start, i)
+      continue
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const start = i
+      i += 2
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++
+      i = Math.min(text.length, i + 2)
+      blank(start, i)
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '$' || ch === '@') {
+      const end = literalEnd(i)
+      if (end !== null) {
+        blank(i, end)
+        i = end
+        continue
+      }
+    }
+    i++
+  }
+  return out.join('')
+}
+
+/** The 1-based line an offset falls on. */
+function lineOf(text: string, index: number): number {
+  let line = 1
+  for (let i = 0; i < index && i < text.length; i++) if (text[i] === '\n') line++
+  return line
 }
 
 /** A `flutter:` (or `flutter_test:`) dependency, or `sdk: flutter` under one. */
@@ -57,7 +203,9 @@ export const reactNativeDetector: Detector = {
   priority: 52,
   matches: (ctx) => filesUnder(ctx, '').some((f) => f === 'package.json' || f.endsWith('/package.json')),
   detect(ctx, draft) {
-    for (const manifest of applicationManifests(ctx)) {
+    const manifests = applicationManifests(ctx)
+    const dirs = [...new Set(manifests.map((manifest) => manifestDir(manifest)))]
+    for (const manifest of manifests) {
       if ('react-native' in manifest.deps || 'expo' in manifest.deps) {
         addStack(draft, {
           id: 'react-native',
@@ -77,7 +225,7 @@ export const reactNativeDetector: Detector = {
       }
     }
 
-    const expoConfig = firstNamedFile(ctx, EXPO_CONFIGS)
+    const expoConfig = firstNamedFileInDirs(ctx, EXPO_CONFIGS, dirs)
     if (expoConfig !== null && /"expo"\s*:/.test(read(ctx, expoConfig) ?? '')) {
       addStack(draft, { id: 'expo', version: null, evidence: [expoConfig] })
     }
@@ -89,10 +237,14 @@ export const reactNativeDetector: Detector = {
  *
  * `Microsoft.Maui.Graphics` is a drawing library usable from a plain console app, and matching
  * the bare prefix classified exactly that as a MAUI application. A project is MAUI when it
- * enables the workload (`<UseMaui>true</UseMaui>`), uses the MAUI SDK, or has the `MauiProgram`
- * entry point the workload requires.
+ * enables the workload (`<UseMaui>true</UseMaui>`) or uses the MAUI SDK. The generated
+ * `MauiProgram` entry point is handled separately: it must be an actual declaration, not a
+ * mention in a comment or a string.
  */
-const MAUI_MARKER = /<UseMaui>\s*true\s*<\/UseMaui>|<Project[^>]*Sdk\s*=\s*["'][^"']*Microsoft\.Maui\.Sdk|MauiProgram/
+const MAUI_MARKER = /<UseMaui>\s*true\s*<\/UseMaui>|<Project[^>]*Sdk\s*=\s*["'][^"']*Microsoft\.Maui\.Sdk/
+
+/** `class MauiProgram`, `partial class MauiProgram`, `record MauiProgram`, and so on. */
+const MAUI_PROGRAM_DECLARATION = /\b(?:class|struct|record(?:\s+(?:class|struct))?)\s+MauiProgram\b/
 
 export const mauiDetector: Detector = {
   id: 'maui',
@@ -103,7 +255,7 @@ export const mauiDetector: Detector = {
     for (const file of filesUnder(ctx, '').filter((f) => f.endsWith('.csproj'))) {
       const text = read(ctx, file)
       if (text === null) continue
-      const line = findLine(text, MAUI_MARKER)
+      const line = findLine(maskXmlComments(text), MAUI_MARKER)
       if (line === null) continue
       // No build/test command: MAUI is a .NET workload, and the `dotnet` detector already emits
       // the `dotnet build` / `dotnet test` the SDK provides.
@@ -112,13 +264,14 @@ export const mauiDetector: Detector = {
     }
 
     // `MauiProgram` is the entry point the workload generates into a `.cs` file, so a project
-    // that only enables the workload through it has no marker in the csproj at all.
+    // that only enables the workload through it has no marker in the csproj at all. The search
+    // spans lines because the keyword and the name may be split (`class\nMauiProgram`).
     for (const file of filesUnder(ctx, '').filter((f) => f.endsWith('.cs'))) {
       const text = read(ctx, file)
       if (text === null) continue
-      const line = findLine(text, /\bMauiProgram\b/)
-      if (line === null) continue
-      addStack(draft, { id: 'maui', version: null, evidence: [evidence(file, line)] })
+      const match = MAUI_PROGRAM_DECLARATION.exec(maskCSharp(text))
+      if (match === null) continue
+      addStack(draft, { id: 'maui', version: null, evidence: [evidence(file, lineOf(text, match.index))] })
       return
     }
   },

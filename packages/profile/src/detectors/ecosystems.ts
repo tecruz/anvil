@@ -21,7 +21,7 @@ import {
   hasFile,
   setMonorepo,
 } from '../detector.ts'
-import { evidence, findLine } from '../manifest.ts'
+import { evidence, findLine, maskXmlComments } from '../manifest.ts'
 import type { CommandEntry } from '../types.ts'
 import { readText } from '../walk.ts'
 import { nodeDetector } from './node.ts'
@@ -346,10 +346,108 @@ function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
     const text = read(ctx, pom)
     if (text === null) continue
     const dir = pom.slice(0, pom.lastIndexOf('/') + 1)
-    for (const match of text.matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+    for (const match of maskXmlComments(text).matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
       const module = (match[1] as string).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
       if (module !== '') queue.push(`${dir}${module}/pom.xml`)
     }
+  }
+  return out
+}
+
+/**
+ * Subproject paths declared by `include` in a Gradle settings file.
+ *
+ * Both DSLs are common: Groovy's parenthesis-free `include ":app", ":core"` and Kotlin's
+ * `include(":app")`, the latter often split across lines when a repository lists its modules. Each
+ * declaration is read where it appears, so a second `include` is not dropped, and comments and
+ * strings are skipped so a commented-out module is not followed.
+ */
+function gradleIncludes(text: string): string[] {
+  const out: string[] = []
+  const n = text.length
+  let i = 0
+  while (i < n) {
+    const ch = text[i] as string
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < n && text[i] !== '\n') i++
+      continue
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++
+      i = Math.min(n, i + 2)
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      i++
+      while (i < n && text[i] !== quote) {
+        if (text[i] === '\\') i++
+        i++
+      }
+      i++
+      continue
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i
+      while (j < n && /[A-Za-z0-9_]/.test(text[j] as string)) j++
+      const word = text.slice(i, j)
+      i = j
+      if (word !== 'include') continue
+      while (i < n && /\s/.test(text[i] as string)) i++
+      if (text[i] === '(') {
+        i++
+        let depth = 1
+        while (i < n && depth > 0) {
+          const c = text[i] as string
+          if (c === '"' || c === "'") {
+            const quote = c
+            i++
+            let value = ''
+            while (i < n && text[i] !== quote) {
+              if (text[i] === '\\') {
+                value += text[i + 1] ?? ''
+                i += 2
+                continue
+              }
+              value += text[i]
+              i++
+            }
+            i++
+            out.push(value)
+            continue
+          }
+          if (c === '(') depth++
+          else if (c === ')') depth--
+          i++
+        }
+        continue
+      }
+      // Groovy's parenthesis-free form: `include ":app", ":core"`.
+      while (i < n && text[i] !== '\n') {
+        const c = text[i] as string
+        if (c === '"' || c === "'") {
+          const quote = c
+          i++
+          let value = ''
+          while (i < n && text[i] !== quote && text[i] !== '\n') {
+            if (text[i] === '\\') {
+              value += text[i + 1] ?? ''
+              i += 2
+              continue
+            }
+            value += text[i]
+            i++
+          }
+          if (text[i] === quote) i++
+          out.push(value)
+          continue
+        }
+        i++
+      }
+      continue
+    }
+    i++
   }
   return out
 }
@@ -370,6 +468,7 @@ export const jvmDetector: Detector = {
     )
     const maven = hasFile(ctx, 'pom.xml')
     const pomText = maven ? read(ctx, 'pom.xml') : null
+    let gradleMembers: string[] = []
 
     if (gradleFiles.length > 0) {
       addStack(draft, {
@@ -409,17 +508,17 @@ export const jvmDetector: Detector = {
         })
       }
 
-      // Subprojects from settings.gradle `include(...)`.
+      // Subprojects from settings.gradle `include(...)`. Every declaration counts: a project
+      // lists `include(":core")` and `include(":api")` on separate lines, or spells them as one
+      // multiline call, and the Spring probe below only visits the modules collected here.
       const settings = gradleFiles.find((f) => f.startsWith('settings.gradle'))
       if (settings !== undefined) {
         const text = read(ctx, settings)
         if (text !== null) {
-          const inc = /include\s*\(?\s*([^)]*)\)?/m.exec(text)
-          if (inc !== null) {
-            const members = [...inc[1]!.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1] as string)
-            for (const m of members) addModule(draft, { id: m, path: m, kind: 'project', deps: [] })
-            if (draft.monorepo !== null) draft.monorepo.members = members
-          }
+          const members = gradleIncludes(text)
+          for (const m of members) addModule(draft, { id: m, path: m, kind: 'project', deps: [] })
+          if (draft.monorepo !== null) draft.monorepo.members = members
+          gradleMembers = members
         }
       }
       if (!wrapper) {
@@ -496,13 +595,25 @@ export const jvmDetector: Detector = {
     if (maven) {
       for (const file of mavenReactorPoms(ctx, ctx.resolve('pom.xml'))) springFiles.add(file)
     }
-    for (const file of ctx.files) {
-      if (/(^|\/)build\.gradle(?:\.kts)?$/.test(file)) springFiles.add(file)
+    // Only the detected Gradle build and the subprojects it declares. Scanning every
+    // `build.gradle` in the tree lets an unreferenced `examples/` build add Spring guidance to a
+    // Maven project that never builds it.
+    if (gradleFiles.length > 0) {
+      for (const name of ['build.gradle', 'build.gradle.kts']) {
+        if (hasFile(ctx, name)) springFiles.add(ctx.resolve(name))
+      }
+      for (const member of gradleMembers) {
+        const path = member.replace(/^:+/, '').replace(/:/g, '/')
+        for (const name of [`${path}/build.gradle`, `${path}/build.gradle.kts`]) {
+          if (ctx.files.has(ctx.resolve(name))) springFiles.add(ctx.resolve(name))
+        }
+      }
     }
     for (const file of springFiles) {
       const text = read(ctx, file)
       if (text === null) continue
-      const line = findLine(text, /spring-boot-starter|org\.springframework\.boot/)
+      const content = file.endsWith('.xml') ? maskXmlComments(text) : text
+      const line = findLine(content, /spring-boot-starter|org\.springframework\.boot/)
       if (line === null) continue
       addStack(draft, { id: 'spring-boot', version: null, evidence: [evidence(file, line)] })
       break

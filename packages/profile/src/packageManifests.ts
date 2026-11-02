@@ -148,6 +148,48 @@ export function applicationManifests(ctx: DetectorContext): PackageManifest[] {
   return out
 }
 
+/** The directory a selected manifest lives in, or `.` for the project root. */
+export function manifestDir(manifest: PackageManifest): string {
+  return dirOf(manifest.path)
+}
+
+/** Directories that hold a selected application manifest. */
+export function applicationDirs(ctx: DetectorContext): string[] {
+  const dirs = new Set<string>()
+  for (const manifest of applicationManifests(ctx)) dirs.add(dirOf(manifest.path))
+  return [...dirs]
+}
+
+/**
+ * The first file named one of `names` directly inside a selected application directory.
+ *
+ * Config files belong to the application that owns them. Searching the whole tree lets an
+ * undeclared `examples/` app contribute a framework the repository does not build -- a root
+ * Express service matched React Native because `examples/demo/app.json` mentioned Expo.
+ * A repository with no manifests at all is a collection of independent applications, so the
+ * tree-wide search remains the fallback there.
+ */
+export function firstNamedFileInDirs(
+  ctx: DetectorContext,
+  names: readonly string[],
+  dirs: readonly string[],
+): string | null {
+  if (dirs.length === 0) {
+    // Only a repository with no manifest at all is a bag of independent applications. A manifest
+    // that exists but could not be selected -- an unparseable root, say -- still owns its tree,
+    // so an undeclared `examples/` app must not claim the repository through a config file.
+    const hasManifest = filesUnder(ctx, '').some(isPackageManifest)
+    return hasManifest ? null : firstNamedFile(ctx, names)
+  }
+  for (const dir of dirs) {
+    for (const name of names) {
+      const rel = dir === '.' ? name : `${dir}/${name}`
+      if (ctx.files.has(ctx.resolve(rel))) return ctx.resolve(rel)
+    }
+  }
+  return null
+}
+
 /** The first file anywhere in the tree whose basename is one of `names`. */
 export function firstNamedFile(ctx: DetectorContext, names: readonly string[]): string | null {
   return (

@@ -209,6 +209,48 @@ describe('the mobile framework detectors do not overreach', () => {
     )
   })
 
+  test('a MauiProgram mention in a comment or string is not an entry point', () => {
+    const ids = stacksOf({
+      'Console.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+      'Program.cs':
+        '// This library can be initialized from MauiProgram or any other entry point.\nSystem.Console.WriteLine("MauiProgram");\n',
+    })
+    assert.ok(!ids.includes('maui'), `a comment or string matched MAUI: ${ids.join(', ')}`)
+  })
+
+  test('a MauiProgram token inside an interpolated string is not a declaration', () => {
+    const ids = stacksOf({
+      'Console.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+      'Program.cs':
+        'var label = $"{string.Join("class MauiProgram", new[] {"a", "b"})}";\nSystem.Console.WriteLine(label);\n',
+    })
+    assert.ok(!ids.includes('maui'), `an interpolated string matched MAUI: ${ids.join(', ')}`)
+  })
+
+  test('a MauiProgram token inside a raw string literal is not a declaration', () => {
+    const ids = stacksOf({
+      'Console.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+      'Program.cs': 'var text = """"\npublic class MauiProgram { }\n"""";\n',
+    })
+    assert.ok(!ids.includes('maui'), `a raw string matched MAUI: ${ids.join(', ')}`)
+  })
+
+  test('a MauiProgram declaration split across lines is still an entry point', () => {
+    const ids = stacksOf({ 'MauiProgram.cs': 'public static class\nMauiProgram\n{ }\n' })
+    assert.ok(ids.includes('maui'), ids.join(', '))
+  })
+
+  test('a commented-out UseMaui element is not a MAUI marker', () => {
+    const ids = stacksOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><!-- <UseMaui>true</UseMaui> --><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+    })
+    assert.ok(!ids.includes('maui'), `a commented-out marker matched MAUI: ${ids.join(', ')}`)
+  })
+
   test('an Xcode project is xcode, not swift', () => {
     const ids = stacksOf({
       'App.xcodeproj/project.pbxproj': '// !$*UTF8*$!\n{ objects = {}; }\n',
@@ -430,6 +472,54 @@ describe('workspace application manifests contribute framework stacks', () => {
     })
     assert.ok(!ids.includes('react'), `an undeclared nested manifest matched react: ${ids.join(', ')}`)
   })
+
+  test('an undeclared nested app does not contribute an Expo config', () => {
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ name: 'api', dependencies: { express: '5.0.0' } }),
+      'examples/demo/package.json': JSON.stringify({ dependencies: { expo: '54.0.0' } }),
+      'examples/demo/app.json': JSON.stringify({ expo: { name: 'demo', slug: 'demo' } }),
+    })
+    assert.ok(!ids.includes('expo'), `an undeclared nested config matched expo: ${ids.join(', ')}`)
+    assert.ok(!ids.includes('react-native'), `an undeclared nested config matched react-native: ${ids.join(', ')}`)
+  })
+
+  test('an undeclared nested app does not contribute frontend configs or tools', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ name: 'api', dependencies: { express: '5.0.0' } }),
+      'examples/demo/package.json': JSON.stringify({ dependencies: { next: '16.0.0' } }),
+      'examples/demo/next.config.js': 'module.exports = {}\n',
+      'examples/demo/vite.config.js': 'export default {}\n',
+      'examples/demo/eslint.config.js': 'export default []\n',
+    })
+    const ids = profile.stacks.map((s) => s.id)
+    for (const id of ['nextjs', 'vite']) {
+      assert.ok(!ids.includes(id), `an undeclared nested config matched ${id}: ${ids.join(', ')}`)
+    }
+    assert.ok(
+      !profile.tooling.lint.includes('eslint'),
+      `an undeclared nested config added eslint: ${profile.tooling.lint.join(', ')}`,
+    )
+  })
+
+  test('a declared workspace member still contributes its configs', () => {
+    const ids = stacksOf({
+      'package.json': JSON.stringify({ private: true, workspaces: ['apps/*'] }),
+      'apps/web/package.json': JSON.stringify({
+        dependencies: { next: '16.0.0', react: '19.0.0', 'react-dom': '19.0.0' },
+      }),
+      'apps/web/next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(ids.includes('nextjs'), `a declared workspace config was missed: ${ids.join(', ')}`)
+  })
+
+  test('an unparseable root manifest does not reopen a tree-wide config scan', () => {
+    const ids = stacksOf({
+      'package.json': '{ "name": "api", }\n',
+      'examples/demo/package.json': JSON.stringify({ dependencies: { next: '16.0.0' } }),
+      'examples/demo/next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(!ids.includes('nextjs'), `an unparseable root reopened the scan: ${ids.join(', ')}`)
+  })
 })
 
 describe('AI and backend frameworks are matched from their own marker', () => {
@@ -502,6 +592,161 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     )
   })
 
+  test('setup.py resolves requirement variables, tuples and concatenation', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nrequirements = ["torch>=2.5"]\nsetup(name="m", install_requires=requirements)\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      stacksOf({
+        'setup.py': 'from setuptools import setup\nsetup(name="m", install_requires=("torch>=2.5",))\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nruntime = ["requests"]\nextras = ["torch>=2.5"]\nsetup(name="m", install_requires=list(runtime) + extras)\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py reads extras populated with deps_list, as diffusers does', () => {
+    const ids = stacksOf({
+      'setup.py': [
+        'from setuptools import setup',
+        'deps = {name: name for name in ["torch", "transformers", "accelerate"]}',
+        'def deps_list(*pkgs):',
+        '    return [deps[pkg] for pkg in pkgs]',
+        'extras = {}',
+        'extras["torch"] = deps_list("torch", "accelerate")',
+        'extras["test"] = deps_list("transformers")',
+        'install_requires = [deps["accelerate"]]',
+        'setup(name="m", install_requires=list(install_requires), extras_require=extras)',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(ids.includes('pytorch'), `expected pytorch in ${ids.join(', ')}`)
+    assert.ok(ids.includes('huggingface'), `expected huggingface in ${ids.join(', ')}`)
+  })
+
+  test('setup.py honors escapes in single-quoted strings', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          "from setuptools import setup\nsetup(name='m', description='A trainer\\'s model', install_requires=['torch>=2.5'])\n",
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py ignores function-local and post-call rebindings', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py':
+          'from setuptools import setup\nrequirements = ["requests"]\ndef unused():\n    requirements = ["torch>=2.5"]\nsetup(name="m", install_requires=requirements)\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      !stacksOf({
+        'setup.py':
+          'from setuptools import setup\nrequirements = ["requests"]\nsetup(name="m", install_requires=requirements)\nrequirements = ["torch>=2.5"]\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      !stacksOf({
+        'setup.py':
+          'from setuptools import setup\nextras = {"train": ["torch>=2.5"]}\nextras["train"] = ["requests"]\nsetup(name="m", extras_require=extras)\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py accepts an aliased setuptools import', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': 'from setuptools import setup as configure\nconfigure(name="m", install_requires=["torch>=2.5"])\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py reads a keyword dictionary passed with **', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nkwargs = dict(name="m", install_requires=["torch>=2.5"])\nsetup(**kwargs)\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a helper named deps_list is read by its shape, not its name', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'def deps_list(*groups):',
+          '    dependencies = {"torch": ["requests"]}',
+          '    return [dep for group in groups for dep in dependencies[group]]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py resolves a subscript concatenated with a list', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nextras = {"base": ["requests"]}\nsetup(name="m", install_requires=extras["base"] + ["torch>=2.5"])\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py ignores commented-out requirements and brackets in comments', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py':
+          'from setuptools import setup\nsetup(name="m", install_requires=[\n    # "torch>=2.5",\n    "requests",\n])\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nsetup(name="m", install_requires=[\n    # keep the closing ] below all dependencies\n    "torch>=2.5",\n])\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('quoted TOML dependency keys are declarations', () => {
+    assert.ok(
+      stacksOf({
+        'pyproject.toml':
+          '[project]\nname="m"\nversion="0.1.0"\ndependencies=[]\n[project.optional-dependencies]\n"train"=["torch>=2.5"]\n',
+      }).includes('pytorch'),
+    )
+    assert.ok(
+      stacksOf({
+        'pyproject.toml':
+          '[tool.poetry]\nname="m"\nversion="0.1.0"\n[tool.poetry.dependencies]\npython="^3.12"\n"torch"="^2.5"\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('uv development dependencies are a key in [tool.uv]', () => {
+    const ids = stacksOf({
+      'pyproject.toml':
+        '[project]\nname="m"\nversion="0.1.0"\ndependencies=[]\n\n[tool.uv]\ndev-dependencies=["torch>=2.5"]\n',
+    })
+    assert.ok(ids.includes('pytorch'), ids.join(', '))
+  })
+
+  test('a dependency-group reference is not a package name', () => {
+    const ids = stacksOf({
+      'pyproject.toml': '[dependency-groups]\ntorch=["requests"]\ndev=[{include-group="torch"}]\n',
+    })
+    assert.ok(!ids.includes('pytorch'), `a group reference matched torch: ${ids.join(', ')}`)
+  })
+
   test('a Spring Boot starter is spring-boot', () => {
     const ids = stacksOf({
       'pom.xml':
@@ -549,6 +794,66 @@ describe('AI and backend frameworks are matched from their own marker', () => {
       'api/pom.xml': '<project><groupId>com.acme</groupId><artifactId>api</artifactId></project>\n',
     })
     assert.ok(!ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('a commented-out Maven module is not followed', () => {
+    const ids = stacksOf({
+      'pom.xml': '<project><modules><!-- <module>unused</module> --><module>core</module></modules></project>\n',
+      'core/pom.xml': '<project><groupId>com.acme</groupId><artifactId>core</artifactId></project>\n',
+      'unused/pom.xml':
+        '<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter</artifactId></dependency></dependencies></project>\n',
+    })
+    assert.ok(!ids.includes('spring-boot'), `a commented-out module was followed: ${ids.join(', ')}`)
+  })
+
+  test('an undeclared Gradle build does not make a Maven project Spring Boot', () => {
+    const ids = stacksOf({
+      'pom.xml': '<project><groupId>com.acme</groupId><artifactId>app</artifactId></project>\n',
+      'examples/unused/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+    })
+    assert.ok(!ids.includes('spring-boot'), `an unrelated Gradle build matched Spring Boot: ${ids.join(', ')}`)
+  })
+
+  test('a declared Gradle subproject is probed for Spring Boot', () => {
+    const ids = stacksOf({
+      'settings.gradle': 'rootProject.name = "app"\ninclude(":api")\n',
+      'build.gradle': 'plugins { id "java" }\n',
+      'api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+    })
+    assert.ok(ids.includes('spring-boot'), ids.join(', '))
+  })
+
+  test('every Gradle include is read, not just the first', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle': 'rootProject.name = "app"\ninclude(":core")\ninclude(":api")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'core/build.gradle': 'plugins { id "java" }\n',
+        'api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a multiline Gradle include lists every module', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle.kts': 'rootProject.name = "app"\ninclude(\n    ":core",\n    ":api",\n)\n',
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'core/build.gradle.kts': 'plugins { id("java") }\n',
+        'api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a commented-out Gradle include is not followed', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle': 'rootProject.name = "app"\n// include(":unused")\ninclude(":core")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'core/build.gradle': 'plugins { id "java" }\n',
+        'unused/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
   })
 
   test('Microsoft.NET.Sdk.Web is aspnet', () => {
