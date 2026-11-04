@@ -112,6 +112,17 @@ export function findLine(text: string, pattern: RegExp): number | null {
   return null
 }
 
+/**
+ * Blank XML comments without moving anything.
+ *
+ * A commented-out element is not evidence: a reactor POM that comments out a module is not
+ * building it, and a commented-out `<UseMaui>` does not enable the workload. Replacing the
+ * comment with spaces keeps line numbers intact for evidence.
+ */
+export function maskXmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, (comment) => comment.replace(/[^\n]/g, ' '))
+}
+
 /** Compose a `file:line` evidence string. */
 export function evidence(file: string, line: number | null): string {
   return line === null ? file : `${file}:${line}`

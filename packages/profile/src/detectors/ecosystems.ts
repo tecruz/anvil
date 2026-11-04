@@ -9,7 +9,7 @@
  * committed, which is a finding in itself.
  */
 
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import {
   addCommand,
   addModule,
@@ -21,7 +21,7 @@ import {
   hasFile,
   setMonorepo,
 } from '../detector.ts'
-import { evidence, findLine } from '../manifest.ts'
+import { evidence, findLine, maskXmlComments } from '../manifest.ts'
 import type { CommandEntry } from '../types.ts'
 import { readText } from '../walk.ts'
 import { nodeDetector } from './node.ts'
@@ -93,6 +93,93 @@ function gradlePluginFile(ctx: DetectorContext, buildFiles: readonly string[], p
     }
   }
   return null
+}
+
+// ---------------------------------------------------------------------------
+// Android and Kotlin Multiplatform
+// ---------------------------------------------------------------------------
+
+/** Every Gradle build file: the modules and the settings that enumerate them. */
+function gradleBuildFiles(ctx: DetectorContext): string[] {
+  return filesUnder(ctx, '').filter((f) => /(^|\/)(?:build|settings)\.gradle(?:\.kts)?$/.test(f))
+}
+
+/**
+ * The plugin that makes a Gradle build an *Android* build.
+ *
+ * This exists because `android.yaml` used to match on the `gradle` dependency and a bare
+ * `**\/build.gradle.kts`, which is every Gradle project ever written. Spring Petclinic -- a
+ * Gradle Java build -- was matched as Android and offered Compose performance guidance, and a
+ * Kotlin Multiplatform module with no Android target was matched the same way. The evidence
+ * for Android is the Android Gradle Plugin id, not the build system.
+ */
+const ANDROID_PLUGIN =
+  /com\.android\.(?:application|library|test|dynamic-feature|asset-pack)|com\.android\.tools\.build:gradle/
+
+/** One manifest or plugin line is Android evidence; the first found is the citation. */
+function androidEvidence(ctx: DetectorContext): string | null {
+  const manifest = filesUnder(ctx, '').find((f) => f === 'AndroidManifest.xml' || f.endsWith('/AndroidManifest.xml'))
+  if (manifest !== undefined) return manifest
+
+  for (const file of gradleBuildFiles(ctx)) {
+    const text = read(ctx, file)
+    if (text === null) continue
+    const plugin = findLine(text, ANDROID_PLUGIN)
+    if (plugin !== null) return evidence(file, plugin)
+    // An `android { }` block with no plugin line in this file: the plugin is applied by a
+    // convention plugin or a parent, and the block is still a statement about Android.
+    const block = findLine(text, /\bandroid\s*\{/)
+    if (block !== null) return evidence(file, block)
+  }
+
+  const props = read(ctx, 'gradle.properties')
+  if (props !== null) {
+    const line = findLine(props, /^\s*android\./)
+    if (line !== null) return evidence('gradle.properties', line)
+  }
+  return null
+}
+
+export const androidDetector: Detector = {
+  id: 'android',
+  title: 'Android',
+  // After `jvm`, so a shared Gradle build claims names first; the stack is additive either way.
+  priority: 65,
+  matches: (ctx) => androidEvidence(ctx) !== null,
+  detect(ctx, draft) {
+    const evidencePath = androidEvidence(ctx)
+    if (evidencePath === null) return
+    addStack(draft, { id: 'android', version: null, evidence: [evidencePath] })
+  },
+}
+
+/**
+ * Kotlin Multiplatform, detected separately so it is not mistaken for Android.
+ *
+ * A KMP module shares the Gradle build system and the `kotlin` language with an Android one,
+ * but it targets iOS, JVM and native too. The two are frequently *and* legitimately both
+ * (a KMP module with an `androidTarget`), which is why this is its own stack rather than a
+ * correction to `android`: a repository can be both, and the plan should say so.
+ */
+const KMP_PLUGIN =
+  /kotlin\s*\(\s*["']multiplatform["']\s*\)|kotlin-multiplatform|kotlin\.multiplatform|ios(?:Arm64|X64|SimulatorArm64)\s*\(/
+
+export const kotlinMultiplatformDetector: Detector = {
+  id: 'kotlin-multiplatform',
+  title: 'Kotlin Multiplatform',
+  priority: 66,
+  matches: (ctx) => gradleBuildFiles(ctx).length > 0,
+  detect(ctx, draft) {
+    for (const file of gradleBuildFiles(ctx)) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      const line = findLine(text, KMP_PLUGIN)
+      if (line !== null) {
+        addStack(draft, { id: 'kotlin-multiplatform', version: null, evidence: [evidence(file, line)] })
+        return
+      }
+    }
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +324,340 @@ export const rustDetector: Detector = {
 // JVM (Gradle / Maven)
 // ---------------------------------------------------------------------------
 
+/**
+ * The POMs a Maven reactor builds: the root plus every `<module>` it declares, recursively.
+ *
+ * A reactor parent commonly has `<packaging>pom</packaging>` and no dependencies of its own;
+ * the Spring Boot starter lives in `api/pom.xml`. Probing only the root therefore reports the
+ * repository as plain Maven/JVM. The module paths are relative to the POM that declares them,
+ * and nested reactors are followed the same way.
+ */
+function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const queue = [rootPom]
+  while (queue.length > 0) {
+    const pom = queue.shift() as string
+    if (seen.has(pom)) continue
+    seen.add(pom)
+    if (!ctx.files.has(pom)) continue
+    out.push(pom)
+
+    const text = read(ctx, pom)
+    if (text === null) continue
+    const dir = pom.slice(0, pom.lastIndexOf('/') + 1)
+    for (const match of maskXmlComments(text).matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+      const module = (match[1] as string).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+      if (module !== '') queue.push(`${dir}${module}/pom.xml`)
+    }
+  }
+  return out
+}
+
+/** Blank Groovy/Kotlin comments, keeping strings and newlines so offsets and evidence survive. */
+function maskGradleComments(text: string): string {
+  const out = text.split('')
+  const n = text.length
+  const blank = (from: number, to: number): void => {
+    for (let j = from; j < to; j++) if (out[j] !== '\n') out[j] = ' '
+  }
+  let i = 0
+  while (i < n) {
+    const ch = text[i] as string
+    if (ch === '/' && text[i + 1] === '/') {
+      const start = i
+      while (i < n && text[i] !== '\n') i++
+      blank(start, i)
+      continue
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const start = i
+      i += 2
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++
+      i = Math.min(n, i + 2)
+      blank(start, i)
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      // Kotlin raw strings and Groovy triple-quoted strings run across lines; skipping them as
+      // a unit keeps a `//` or `"` inside from being read as a comment or the end of a string.
+      if (text.startsWith(quote.repeat(3), i)) {
+        const close = text.indexOf(quote.repeat(3), i + 3)
+        i = close < 0 ? n : close + 3
+        continue
+      }
+      i++
+      while (i < n && text[i] !== quote) {
+        if (text[i] === '\\') i++
+        i++
+      }
+      i++
+      continue
+    }
+    i++
+  }
+  return out.join('')
+}
+
+/**
+ * Blank the contents of string literals while keeping their quotes and source offsets.
+ *
+ * Remaps are matched structurally, so text that only looks like an assignment inside a string
+ * must not be read as one. Keeping the quotes lets the matched span's value be read from the
+ * original source.
+ */
+function maskGradleStrings(text: string): string {
+  const out = text.split('')
+  const n = text.length
+  const blank = (from: number, to: number): void => {
+    for (let j = from; j < to; j++) if (text[j] !== '\n') out[j] = '\u0000'
+  }
+  let i = 0
+  while (i < n) {
+    const ch = text[i] as string
+    if (ch !== '"' && ch !== "'") {
+      i++
+      continue
+    }
+    const quote = ch
+    // Kotlin raw strings (`"""`) and Groovy triple-quoted strings span lines. Their contents are
+    // data, so a remap written inside one must not be read as an assignment.
+    if (text.startsWith(quote.repeat(3), i)) {
+      const close = text.indexOf(quote.repeat(3), i + 3)
+      blank(i + 3, close < 0 ? n : close)
+      i = close < 0 ? n : close + 3
+      continue
+    }
+    i++
+    while (i < n && text[i] !== quote) {
+      if (text[i] === '\\' && i + 1 < n) {
+        out[i] = '\u0000'
+        out[i + 1] = '\u0000'
+        i += 2
+        continue
+      }
+      if (text[i] !== '\n') out[i] = '\u0000'
+      i++
+    }
+    if (i < n) i++
+  }
+  return out.join('')
+}
+
+/** A Gradle project path always starts with `:`, whichever DSL wrote it. */
+function gradlePath(id: string): string {
+  return id.startsWith(':') ? id : `:${id}`
+}
+
+/** The index one past the end of the statement at `start`, respecting brackets. */
+function gradleStatementEnd(text: string, start: number): number {
+  let depth = 0
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i] as string
+    if (ch === '(' || ch === '[' || ch === '{') depth++
+    else if (ch === ')' || ch === ']' || ch === '}') {
+      if (depth === 0) return i
+      depth--
+    } else if (depth === 0 && (ch === '\n' || ch === ';')) return i
+  }
+  return text.length
+}
+
+/** The index of the brace that closes the one at `open`, or -1. */
+function gradleMatchingBrace(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i] as string
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+/**
+ * Subproject directories remapped from their Gradle path with `project(":api").projectDir`.
+ *
+ * The include declares the project path, but `projectDir = file("services/api")` moves its build
+ * file. Following only the path misreads the module as missing and loses its plugins. The value
+ * is relative to the settings file that declares it, so a nested `app/settings.gradle.kts` with
+ * `file("../services/api")` names `services/api` in the repository.
+ */
+function gradleProjectDirs(text: string, baseDir: string): Map<string, string | null> {
+  const out = new Map<string, string | null>()
+  const masked = maskGradleStrings(maskGradleComments(text))
+  const normalize = (path: string): string => {
+    const value = path.trim().replace(/\\/g, '/')
+    const resolved = value.startsWith('/') ? value : posix.join(baseDir, value)
+    return posix.normalize(resolved).replace(/^\.\//, '').replace(/\/+$/, '')
+  }
+  /**
+   * The directory a remap RHS names, or null when it is computed. Only `file("...")` and a bare
+   * string are static; taking the first literal out of `file("x") + suffix` invents a path. The
+   * RHS spans to the end of the statement, so a `file(` whose argument is on the next line is
+   * read whole.
+   */
+  const remap = (from: number, to: number): string | null => {
+    const span = masked.slice(from, to)
+    const leading = span.length - span.trimStart().length
+    const rhs = span.trim()
+    const match = /^file\s*\(\s*(['"])(\u0000*)\1\s*\)$/d.exec(rhs) ?? /^(['"])(\u0000*)\1$/d.exec(rhs)
+    const content = match?.indices?.[2]
+    if (match === null || content === undefined) return null
+    const start = from + leading + content[0]
+    return text.slice(start, start + (content[1] - content[0]))
+  }
+  // Both assignment spellings, in source order, so a later one replaces or invalidates an
+  // earlier remap of the same project.
+  const remaps: Array<{ index: number; id: string; value: string | null }> = []
+  const literal = /project\s*\(\s*(['"])([^'"]*)\1\s*\)\s*\.\s*projectDir\s*=\s*/dg
+  for (const match of masked.matchAll(literal)) {
+    const id = match.indices?.[2]
+    if (id === undefined) continue
+    const at = (match.index ?? 0) + match[0].length
+    remaps.push({
+      index: match.index ?? 0,
+      id: text.slice(id[0], id[1]),
+      value: remap(at, gradleStatementEnd(masked, at)),
+    })
+  }
+  const block = /project\s*\(\s*(['"])([^'"]*)\1\s*\)\s*\{/dg
+  for (const match of masked.matchAll(block)) {
+    const id = match.indices?.[2]
+    if (id === undefined) continue
+    const open = (match.index ?? 0) + match[0].length - 1
+    const close = gradleMatchingBrace(masked, open)
+    if (close < 0) continue
+    const body = masked.slice(open + 1, close)
+    const projectDir = /\bprojectDir\s*=\s*/d.exec(body)
+    if (projectDir?.index === undefined) continue
+    const at = open + 1 + projectDir.index + projectDir[0].length
+    remaps.push({
+      index: match.index ?? 0,
+      id: text.slice(id[0], id[1]),
+      value: remap(at, gradleStatementEnd(masked, at)),
+    })
+  }
+  remaps.sort((a, b) => a.index - b.index)
+  for (const { id, value } of remaps) {
+    const path = gradlePath(id)
+    // A later assignment whose value is not static leaves the project's directory unknown. It is
+    // recorded as null so a caller does not fall back to the declared path, which could name an
+    // unrelated directory.
+    out.set(path, value === null ? null : normalize(value))
+  }
+  return out
+}
+
+/**
+ * Subproject paths declared by `include` in a Gradle settings file.
+ *
+ * Both DSLs are common: Groovy's parenthesis-free `include ":app", ":core"` and Kotlin's
+ * `include(":app")`, the latter often split across lines when a repository lists its modules. Each
+ * declaration is read where it appears, so a second `include` is not dropped, and comments and
+ * strings are skipped so a commented-out module is not followed.
+ */
+function gradleIncludes(text: string): string[] {
+  const out: string[] = []
+  const source = maskGradleComments(text)
+  const n = source.length
+  let i = 0
+  while (i < n) {
+    const ch = source[i] as string
+    if (ch === '"' || ch === "'") {
+      const quote = ch
+      // A raw string is one literal, however many quotes its contents hold. Skipping it as a
+      // unit is what keeps an `include` written inside it from declaring a module.
+      if (source.startsWith(quote.repeat(3), i)) {
+        const close = source.indexOf(quote.repeat(3), i + 3)
+        i = close < 0 ? n : close + 3
+        continue
+      }
+      i++
+      while (i < n && source[i] !== quote) {
+        if (source[i] === '\\') i++
+        i++
+      }
+      i++
+      continue
+    }
+    if (/[A-Za-z_]/.test(ch)) {
+      let j = i
+      while (j < n && /[A-Za-z0-9_]/.test(source[j] as string)) j++
+      const word = source.slice(i, j)
+      i = j
+      if (word !== 'include') continue
+      while (i < n && /\s/.test(source[i] as string)) i++
+      if (source[i] === '(') {
+        i++
+        let depth = 1
+        while (i < n && depth > 0) {
+          const c = source[i] as string
+          if (c === '"' || c === "'") {
+            const quote = c
+            if (source.startsWith(quote.repeat(3), i)) {
+              const close = source.indexOf(quote.repeat(3), i + 3)
+              i = close < 0 ? n : close + 3
+              continue
+            }
+            i++
+            let value = ''
+            while (i < n && source[i] !== quote) {
+              if (source[i] === '\\') {
+                value += source[i + 1] ?? ''
+                i += 2
+                continue
+              }
+              value += source[i]
+              i++
+            }
+            i++
+            out.push(value)
+            continue
+          }
+          if (c === '(') depth++
+          else if (c === ')') depth--
+          i++
+        }
+        continue
+      }
+      // Groovy's parenthesis-free form: `include ":app", ":core"`.
+      while (i < n && source[i] !== '\n') {
+        const c = source[i] as string
+        if (c === '"' || c === "'") {
+          const quote = c
+          if (source.startsWith(quote.repeat(3), i)) {
+            const close = source.indexOf(quote.repeat(3), i + 3)
+            i = close < 0 ? n : close + 3
+            continue
+          }
+          i++
+          let value = ''
+          while (i < n && source[i] !== quote && source[i] !== '\n') {
+            if (source[i] === '\\') {
+              value += source[i + 1] ?? ''
+              i += 2
+              continue
+            }
+            value += source[i]
+            i++
+          }
+          if (source[i] === quote) i++
+          out.push(value)
+          continue
+        }
+        i++
+      }
+      continue
+    }
+    i++
+  }
+  return out
+}
+
 export const jvmDetector: Detector = {
   id: 'jvm',
   title: 'JVM (Gradle / Maven)',
@@ -253,6 +674,8 @@ export const jvmDetector: Detector = {
     )
     const maven = hasFile(ctx, 'pom.xml')
     const pomText = maven ? read(ctx, 'pom.xml') : null
+    let gradleMembers: string[] = []
+    const gradleRemaps = new Map<string, string | null>()
 
     if (gradleFiles.length > 0) {
       addStack(draft, {
@@ -292,17 +715,23 @@ export const jvmDetector: Detector = {
         })
       }
 
-      // Subprojects from settings.gradle `include(...)`.
+      // Subprojects from settings.gradle `include(...)`. Every declaration counts: a project
+      // lists `include(":core")` and `include(":api")` on separate lines, or spells them as one
+      // multiline call, and the Spring probe below only visits the modules collected here.
       const settings = gradleFiles.find((f) => f.startsWith('settings.gradle'))
       if (settings !== undefined) {
         const text = read(ctx, settings)
         if (text !== null) {
-          const inc = /include\s*\(?\s*([^)]*)\)?/m.exec(text)
-          if (inc !== null) {
-            const members = [...inc[1]!.matchAll(/['"]([^'"]+)['"]/g)].map((m) => m[1] as string)
-            for (const m of members) addModule(draft, { id: m, path: m, kind: 'project', deps: [] })
-            if (draft.monorepo !== null) draft.monorepo.members = members
+          const settingsPath = ctx.resolve(settings)
+          const settingsDir = settingsPath.includes('/') ? settingsPath.slice(0, settingsPath.lastIndexOf('/')) : ''
+          const remaps = gradleProjectDirs(text, settingsDir)
+          const members = gradleIncludes(text)
+          for (const m of members) {
+            addModule(draft, { id: m, path: remaps.get(gradlePath(m)) ?? m, kind: 'project', deps: [] })
           }
+          if (draft.monorepo !== null) draft.monorepo.members = members
+          gradleMembers = members
+          for (const [id, dir] of remaps) gradleRemaps.set(id, dir)
         }
       }
       if (!wrapper) {
@@ -368,6 +797,47 @@ export const jvmDetector: Detector = {
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
     }
 
+    // Spring Boot is a framework on top of the build, and the marker is the starter it pulls in.
+    // A plain JVM project that happens to be a web service is not a Spring project: the framework's
+    // conventions -- auto-configuration, the application context, the request lifecycle -- are not
+    // inferable from `build.gradle`.
+    //
+    // A Maven reactor's parent POM usually declares only `<modules>`; the starter is in a module.
+    // Following the reactor is what makes `api/pom.xml` evidence, with its real path.
+    const springFiles = new Set<string>()
+    if (maven) {
+      for (const file of mavenReactorPoms(ctx, ctx.resolve('pom.xml'))) springFiles.add(file)
+    }
+    // Only the detected Gradle build and the subprojects it declares. Scanning every
+    // `build.gradle` in the tree lets an unreferenced `examples/` build add Spring guidance to a
+    // Maven project that never builds it.
+    if (gradleFiles.length > 0) {
+      for (const name of ['build.gradle', 'build.gradle.kts']) {
+        if (hasFile(ctx, name)) springFiles.add(ctx.resolve(name))
+      }
+      for (const member of gradleMembers) {
+        const remap = gradleRemaps.get(gradlePath(member))
+        // The project's directory was remapped to a computed value, so it is unknown. Probing the
+        // declared path could read a directory the build never uses.
+        if (remap === null) continue
+        const path = remap ?? member.replace(/^:+/, '').replace(/:/g, '/')
+        for (const name of [`${path}/build.gradle`, `${path}/build.gradle.kts`]) {
+          if (ctx.files.has(ctx.resolve(name))) springFiles.add(ctx.resolve(name))
+        }
+      }
+    }
+    for (const file of springFiles) {
+      const text = read(ctx, file)
+      if (text === null) continue
+      // A commented-out plugin is not applied. POMs use XML comments and Gradle build files use
+      // `//`/`/* */`, so each is masked before the marker is looked for; line numbers survive.
+      const content = file.endsWith('.xml') ? maskXmlComments(text) : maskGradleComments(text)
+      const line = findLine(content, /spring-boot-starter|org\.springframework\.boot/)
+      if (line === null) continue
+      addStack(draft, { id: 'spring-boot', version: null, evidence: [evidence(file, line)] })
+      break
+    }
+
     for (const f of ctx.files) {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
     }
@@ -401,6 +871,19 @@ export const dotnetDetector: Detector = {
       const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
       addModule(draft, { id, path: dir, kind: 'project', deps: [] })
     }
+
+    // ASP.NET Core is a .NET workload with its own SDK marker. A plain .NET project is not a web
+    // application, and the framework's guidance -- middleware order, the request pipeline, the
+    // hosting model -- does not apply to a console app.
+    for (const p of projects) {
+      const text = read(ctx, p)
+      if (text === null) continue
+      const line = findLine(text, /Microsoft\.NET\.Sdk\.Web/i)
+      if (line === null) continue
+      addStack(draft, { id: 'aspnet', version: null, evidence: [evidence(p, line)] })
+      break
+    }
+
     if (hasFile(ctx, 'global.json')) {
       setMonorepo(draft, { tool: 'sln', evidence: 'global.json', members: [] })
     }
@@ -418,6 +901,8 @@ export const dotnetDetector: Detector = {
 
 export const ecosystemDetectors: readonly Detector[] = [
   jvmDetector,
+  androidDetector,
+  kotlinMultiplatformDetector,
   nodeDetector,
   pythonDetector,
   goDetector,

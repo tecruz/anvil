@@ -118,32 +118,51 @@ describe('built-in registry', () => {
   })
 
   test('covers every ecosystem the detectors emit, plus the file-only ones', () => {
-    // The registry grew from 3 to 15, so this is now a coverage claim rather than a
-    // snapshot. A new ecosystem with no playbook shows up in `plan` as a matched stack
-    // with no guidance at all, which is worse than not detecting it. The QA playbooks are
-    // one per tool, because a repository that runs Playwright has no use for the Cypress
-    // documentation.
+    // The registry grew from 3 to 24, so this is now a coverage claim rather than a snapshot. A
+    // new ecosystem with no playbook shows up in `plan` as a matched stack with no guidance at
+    // all, which is worse than not detecting it. The QA and mobile frameworks are one playbook
+    // per tool, because a repository that runs Playwright has no use for the Cypress
+    // documentation, and a Flutter app has none for Xcode's.
     const ids = playbooks.map((p) => p.id).sort()
     assert.deepEqual(ids, [
       'android',
+      'angular',
+      'aspnet',
+      'astro',
       'ci',
+      'cpp',
       'cypress',
       'docker',
       'dotnet',
       'elixir',
+      'flutter',
       'go',
+      'ios',
+      'jupyter',
       'jvm',
+      'kotlin-multiplatform',
       'kubernetes',
       'maestro',
+      'maui',
+      'nestjs',
+      'nextjs',
       'node',
       'php',
       'playwright',
+      'powershell',
       'python',
+      'pytorch',
       'qa',
+      'react',
+      'react-native',
       'ruby',
       'rust',
+      'shell',
+      'spring-boot',
+      'svelte',
       'swift',
       'terraform',
+      'vue',
       'webdriverio',
     ])
   })
@@ -572,6 +591,84 @@ describe('matching', () => {
     const matches = matchPlaybooks(profileFor('jvm-gradle'), [byLang, byStack])
     assert.equal(matches[0]?.playbook.id, 's')
   })
+
+  test('a lone .rb file is a language, not a Ruby project', () => {
+    // ripgrep ships a Homebrew formula under pkg/brew, so the profile infers the `ruby`
+    // language. Matching the ruby playbook on it offered Rails security guides to a Rust
+    // repository. The playbook requires a real Ruby manifest now.
+    const dir = tempDir()
+    try {
+      mkdirSync(join(dir, 'pkg', 'brew'), { recursive: true })
+      writeFileSync(join(dir, 'pkg', 'brew', 'ripgrep-bin.rb'), 'class RipgrepBin < Formula\nend\n')
+      writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname = "ripgrep"\nversion = "14.1.0"\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(ids.includes('rust'), `it is still a Rust project; got ${ids.join(', ')}`)
+      assert.ok(!ids.includes('ruby'), `a lone .rb file matched ruby: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a Dart package with no Flutter dependency is not a Flutter project', () => {
+    // A `pubspec.yaml` is a Dart package. Matching the flutter playbook on the file alone
+    // offered the Flutter cookbook and `flutter build` to a package with no Flutter SDK.
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'pubspec.yaml'), 'name: pure_dart\ndependencies:\n  http: ^1.2.0\n')
+      mkdirSync(join(dir, 'lib'), { recursive: true })
+      writeFileSync(join(dir, 'lib', 'main.dart'), 'void main() {}\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(!ids.includes('flutter'), `pure Dart matched flutter: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('bare C++ sources do not match the cpp playbook', () => {
+    // The language is inferred from `.cpp`; that is not a project with a build system.
+    const dir = tempDir()
+    try {
+      mkdirSync(join(dir, 'reference'), { recursive: true })
+      writeFileSync(join(dir, 'reference', 'sample.cpp'), 'int main() { return 0; }\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(!ids.includes('cpp'), `bare C++ source matched cpp: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CMake for a Swift project does not match the cpp playbook', () => {
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'CMakeLists.txt'), 'project(app LANGUAGES C Swift)\n')
+      writeFileSync(join(dir, 'Package.swift'), '// swift-tools-version: 6.0\n')
+      mkdirSync(join(dir, 'Sources'), { recursive: true })
+      writeFileSync(join(dir, 'Sources', 'main.swift'), 'print("hello")\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(!ids.includes('cpp'), `CMake for Swift matched cpp: ${ids.join(', ')}`)
+      assert.ok(ids.includes('swift'), `it is still a Swift project: ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('CMake plus a C++ source matches the cpp playbook', () => {
+    const dir = tempDir()
+    try {
+      writeFileSync(join(dir, 'CMakeLists.txt'), 'project(app LANGUAGES CXX)\n')
+      mkdirSync(join(dir, 'src'), { recursive: true })
+      writeFileSync(join(dir, 'src', 'main.cpp'), 'int main() { return 0; }\n')
+      const profile = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+      const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+      assert.ok(ids.includes('cpp'), `expected cpp, got ${ids.join(', ')}`)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -833,6 +930,44 @@ describe('qa playbooks', () => {
     const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
     assert.ok(ids.includes('maestro'), `expected maestro, saw ${ids.join(', ')}`)
     assert.ok(ids.includes('qa'), `expected qa, saw ${ids.join(', ')}`)
+  })
+})
+
+describe('workspace boundaries reach the playbook match', () => {
+  /** A repository with the given files, which may live in subdirectories. */
+  function repoWith(files: Record<string, string>): ProjectProfile {
+    const dir = tempDir()
+    try {
+      for (const [name, body] of Object.entries(files)) {
+        const path = join(dir, name)
+        mkdirSync(dirname(path), { recursive: true })
+        writeFileSync(path, body)
+      }
+      return buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null }).profile
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('an undeclared example app does not match the React Native playbook', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({
+      'package.json': JSON.stringify({ name: 'api', dependencies: { express: '5.0.0' } }),
+      'examples/demo/package.json': JSON.stringify({ dependencies: { expo: '54.0.0' } }),
+      'examples/demo/app.json': JSON.stringify({ expo: { name: 'demo', slug: 'demo' } }),
+    })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(!ids.includes('react-native'), `undeclared example matched react-native: ${ids.join(', ')}`)
+  })
+
+  test('a declared workspace Expo app matches the React Native playbook', () => {
+    const { playbooks } = loadBuiltins()
+    const profile = repoWith({
+      'package.json': JSON.stringify({ private: true, workspaces: ['apps/*'] }),
+      'apps/mobile/package.json': JSON.stringify({ dependencies: { expo: '54.0.0' } }),
+    })
+    const ids = matchPlaybooks(profile, playbooks).map((m) => m.playbook.id)
+    assert.ok(ids.includes('react-native'), `expected react-native, saw ${ids.join(', ')}`)
   })
 })
 

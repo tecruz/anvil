@@ -99,6 +99,45 @@ describe('saveCache and loadCache', () => {
     }
   })
 
+  test('round-trips the completeness marker, and an old cache without it is left unmarked', () => {
+    // The marker is how a reader tells a partial or local-only cache from a complete one. An
+    // older cache has no marker and must read as `undefined` -- not `false` -- or upgrading
+    // would make every playbook refetch once.
+    const h = home()
+    try {
+      saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: 'android',
+          fetchedAt: new Date().toISOString(),
+          entries: [entry()],
+          remoteAnswered: false,
+        },
+        env(h),
+      )
+      assert.equal(loadCache('android', env(h)).cache?.remoteAnswered, false)
+
+      saveCache({ schemaVersion: 1, playbookId: 'go', fetchedAt: new Date().toISOString(), entries: [entry()] }, env(h))
+      assert.equal(loadCache('go', env(h)).cache?.remoteAnswered, undefined)
+
+      // The cache is a file any process may have written, so a marker of the wrong type is
+      // dropped rather than trusted.
+      saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: 'node',
+          fetchedAt: new Date().toISOString(),
+          entries: [entry()],
+          remoteAnswered: 'yes' as unknown as boolean,
+        },
+        env(h),
+      )
+      assert.equal(loadCache('node', env(h)).cache?.remoteAnswered, undefined)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
   test('a missing cache is absent, not an error', () => {
     const h = home()
     try {

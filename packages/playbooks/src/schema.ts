@@ -83,9 +83,27 @@ export interface DiscoverSeeds {
    * The host is case-insensitive; the path is not, because a URL path is case-sensitive.
    */
   officialDomains?: string[]
+  /**
+   * Identity terms a *locally installed skill* is matched against.
+   *
+   * Kept apart from `keywords` on purpose. A keyword is a repository-search phrase, and its
+   * head is an ordinary English word often enough to matter: the head of `workflow
+   * validation` is `workflow`, which matched a Jetpack Compose skill whose description
+   * happened to contain the word, and the head of `infrastructure agent skills` is
+   * `infrastructure`, which matched a testing skill. These are the technology's own names --
+   * what a skill's frontmatter would actually say it is about -- and nothing else. Small and
+   * unambiguous by construction; the playbook id is always matched too.
+   */
+  localMatch?: string[]
   /** Repository-search terms. Kept generic enough that new repos match too. */
   keywords: string[]
-  /** Search terms for the MCP registry. */
+  /**
+   * Search terms for the MCP registry.
+   *
+   * Each must be at least three characters, the registry's own minimum for a `search` term.
+   * A shorter term is rejected before the request is even made, because a query the registry
+   * can never answer would otherwise mark the cache incomplete on every run.
+   */
   mcp: string[]
 }
 
@@ -279,6 +297,30 @@ function nonEmptyStrArray(value: YamlValue | undefined, path: string, issues: Va
   return out
 }
 
+/** The shortest `search` term the public MCP registry accepts; a shorter one returns HTTP 422. */
+const MIN_MCP_SEARCH_CHARS = 3
+
+/**
+ * Search terms for the MCP registry, none shorter than the registry's minimum.
+ *
+ * A term below the minimum is not a weak query, it is one the registry refuses outright, and
+ * a run that keeps asking it can never complete. Checked at parse time so a bad seed fails
+ * `playbook check` and the load with a clear message, rather than surviving as a plan that
+ * refetches forever. `ci` and `go` shipped this way once, which is how it was found.
+ */
+function mcpTermArray(value: YamlValue | undefined, path: string, issues: ValidationIssue[]): string[] {
+  const out = nonEmptyStrArray(value, path, issues)
+  for (const item of out) {
+    if (item.trim().length < MIN_MCP_SEARCH_CHARS) {
+      issues.push({
+        path,
+        message: `shorter than the MCP registry's ${String(MIN_MCP_SEARCH_CHARS)}-character minimum: "${item}"`,
+      })
+    }
+  }
+  return out
+}
+
 function checkKeys(
   obj: Record<string, YamlValue>,
   allowed: readonly string[],
@@ -419,8 +461,14 @@ export function validatePlaybook(
   checkKeys(c, ['moduleLayout', 'testNaming', 'reviewFocus'], 'conventions', issues)
 
   const d = optionalSection(doc.discover)
-  checkKeys(d, ['officialOrgs', 'officialDomains', 'keywords', 'mcp'], 'discover', issues)
+  checkKeys(d, ['officialOrgs', 'officialDomains', 'localMatch', 'keywords', 'mcp'], 'discover', issues)
   const officialDomains = domainArray(d.officialDomains, 'discover.officialDomains', issues)
+  const localMatch = nonEmptyStrArray(d.localMatch, 'discover.localMatch', issues)
+  // Validated here, before the "any issue means no playbook" check below. Reading these into
+  // the returned object instead put their issues *after* that check, so a bad seed was
+  // reported in `issues` while the playbook was still returned -- and the load still succeeded.
+  const keywords = nonEmptyStrArray(d.keywords, 'discover.keywords', issues)
+  const mcp = mcpTermArray(d.mcp, 'discover.mcp', issues)
 
   const communityRaw = doc.community
   const community: CommunityResource[] = []
@@ -503,8 +551,9 @@ export function validatePlaybook(
       discover: {
         officialOrgs: loginArray(d.officialOrgs, 'discover.officialOrgs', issues),
         ...(officialDomains.length === 0 ? {} : { officialDomains }),
-        keywords: nonEmptyStrArray(d.keywords, 'discover.keywords', issues),
-        mcp: nonEmptyStrArray(d.mcp, 'discover.mcp', issues),
+        ...(localMatch.length === 0 ? {} : { localMatch }),
+        keywords,
+        mcp,
       },
       source,
     },

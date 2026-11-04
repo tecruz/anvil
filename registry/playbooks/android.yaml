@@ -9,8 +9,12 @@ title: Android (Jetpack Compose)
 priority: 90
 
 match:
-  files: ['**/AndroidManifest.xml', 'gradle/libs.versions.toml', '**/build.gradle.kts']
-  deps: ['android', 'gradle']
+  # The manifest, or the `android` stack the detector emits from the Android Gradle Plugin.
+  # Deliberately NOT `deps: [gradle]` and not a bare `**/build.gradle.kts`: those are every
+  # Gradle project, which is how Spring Petclinic -- a Gradle Java build -- was matched as an
+  # Android project and offered Compose performance guidance. A build system is not a platform.
+  files: ['**/AndroidManifest.xml']
+  deps: ['android']
   importPrefixes: ['androidx.compose', 'androidx.', 'com.android.']
 
 official:

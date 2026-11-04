@@ -66,6 +66,30 @@ describe('mergeBySource', () => {
     assert.equal(merged[0]?.label, 'other/server')
   })
 
+  test('a source that answered only some queries keeps what it could not refresh', () => {
+    // The cache cannot tell which previous entry came from the query that failed, so a
+    // partially answered source is conservative: fresh entries are added, old ones stay. The
+    // cache is marked incomplete, so the next run can settle the question.
+    const previous = [entry({ label: 'android/old', url: 'https://github.com/android/old' })]
+    const fresh = [entry({ label: 'android/new', url: 'https://github.com/android/new' })]
+    const merged = mergeBySource(previous, fresh, [{ ...note('github-search', true, 1), complete: false }])
+    assert.deepEqual(
+      merged.map((e) => e.label).sort(),
+      ['android/new', 'android/old'],
+      'a partial answer must not erase the half it did not reach',
+    )
+  })
+
+  test('a source that answered every query still replaces its entries', () => {
+    const previous = [entry({ label: 'android/old', url: 'https://github.com/android/old' })]
+    const fresh = [entry({ label: 'android/new', url: 'https://github.com/android/new' })]
+    const merged = mergeBySource(previous, fresh, [{ ...note('github-search', true, 1), complete: true }])
+    assert.deepEqual(
+      merged.map((e) => e.label),
+      ['android/new'],
+    )
+  })
+
   test('a source that answered with nothing replaces its entries too', () => {
     // "Answered, and found nothing" is a real answer. Keeping the old entries would mean
     // the cache could never shrink, and a source that stopped publishing would keep its

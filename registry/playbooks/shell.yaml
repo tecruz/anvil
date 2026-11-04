@@ -1,0 +1,100 @@
+# Shell playbook.
+#
+# Shell is the language most repositories use without thinking about it, and the one where a
+# wrong command is most expensive: an unquoted expansion or a swallowed pipeline failure passes
+# review and then runs in production. The playbook is documentation-first on purpose -- there is
+# no universal shell test command, so none is invented. A repository that documents `shellcheck`,
+# `shfmt` or `bats` gets that command from its own instructions.
+
+id: shell
+title: Shell
+priority: 48
+
+match:
+  # The explicit signals only: a Bats suite, or the `shell-project` stack the detector emits
+  # (a chosen linter, five-plus scripts). Not `**/*.sh`, which is one helper script in a Node
+  # repository, and not `deps: [shell]`, which matches the inferred language anywhere. The
+  # `.shellcheckrc` probe lives in the detector and in `satisfiedBy`, not here -- listing it as
+  # both would make the ShellCheck resource unreachable for the repositories that need it least
+  # and invisible in `playbook check`.
+  files: ['**/*.bats']
+  deps: ['shell-project']
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Bash Reference Manual
+      url: 'https://www.gnu.org/software/bash/manual/'
+      why: >-
+        The authoritative description of Bash behaviour: expansion, quoting, redirection and
+        the shell options. Most "it worked interactively" bugs are an expansion rule stated here.
+    - label: POSIX shell specification
+      url: 'https://pubs.opengroup.org/onlinepubs/9799919799/'
+      why: >-
+        What a `#!/bin/sh` script may rely on. The difference between POSIX and Bash is where a
+        script that ran on one machine fails on another.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: ShellCheck wiki
+      url: 'https://www.shellcheck.net/wiki/Home'
+      why: >-
+        Every ShellCheck diagnostic, with the failure it prevents. A ShellCheck warning names a
+        real defect far more often than a style preference.
+      satisfiedBy: ['**/.shellcheckrc']
+  migrationGuides: []
+
+community:
+  - repo: 'koalaman/shellcheck'
+    label: ShellCheck
+    why: >-
+      The de-facto shell linter. Its checks are written as descriptions of the bug they catch,
+      which makes an unexplained lint failure diagnosable.
+  - repo: 'mvdan/sh'
+    label: shfmt
+    why: >-
+      The formatter, and a parser for shell that is stricter than the shell itself. `shfmt -d`
+      in CI is the cheapest way to keep a script readable.
+  - repo: 'bats-core/bats-core'
+    label: Bats
+    why: >-
+      The test framework for shell. A Bats test can assert on exit status and output, which is
+      what makes a shell change verifiable at all.
+
+verify:
+  # Empty on purpose. Shell has no universal build or test command: a repository may use bats,
+  # a hand-written `tests/run`, or nothing. Inventing one would hand an agent a command that
+  # fails for reasons unrelated to its change.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'bin/ or scripts/ for entry points; lib/ for sourced functions'
+  testNaming: '*.bats with bats-core, or a tests/ script that exits non-zero on failure'
+  reviewFocus:
+    - 'an unquoted expansion, and word splitting on a path with a space'
+    - 'a pipeline whose failure is swallowed because pipefail is not set'
+    - '`rm -rf` with a variable that can be empty or unset'
+    - 'anything that runs with elevated privileges or writes outside the working tree'
+
+riskGlobs:
+  - '**/*.sh'
+  - '**/*.bash'
+  - '**/*.zsh'
+  - '**/.shellcheckrc'
+  - '**/*.bats'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['koalaman', 'bats-core', 'mvdan']
+  officialDomains: ['shellcheck.net', 'gnu.org/software/bash', 'pubs.opengroup.org']
+  localMatch: ['shellcheck', 'shfmt', 'bash', 'shell']
+  keywords:
+    - 'bash agent skills'
+    - 'shellcheck mcp server'
+  mcp: ['bash', 'shellcheck']

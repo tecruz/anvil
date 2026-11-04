@@ -1,0 +1,81 @@
+# Vue playbook.
+#
+# Matched on the `vue` stack, emitted from a `vue` dependency or a `.vue` file. Nuxt is offered the
+# same guidance through `localMatch`: the component and reactivity model is Vue's.
+
+id: vue
+title: Vue
+priority: 60
+
+match:
+  files: ['**/*.vue']
+  deps: ['vue']
+  importPrefixes: ['vue']
+
+official:
+  docs:
+    - label: Vue guide
+      url: 'https://vuejs.org/guide/introduction.html'
+      why: >-
+        The framework guide, from the reactivity model to components and routing. The Composition
+        API section is where most current code starts.
+    - label: Vue API reference
+      url: 'https://vuejs.org/api/'
+      why: >-
+        Every component option and composable, including the reactivity caveats. Reactivity loss --
+        destructuring a reactive object, replacing a ref's value -- is the failure to look for.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: Vue style guide
+      url: 'https://vuejs.org/style-guide/'
+      why: >-
+        The official priority-ordered rules. Prefer the repository's own lint configuration when
+        it has one; this is the fallback.
+  migrationGuides:
+    - label: Vue 3 migration guide
+      url: 'https://v3-migration.vuejs.org/'
+      why: >-
+        The Vue 2 to 3 changes, including the removed APIs. Required before a major upgrade, and
+        useful when reading code written against the older model.
+
+community:
+  - repo: 'vuejs/core'
+    label: Vue
+    why: >-
+      The framework source. Reactivity and the scheduler are here, which settles most "why did
+      this not update" questions.
+  - repo: 'vuejs/router'
+    label: Vue Router
+    why: >-
+      The router most apps use, and the reference for navigation guards and route metadata.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'src/ with components/ and composables/; one component per .vue file'
+  testNaming: '*.spec.ts with Vitest and @vue/test-utils'
+  reviewFocus:
+    - 'destructuring a reactive object, which silently loses reactivity'
+    - 'a watcher that mutates the value it watches'
+    - 'v-html, which renders trusted markup and is an injection point otherwise'
+    - 'a route or store change that the component reads once at setup'
+
+riskGlobs: []
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['vuejs']
+  officialDomains: ['vuejs.org']
+  localMatch: ['vue', 'nuxt']
+  keywords:
+    - 'vue agent skills'
+    - 'vue mcp server'
+  mcp: ['vue', 'nuxt']

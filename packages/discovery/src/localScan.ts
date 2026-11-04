@@ -203,6 +203,21 @@ export function scanLocalSkills(options: LocalScanOptions = {}): LocalSkill[] {
 }
 
 /**
+ * Terms that carry the provenance the length floor needs.
+ *
+ * `localMatch` is an explicit curation by the playbook author, so a short technology name such
+ * as `vue` is a real identity term. Search keywords are not curated this way, and a plain array
+ * of strings still uses the general four-character floor.
+ */
+export interface CuratedSkillTerms extends Array<string> {
+  /** Lowercased, trimmed `localMatch` terms shorter than the general floor. */
+  curatedShortTerms: ReadonlySet<string>
+}
+
+/** The general floor for an arbitrary term; curated `localMatch` terms may go below it. */
+const MIN_TERM_LENGTH = 4
+
+/**
  * True when a skill's name or description mentions a playbook's technology.
  *
  * A whole-word substring test against the playbook id, its id split into words, and each
@@ -210,12 +225,18 @@ export function scanLocalSkills(options: LocalScanOptions = {}): LocalSkill[] {
  * skill in an Android plan, and a reader who sees one wrong entry stops reading the rest.
  * Two words of "android" in a sentence is a mention; "and" matching "android" is not,
  * which is why the pattern requires a non-word character at each boundary.
+ *
+ * The four-character floor keeps "go" from matching "google", "django" and "mongo". A term the
+ * playbook explicitly curated in `localMatch` is exempt, because the author chose it as the
+ * technology's identity -- `vue` is three characters and is the whole name.
  */
 export function skillMatchesSeeds(skill: LocalSkill, terms: readonly string[]): boolean {
   const haystack = skill.haystack.toLowerCase()
+  const curated = (terms as Partial<CuratedSkillTerms>).curatedShortTerms
   for (const term of terms) {
     const needle = term.toLowerCase().trim()
-    if (needle.length < 4) continue
+    const floor = curated?.has(needle) === true ? 1 : MIN_TERM_LENGTH
+    if (needle.length < floor) continue
     const pattern = new RegExp(`(^|[^a-z0-9])${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`)
     if (pattern.test(haystack)) return true
   }

@@ -78,6 +78,35 @@ Inside opencode, the [plugin](packages/plugin-opencode/README.md) registers the 
 tools for the agent, and keeps the ticket context alive when the conversation is
 compacted.
 
+## Local detection, online enrichment
+
+Anvil detects the project from local files first, without running its build or calling a
+model. Stack detection is entirely local; the network is used only to enrich the guidance
+for the technologies already matched.
+
+```mermaid
+flowchart TD
+    repo["Repository files"] --> profile["Local profile: stack, commands, tooling and risks"]
+    profile --> match["Match playbooks and audit"]
+    match --> doctor["doctor: findings and score"]
+    match --> merge["Merge guidance for matched playbooks"]
+    skills["Installed skills: local scan"] --> merge
+    cache["Fresh discovery cache"] --> merge
+    match -. "cache missing or stale: fetch, then cache" .-> online["GitHub search + MCP registry"]
+    online --> merge
+    merge --> output["plan: ranked fixes / brief: agent context"]
+```
+
+`plan` and `brief` read a fresh cache and fetch for only a technology whose cache is
+missing or expired, so the first run after a clone searches and the following week is
+answered from disk. `--offline` asks for no network at all, `--refresh` fetches even a
+fresh cache, and `anvil playbook discover` is the same fetch driven directly. Discovery
+never installs what it finds or edits the curated registry; it recommends resources,
+ranked below the ones a human reviewed.
+
+See the [offline and online command guide](docs/USAGE.md#offline-detection-and-online-discovery)
+for the exact cache and flag behaviour.
+
 ## How it decides
 
 - **Detection is evidence, not convention.** A command is reported because a file says so

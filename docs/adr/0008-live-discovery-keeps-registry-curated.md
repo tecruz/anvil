@@ -33,6 +33,17 @@ mistaken for the curated record.
 to search, and `mcp` terms for the MCP registry. That list is a stable, reviewable fact, so
 it belongs in YAML. What those orgs published is a network answer and belongs in a cache.
 
+**Search phrases are not identity terms, so the two are separate fields.** The local skill
+scan matches an installed skill against the technology's own names — the playbook id and,
+when declared, `localMatch` — and never against `keywords`, `mcp` or `officialOrgs`. Those
+are the strings the *network* is asked, and a keyword's leading word is an ordinary English
+word far too often: the head of `workflow validation` is `workflow`, which matched a Jetpack
+Compose skill whose description contained the word, and the head of `infrastructure agent
+skills` is `infrastructure`, which matched a testing skill in the Terraform plan. A skill is
+a file about the technology, so only a name the technology is actually known by can be
+evidence that it is relevant. `localMatch` is small and unambiguous by construction, and a
+playbook that declares none matches on its id alone.
+
 **Live results are cached and merged, never written to `registry/playbooks/`.** Fetching goes
 to `~/.anvil/cache/discovery/<id>.json` with a seven-day TTL, and `plan`/`brief` merge the
 cache at read time. A missing or corrupt cache is empty and quiet; `plan` must work on a
@@ -92,7 +103,9 @@ ecosystem has published nothing.
   `--refresh`.
 - `Playbook` gained `discover`; `Suggestion` gained `provenance` and `fetchedAt`; all fifteen
   registry playbooks declare seeds. `generated.ts` is still the compiled registry and the
-  parity test still enforces it.
+  parity test still enforces it. `DiscoverSeeds.localMatch` was added after the first live
+  caches existed; it is optional, so a cache or a hand-written seed list without it is read
+  as "match on the id", not as an error.
 - Discovery is keyed by playbook id and read after matching, so a cached `android` entry
   never appears in a plan for a repository that matched only `node`.
 - The unit suite covers classification, cache freshness, local scanning, proposals

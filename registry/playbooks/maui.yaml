@@ -1,0 +1,83 @@
+# .NET MAUI playbook.
+#
+# MAUI is a .NET workload, so the `dotnet` playbook's build and test advice still applies; the
+# `maui` stack exists so a mobile .NET project is identified as one, and this playbook carries the
+# guidance that is specific to it -- per-platform code, handlers, and the target frameworks.
+
+id: maui
+title: .NET MAUI
+priority: 61
+
+match:
+  files: ['**/MauiProgram.cs']
+  deps: ['maui']
+  importPrefixes: ['Microsoft.Maui']
+
+official:
+  docs:
+    - label: .NET MAUI documentation
+      url: 'https://learn.microsoft.com/en-us/dotnet/maui/'
+      why: >-
+        The framework guide, versioned per .NET release. MAUI's controls and handlers changed
+        across major versions, so read the page for the target framework in the csproj.
+    - label: .NET MAUI platform integration
+      url: 'https://learn.microsoft.com/en-us/dotnet/maui/platform-integration/'
+      why: >-
+        The APIs that reach a device feature -- storage, sensors, connectivity, permissions. Each
+        is documented per platform, and the differences are the ones that break one platform only.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: .NET MAUI migration guides
+      url: 'https://learn.microsoft.com/en-us/dotnet/maui/migration/'
+      why: >-
+        How to move a Xamarin.Forms project to MAUI, and the API changes it implies. The
+        migrations are not mechanical, so the guide is the starting point rather than a recipe.
+
+community:
+  - repo: 'dotnet/maui'
+    label: .NET MAUI
+    why: >-
+      The framework source and issue tracker. Handler and control behaviour questions are settled
+      here, and the samples are part of the repository.
+  - repo: 'dotnet/maui-samples'
+    label: .NET MAUI samples
+    why: >-
+      Official samples per feature. Useful for seeing how a platform-specific API is meant to be
+      used rather than how it compiles.
+
+verify:
+  # Empty on purpose: MAUI is a .NET workload, and the `dotnet` playbook already carries
+  # `dotnet build` / `dotnet test`. Repeating them here would print the same advice twice.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'one csproj per app; Platforms/ holds per-platform code, code-behind and manifests'
+  testNaming: '*Tests.cs, with the app under test project-referenced'
+  reviewFocus:
+    - 'Platforms/ code, which only compiles for its own target framework'
+    - 'a handler, gesture or effect, which behaves differently per platform'
+    - 'the target frameworks in the csproj, which decide what compiles at all'
+    - 'an Android manifest or iOS Info.plist change under Platforms/'
+
+riskGlobs:
+  - '**/Platforms/**'
+  - '**/MauiProgram.cs'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['dotnet', 'microsoft']
+  officialDomains: ['learn.microsoft.com']
+  localMatch: ['maui', 'xamarin']
+  keywords:
+    - 'maui agent skills'
+    - 'dotnet maui mcp server'
+    - 'xamarin migration agent'
+  mcp: ['maui', 'dotnet']

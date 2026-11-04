@@ -689,6 +689,9 @@ describe('playbook discover cache', () => {
           cachedEntry('android/androidify', fetchedAt),
           { ...cachedEntry('android/mcp-server', fetchedAt), source: 'mcp-registry', url: 'https://example.test/mcp' },
         ],
+        // The remote half was complete before the scan. A local-only run leaves it untouched,
+        // so it must not turn the cache into a partial one and force the next plan to refetch.
+        remoteAnswered: true,
       },
       { ANVIL_CONFIG_HOME: home },
     )
@@ -715,6 +718,62 @@ describe('playbook discover cache', () => {
     assert.equal(after.status, 'fresh')
     assert.equal(after.cache?.entries.length, 3, 'the local skill and both fetched entries')
     assert.equal(after.cache?.fetchedAt, fetchedAt, 'the network half should keep its original age')
+    assert.equal(
+      after.cache?.remoteAnswered,
+      true,
+      'a local scan must preserve the completeness of the remote half it did not touch',
+    )
+  })
+
+  test('--local-only without a remote cache writes a partial cache', () => {
+    // The other half of the same rule. There is no remote half to preserve, so the cache must
+    // stay partial and the next default `plan` must perform the enrichment this scan skipped.
+    const home = tempDir('anvil-discover-home-')
+    const skillDir = join(home, '.agents', 'skills', 'zz-anvil-test-android')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: zz-anvil-test-android\ndescription: A fixture skill for Android discovery tests.\n---\n\nBody.\n',
+    )
+
+    const res = runAnvil(['playbook', 'discover', 'android', '--local-only', '--json'], {
+      env: { ANVIL_CONFIG_HOME: home },
+    })
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+    const after = loadCache('android', { ANVIL_CONFIG_HOME: home })
+    assert.equal(after.status, 'fresh')
+    assert.equal(after.cache?.remoteAnswered, false, 'a cache with no remote half is not complete')
+    assert.equal(after.cache?.entries.length, 1)
+  })
+  test('--local-only keeps a complete empty network answer complete, and keeps its age', () => {
+    // A remote source answered "nothing matched", which is a real answer: the cache is fresh,
+    // holds no remote entries, and is marked `remoteAnswered: true`. A local-only scan then
+    // adds a skill. Deciding completeness from the merged entries saw no remote entry and
+    // marked the cache partial, so the next `plan`/`brief` spent requests on a question that
+    // had already been answered. Recomputing `fetchedAt` would also date that answer from the
+    // skill scanned today, extending its TTL by a week.
+    const home = tempDir('anvil-discover-home-')
+    const fetchedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString()
+    saveCache(
+      { schemaVersion: 1, playbookId: 'android', fetchedAt, entries: [], remoteAnswered: true },
+      { ANVIL_CONFIG_HOME: home },
+    )
+    const skillDir = join(home, '.agents', 'skills', 'zz-anvil-test-android')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: zz-anvil-test-android\ndescription: A fixture skill for Android discovery tests.\n---\n\nBody.\n',
+    )
+
+    const res = runAnvil(['playbook', 'discover', 'android', '--local-only', '--json'], {
+      env: { ANVIL_CONFIG_HOME: home },
+    })
+    assert.equal(res.code, 0, res.stdout + res.stderr)
+
+    const after = loadCache('android', { ANVIL_CONFIG_HOME: home })
+    assert.equal(after.cache?.entries.length, 1)
+    assert.equal(after.cache?.remoteAnswered, true, 'an empty remote answer is still a complete answer')
+    assert.equal(after.cache?.fetchedAt, fetchedAt, 'a local skill must not date the remote answer from today')
   })
 })
 

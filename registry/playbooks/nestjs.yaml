@@ -1,0 +1,74 @@
+# NestJS playbook.
+#
+# Matched on the `nestjs` stack, emitted from `@nestjs/core` or `nest-cli.json`. Nest's
+# decorator-driven DI and module system are its own; Express guidance does not cover them, and the
+# framework's structure decides where a dependency is available.
+
+id: nestjs
+title: NestJS
+priority: 62
+
+match:
+  files: ['**/nest-cli.json']
+  deps: ['nestjs']
+  importPrefixes: ['@nestjs/']
+
+official:
+  docs:
+    - label: NestJS documentation
+      url: 'https://docs.nestjs.com/'
+      why: >-
+        The module, provider and controller model, with the request lifecycle. Nest does a great
+        deal by convention, so this is where a decorator's effect is actually stated.
+    - label: NestJS request lifecycle
+      url: 'https://docs.nestjs.com/faq/request-lifecycle'
+      why: >-
+        The order middleware, guards, interceptors, pipes and exception filters run in. Getting it
+        wrong makes an authorization check run after the code it was meant to protect.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: NestJS migration guide
+      url: 'https://docs.nestjs.com/migration-guide'
+      why: >-
+        Required before a major upgrade. The breaking changes are mostly in the platform adapters
+        and the DI container, and they surface at runtime.
+
+community:
+  - repo: 'nestjs/nest'
+    label: NestJS
+    why: >-
+      The framework source and samples. The DI container and the platform adapters are here, which
+      is where an "it is not injected" question is answered.
+
+verify:
+  build: ['npm run build']
+  test: ['npm test']
+  testFast: []
+  lint: ['npm run lint']
+  format: []
+  typecheck: ['npx tsc --noEmit']
+
+conventions:
+  moduleLayout: 'one module per feature, with controller/service/provider beside it'
+  testNaming: '*.spec.ts for units, *.e2e-spec.ts with supertest for the HTTP surface'
+  reviewFocus:
+    - 'a provider registered in the wrong module, which changes its scope and injection'
+    - 'a guard or interceptor applied globally, which changes every route at once'
+    - 'the order of middleware versus guards in the request lifecycle'
+    - 'a request-scoped provider that a singleton depends on'
+
+riskGlobs:
+  - '**/nest-cli.json'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['nestjs']
+  officialDomains: ['docs.nestjs.com']
+  localMatch: ['nestjs', 'nest']
+  keywords:
+    - 'nestjs agent skills'
+    - 'nestjs mcp server'
+  mcp: ['nestjs']

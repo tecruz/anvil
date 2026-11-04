@@ -13,12 +13,13 @@
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
-import { type CacheFile, type DiscoveryEntry, saveCache } from '@anvil/discovery'
+import { type CacheFile, cachePathFor, type DiscoveryEntry, saveCache } from '@anvil/discovery'
 import { liveEntriesForPlan, loadLiveForPlan } from '../src/commands/discover.ts'
 
 const ANDROID = { id: 'android', discover: { officialOrgs: ['android'], keywords: [], mcp: [] } }
+const NODE = { id: 'node', discover: { officialOrgs: ['nodejs'], keywords: [], mcp: [] } }
 
 function entry(label: string): DiscoveryEntry {
   return {
@@ -143,25 +144,6 @@ describe('loadLiveForPlan', () => {
       rmSync(h, { recursive: true, force: true })
     }
   })
-
-  test('the default cache path applies the same stale rule', async () => {
-    const h = home()
-    try {
-      const old = new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString()
-      saveCache(cache(old), env(h))
-      const result = await liveEntriesForPlan([ANDROID], {
-        offline: false,
-        refresh: false,
-        cwd: '.',
-        env: env(h),
-      })
-      assert.equal(result.live.size, 0)
-      assert.equal(result.warnings.length, 1)
-      assert.match(result.warnings[0]!, /--refresh/)
-    } finally {
-      rmSync(h, { recursive: true, force: true })
-    }
-  })
 })
 
 describe('liveEntriesForPlan', () => {
@@ -213,7 +195,7 @@ describe('liveEntriesForPlan', () => {
     }
   })
 
-  test('without --refresh the cache is read and nothing is fetched', async () => {
+  test('a fresh cache is read and nothing is fetched', async () => {
     const h = home()
     try {
       writeSkill(h, 'testing-setup', 'Android test strategy and coverage.')
@@ -251,6 +233,249 @@ describe('liveEntriesForPlan', () => {
       })
       assert.equal(result.live.get('android')?.length, 1)
       assert.equal(result.live.get('android')?.[0]?.source, 'local-scan')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a missing cache is fetched by default and merged with installed skills', async () => {
+    // The enrichment this default exists for: a machine that has never run discovery still
+    // gets live guidance, without the user having to know `--refresh` exists.
+    const h = home()
+    try {
+      writeSkill(h, 'testing-setup', 'Android test strategy and coverage.')
+      const asked: string[][] = []
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async (playbooks) => {
+          asked.push(playbooks.map((p) => p.id))
+          const live = new Map<string, DiscoveryEntry[]>()
+          live.set('android', [entry('agent-skills')])
+          return { live, warnings: [], cached: [] }
+        },
+      })
+      assert.deepEqual(asked, [['android']], 'an absent cache is the case enrichment exists for')
+      const sources = result.live.get('android')?.map((e) => e.source) ?? []
+      assert.ok(sources.includes('local-scan'), 'the installed skill survives the fetch')
+      assert.ok(sources.includes('github-search'), 'the fetched entry is merged in')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('the default fetches a stale cache instead of leaving it out', async () => {
+    // Under the previous default a stale cache was reported and left out, and the fix was a
+    // flag the reader had to know. The default now completes the stale cache itself.
+    const h = home()
+    try {
+      const old = new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString()
+      saveCache(cache(old), env(h))
+      const asked: string[][] = []
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async (playbooks) => {
+          asked.push(playbooks.map((p) => p.id))
+          const live = new Map<string, DiscoveryEntry[]>()
+          live.set('android', [{ ...entry('agent-skills'), fetchedAt: new Date().toISOString() }])
+          return { live, warnings: [], cached: [] }
+        },
+      })
+      assert.deepEqual(asked, [['android']])
+      assert.equal(result.live.get('android')?.length, 1)
+      assert.deepEqual(result.warnings, [], 'the fetch answered, so there is no staleness warning')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('only a playbook whose cache cannot answer is fetched', async () => {
+    // Fetching a fresh cache again would spend a rate limit to rediscover what was fetched an
+    // hour ago; the enrichment is per playbook, so a matched technology with a fresh cache is
+    // left alone while one with no cache is fetched.
+    const h = home()
+    try {
+      saveCache(cache(new Date().toISOString()), env(h))
+      const asked: string[][] = []
+      const result = await liveEntriesForPlan([ANDROID, NODE], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async (playbooks) => {
+          asked.push(playbooks.map((p) => p.id))
+          const live = new Map<string, DiscoveryEntry[]>()
+          live.set('node', [entry('node-tooling')])
+          return { live, warnings: [], cached: [] }
+        },
+      })
+      assert.deepEqual(asked, [['node']], 'the fresh android cache is reused, not refetched')
+      assert.equal(result.live.get('android')?.length, 1)
+      assert.equal(result.live.get('node')?.length, 1)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('an unreadable cache is reported and refetched', async () => {
+    const h = home()
+    try {
+      const path = cachePathFor('android', env(h))
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, 'not json', 'utf8')
+      let fetched = false
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async () => {
+          fetched = true
+          const live = new Map<string, DiscoveryEntry[]>()
+          live.set('android', [entry('agent-skills')])
+          return { live, warnings: [], cached: [] }
+        },
+      })
+      assert.equal(fetched, true)
+      assert.equal(result.warnings.length, 1)
+      assert.match(result.warnings[0]!, /unreadable/)
+      assert.equal(result.live.get('android')?.length, 1)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('an enrichment that reaches no source keeps installed skills and its warning', async () => {
+    const h = home()
+    try {
+      writeSkill(h, 'testing-setup', 'Android test strategy and coverage.')
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async () => ({ live: new Map(), warnings: ['no transport could reach GitHub'], cached: [] }),
+      })
+      assert.equal(result.live.get('android')?.length, 1)
+      assert.equal(result.live.get('android')?.[0]?.source, 'local-scan')
+      assert.deepEqual(result.warnings, ['no transport could reach GitHub'])
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a local-only cache is fetched, not trusted as an answer', async () => {
+    // `discover --local-only` writes a fresh cache holding only local-scan entries. Reusing it
+    // would suppress online enrichment for a week, which is the opposite of the default.
+    const h = home()
+    try {
+      writeSkill(h, 'testing-setup', 'Android test strategy and coverage.')
+      const localOnly: DiscoveryEntry = {
+        ...entry('testing-setup'),
+        url: '',
+        source: 'local-scan',
+        trust: 'local-install',
+        install: join(h, '.agents', 'skills', 'testing-setup', 'SKILL.md'),
+        repo: null,
+        owner: null,
+      }
+      saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: 'android',
+          fetchedAt: new Date().toISOString(),
+          entries: [localOnly],
+          remoteAnswered: false,
+        },
+        env(h),
+      )
+      let fetched = false
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async () => {
+          fetched = true
+          const live = new Map<string, DiscoveryEntry[]>()
+          live.set('android', [entry('agent-skills')])
+          return { live, warnings: [], cached: [] }
+        },
+      })
+      assert.equal(fetched, true, 'a cache with no complete remote answer must be fetched')
+      const sources = result.live.get('android')?.map((e) => e.source) ?? []
+      assert.ok(sources.includes('local-scan'), 'the installed skill is still listed')
+      assert.ok(sources.includes('github-search'), 'the missing remote half is fetched')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a partial cache is fetched again', async () => {
+    // A cache written when one source did not answer is not complete, so the default retries
+    // it rather than presenting the half-answer as the whole truth.
+    const h = home()
+    try {
+      saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: 'android',
+          fetchedAt: new Date().toISOString(),
+          entries: [entry('agent-skills')],
+          remoteAnswered: false,
+        },
+        env(h),
+      )
+      let fetched = false
+      await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async () => {
+          fetched = true
+          return { live: new Map(), warnings: [], cached: [] }
+        },
+      })
+      assert.equal(fetched, true, 'an incomplete cache must be retried')
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a complete empty answer is reused instead of fetched again', async () => {
+    // "Asked, nothing matched" is a complete answer. A cache holding it has no entries to
+    // show, but there is still nothing to retry until it ages out.
+    const h = home()
+    try {
+      saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: 'android',
+          fetchedAt: new Date().toISOString(),
+          entries: [],
+          remoteAnswered: true,
+        },
+        env(h),
+      )
+      let fetched = false
+      const result = await liveEntriesForPlan([ANDROID], {
+        offline: false,
+        refresh: false,
+        cwd: '.',
+        env: env(h),
+        refreshLive: async () => {
+          fetched = true
+          return { live: new Map(), warnings: [], cached: [] }
+        },
+      })
+      assert.equal(fetched, false, 'an answered empty cache must not be fetched again')
+      assert.deepEqual(result.warnings, [])
     } finally {
       rmSync(h, { recursive: true, force: true })
     }

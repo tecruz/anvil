@@ -1,0 +1,86 @@
+# PyTorch / Transformers playbook.
+#
+# Matched on the `pytorch` or `huggingface` stack, read from the declared dependency (`torch`,
+# `transformers`). The framework API changes on its own schedule, so the version the repository
+# pins is the version the guidance has to be read against.
+
+id: pytorch
+title: PyTorch / Transformers
+priority: 56
+
+match:
+  deps: ['pytorch', 'huggingface']
+  importPrefixes: ['torch', 'transformers']
+
+official:
+  docs:
+    - label: PyTorch documentation
+      url: 'https://pytorch.org/docs/stable/index.html'
+      why: >-
+        The API reference for tensors, autograd and the module system. Autograd semantics -- what
+        is tracked, what is detached, what accumulates -- decide whether a training step is correct.
+    - label: PyTorch tutorials
+      url: 'https://pytorch.org/tutorials/'
+      why: >-
+        Task-shaped walkthroughs, including the training loop. The loop is short enough to copy and
+        wrong often enough that the reference is worth reading once.
+    - label: Transformers documentation
+      url: 'https://huggingface.co/docs/transformers/index'
+      why: >-
+        The model, tokenizer and pipeline APIs. Tokenizer behaviour must match the model it came
+        with, and the docs state which combinations are valid.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: PyTorch release notes
+      url: 'https://github.com/pytorch/pytorch/releases'
+      why: >-
+        Required before a version bump. Deprecations in the C++ and Python APIs are listed per
+        release, and some removals compile and then fail at runtime.
+
+community:
+  - repo: 'pytorch/pytorch'
+    label: PyTorch
+    why: >-
+      The framework source and issue tracker. Numerical behaviour and autograd questions are settled
+      here, and the tests show the intended semantics.
+  - repo: 'huggingface/transformers'
+    label: Transformers
+    why: >-
+      The model implementations, which are the reference for how a checkpoint expects its inputs to
+      be shaped.
+
+verify:
+  build: []
+  test: ['pytest']
+  testFast: []
+  lint: ['ruff check .']
+  format: ['ruff format .']
+  typecheck: []
+
+conventions:
+  moduleLayout: 'data/, models/ and training/ as importable modules; notebooks only for exploration'
+  testNaming: 'test_*.py, with a tiny model and fixed seed for a deterministic check'
+  reviewFocus:
+    - 'a tensor moved or detached in the wrong place, which silently stops gradients'
+    - 'a training loop without `optimizer.zero_grad()` or with a missing `model.train()`'
+    - 'a tokenizer and model loaded from different checkpoints'
+    - 'randomness without a fixed seed, which makes a result unreproducible'
+
+riskGlobs:
+  - '**/*.pt'
+  - '**/*.pth'
+  - '**/*.onnx'
+  - '**/*.safetensors'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['pytorch', 'huggingface']
+  officialDomains: ['pytorch.org', 'huggingface.co']
+  localMatch: ['pytorch', 'torch', 'transformers']
+  keywords:
+    - 'pytorch agent skills'
+    - 'huggingface mcp server'
+  mcp: ['pytorch', 'huggingface']

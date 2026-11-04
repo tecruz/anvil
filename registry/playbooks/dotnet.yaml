@@ -87,6 +87,8 @@ riskGlobs:
 discover:
   officialOrgs: ['dotnet', 'microsoft']
   officialDomains: ['learn.microsoft.com']
+  # Identity terms for the local skill scan; see `discover.localMatch` in the schema.
+  localMatch: ['csharp']
   keywords:
     - 'dotnet mcp server'
     - 'csharp agent skills'

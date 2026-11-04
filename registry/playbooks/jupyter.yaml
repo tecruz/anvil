@@ -1,0 +1,77 @@
+# Jupyter playbook.
+#
+# Matched on the `jupyter` stack, emitted from any `.ipynb`. A notebook is a different artifact
+# from a `.py` file -- it has cell state, hidden execution order and outputs committed into it --
+# and that is the guidance the Python playbook cannot give.
+
+id: jupyter
+title: Jupyter / notebooks
+priority: 56
+
+match:
+  files: ['**/*.ipynb']
+  deps: ['jupyter']
+  importPrefixes: []
+
+official:
+  docs:
+    - label: Jupyter documentation
+      url: 'https://jupyter.org/documentation'
+      why: >-
+        The notebook format and the server model. The `.ipynb` JSON structure and how kernels
+        execute cells are documented here, and both decide whether a run is reproducible.
+    - label: Notebook file format
+      url: 'https://nbformat.readthedocs.io/en/latest/format_description.html'
+      why: >-
+        The cell and output schema. A diff of a notebook is mostly output and execution counts,
+        which is why committed notebooks are noisy and occasionally secret-bearing.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides: []
+
+community:
+  - repo: 'jupyter/notebook'
+    label: Jupyter Notebook
+    why: >-
+      The classic notebook front end. Cell execution and the kernel protocol are implemented here,
+      which is the reference for "why did this cell see that variable".
+  - repo: 'jupyterlab/jupyterlab'
+    label: JupyterLab
+    why: >-
+      The current front end, and the one most repositories' READMEs assume. Its extension model
+      and settings are documented in the repository.
+
+verify:
+  # Empty on purpose. A notebook has no build or test command of its own: verification is whatever
+  # the repository runs (pytest over a test suite, a papermill execution, or nothing). Inventing
+  # one would hand an agent a command that does not exist.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'notebooks/ for exploration, with reusable logic extracted into src/ modules'
+  testNaming: 'a test module under tests/, not an assertion inside a notebook cell'
+  reviewFocus:
+    - 'a notebook whose committed outputs contain data, a token or a local path'
+    - 'hidden state: results that depend on the order cells were run rather than on the file'
+    - 'logic that only exists in a cell, where no test can import it'
+    - 'an execution count that shows the notebook was not run top to bottom'
+
+riskGlobs:
+  - '**/*.ipynb'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['jupyter', 'jupyterlab']
+  officialDomains: ['jupyter.org', 'nbformat.readthedocs.io']
+  localMatch: ['jupyter', 'notebook']
+  keywords:
+    - 'jupyter agent skills'
+    - 'jupyterlab mcp server'
+  mcp: ['jupyter']

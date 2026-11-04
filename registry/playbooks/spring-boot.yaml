@@ -1,0 +1,83 @@
+# Spring Boot playbook.
+#
+# Matched on the `spring-boot` stack, read from the Spring Boot starter in the Maven or Gradle
+# build. A plain JVM project is not a Spring project, and the framework's conventions --
+# auto-configuration, the application context, the request lifecycle -- are not inferable from the
+# build file.
+
+id: spring-boot
+title: Spring Boot
+priority: 64
+
+match:
+  deps: ['spring-boot']
+  importPrefixes: ['org.springframework.boot']
+
+official:
+  docs:
+    - label: Spring Boot documentation
+      url: 'https://docs.spring.io/spring-boot/'
+      why: >-
+        The reference for auto-configuration, the application context and every starter. Most
+        "why is this bean here" questions are answered by the auto-configuration report this guide
+        documents.
+    - label: Spring Guides
+      url: 'https://spring.io/guides'
+      why: >-
+        Short, runnable guides per feature. Useful for the shape of a change -- a filter, a
+        scheduled job, a repository -- rather than for the API list.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides: []
+  migrationGuides:
+    - label: Spring Boot upgrade guide
+      url: 'https://github.com/spring-projects/spring-boot/wiki'
+      why: >-
+        Required before a minor or major upgrade. Property renames and removed auto-configurations
+        are listed per release, and they fail at startup rather than at compile time.
+
+community:
+  - repo: 'spring-projects/spring-boot'
+    label: Spring Boot
+    why: >-
+      The framework source and issue tracker. Auto-configuration is code in this repository, so the
+      conditional annotations there are the definitive answer.
+  - repo: 'spring-projects/spring-framework'
+    label: Spring Framework
+    why: >-
+      The container and web stack underneath Boot. Proxy and transaction behaviour is settled here.
+
+verify:
+  # Empty on purpose: the `jvm` playbook and detector already carry `./mvnw`/`./gradlew` build and
+  # test commands. Repeating them here would print the same advice twice.
+  build: []
+  test: []
+  testFast: []
+  lint: []
+  format: []
+  typecheck: []
+
+conventions:
+  moduleLayout: 'one package per feature, with controller/service/repository beside it'
+  testNaming: '*Tests.java with @SpringBootTest, and a slice test for a single layer'
+  reviewFocus:
+    - 'a change to application.yml or a property name, which changes every environment'
+    - 'transaction boundaries, including self-invocation that bypasses the proxy'
+    - 'a new auto-configuration or bean condition, which changes the whole context'
+    - 'security filter-chain changes, which decide what is actually protected'
+
+riskGlobs:
+  - '**/application*.yml'
+  - '**/application*.yaml'
+  - '**/application*.properties'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['spring-projects']
+  officialDomains: ['docs.spring.io', 'spring.io']
+  localMatch: ['spring boot', 'springframework']
+  keywords:
+    - 'spring boot agent skills'
+    - 'spring mcp server'
+  mcp: ['spring-boot', 'spring']

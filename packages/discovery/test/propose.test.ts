@@ -21,6 +21,7 @@ import {
   type FetchImpl,
   type GhRun,
   matchTerms,
+  mergeBySource,
   proposePlaybookYaml,
   rankForProposal,
   runDiscovery,
@@ -62,7 +63,7 @@ function writeSkill(home: string, root: string, dir: string, body: string): void
 }
 
 describe('matchTerms', () => {
-  test('includes the playbook id and the head of each keyword', () => {
+  test('includes the playbook id', () => {
     const terms = matchTerms('android', ANDROID)
     assert.ok(terms.includes('android'))
     assert.ok(terms.includes('jetpack') === false, 'not seeded, so not a term')
@@ -74,12 +75,26 @@ describe('matchTerms', () => {
     assert.ok(terms.includes('billing'))
   })
 
-  test('takes the leading word of a multi-word keyword', () => {
-    // "android agent skills" must match a skill described as "Skills for Android
-    // development", so the head is the term rather than the whole phrase.
-    assert.ok(
+  test('does not take a term from a search keyword', () => {
+    // The keyword head is an ordinary English word far too often -- `workflow` from "workflow
+    // validation", `infrastructure` from "infrastructure agent skills" -- and matching a local
+    // skill on it put a Play Engage SDK skill in the CI plan and a testing skill in the
+    // Terraform one. Search phrases are what the *network* is asked; `localMatch` is what a
+    // skill's own frontmatter is matched against.
+    assert.equal(
       matchTerms('node', { officialOrgs: [], keywords: ['typescript agent skills'], mcp: [] }).includes('typescript'),
+      false,
     )
+  })
+
+  test('includes an explicitly declared local-match term', () => {
+    const terms = matchTerms('node', {
+      officialOrgs: [],
+      keywords: [],
+      mcp: [],
+      localMatch: ['typescript'],
+    })
+    assert.ok(terms.includes('typescript'))
   })
 })
 
@@ -409,6 +424,69 @@ describe('runDiscovery', () => {
       assert.match(first.why, /one of this playbook's official orgs/)
       assert.equal(second.tier, 'community')
       assert.equal(second.owner, null)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('warns when the MCP registry could not be reached', async () => {
+    // Mirrors the GitHub warning. Without it a registry that could not be reached is silent,
+    // and its absence reads as the reassuring-but-false "the ecosystem published nothing".
+    const h = tempHome()
+    try {
+      const result = await runDiscovery(
+        { id: 'android', discover: ANDROID },
+        { cwd: '.', env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv, fetchImpl: fetchFail, gh: ghFail },
+      )
+      assert.ok(
+        result.warnings.some((w) => /MCP registry could not be reached/.test(w)),
+        result.warnings.join('; '),
+      )
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a playbook whose only MCP seed is unsearchable asks nothing and keeps cached servers', async () => {
+    // The schema rejects such a seed, but a playbook built directly can still reach discovery.
+    // Reporting "answered, empty" for a run that made no request would let the merge delete
+    // every cached MCP server, which is the opposite of what happened.
+    const h = tempHome()
+    try {
+      let fetched = 0
+      const result = await runDiscovery(
+        { id: 'toy', discover: { officialOrgs: [], keywords: [], mcp: ['ci'] } },
+        {
+          cwd: '.',
+          env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv,
+          gh: ghFail,
+          fetchImpl: async () => {
+            fetched++
+            throw new Error('no request should be made')
+          },
+        },
+      )
+      assert.equal(fetched, 0, 'a term the registry cannot search must not be requested')
+      const note = result.sources.find((s) => s.source === 'mcp-registry')
+      assert.equal(note?.answered, false)
+      assert.equal(note?.complete, false)
+      assert.ok(
+        result.warnings.some((w) => /no MCP seed is long enough/.test(w)),
+        result.warnings.join('; '),
+      )
+
+      const cached = entry({
+        label: 'cached/server',
+        url: 'https://cached.test/mcp',
+        section: 'mcp',
+        source: 'mcp-registry',
+      })
+      const merged = mergeBySource([cached], result.entries, result.sources)
+      assert.deepEqual(
+        merged.map((e) => e.label),
+        ['cached/server'],
+        'a run that asked nothing must not erase what the cache already had',
+      )
     } finally {
       rmSync(h, { recursive: true, force: true })
     }

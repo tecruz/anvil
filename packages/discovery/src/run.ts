@@ -19,7 +19,7 @@ import {
   ownerFromGitHubUrl,
   type SourceNote,
 } from './github.ts'
-import { type LocalSkill, scanLocalSkills, skillMatchesSeeds } from './localScan.ts'
+import { type CuratedSkillTerms, type LocalSkill, scanLocalSkills, skillMatchesSeeds } from './localScan.ts'
 import { DEFAULT_MCP_REGISTRY, fetchMcpServers } from './mcpRegistry.ts'
 
 export interface RunOptions extends DiscoverOptions {
@@ -39,19 +39,39 @@ export interface RunResult {
   kept: number
 }
 
-/** Terms a local skill is matched against: the playbook id, its words, and its keywords. */
-export function matchTerms(playbookId: string, seeds: DiscoverSeeds): string[] {
+/**
+ * Terms a local skill is matched against: the playbook's own name, plus the identity terms
+ * it declares in `localMatch`.
+ *
+ * The seeds' `keywords` are deliberately *not* used here, and that is the whole point of the
+ * split. A keyword is a repository-search phrase, and its leading word is an ordinary English
+ * word often enough to matter: the head of `workflow validation` is `workflow`, which matched
+ * a Jetpack Compose skill whose description contained the word, and the head of
+ * `infrastructure agent skills` is `infrastructure`, which matched a testing skill. A local
+ * skill is a file *about the technology*, so the only honest terms are the technology's own
+ * names -- the id, and the curated `localMatch` list.
+ *
+ * The id is added whole and split on hyphens, so `play-billing` matches both halves: a skill
+ * is as likely to say "billing" as the full name.
+ */
+export function matchTerms(playbookId: string, seeds: DiscoverSeeds): CuratedSkillTerms {
   const terms = new Set<string>()
   terms.add(playbookId)
   for (const part of playbookId.split('-')) if (part.length >= 4) terms.add(part)
-  for (const keyword of seeds.keywords) {
-    // The leading word of each keyword is the technology name; the rest is the qualifier
-    // ("android agent skills" -> "android"). Matching on the whole phrase would miss a skill
-    // described as "Skills for Android development".
-    const head = keyword.trim().split(/\s+/)[0]
-    if (head !== undefined && head.length >= 4) terms.add(head)
+
+  // `localMatch` is the author's explicit identity list, so a term shorter than the general
+  // floor is still usable there. `vue` is the canonical case: the playbook id and the curated
+  // term are both three characters, and the previous length floor silently dropped both.
+  const curatedShortTerms = new Set<string>()
+  for (const term of seeds.localMatch ?? []) {
+    terms.add(term)
+    const needle = term.toLowerCase().trim()
+    if (needle.length > 0 && needle.length < 4) curatedShortTerms.add(needle)
   }
-  return [...terms]
+
+  const out = [...terms] as CuratedSkillTerms
+  out.curatedShortTerms = curatedShortTerms
+  return out
 }
 
 /**
@@ -199,7 +219,20 @@ export async function runDiscovery(
       }
     })
     entries.push(...mcpEntries)
-    sources.push({ source: 'mcp-registry', detail: mcp.detail, entries: mcpEntries.length, answered: mcp.answered })
+    sources.push({
+      source: 'mcp-registry',
+      detail: mcp.detail,
+      entries: mcpEntries.length,
+      answered: mcp.answered,
+      complete: mcp.complete,
+    })
+    // Mirrors the GitHub warning. Without it a registry that could not be reached is silent,
+    // and its absence reads as "the ecosystem published nothing" -- the reassuring-but-false
+    // conclusion this package exists to avoid. A registry that answered some terms and failed
+    // others gets its own warning, because that is a partial answer rather than no answer.
+    if (mcp.skipped) warnings.push(`${id}: no MCP seed is long enough for the registry to search; nothing was asked`)
+    else if (!mcp.answered) warnings.push(`${id}: the MCP registry could not be reached`)
+    else if (!mcp.complete) warnings.push(`${id}: the MCP registry answered only part of its queries`)
   }
 
   return { playbookId: id, entries: dedupeEntries(entries), sources, warnings, kept: 0 }

@@ -1,0 +1,121 @@
+# C / C++ playbook.
+#
+# C and C++ are the languages GitHub ranks in the top ten by contributors, and they are the ones
+# a language-only reading gets wrong: the build system is the project. The advice here is the part
+# that is not inferable from the code -- undefined behaviour, the ownership rules, and the build
+# system that decides which translation units compile at all.
+
+id: cpp
+title: C / C++
+priority: 62
+
+match:
+  # CMakeLists.txt and meson.build are build systems, not language evidence: a Swift project
+  # can use CMake, and a Node native addon can ship C++ sources with no build system at all.
+  # The detector emits `cpp-project` only when a C/C++ source file and a build system are both
+  # present, which is the declared-project marker this playbook matches.
+  files:
+    - '**/*.vcxproj'
+    - 'conanfile.txt'
+    - 'conanfile.py'
+    - 'vcpkg.json'
+  deps: ['cpp-project']
+  importPrefixes: ['#include <']
+
+official:
+  docs:
+    - label: cppreference
+      url: 'https://en.cppreference.com/w/'
+      why: >-
+        The language and standard-library reference. The rules that decide whether a program is
+        well-formed -- sequencing, object lifetime, overload resolution -- are stated precisely
+        here and loosely everywhere else.
+    - label: C++ Core Guidelines
+      url: 'https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines'
+      why: >-
+        The rule set the standards committee maintains, each rule with a reason and a
+        counter-example. The ownership and bounds rules are the ones that prevent the memory bugs
+        a compiler will not catch.
+    - label: CMake documentation
+      url: 'https://cmake.org/documentation/'
+      why: >-
+        The build-system reference. Target properties and the configure/build split decide which
+        translation units exist; a wrong property fails in a way that reads like a code error.
+    - label: Meson documentation
+      url: 'https://mesonbuild.com/'
+      why: >-
+        The reference for a `meson.build`, including the dependency and cross-compilation model.
+  skills: []
+  agents: []
+  mcp: []
+  styleGuides:
+    - label: clang-format style options
+      url: 'https://clang.llvm.org/docs/ClangFormatStyleOptions.html'
+      why: >-
+        The option list behind `.clang-format`. Formatting is the one thing a C++ reviewer will
+        not debate, so align with the file the repository already has.
+      satisfiedBy: ['**/.clang-format', '**/_clang-format']
+    - label: Google C++ Style Guide
+      url: 'https://google.github.io/styleguide/cppguide.html'
+      why: >-
+        A widely adopted convention with the reasoning included. Use the repository's own
+        `.clang-format` and `.clang-tidy` first; this is the fallback for an unconfigured project.
+  migrationGuides:
+    - label: C++ compiler support and language versions
+      url: 'https://en.cppreference.com/w/cpp/compiler_support'
+      why: >-
+        Which standard library features a compiler version provides. Required before raising the
+        language standard, because a feature that compiles can still fail to link.
+
+community:
+  - repo: 'isocpp/CppCoreGuidelines'
+    label: C++ Core Guidelines repository
+    why: >-
+      The guidelines source, including the discussions that explain why a rule is what it is.
+      Useful when a rule seems to conflict with the code in front of you.
+  - repo: 'google/googletest'
+    label: GoogleTest
+    why: >-
+      The test framework most C++ projects use, and the reference for how a test binary is
+      registered and run.
+
+verify:
+  # Empty on purpose: the detector already carries the build system's own commands
+  # (`cmake --build`/`ctest`, `meson compile`/`meson test`, `msbuild`), so hard-coding CMake
+  # here printed `cmake --build build` and `ctest` on a Meson project. The language-level
+  # tools stay: they do not depend on which build system compiles the sources.
+  build: []
+  test: []
+  testFast: []
+  lint: ['clang-tidy']
+  format: ['clang-format -i --style=file']
+  typecheck: []
+
+conventions:
+  moduleLayout: 'sources and headers per target; the build-system target (not a directory) is the unit'
+  testNaming: '*_test.cpp, registered with the test framework and run through the build system'
+  reviewFocus:
+    - 'pointer and reference lifetimes, and anything returning a raw owning pointer'
+    - 'undefined behaviour: signed overflow, out-of-bounds access, use after move'
+    - 'a build-system target property or a new source file, which changes what compiles'
+    - 'C API boundaries, where the ABI is frozen once published'
+
+riskGlobs:
+  - '**/CMakeLists.txt'
+  - '**/meson.build'
+  - '**/*.vcxproj'
+  - '**/conanfile.*'
+  - '**/vcpkg.json'
+  - '**/*.hpp'
+  - '**/*.h'
+
+# Live-discovery seeds; see android.yaml for why this section exists.
+discover:
+  officialOrgs: ['llvm', 'kitware']
+  officialDomains: ['en.cppreference.com', 'isocpp.github.io', 'cmake.org', 'mesonbuild.com']
+  localMatch: ['clang', 'cmake', 'meson', 'cpp']
+  keywords:
+    - 'cpp agent skills'
+    - 'clangd mcp server'
+    - 'cmake agent'
+  mcp: ['clangd', 'cmake']
