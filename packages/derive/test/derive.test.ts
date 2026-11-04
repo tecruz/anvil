@@ -1116,6 +1116,48 @@ describe('brief', () => {
     assert.ok(brief.playbooks[0]!.guidance.length > 0)
   })
 
+  test('C/C++ verify guidance follows the detected build system, not CMake', () => {
+    // The playbook's CMake convention used to win over the build system the detector had
+    // already identified, so a Meson repository was told to run `cmake --build build` and
+    // `ctest`. The detected command is the verified one.
+    const meson = mkdtempSync(join(tmpdir(), 'anvil-cpp-meson-'))
+    temps.push(meson)
+    writeFileSync(join(meson, 'meson.build'), "project('demo', 'c')\n")
+    writeFileSync(join(meson, 'main.c'), 'int main(void) { return 0; }\n')
+    const mesonProfile = profileIn(meson)
+    const mesonBrief = buildBrief({
+      profile: mesonProfile,
+      report: audit(mesonProfile),
+      matches: matchesFor(mesonProfile),
+      target: 'all',
+      read: () => null,
+    })
+    const cpp = mesonBrief.playbooks.find((p) => p.id === 'cpp')
+    assert.ok(cpp !== undefined)
+    assert.deepEqual(cpp.verify.build, ['meson compile -C build'])
+    assert.deepEqual(cpp.verify.test, ['meson test -C build'])
+    assert.ok(!JSON.stringify(cpp.verify).includes('cmake'), 'no CMake command on a Meson project')
+    assert.ok(!JSON.stringify(cpp.verify).includes('ctest'), 'no CTest command on a Meson project')
+
+    // MSBuild has no CTest driver, and the playbook must not invent one.
+    const msbuild = mkdtempSync(join(tmpdir(), 'anvil-cpp-msbuild-'))
+    temps.push(msbuild)
+    writeFileSync(join(msbuild, 'demo.vcxproj'), '<Project></Project>\n')
+    writeFileSync(join(msbuild, 'main.cpp'), 'int main() { return 0; }\n')
+    const msbuildProfile = profileIn(msbuild)
+    const msbuildBrief = buildBrief({
+      profile: msbuildProfile,
+      report: audit(msbuildProfile),
+      matches: matchesFor(msbuildProfile),
+      target: 'all',
+      read: () => null,
+    })
+    const msCpp = msbuildBrief.playbooks.find((p) => p.id === 'cpp')
+    assert.ok(msCpp !== undefined)
+    assert.deepEqual(msCpp.verify.build, ['msbuild'])
+    assert.deepEqual(msCpp.verify.test, [])
+  })
+
   test('a locally installed skill is cited by path, not dropped for having no url', () => {
     // A local-scan skill has an empty url: dropping it for that hid the one source that
     // works with no network. Its SKILL.md path is the citation instead.

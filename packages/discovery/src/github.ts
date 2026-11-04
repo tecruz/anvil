@@ -20,7 +20,7 @@
 
 import { runProcess } from '@anvil/core'
 import { communityConfidence, type DiscoverSeeds, type LiveResource } from '@anvil/playbooks'
-import { type FetchImpl, requestJson } from './transport.ts'
+import { defaultTimeoutMs, type FetchImpl, requestJson } from './transport.ts'
 
 export type DiscoverySource = 'github-search' | 'mcp-registry' | 'local-scan' | 'cache'
 
@@ -153,8 +153,23 @@ const MAX_QUERIES = 6
  */
 const LIVE_OFFICIAL_CAP = 0.65
 
-async function defaultGh(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const res = await runProcess('gh', args, { cwd })
+/**
+ * How long a `gh` probe may take.
+ *
+ * `gh --version` is a local binary; a probe that has not returned in five seconds is not
+ * going to. Kept below the request timeout so a broken install degrades to REST quickly.
+ */
+const GH_PROBE_TIMEOUT_MS = 5_000
+
+async function defaultGh(
+  args: string[],
+  cwd: string,
+  timeoutMs: number = defaultTimeoutMs,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  // The HTTP path has always been bounded; the preferred transport was not. A hung `gh`
+  // (a blocked network, an unresponsive enterprise proxy) made automatic enrichment wait
+  // forever, and the user cannot tell that apart from a tool that is thinking.
+  const res = await runProcess('gh', args, { cwd, timeoutMs })
   return { stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode }
 }
 
@@ -281,7 +296,19 @@ interface RawSearchItem {
   owner?: { login?: unknown; type?: unknown }
 }
 
-function parseSearchResponse(body: string): SearchResult[] | null {
+interface SearchPage {
+  results: SearchResult[]
+  /**
+   * GitHub's own admission that it timed out before searching everything.
+   *
+   * `incomplete_results: true` means the list is real but not the whole answer. Treating it
+   * as complete wrote a truncated list into the cache as a finished answer, and the next
+   * week's plan could not tell that a query had been cut short.
+   */
+  incomplete: boolean
+}
+
+function parseSearchResponse(body: string): SearchPage | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(body)
@@ -307,10 +334,30 @@ function parseSearchResponse(body: string): SearchResult[] | null {
       isOrg: item.owner?.type === 'Organization',
     })
   }
-  return out
+  return { results: out, incomplete: (parsed as { incomplete_results?: unknown }).incomplete_results === true }
 }
 
-type SearchOutcome = { results: SearchResult[]; via: 'gh' | 'api'; detail: string }
+type SearchOutcome = { results: SearchResult[]; incomplete: boolean; via: 'gh' | 'api'; detail: string }
+
+/**
+ * Bound a `gh` invocation, including an injected one.
+ *
+ * `defaultGh` passes the timeout to `runProcess` so the child is killed. This guard is the
+ * outer half: a test (or an enterprise `gh` wrapper) that never settles is raced against the
+ * same bound, so a broken transport becomes "gh declined" and falls through to REST instead
+ * of holding the enrichment open indefinitely.
+ */
+async function withGhTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`gh did not answer within ${String(timeoutMs)}ms`)), timeoutMs)
+  })
+  try {
+    return await Promise.race([work, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 /**
  * Search GitHub for one query.
@@ -321,38 +368,48 @@ type SearchOutcome = { results: SearchResult[]; via: 'gh' | 'api'; detail: strin
  */
 export async function searchGitHub(query: string, options: DiscoverOptions): Promise<SearchOutcome | null> {
   const perQuery = options.perQuery ?? DEFAULT_RESULTS_PER_QUERY
+  const timeoutMs = options.timeoutMs ?? defaultTimeoutMs
 
-  if (options.gh !== undefined || (await ghIsInstalled())) {
-    const run = options.gh ?? defaultGh
+  if (options.gh !== undefined || (await ghIsInstalled(timeoutMs))) {
+    const run: GhRun = options.gh ?? ((args, cwd) => defaultGh(args, cwd, timeoutMs))
     let res: { stdout: string; stderr: string; exitCode: number }
     try {
-      res = await run(
-        [
-          'api',
-          '-X',
-          'GET',
-          'search/repositories',
-          '-f',
-          `q=${query}`,
-          '-f',
-          'sort=stars',
-          '-f',
-          'order=desc',
-          '-f',
-          `per_page=${String(perQuery)}`,
-        ],
-        options.cwd,
+      res = await withGhTimeout(
+        run(
+          [
+            'api',
+            '-X',
+            'GET',
+            'search/repositories',
+            '-f',
+            `q=${query}`,
+            '-f',
+            'sort=stars',
+            '-f',
+            'order=desc',
+            '-f',
+            `per_page=${String(perQuery)}`,
+          ],
+          options.cwd,
+        ),
+        timeoutMs,
       )
     } catch {
-      // gh is present but could not be run at all -- a broken shim, or an argument cmd.exe
-      // refuses on an untrusted seed. That is "gh is unavailable" by another name, so fall to
-      // the API rather than aborting a discovery run whose other sources still work.
+      // gh is present but could not be run at all -- a broken shim, an argument cmd.exe
+      // refuses on an untrusted seed, or a timeout. That is "gh is unavailable" by another
+      // name, so fall to the API rather than aborting a discovery run whose other sources
+      // still work.
       return searchViaApi(query, perQuery, options)
     }
     if (res.exitCode === 0) {
       const parsed = parseSearchResponse(res.stdout)
       if (parsed !== null) {
-        return { results: parsed, via: 'gh', detail: `gh api search, ${String(parsed.length)} result(s)` }
+        return {
+          results: parsed.results,
+          incomplete: parsed.incomplete,
+          via: 'gh',
+          detail: `gh api search, ${String(parsed.results.length)} result(s)${parsed.incomplete ? ', incomplete' : ''}`,
+        }
       }
       return null
     }
@@ -374,18 +431,23 @@ export async function searchGitHub(query: string, options: DiscoverOptions): Pro
  * Cached per process: it cannot change mid-run, and probing per query would spawn a process
  * per seed for a fact that is fixed for the whole command. `gh --version` is the cheapest
  * command that proves the binary runs -- a PATH lookup proves only that the file exists,
- * and a broken gh should fall through to REST rather than fail the run.
+ * and a broken gh should fall through to REST rather than fail the run. The probe is bounded
+ * too: an install that hangs on `--version` must not hang the whole discovery run.
  */
 let ghInstalled: boolean | null = null
-async function ghIsInstalled(): Promise<boolean> {
+async function ghIsInstalled(timeoutMs: number): Promise<boolean> {
   if (ghInstalled !== null) return ghInstalled
   try {
-    const res = await runProcess('gh', ['--version'], { cwd: '.' })
+    const res = await runProcess('gh', ['--version'], {
+      cwd: '.',
+      timeoutMs: Math.min(timeoutMs, GH_PROBE_TIMEOUT_MS),
+    })
     ghInstalled = res.exitCode === 0
   } catch {
     // `runProcess` throws ToolMissing when the binary is absent -- the exact case this probe
-    // exists to detect. A missing gh is a fallback to the REST API, not a failed run, and a
-    // probe that propagated would abort every `plan` on a machine the README supports.
+    // exists to detect -- and throws on a timeout. A missing or hung gh is a fallback to the
+    // REST API, not a failed run, and a probe that propagated would abort every `plan` on a
+    // machine the README supports.
     ghInstalled = false
   }
   return ghInstalled
@@ -407,7 +469,14 @@ async function searchViaApi(query: string, perQuery: number, options: DiscoverOp
   const parsed = parseSearchResponse(res.body)
   if (parsed === null) return null
   const authNote = token === '' ? 'anonymous (10 req/min)' : 'authenticated'
-  return { results: parsed, via: 'api', detail: `api.github.com, ${authNote}, ${String(parsed.length)} result(s)` }
+  return {
+    results: parsed.results,
+    incomplete: parsed.incomplete,
+    via: 'api',
+    detail: `api.github.com, ${authNote}, ${String(parsed.results.length)} result(s)${
+      parsed.incomplete ? ', incomplete' : ''
+    }`,
+  }
 }
 
 /** One repo, classified official or community, with a `why` that names the evidence. */
@@ -470,6 +539,7 @@ export async function discover(
   const queries = queriesFor(seeds)
   let detail = ''
   let failures = 0
+  let incompleteQueries = 0
 
   for (const query of queries) {
     const outcome = await searchGitHub(query, { ...options, perQuery })
@@ -477,6 +547,7 @@ export async function discover(
       failures++
       continue
     }
+    if (outcome.incomplete) incompleteQueries++
     if (detail === '') detail = `${outcome.via}: ${outcome.detail}`
     for (const r of outcome.results) {
       if (!found.has(r.fullName)) found.set(r.fullName, r)
@@ -493,11 +564,19 @@ export async function discover(
     sources.push({ source: 'github-search', detail: 'no transport available', entries: 0, answered: false })
   } else {
     // A source with several queries can be partly answered: the org search succeeded and the
-    // keyword search was rate-limited. `answered` stays true -- some results are real -- but
-    // `complete` records that the source did not have its whole say, so a cache written from
-    // this run is not presented as a finished answer.
-    const complete = failures === 0
-    const partial = complete ? detail : `${detail}; ${String(failures)} of ${String(queries.length)} queries failed`
+    // keyword search was rate-limited, or GitHub itself timed out and returned
+    // `incomplete_results`. `answered` stays true -- some results are real -- but `complete`
+    // records that the source did not have its whole say, so a cache written from this run
+    // is not presented as a finished answer.
+    const complete = failures === 0 && incompleteQueries === 0
+    const partialReasons: string[] = []
+    if (failures > 0) partialReasons.push(`${String(failures)} of ${String(queries.length)} queries failed`)
+    if (incompleteQueries > 0) {
+      partialReasons.push(
+        `${String(incompleteQueries)} of ${String(queries.length)} queries returned incomplete results`,
+      )
+    }
+    const partial = complete ? detail : `${detail}; ${partialReasons.join('; ')}`
     sources.push({
       source: 'github-search',
       detail: partial,
@@ -505,9 +584,14 @@ export async function discover(
       answered: true,
       complete,
     })
-    if (!complete) {
+    if (failures > 0) {
       warnings.push(
         `${playbookId}: GitHub answered ${String(queries.length - failures)} of ${String(queries.length)} queries; the rest could not be reached`,
+      )
+    }
+    if (incompleteQueries > 0) {
+      warnings.push(
+        `${playbookId}: GitHub returned incomplete results for ${String(incompleteQueries)} of ${String(queries.length)} queries; the cache will be marked partial`,
       )
     }
     if (agentish.length === 0) {

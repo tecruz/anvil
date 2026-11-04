@@ -16,7 +16,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
-import { curatedTrust, liveTrust, type MatchResult } from '@anvil/playbooks'
+import { curatedTrust, liveTrust, type MatchResult, type Playbook, type PlaybookVerify } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
 export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
@@ -187,6 +187,26 @@ export interface LiveGuidance {
   source?: string
 }
 
+/**
+ * The verify commands for one playbook, with the repository's own detected commands winning.
+ *
+ * A playbook's `verify` is the ecosystem convention, and on its own it is a guess about this
+ * repository: the C/C++ playbook offered `cmake --build build` and `ctest` to a Meson project,
+ * which is a command that cannot run. Where the profile detected a command of the same kind,
+ * that is the verified answer and it replaces the convention. Where nothing was detected the
+ * convention stands, honestly labelled by the plan as what projects usually use.
+ */
+function verifyCommands(playbook: Playbook, profile: ProjectProfile): Record<string, string[]> {
+  const kinds: ReadonlyArray<keyof PlaybookVerify> = ['build', 'test', 'testFast', 'lint', 'format', 'typecheck']
+  const out: Record<string, string[]> = {}
+  for (const kind of kinds) out[kind] = [...playbook.verify[kind]]
+  for (const kind of kinds) {
+    const detected = profile.commands[kind]
+    if (detected !== undefined && detected.length > 0) out[kind] = detected.map((entry) => entry.cmd)
+  }
+  return out
+}
+
 export function buildBrief(options: BuildBriefOptions): Brief {
   const { profile, report, matches, target, read } = options
 
@@ -224,7 +244,7 @@ export function buildBrief(options: BuildBriefOptions): Brief {
       testNaming: m.playbook.conventions.testNaming,
       reviewFocus: m.playbook.conventions.reviewFocus,
     },
-    verify: m.playbook.verify as unknown as Record<string, string[]>,
+    verify: verifyCommands(m.playbook, profile),
     guidance: flattenGuidance(m.playbook, options.live?.get(m.playbook.id) ?? []),
   }))
 

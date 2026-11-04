@@ -76,23 +76,28 @@ community:
   - repo: 'google/googletest'
     label: GoogleTest
     why: >-
-      The test framework most C++ projects use, and the reference for what `ctest` is running.
+      The test framework most C++ projects use, and the reference for how a test binary is
+      registered and run.
 
 verify:
-  build: ['cmake --build build']
-  test: ['ctest --test-dir build --output-on-failure']
+  # Empty on purpose: the detector already carries the build system's own commands
+  # (`cmake --build`/`ctest`, `meson compile`/`meson test`, `msbuild`), so hard-coding CMake
+  # here printed `cmake --build build` and `ctest` on a Meson project. The language-level
+  # tools stay: they do not depend on which build system compiles the sources.
+  build: []
+  test: []
   testFast: []
   lint: ['clang-tidy']
   format: ['clang-format -i --style=file']
   typecheck: []
 
 conventions:
-  moduleLayout: 'sources and headers per target; a CMake target (not a directory) is the unit'
-  testNaming: '*_test.cpp, registered with the test framework and run through ctest'
+  moduleLayout: 'sources and headers per target; the build-system target (not a directory) is the unit'
+  testNaming: '*_test.cpp, registered with the test framework and run through the build system'
   reviewFocus:
     - 'pointer and reference lifetimes, and anything returning a raw owning pointer'
     - 'undefined behaviour: signed overflow, out-of-bounds access, use after move'
-    - 'a CMake target property or a new source file, which changes what compiles'
+    - 'a build-system target property or a new source file, which changes what compiles'
     - 'C API boundaries, where the ABI is frozen once published'
 
 riskGlobs:

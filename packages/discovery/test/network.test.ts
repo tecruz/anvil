@@ -313,6 +313,52 @@ describe('discover', () => {
       result.warnings.join('; '),
     )
   })
+
+  test('an incomplete search result is not cached as a complete answer', async () => {
+    // GitHub sets `incomplete_results: true` when its own search timed out. The items are
+    // real, so they are kept, but the source has not finished answering -- writing this into
+    // the cache as complete froze a truncated list for the whole TTL.
+    const seeds: DiscoverSeeds = { officialOrgs: [], keywords: ['only query'], mcp: [] }
+    const body = { incomplete_results: true, items: REPOS.items }
+    const result = await discover('incomplete', seeds, { cwd: '.', gh: ghOk(body), fetchImpl: fetchOk({}) })
+    const note = result.sources.find((s) => s.source === 'github-search')
+    assert.equal(note?.answered, true, 'the partial list is still a real answer')
+    assert.equal(note?.complete, false, 'GitHub did not finish searching')
+    assert.match(note?.detail ?? '', /incomplete/)
+    assert.equal(result.entries.length, 2, 'the results that were returned are kept')
+    assert.ok(
+      result.warnings.some((w) => /incomplete results/.test(w)),
+      result.warnings.join('; '),
+    )
+  })
+
+  test('a gh that never answers is bounded and falls back to the API', async () => {
+    // The preferred transport is a subprocess, so the HTTP timeout never covered it. A hung
+    // gh made automatic enrichment wait forever; it must fall through like any other decline.
+    const hung: GhRun = () => new Promise(() => {})
+    const result = await searchGitHub('org:android', {
+      cwd: '.',
+      gh: hung,
+      fetchImpl: fetchOk(REPOS),
+      timeoutMs: 25,
+    })
+    assert.equal(result?.via, 'api', 'a timeout is "gh declined", not a hang')
+  })
+
+  test('discovery does not hang when gh hangs and the API is unreachable', async () => {
+    const hung: GhRun = () => new Promise(() => {})
+    const started = Date.now()
+    const result = await discover('android', ANDROID, {
+      cwd: '.',
+      gh: hung,
+      fetchImpl: async () => {
+        throw new Error('offline')
+      },
+      timeoutMs: 25,
+    })
+    assert.ok(Date.now() - started < 5_000, 'the run must be bounded by the timeout')
+    assert.ok(result.warnings.some((w) => /no transport could reach GitHub/.test(w)))
+  })
 })
 
 describe('parseServers', () => {
