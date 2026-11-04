@@ -118,7 +118,7 @@ describe('built-in registry', () => {
   })
 
   test('covers every ecosystem the detectors emit, plus the file-only ones', () => {
-    // The registry grew from 3 to 24, so this is now a coverage claim rather than a snapshot. A
+    // The registry grew from 3 to 39, so this is now a coverage claim rather than a snapshot. A
     // new ecosystem with no playbook shows up in `plan` as a matched stack with no guidance at
     // all, which is worse than not detecting it. The QA and mobile frameworks are one playbook
     // per tool, because a repository that runs Playwright has no use for the Cypress

@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - **Provider test seam**: `GhOptions.runGit` lets a test assert the ship marker and push argv without a remote.
 - **Claim provenance**: a claim now records the `opencode` version that will run it, alongside the runner path, so a result can be reproduced later.
 - **Worktree resource shortlist**: `anvil claim`, `anvil crew up` and `anvil issue refresh` rank up to five optional resources for the ticket and write them into `.anvil/ticket.md`, each labelled by who publishes it (`installed locally`, `official publisher`, `third party`). Nothing is installed or run. See [ADR-0014](docs/adr/0014-optional-resources-in-the-worktree.md).
+- **Broad ecosystem coverage**: nineteen new playbooks — Angular, ASP.NET Core, Astro, C/C++, Flutter, iOS, Jupyter, Kotlin Multiplatform, .NET MAUI, NestJS, Next.js, PowerShell, PyTorch, React, React Native / Expo, Shell, Spring Boot, Svelte and Vue — each matched from its own evidence rather than a shared build system or language. See [ADR-0015](docs/adr/0015-framework-evidence-is-the-framework.md) and [ADR-0016](docs/adr/0016-mobile-platforms-are-their-own-stacks.md).
 
 ### Changed
 - Generated `AGENTS.md` command rows now cite the line they occupy in the regenerated file, so self-citations cannot drift when the layout above them changes.
