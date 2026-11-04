@@ -37,7 +37,7 @@ All notable changes to this project will be documented in this file.
 - Live discovery reads only a repository's name and a bounded head of its description when deciding whether it is agent tooling, and stores a bounded description as evidence. A catch-all description that mentioned `agent` tens of thousands of characters in no longer admits an unrelated repository or floods the plan with its text.
 - A GitHub search that GitHub itself marked `incomplete_results` is a partial answer: the results it did return are kept, but the source is marked incomplete and retried rather than freezing a truncated list into the cache as a finished one.
 - The preferred `gh` transport is bounded by the same timeout as the HTTP fallback, for both the version probe and the search call. A hung `gh` now falls through to REST, or reports a partial result, instead of holding automatic enrichment open indefinitely.
-- C/C++ verification guidance follows the detected build system instead of assuming CMake: a Meson project gets `meson compile`/`meson test`, an MSBuild project gets `msbuild` with no invented `ctest`, and a CMake project keeps `cmake --build`/`ctest`.
+- The C/C++ playbook no longer hard-codes CMake verification commands, so a Meson project is not told to run `cmake --build build` and `ctest`. Build and test advice comes from the repository's own detected commands — `meson compile`/`meson test`, `msbuild`, or `cmake --build`/`ctest` — and each matched playbook keeps its own technology's guidance rather than inheriting every detected command.
 
 ## [0.1.0] - 2026-04-14
 
