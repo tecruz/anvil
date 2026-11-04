@@ -124,9 +124,9 @@ deliberately differ.
   including a complete empty answer and its age; an unwritable cache still returning its
   entries; the
   MCP warning; and a fetch that reaches no source keeping installed skills and its warning.
-- The transport timeout bounds a machine with no network: a failed fetch costs the
-  per-request timeout once, contributes nothing, and warns, while the local profile, audit
-  and installed skills still resolve.
+- The transport timeout bounds a machine with no network: every GitHub query, MCP term and
+  `gh` invocation is capped, so a failed fetch contributes nothing and warns rather than
+  hanging, while the local profile, audit and installed skills still resolve.
 
 ## Alternatives rejected
 

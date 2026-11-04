@@ -32,9 +32,12 @@ came out of extending the cross-technology check to mobile:
   no native project and the dependency is the only evidence. One playbook covers both, because it
   is one ecosystem and the advice — Metro, the native projects, a dependency bump that must reach
   both platforms — is the same.
-- A **.NET MAUI** project is `<UseMaui>` or `Microsoft.Maui` in a csproj; the `maui` stack, and a
-  `maui` playbook. Its build and test advice stays with `dotnet`, which already carries
-  `dotnet build` / `dotnet test`; the MAUI playbook holds only what is MAUI-specific.
+- A **.NET MAUI** project enables the workload (`<UseMaui>true</UseMaui>` or the
+  `Microsoft.Maui.Sdk`), or declares the generated `MauiProgram` entry point; a
+  `Microsoft.Maui.*` package reference alone is not enough, because `Microsoft.Maui.Graphics`
+  is usable from a plain console app. It gets the `maui` stack and playbook. Its build and
+  test advice stays with `dotnet`, which already carries `dotnet build` / `dotnet test`; the
+  MAUI playbook holds only what is MAUI-specific.
 - **Apple's two ecosystems are two playbooks.** `swift.yaml` is scoped to SwiftPM (`Package.swift`)
   and keeps `swift build` / `swift test`; a new `ios` playbook covers `.xcodeproj`/`.xcworkspace`/
   `Podfile` projects, and carries **no verify command**, because `xcodebuild` requires a scheme
@@ -46,10 +49,12 @@ came out of extending the cross-technology check to mobile:
 - `anvil plan` on a mobile repository now names the framework and links its documentation; on an
   Xcode app it links Apple's documentation and no longer suggests a SwiftPM command.
 - Four playbooks are added (`flutter`, `react-native`, `maui`, `ios`) and `swift` narrows; the
-  registry is 24 playbooks, and the coverage test that pins the id list is updated deliberately.
-- Three detectors are added and the detector-count test moves from sixteen to nineteen.
-- A `.NET` Android target framework alone is **not** MAUI: the marker is `<UseMaui>` or
-  `Microsoft.Maui`, so a plain .NET-Android project is not mislabelled.
+  registry reached 39 playbooks, and the coverage test that pins the id list is updated
+  deliberately.
+- Three detectors are added; the detector-count test is raised accordingly.
+- A `.NET` Android target framework alone is **not** MAUI: the markers are
+  `<UseMaui>true</UseMaui>`, the `Microsoft.Maui.Sdk` and the `MauiProgram` declaration, so a
+  plain .NET-Android project is not mislabelled.
 - `packages/profile/test/detectors.test.ts` holds the negatives: a React web app is not React
   Native, a plain .NET project is not MAUI, a Dart package with no Flutter dependency is not
   Flutter, and an Xcode project is `xcode` and not `swift`.

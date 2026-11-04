@@ -10,7 +10,8 @@ predictable. Adding more commands, trackers, or agent integrations is out of sco
 
 ## Constraints
 
-- The product CLI remains deterministic, offline by default, and model-free. Real-model
+- The product CLI remains deterministic and model-free, and detection runs offline. `plan`
+  and `brief` enrich from a cache-bounded network fetch that `--offline` disables; real-model
   calls belong only to the explicitly enabled benchmark harness.
 - No telemetry or hosted service. Benchmark artifacts concern controlled fixtures, not
   a user's repositories or usage history. See [ADR-0010](adr/0010-cost-is-read-from-the-hosts-ledger.md).
