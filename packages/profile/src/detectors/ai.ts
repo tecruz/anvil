@@ -474,6 +474,15 @@ interface Binding {
   range: Range
   /** Offset of the statement, so a reference resolves against source order. */
   order: number
+  /** Offset of the innermost function or class body that runs the assignment, or null at module level. */
+  scope: number | null
+}
+
+interface Scope {
+  /** Offset of the `def`/`class` statement. */
+  start: number
+  /** Offset just past the last statement in its body. */
+  end: number
 }
 
 /** The leading whitespace before the line an offset sits on. */
@@ -484,38 +493,65 @@ function indentationAt(text: string, index: number): number {
   return n
 }
 
+/** Every function and class body, so an assignment can be attributed to the scope that runs it. */
+function collectScopes(mask: PythonMask, statements: Statement[]): Scope[] {
+  const out: Scope[] = []
+  for (let i = 0; i < statements.length; i++) {
+    const stmt = statements[i] as Statement
+    if (!/^(?:async\s+)?(?:def|class)\b/.test(stmt.text.trimStart())) continue
+    const indent = indentationAt(mask.nocomment, stmt.start)
+    let end = stmt.end
+    for (let j = i + 1; j < statements.length; j++) {
+      const body = statements[j] as Statement
+      if (indentationAt(mask.nocomment, body.start) <= indent) break
+      end = body.end
+    }
+    out.push({ start: stmt.start, end })
+  }
+  return out
+}
+
+/** The innermost scope containing `offset`, or null at module level. */
+function scopeAt(scopes: readonly Scope[], offset: number): number | null {
+  let out: number | null = null
+  for (const scope of scopes) {
+    if (scope.start >= offset || scope.end <= offset) continue
+    if (out === null || scope.start > out) out = scope.start
+  }
+  return out
+}
+
 /**
- * Module-level assignments in source order, skipping function and class bodies.
+ * Assignments in source order, each attributed to the scope that runs it.
  *
  * `setup.py` runs top to bottom, and a name bound inside an uncalled helper is not the value
- * `setup()` receives. The statement offset is kept so a reference resolves against the bindings
- * that exist where the call is written, not the last binding anywhere in the file.
+ * `setup()` receives. The scope is kept so a call inside `main()` sees the locals of `main()`
+ * without also seeing the locals of an unrelated helper.
  */
-function collectAssignments(mask: PythonMask, statements: Statement[]): Binding[] {
+function collectAssignments(mask: PythonMask, statements: Statement[], scopes: readonly Scope[]): Binding[] {
   const out: Binding[] = []
-  let bodyIndent: number | null = null
   for (const stmt of statements) {
-    const indent = indentationAt(mask.nocomment, stmt.start)
-    if (bodyIndent !== null && indent > bodyIndent) continue
-    bodyIndent = null
-
-    if (/^(?:async\s+)?(?:def|class)\b/.test(stmt.text.trimStart())) {
-      bodyIndent = indent
-      continue
-    }
+    if (/^(?:async\s+)?(?:def|class)\b/.test(stmt.text.trimStart())) continue
 
     const structural = mask.structural.slice(stmt.start, stmt.end)
     const eq = topLevelIndex(structural, { start: 0, end: structural.length }, '=')
     if (eq < 0) continue
     const left = stmt.text.slice(0, eq).trim()
     const range = { start: stmt.start + eq + 1, end: stmt.end }
+    const scope = scopeAt(scopes, stmt.start)
     const subscript = /^([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?:"([^"]*)"|'([^']*)')\s*\]$/.exec(left)
     if (subscript !== null) {
-      out.push({ base: subscript[1] as string, key: subscript[2] ?? subscript[3] ?? '', range, order: stmt.start })
+      out.push({
+        base: subscript[1] as string,
+        key: subscript[2] ?? subscript[3] ?? '',
+        range,
+        order: stmt.start,
+        scope,
+      })
       continue
     }
     const name = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:[^=]+)?$/.exec(left)?.[1]
-    if (name !== undefined) out.push({ base: name, key: null, range, order: stmt.start })
+    if (name !== undefined) out.push({ base: name, key: null, range, order: stmt.start, scope })
   }
   return out
 }
@@ -527,6 +563,8 @@ interface FunctionDef {
   varargs: string | null
   /** The range of the expression after the function's single `return`. */
   body: Range
+  /** Scope the `def` itself sits in, so a free name resolves in the helper's lexical scope. */
+  scope: number | null
 }
 
 /**
@@ -536,7 +574,11 @@ interface FunctionDef {
  * steps is not a plain projection and is left unresolved, so an unrelated helper that happens to
  * share a name cannot claim its call arguments as distributions.
  */
-function collectFunctions(mask: PythonMask, statements: Statement[]): Map<string, FunctionDef> {
+function collectFunctions(
+  mask: PythonMask,
+  statements: Statement[],
+  scopes: readonly Scope[],
+): Map<string, FunctionDef> {
   const { structural } = mask
   const out = new Map<string, FunctionDef>()
   for (let i = 0; i < statements.length; i++) {
@@ -548,25 +590,50 @@ function collectFunctions(mask: PythonMask, statements: Statement[]): Map<string
     if (header === null) continue
     const params: string[] = []
     let varargs: string | null = null
+    let keywordOnly = false
     const raw = header[2] ?? ''
     for (const part of splitTopLevel(raw, { start: 0, end: raw.length }, ',')) {
       const token = raw.slice(part.start, part.end).trim()
       const name = /^(\*\*\s*|\*\s*)?([A-Za-z_][A-Za-z0-9_]*)/.exec(token)
       if (name === null) continue
-      if (name[1]?.trim() === '*') varargs = name[2] as string
-      else if (name[1] === undefined) params.push(name[2] as string)
+      const prefix = name[1]?.trim()
+      if (prefix === '*') {
+        varargs = name[2] as string
+        keywordOnly = true
+      } else if (prefix === '**') {
+        keywordOnly = true
+      } else if (!keywordOnly) {
+        params.push(name[2] as string)
+      }
     }
     if (varargs === null) continue
 
+    const bodyStatements: Statement[] = []
+    let bodyIndent: number | null = null
     for (let j = i + 1; j < statements.length; j++) {
       const body = statements[j] as Statement
-      if (indentationAt(mask.nocomment, body.start) <= indent) break
-      const text = structural.slice(body.start, body.end)
-      if (!/^return\s+/.test(text.trim())) continue
-      const offset = body.start + text.indexOf('return') + 'return'.length
-      out.set(header[1] as string, { params, varargs, body: { start: offset, end: body.end } })
-      break
+      const bodyIndentation = indentationAt(mask.nocomment, body.start)
+      if (bodyIndentation <= indent) break
+      if (bodyIndent === null) bodyIndent = bodyIndentation
+      if (bodyIndentation === bodyIndent) bodyStatements.push(body)
     }
+    // A docstring documents the helper; any other statement before the return means the body
+    // does more than project its arguments, so the call is not evidence of a distribution.
+    if (bodyStatements.length > 0) {
+      const first = bodyStatements[0] as Statement
+      if (stringTokenFor(mask, { start: first.start, end: first.end }) !== null) bodyStatements.shift()
+    }
+    if (bodyStatements.length !== 1) continue
+    const body = bodyStatements[0] as Statement
+    const text = structural.slice(body.start, body.end)
+    if (!/^return\s+/.test(text.trim())) continue
+    const offset = body.start + text.indexOf('return') + 'return'.length
+    out.set(header[1] as string, {
+      params,
+      varargs,
+      body: { start: offset, end: body.end },
+      scope: scopeAt(scopes, stmt.start),
+    })
   }
   return out
 }
@@ -577,6 +644,8 @@ interface EvalContext {
   functions: Map<string, FunctionDef>
   /** Offset of the `setup(...)` call being evaluated; only earlier bindings count. */
   callOffset: number
+  /** Scope the call sits in, so only its own locals and module bindings are visible. */
+  callScope: number | null
   seen: Set<string>
 }
 
@@ -587,16 +656,113 @@ const SETUP_DEPENDENCY_KEYS: ReadonlySet<string> = new Set([
   'extras_require',
 ])
 
-/** The bindings for a name that are in scope where the call is written. */
-function bindingsFor(ctx: EvalContext, base: string): Binding[] {
-  return ctx.bindings.filter((b) => b.base === base && b.order < ctx.callOffset)
+/**
+ * The bindings for a name that are visible at `refOffset`.
+ *
+ * Module bindings are always visible; a function's locals only where the call is written in
+ * that same function. `refOffset` is the point the reference is read at, so an alias captures
+ * the value it was assigned, not a later rebinding of the name it names.
+ */
+function bindingsFor(ctx: EvalContext, base: string, refOffset: number): Binding[] {
+  return ctx.bindings.filter(
+    (b) => b.base === base && b.order < refOffset && (b.scope === null || b.scope === ctx.callScope),
+  )
 }
 
-/** The last simple assignment to a name before the call, if any. */
-function lastSimple(ctx: EvalContext, name: string): Binding | null {
+/** The last simple assignment to a name before `refOffset`, if any. */
+function lastSimple(ctx: EvalContext, name: string, refOffset: number): Binding | null {
   let out: Binding | null = null
   for (const b of ctx.bindings) {
-    if (b.key === null && b.base === name && b.order < ctx.callOffset) out = b
+    if (b.key === null && b.base === name && b.order < refOffset && (b.scope === null || b.scope === ctx.callScope))
+      out = b
+  }
+  return out
+}
+
+/** The identifier a bare-name range names, or null for any other expression. */
+function bareIdentifier(mask: PythonMask, range: Range): string | null {
+  const trimmed = trimRange(mask.structural, range)
+  const text = mask.structural.slice(trimmed.start, trimmed.end)
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) ? text : null
+}
+
+/**
+ * The next assignment to `name` that can change the object it refers to, after `afterOrder` and
+ * before `limit`. A self-assignment (`x = x`) keeps the same object, so it does not end the
+ * object's lifetime; treating it as a rebinding would drop the mutations that follow it.
+ */
+function nextRebinding(ctx: EvalContext, name: string, afterOrder: number, limit: number): Binding | null {
+  let out: Binding | null = null
+  for (const b of ctx.bindings) {
+    if (b.key !== null || b.base !== name) continue
+    if (b.order <= afterOrder || b.order >= limit) continue
+    if (b.scope !== null && b.scope !== ctx.callScope) continue
+    if (bareIdentifier(ctx.mask, b.range) === name) continue
+    if (out === null || b.order < out.order) out = b
+  }
+  return out
+}
+
+/** The last subscript assignment to each key, so a later write replaces an earlier one. */
+function latestByKey(bindings: Iterable<Binding>): Map<string, Binding> {
+  const out = new Map<string, Binding>()
+  for (const b of bindings) {
+    if (b.key === null) continue
+    const prior = out.get(b.key)
+    if (prior === undefined || b.order > prior.order) out.set(b.key, b)
+  }
+  return out
+}
+
+/** A name that refers to the object during `[start, limit)`. */
+interface AliasSegment {
+  name: string
+  start: number
+  limit: number
+}
+
+/** Guard so an object reached through a pathological web of aliases cannot cost more than the
+ * finding is worth. Exceeding it makes the object unresolvable rather than approximated. */
+const MAX_ALIAS_SEGMENTS = 256
+
+/**
+ * Subscript assignments that mutate the object bound to `name` at `bindingOrder`, written through
+ * any name assigned it (`alias = obj`, and aliases of those) before `readOffset`.
+ *
+ * `alias = obj` gives one object two names, so `alias["k"] = v` changes what `obj["k"]` holds.
+ * A name refers to the object only between one of its assignments and its next rebinding, so each
+ * assignment contributes the writes made in that window -- and a name reassigned the object later
+ * refers to it again. Every such window is walked, which is what lets an alias be reused.
+ *
+ * Returns null when the object has more alias windows than the budget allows: the writes cannot be
+ * enumerated, and reporting the literal entries as if nothing had overwritten them would be a
+ * confident guess, which is the one outcome this detector exists to avoid.
+ */
+function aliasSubscripts(ctx: EvalContext, name: string, bindingOrder: number, readOffset: number): Binding[] | null {
+  if (bindingOrder < 0) return []
+  const out: Binding[] = []
+  const segments: AliasSegment[] = []
+  const seen = new Set<string>()
+  const push = (segment: AliasSegment): boolean => {
+    const id = `${segment.name}@${segment.start}`
+    if (seen.has(id)) return true
+    if (seen.size >= MAX_ALIAS_SEGMENTS) return false
+    seen.add(id)
+    segments.push(segment)
+    out.push(...bindingsFor(ctx, segment.name, segment.limit).filter((s) => s.key !== null && s.order > segment.start))
+    return true
+  }
+  const firstRebinding = nextRebinding(ctx, name, bindingOrder, readOffset)
+  if (!push({ name, start: bindingOrder, limit: firstRebinding?.order ?? readOffset })) return null
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i] as AliasSegment
+    for (const b of ctx.bindings) {
+      if (b.key !== null || b.order <= segment.start || b.order >= segment.limit) continue
+      if (b.scope !== null && b.scope !== ctx.callScope) continue
+      if (bareIdentifier(ctx.mask, b.range) !== segment.name) continue
+      const limit = nextRebinding(ctx, b.base, b.order, readOffset)?.order ?? readOffset
+      if (!push({ name: b.base, start: b.order, limit })) return null
+    }
   }
   return out
 }
@@ -635,12 +801,19 @@ function literalDictEntries(mask: PythonMask, range: Range): Map<string, Range> 
   return out
 }
 
-/** Evaluate a Python expression to the requirement strings it statically contains. */
-function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[] {
+/**
+ * Evaluate a Python expression to the requirement strings it statically contains.
+ *
+ * `refOffset` is where the expression is read: the `setup()` call for an argument, or the
+ * assignment's own offset for a value bound in a variable. Passing it down is what keeps
+ * `install_requires = requirements` from seeing a later rebinding of `requirements`.
+ */
+function evalRange(range: Range, ctx: EvalContext, depth = 0, refOffset?: number): RequirementToken[] {
   if (depth > 32) return []
   const { structural } = ctx.mask
   const trimmed = trimRange(structural, range)
   if (trimmed.start >= trimmed.end) return []
+  const ref = refOffset ?? trimmed.start
 
   const token = stringTokenFor(ctx.mask, trimmed)
   if (token !== null) return [{ spec: token.value, offset: token.start }]
@@ -653,13 +826,13 @@ function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[
         const entries = literalDictEntries(ctx.mask, trimmed)
         if (entries === null) return []
         const out: RequirementToken[] = []
-        for (const value of entries.values()) out.push(...evalRange(value, ctx, depth + 1))
+        for (const value of entries.values()) out.push(...evalRange(value, ctx, depth + 1, ref))
         return out
       }
       const inner = { start: trimmed.start + 1, end: trimmed.end - 1 }
       const out: RequirementToken[] = []
       for (const part of splitTopLevel(structural, inner, ',')) {
-        out.push(...evalRange(part, ctx, depth + 1))
+        out.push(...evalRange(part, ctx, depth + 1, ref))
       }
       return out
     }
@@ -677,7 +850,7 @@ function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[
     if (leftString !== null && rightString !== null) {
       return [{ spec: leftString.value + rightString.value, offset: leftString.start }]
     }
-    return [...evalRange(left, ctx, depth + 1), ...evalRange(right, ctx, depth + 1)]
+    return [...evalRange(left, ctx, depth + 1, ref), ...evalRange(right, ctx, depth + 1, ref)]
   }
 
   const call = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(structural.slice(trimmed.start, trimmed.end))
@@ -688,9 +861,9 @@ function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[
     if (close === trimmed.end - 1) {
       const args = splitTopLevel(structural, { start: open + 1, end: close }, ',')
       if (name === 'list' || name === 'tuple' || name === 'set') {
-        return args.flatMap((arg) => evalRange(arg, ctx, depth + 1))
+        return args.flatMap((arg) => evalRange(arg, ctx, depth + 1, ref))
       }
-      return resolveHelperCall(name, args, ctx, depth + 1)
+      return resolveHelperCall(name, args, ctx, depth + 1, ref)
     }
   }
 
@@ -701,14 +874,14 @@ function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[
     const close = matchingBracket(structural, open)
     if (close === trimmed.end - 1) {
       const key = stringTokenFor(ctx.mask, trimRange(structural, { start: open + 1, end: close }))
-      if (key !== null) return evalSubscript(base, key.value, ctx, depth + 1)
+      if (key !== null) return evalSubscript(base, key.value, ctx, depth + 1, ref)
     }
     return []
   }
 
   const identifier = structural.slice(trimmed.start, trimmed.end)
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
-    return evalName(identifier, ctx, depth + 1)
+    return evalName(identifier, ctx, depth + 1, ref)
   }
 
   return []
@@ -722,9 +895,18 @@ function evalRange(range: Range, ctx: EvalContext, depth = 0): RequirementToken[
  * this shape: a single `return` of a one-clause comprehension over the varargs parameter. The
  * name alone is not evidence, so a helper with any other body resolves to nothing.
  */
-function resolveHelperCall(name: string, args: readonly Range[], ctx: EvalContext, depth: number): RequirementToken[] {
+function resolveHelperCall(
+  name: string,
+  args: readonly Range[],
+  ctx: EvalContext,
+  depth: number,
+  refOffset: number,
+): RequirementToken[] {
   const fn = ctx.functions.get(name)
   if (fn === undefined || fn.varargs === null) return []
+  // The helper body resolves its free names where the helper is defined, not where it is called.
+  // A caller-local name of the same spelling must not shadow the module-level lookup table.
+  const helperCtx: EvalContext = fn.scope === ctx.callScope ? ctx : { ...ctx, callScope: fn.scope }
   const { structural } = ctx.mask
   const trimmed = trimRange(structural, fn.body)
   if (structural[trimmed.start] !== '[') return []
@@ -741,11 +923,20 @@ function resolveHelperCall(name: string, args: readonly Range[], ctx: EvalContex
   const projection = /^([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]$/.exec(element)
   if (projection === null && element !== loopVar) return []
 
-  const out: RequirementToken[] = []
+  // Only the arguments the varargs parameter actually receives are projected. A required
+  // parameter consumes its positional argument, and a keyword argument never reaches `*pkgs`.
+  const positional: Range[] = []
   for (const arg of args) {
     const trimmedArg = trimRange(structural, arg)
     // A trailing comma leaves an empty final argument; it declares nothing.
     if (trimmedArg.start >= trimmedArg.end) continue
+    if (topLevelIndex(structural, trimmedArg, '=') >= 0) return []
+    positional.push(trimmedArg)
+  }
+  if (positional.length < fn.params.length) return []
+
+  const out: RequirementToken[] = []
+  for (const trimmedArg of positional.slice(fn.params.length)) {
     const token = stringTokenFor(ctx.mask, trimmedArg)
     if (token === null) return [] // a computed argument cannot be read statically
     if (projection === null) {
@@ -754,16 +945,64 @@ function resolveHelperCall(name: string, args: readonly Range[], ctx: EvalContex
     }
     if ((projection[2] as string) !== loopVar) return []
     const mapping = projection[1] as string
-    const simple = lastSimple(ctx, mapping)
-    const dict = simple === null ? null : literalDictEntries(ctx.mask, simple.range)
-    if (dict !== null) {
+    // A parameter of the helper is the caller's argument, not a module-level name that happens
+    // to share its spelling. Resolve it where the call is written; a same-named global is not
+    // evidence for what the parameter received.
+    let mappingCtx = helperCtx
+    let mappingRange: Range | null = null
+    let mappingOrder = refOffset
+    let mappingName: string | null = null
+    if (fn.params.includes(mapping)) {
+      const arg = positional[fn.params.indexOf(mapping)]
+      if (arg === undefined) return []
+      const argumentName = bareIdentifier(ctx.mask, arg)
+      const argument = argumentName === null ? null : lastSimple(ctx, argumentName, refOffset)
+      if (argument !== null) {
+        mappingRange = argument.range
+        mappingOrder = argument.order
+        mappingName = argumentName
+      } else {
+        mappingRange = arg
+      }
+      mappingCtx = ctx
+    } else {
+      if (mapping === fn.varargs) return []
+      const simple = lastSimple(helperCtx, mapping, refOffset)
+      if (simple !== null) {
+        mappingRange = simple.range
+        mappingOrder = simple.order
+        mappingName = mapping
+      }
+    }
+    const dict = mappingRange === null ? null : literalDictEntries(ctx.mask, mappingRange)
+    // A subscript assignment replaces a key of the table, whether it is written through the
+    // table's own name or an alias of the same dict, and it is what the projection reads.
+    const aliasWrites = mappingName === null ? [] : aliasSubscripts(mappingCtx, mappingName, mappingOrder, refOffset)
+    if (aliasWrites === null) return []
+    const overrides =
+      mappingName === null
+        ? new Map<string, Binding>()
+        : latestByKey([
+            ...bindingsFor(mappingCtx, mappingName, refOffset).filter((b) => b.order > mappingOrder),
+            ...aliasWrites,
+          ])
+    const override = overrides.get(token.value)
+    if (dict !== null && mappingRange !== null) {
+      if (override !== undefined) {
+        out.push(...evalRange(override.range, mappingCtx, depth + 1, override.order))
+        continue
+      }
       const value = dict.get(token.value)
-      if (value !== undefined) out.push(...evalRange(value, ctx, depth + 1))
+      if (value !== undefined) out.push(...evalRange(value, mappingCtx, depth + 1, mappingOrder))
       continue
     }
     // An unresolvable lookup table is trusted only when it is a comprehension, the shape real
-    // projects use to alias a pinned requirement back to its own name.
-    if (simple !== null && isDictComprehension(ctx.mask, simple.range)) {
+    // projects use to alias a pinned requirement back to its own name. An override still wins.
+    if (mappingRange !== null && isDictComprehension(ctx.mask, mappingRange)) {
+      if (override !== undefined) {
+        out.push(...evalRange(override.range, mappingCtx, depth + 1, override.order))
+        continue
+      }
       out.push({ spec: token.value, offset: token.start })
       continue
     }
@@ -772,50 +1011,149 @@ function resolveHelperCall(name: string, args: readonly Range[], ctx: EvalContex
   return out
 }
 
-function evalName(name: string, ctx: EvalContext, depth: number): RequirementToken[] {
-  if (ctx.seen.has(name)) return []
-  ctx.seen.add(name)
+function evalName(name: string, ctx: EvalContext, depth: number, refOffset: number): RequirementToken[] {
+  // The same name read at an earlier offset is a different value: `x = list(x)` is legitimate.
+  // Bindings only ever resolve to an earlier statement, so this also keeps the recursion finite.
+  const key = `${name}@${refOffset}`
+  if (ctx.seen.has(key)) return []
+  ctx.seen.add(key)
   try {
-    const simple = lastSimple(ctx, name)
-    const subs = bindingsFor(ctx, name).filter((b) => b.key !== null)
+    const simple = lastSimple(ctx, name, refOffset)
+    const subs = bindingsFor(ctx, name, refOffset).filter((b) => b.key !== null)
     if (simple !== null) {
       const dict = literalDictEntries(ctx.mask, simple.range)
       if (dict !== null) {
-        // The literal defines the base value; later subscript assignments overwrite keys, and
-        // earlier ones are stale because the dict was rebuilt since.
-        for (const b of subs) {
-          if (b.order > simple.order) dict.set(b.key as string, b.range)
-        }
+        // The literal defines the base value; a later subscript assignment overwrites a key,
+        // whether it is written through this name or through an alias of the same dict.
+        const aliasWrites = aliasSubscripts(ctx, name, simple.order, refOffset)
+        if (aliasWrites === null) return []
+        const overrides = latestByKey([...subs.filter((b) => b.order > simple.order), ...aliasWrites])
         const out: RequirementToken[] = []
-        for (const value of dict.values()) out.push(...evalRange(value, ctx, depth + 1))
+        for (const [entryKey, value] of dict) {
+          if (overrides.has(entryKey)) continue
+          out.push(...evalRange(value, ctx, depth + 1, simple.order))
+        }
+        const ordered = [...overrides.values()].sort((a, b) => a.order - b.order)
+        for (const b of ordered) out.push(...evalRange(b.range, ctx, depth + 1, b.order))
         return out
       }
     }
+    if (simple !== null) {
+      const alias = bareIdentifier(ctx.mask, simple.range)
+      // A subscript assignment reaches the object, not the name. When `simple` is another name
+      // for that object, the alias owns the keys written through any of its names, so an
+      // override written through either spelling replaces the base entry once, not twice.
+      const aliasWrites = aliasSubscripts(ctx, name, simple.order, refOffset)
+      if (aliasWrites === null) return []
+      const applied = [...subs, ...aliasWrites]
+      if (alias !== null) return evalAlias(alias, ctx, depth + 1, simple.order, refOffset, applied)
+      const out = evalRange(simple.range, ctx, depth + 1, simple.order)
+      for (const b of applied) out.push(...evalRange(b.range, ctx, depth + 1, b.order))
+      return out
+    }
     const out: RequirementToken[] = []
-    if (simple !== null) out.push(...evalRange(simple.range, ctx, depth + 1))
     // A dict populated only by `name["key"] = ...` has no single literal value; every key is
     // part of the declaration, which is how `extras_require=extras` carries its extras.
-    for (const b of subs) out.push(...evalRange(b.range, ctx, depth + 1))
+    for (const b of subs) out.push(...evalRange(b.range, ctx, depth + 1, b.order))
     return out
   } finally {
-    ctx.seen.delete(name)
+    ctx.seen.delete(key)
   }
 }
 
-function evalSubscript(base: string, key: string, ctx: EvalContext, depth: number): RequirementToken[] {
+/**
+ * A name assigned another name aliases the same object in Python.
+ *
+ * `install_requires = extras` followed by `extras["torch"] = ...` still passes the dict with
+ * `torch`: both names point at one object, so the alias captures which binding it saw -- a later
+ * `extras = {}` rebinds the name -- but not the dict's contents. Subscript assignments made to
+ * the base up to the reference point therefore still count, while a later rebinding does not.
+ */
+function evalAlias(
+  name: string,
+  ctx: EvalContext,
+  depth: number,
+  bindingOffset: number,
+  mutationOffset: number,
+  inherited: readonly Binding[] = [],
+): RequirementToken[] {
+  if (depth > 32) return []
+  const key = `${name}@${bindingOffset}>${mutationOffset}`
+  if (ctx.seen.has(key)) return []
+  ctx.seen.add(key)
+  try {
+    const simple = lastSimple(ctx, name, bindingOffset)
+    const rebinding = nextRebinding(ctx, name, simple?.order ?? -1, mutationOffset)
+    const limit = rebinding?.order ?? mutationOffset
+    const subs = bindingsFor(ctx, name, limit).filter(
+      (b) => b.key !== null && (simple === null || b.order > simple.order),
+    )
+    // Subscript assignments made through any name for the object reach the same dict; a later
+    // write replaces an earlier one, whichever spelling made it. An alias that captured the
+    // object keeps mutating it even after the original name is rebound, so the alias walk runs to
+    // the read point, not to `name`'s rebinding.
+    const aliasWrites = simple === null ? [] : aliasSubscripts(ctx, name, simple.order, mutationOffset)
+    if (aliasWrites === null) return []
+    const overrides = latestByKey([...inherited, ...subs, ...aliasWrites])
+    const ordered = [...overrides.values()].sort((a, b) => a.order - b.order)
+    if (simple !== null) {
+      const dict = literalDictEntries(ctx.mask, simple.range)
+      if (dict !== null) {
+        const out: RequirementToken[] = []
+        for (const [entryKey, value] of dict) {
+          if (overrides.has(entryKey)) continue
+          out.push(...evalRange(value, ctx, depth + 1, simple.order))
+        }
+        for (const b of ordered) out.push(...evalRange(b.range, ctx, depth + 1, b.order))
+        return out
+      }
+      const alias = bareIdentifier(ctx.mask, simple.range)
+      if (alias !== null) return evalAlias(alias, ctx, depth + 1, simple.order, mutationOffset, ordered)
+      const out = evalRange(simple.range, ctx, depth + 1, simple.order)
+      for (const b of ordered) out.push(...evalRange(b.range, ctx, depth + 1, b.order))
+      return out
+    }
+    return ordered.flatMap((b) => evalRange(b.range, ctx, depth + 1, b.order))
+  } finally {
+    ctx.seen.delete(key)
+  }
+}
+
+/**
+ * Evaluate a value that was captured in a mapping and is observed when it is unpacked.
+ *
+ * `writeOffset` is where the value was written; the call is where it is read. A bare name is
+ * bound where it was written, but the object it names is read at the call, so a subscript
+ * mutation made after the capture still counts while a later rebinding of the name does not --
+ * the alias rule, seen from the captured value. Every other expression is constructed at the
+ * write, so evaluating it there is already correct.
+ */
+function evalCapturedValue(range: Range, ctx: EvalContext, depth: number, writeOffset: number): RequirementToken[] {
+  const name = bareIdentifier(ctx.mask, range)
+  if (name === null) return evalRange(range, ctx, depth + 1, writeOffset)
+  return evalAlias(name, ctx, depth + 1, writeOffset, ctx.callOffset)
+}
+
+function evalSubscript(
+  base: string,
+  key: string,
+  ctx: EvalContext,
+  depth: number,
+  refOffset: number,
+): RequirementToken[] {
   let sub: Binding | null = null
-  for (const b of bindingsFor(ctx, base)) {
+  for (const b of bindingsFor(ctx, base, refOffset)) {
     if (b.key === key) sub = b
   }
-  const simple = lastSimple(ctx, base)
+  const simple = lastSimple(ctx, base, refOffset)
   // A dict rebuilt after the subscript assignment replaces it entirely.
   if (simple !== null && (sub === null || simple.order > sub.order)) {
     const dict = literalDictEntries(ctx.mask, simple.range)
     if (dict === null) return []
     const value = dict.get(key)
-    return value === undefined ? [] : evalRange(value, ctx, depth + 1)
+    return value === undefined ? [] : evalRange(value, ctx, depth + 1, simple.order)
   }
-  if (sub !== null) return evalRange(sub.range, ctx, depth + 1)
+  if (sub !== null) return evalRange(sub.range, ctx, depth + 1, sub.order)
   return []
 }
 
@@ -895,29 +1233,88 @@ function setupCalls(mask: PythonMask, aliases: { funcs: Set<string>; modules: Se
   return out
 }
 
-/** The keyword entries of a mapping passed as `**name`, following a variable to its dict. */
-function keywordDictEntries(ctx: EvalContext, range: Range, depth = 0): Map<string, Range> | null {
-  if (depth > 8) return null
+interface MappingEntry {
+  range: Range
+  /** Where the value is read: the assignment that wrote it, not the `setup` call. */
+  refOffset: number
+}
+
+/**
+ * Returned when a `**mapping` is recognised but its entries cannot all be enumerated -- too many
+ * aliases to follow, or nested deeper than the recursion bound. Distinct from `null`, which means
+ * the expression is simply not a mapping. An unavailable mapping must be dropped rather than
+ * rebuilt from the writes that happened to be found, because an entry it might still hold could
+ * have been overwritten.
+ */
+const UNAVAILABLE = Symbol('mapping-unavailable')
+
+type MappingEntries = Map<string, MappingEntry> | null
+
+/**
+ * The keyword entries of a mapping passed as `**name`, following a variable to its dict.
+ *
+ * Subscript assignments made before the call mutate that dict, so they are part of the mapping
+ * and override an entry of the same key. Each value remembers where it was written, which is
+ * what keeps a name inside an early entry from resolving to a later rebinding.
+ */
+function keywordDictEntries(
+  ctx: EvalContext,
+  range: Range,
+  depth = 0,
+  refOffset?: number,
+): MappingEntries | typeof UNAVAILABLE {
+  if (depth > 8) return UNAVAILABLE
   const { structural } = ctx.mask
   const trimmed = trimRange(structural, range)
+  const ref = refOffset ?? trimmed.start
   const text = structural.slice(trimmed.start, trimmed.end)
-  if (structural[trimmed.start] === '{') return literalDictEntries(ctx.mask, trimmed)
+  if (structural[trimmed.start] === '{') {
+    const entries = literalDictEntries(ctx.mask, trimmed)
+    if (entries === null) return null
+    const out = new Map<string, MappingEntry>()
+    for (const [key, value] of entries) out.set(key, { range: value, refOffset: ref })
+    return out
+  }
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) {
-    const simple = lastSimple(ctx, text)
-    return simple === null ? null : keywordDictEntries(ctx, simple.range, depth + 1)
+    const simple = lastSimple(ctx, text, ref)
+    const base = simple === null ? null : keywordDictEntries(ctx, simple.range, depth + 1, simple.order)
+    if (base === UNAVAILABLE) return UNAVAILABLE
+    // The mapping is observed when it is unpacked, so a subscript assignment made after it was
+    // captured is still in the dict. A rebinding replaces the name, leaving the captured object
+    // untouched, so mutations past it do not count.
+    const rebinding = nextRebinding(ctx, text, simple?.order ?? -1, ctx.callOffset)
+    const limit = rebinding?.order ?? ctx.callOffset
+    // An alias that captured the mapping keeps mutating it after the name is rebound, so the
+    // alias walk runs to the call while the name's own writes stop at its rebinding.
+    const aliasWrites = simple === null ? [] : aliasSubscripts(ctx, text, simple.order, ctx.callOffset)
+    if (aliasWrites === null) return UNAVAILABLE
+    const writes = [
+      ...bindingsFor(ctx, text, limit).filter((b) => b.key !== null && (simple === null || b.order > simple.order)),
+      ...aliasWrites,
+    ]
+    if (base === null && writes.length === 0) return null
+    const out = new Map<string, MappingEntry>()
+    if (base !== null) for (const [key, entry] of base) out.set(key, entry)
+    // A later write replaces an earlier one, whichever name for the dict made it.
+    for (const b of writes) {
+      const key = b.key as string
+      const prior = out.get(key)
+      if (prior === undefined || b.order > prior.refOffset) out.set(key, { range: b.range, refOffset: b.order })
+    }
+    return out
   }
   const call = /^dict\s*\(/.exec(text)
   if (call !== null) {
     const open = trimmed.start + call[0].length - 1
     const close = matchingBracket(structural, open)
     if (close !== trimmed.end - 1) return null
-    const out = new Map<string, Range>()
+    const out = new Map<string, MappingEntry>()
     for (const arg of splitTopLevel(structural, { start: open + 1, end: close }, ',')) {
       const eq = topLevelIndex(structural, arg, '=')
       if (eq < 0) continue
       const key = structural.slice(arg.start, eq).trim()
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
-      out.set(key, { start: eq + 1, end: arg.end })
+      out.set(key, { range: { start: eq + 1, end: arg.end }, refOffset: ref })
     }
     return out
   }
@@ -943,8 +1340,9 @@ function lineAt(text: string, index: number): number {
 function setupPyDeclarations(text: string): Declaration[] {
   const mask = maskPython(text)
   const statements = pythonStatements(mask)
-  const bindings = collectAssignments(mask, statements)
-  const functions = collectFunctions(mask, statements)
+  const scopes = collectScopes(mask, statements)
+  const bindings = collectAssignments(mask, statements, scopes)
+  const functions = collectFunctions(mask, statements, scopes)
   const aliases = setupAliases(mask, statements)
   const out: Declaration[] = []
   const add = (requirement: RequirementToken): void => {
@@ -952,17 +1350,26 @@ function setupPyDeclarations(text: string): Declaration[] {
     if (name !== null) out.push({ name, line: lineAt(text, requirement.offset) })
   }
   for (const call of setupCalls(mask, aliases)) {
-    const ctx: EvalContext = { mask, bindings, functions, callOffset: call.offset, seen: new Set() }
+    const ctx: EvalContext = {
+      mask,
+      bindings,
+      functions,
+      callOffset: call.offset,
+      callScope: scopeAt(scopes, call.offset),
+      seen: new Set(),
+    }
     for (const { key, range } of call.keywords) {
       if (!SETUP_DEPENDENCY_KEYS.has(key)) continue
-      for (const requirement of evalRange(range, ctx)) add(requirement)
+      for (const requirement of evalRange(range, ctx, 0, call.offset)) add(requirement)
     }
     for (const star of call.stars) {
-      const entries = keywordDictEntries(ctx, star)
-      if (entries === null) continue
-      for (const [key, range] of entries) {
+      const entries = keywordDictEntries(ctx, star, 0, call.offset)
+      if (entries === null || entries === UNAVAILABLE) continue
+      for (const [key, entry] of entries) {
         if (!SETUP_DEPENDENCY_KEYS.has(key)) continue
-        for (const requirement of evalRange(range, ctx)) add(requirement)
+        // The value is bound where it was written, but a subscript mutation to the object it
+        // names is still visible at the call.
+        for (const requirement of evalCapturedValue(entry.range, ctx, 0, entry.refOffset)) add(requirement)
       }
     }
   }

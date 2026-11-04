@@ -73,7 +73,9 @@ function maskCSharp(text: string): string {
     }
     const quote = text[i]
     if (quote !== '"' && quote !== "'") return null
-    if (quote === '"') {
+    // A raw string is never verbatim, so `@""""` is an empty escaped-quote verbatim literal,
+    // not a raw string with a four-quote delimiter.
+    if (quote === '"' && !verbatim) {
       let quotes = 0
       while (text[i + quotes] === '"') quotes++
       if (quotes >= 3) {

@@ -177,9 +177,26 @@ export function firstNamedFileInDirs(
   if (dirs.length === 0) {
     // Only a repository with no manifest at all is a bag of independent applications. A manifest
     // that exists but could not be selected -- an unparseable root, say -- still owns its tree,
-    // so an undeclared `examples/` app must not claim the repository through a config file.
-    const hasManifest = filesUnder(ctx, '').some(isPackageManifest)
-    return hasManifest ? null : firstNamedFile(ctx, names)
+    // so an undeclared `examples/` app must not claim the repository through a config file. Its
+    // own directory is still the project, so the config beside it remains evidence.
+    const manifests = filesUnder(ctx, '').filter(isPackageManifest)
+    if (manifests.length === 0) return firstNamedFile(ctx, names)
+    // A manifest that could not be selected still owns the directory it sits in, so a config
+    // beside it is evidence. Another directory's config is not, which is what keeps an
+    // undeclared `examples/` app from claiming the repository. A broken root manifest owns the
+    // whole tree, so only its own directory is considered; without a root manifest every
+    // manifest is an independent application and owns its own directory.
+    const rootManifest = ctx.resolve('package.json')
+    const owners = manifests.includes(rootManifest) ? [rootManifest] : manifests
+    for (const manifest of owners) {
+      if (readJson(ctx, manifest) !== null) continue
+      const dir = dirOf(manifest)
+      for (const name of names) {
+        const rel = dir === '.' ? name : `${dir}/${name}`
+        if (ctx.files.has(rel)) return rel
+      }
+    }
+    return null
   }
   for (const dir of dirs) {
     for (const name of names) {

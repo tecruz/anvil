@@ -238,6 +238,11 @@ describe('the mobile framework detectors do not overreach', () => {
     assert.ok(!ids.includes('maui'), `a raw string matched MAUI: ${ids.join(', ')}`)
   })
 
+  test('a verbatim string containing a quote does not hide the entry point', () => {
+    const ids = stacksOf({ 'MauiProgram.cs': 'var quote = @"""";\npublic static class MauiProgram { }\n' })
+    assert.ok(ids.includes('maui'), `a verbatim string swallowed the file: ${ids.join(', ')}`)
+  })
+
   test('a MauiProgram declaration split across lines is still an entry point', () => {
     const ids = stacksOf({ 'MauiProgram.cs': 'public static class\nMauiProgram\n{ }\n' })
     assert.ok(ids.includes('maui'), ids.join(', '))
@@ -512,6 +517,14 @@ describe('workspace application manifests contribute framework stacks', () => {
     assert.ok(ids.includes('nextjs'), `a declared workspace config was missed: ${ids.join(', ')}`)
   })
 
+  test('an unparseable root manifest still owns its own config files', () => {
+    const ids = stacksOf({
+      'package.json': '{ "name": "web", }\n',
+      'next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(ids.includes('nextjs'), `the root config beside a broken manifest was dropped: ${ids.join(', ')}`)
+  })
+
   test('an unparseable root manifest does not reopen a tree-wide config scan', () => {
     const ids = stacksOf({
       'package.json': '{ "name": "api", }\n',
@@ -519,6 +532,32 @@ describe('workspace application manifests contribute framework stacks', () => {
       'examples/demo/next.config.js': 'module.exports = {}\n',
     })
     assert.ok(!ids.includes('nextjs'), `an unparseable root reopened the scan: ${ids.join(', ')}`)
+  })
+
+  test('an unparseable root manifest does not let a broken nested app own its config', () => {
+    const ids = stacksOf({
+      'package.json': '{ "name": "api", }\n',
+      'examples/demo/package.json': '{ "name": "demo", }\n',
+      'examples/demo/next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(!ids.includes('nextjs'), `a broken nested app claimed its config: ${ids.join(', ')}`)
+  })
+
+  test('the resolved project manifest owns the fallback, whatever its path', () => {
+    // No root manifest: the one nested manifest is the project, so its own config is evidence.
+    const own = stacksOf({
+      'app/package.json': '{ "name": "app", }\n',
+      'app/next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(own.includes('nextjs'), `the resolved project's config was dropped: ${own.join(', ')}`)
+
+    // A second broken manifest is a sibling, not the project: its config must not be read.
+    const sibling = stacksOf({
+      'app/package.json': '{ "name": "app", }\n',
+      'examples/demo/package.json': '{ "name": "demo", }\n',
+      'examples/demo/next.config.js': 'module.exports = {}\n',
+    })
+    assert.ok(!sibling.includes('nextjs'), `a sibling broken manifest claimed the project: ${sibling.join(', ')}`)
   })
 })
 
@@ -612,6 +651,15 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     )
   })
 
+  test('setup.py reusing a name for its derived list still resolves the original', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\nrequirements = ["torch>=2.5"]\nrequirements = list(requirements)\nsetup(name="m", install_requires=requirements)\n',
+      }).includes('pytorch'),
+    )
+  })
+
   test('setup.py reads extras populated with deps_list, as diffusers does', () => {
     const ids = stacksOf({
       'setup.py': [
@@ -661,6 +709,103 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     )
   })
 
+  test('setup.py resolves a reference as of its assignment, not the call', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py':
+          'from setuptools import setup\nrequirements = ["requests"]\ninstall_requires = requirements\nrequirements = ["torch>=2.5"]\nsetup(name="m", install_requires=install_requires)\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('setup.py reads requirements built in the function that calls setup', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py':
+          'from setuptools import setup\ndef main():\n    install_requires = ["torch>=2.5"]\n    setup(name="m", install_requires=install_requires)\nif __name__ == "__main__":\n    main()\n',
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a helper that rebinds its varargs is not a projection', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'def dependencies(*pkgs):',
+          '    pkgs = ("requests",)',
+          '    return [pkg for pkg in pkgs]',
+          'setup(name="m", install_requires=dependencies("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a required helper parameter is not read as a package', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'def dependencies(group, *pkgs):',
+          '    return [pkg for pkg in pkgs]',
+          'setup(name="m", install_requires=dependencies("torch", "requests"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a global helper reads its own scope, not a caller-local name', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {"torch": "torch>=2.5"}',
+          'def dependencies(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'def main():',
+          '    deps = {"requests": "requests"}',
+          '    setup(name="m", install_requires=dependencies("torch"))',
+          'if __name__ == "__main__":',
+          '    main()',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a dict alias sees mutations made through the base after the alias', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {}',
+          'install_requires = extras',
+          'extras["torch"] = "torch>=2.5"',
+          'setup(name="m", install_requires=install_requires)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a dict alias does not see a mutation made after the base was rebound', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {}',
+          'install_requires = extras',
+          'extras = {}',
+          'extras["torch"] = "torch>=2.5"',
+          'setup(name="m", install_requires=install_requires)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
   test('setup.py accepts an aliased setuptools import', () => {
     assert.ok(
       stacksOf({
@@ -676,6 +821,400 @@ describe('AI and backend frameworks are matched from their own marker', () => {
           'from setuptools import setup\nkwargs = dict(name="m", install_requires=["torch>=2.5"])\nsetup(**kwargs)\n',
       }).includes('pytorch'),
     )
+  })
+
+  test('a keyword dictionary sees mutations made before setup', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'kwargs = {}',
+          'kwargs["install_requires"] = ["torch>=2.5"]',
+          'setup(**kwargs)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a keyword dictionary does not see a mutation made after setup', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'kwargs = {"install_requires": ["requests"]}',
+          'setup(**kwargs)',
+          'kwargs["install_requires"] = ["torch>=2.5"]',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a keyword dictionary value resolves where it was written, not at the call', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'requirements = ["requests"]',
+          'kwargs = {"install_requires": requirements}',
+          'requirements = ["torch>=2.5"]',
+          'setup(**kwargs)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a dict captured in a keyword dictionary still sees a later mutation', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {}',
+          'kwargs = {"extras_require": extras}',
+          'extras["train"] = ["torch>=2.5"]',
+          'setup(**kwargs)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a dict captured in a keyword dictionary does not keep an overwritten entry', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {"train": ["torch>=2.5"]}',
+          'kwargs = {"extras_require": extras}',
+          'extras["train"] = ["requests"]',
+          'setup(**kwargs)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a mapping aliased before unpacking sees mutations made through the base', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'kwargs = {}',
+          'options = kwargs',
+          'kwargs["install_requires"] = ["torch>=2.5"]',
+          'setup(**options)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a keyword dictionary keeps the latest write across a mapping and its alias', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'kwargs = {"install_requires": ["torch>=2.5"]}',
+          'options = kwargs',
+          'options["install_requires"] = ["torch>=2.5"]',
+          'kwargs["install_requires"] = ["requests"]',
+          'setup(**options)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a keyword dictionary sees a write through an alias reassigned the mapping', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'kwargs = {"install_requires": ["torch>=2.5"]}',
+          'options = kwargs',
+          'options = {}',
+          'options = kwargs',
+          'options["install_requires"] = ["requests"]',
+          'setup(**kwargs)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a helper mapping parameter is the caller argument, not a same-named global', () => {
+    const helper = [
+      'from setuptools import setup',
+      'dependencies = {"requests": "requests"}',
+      'def deps_list(dependencies, *pkgs):',
+      '    return [dependencies[pkg] for pkg in pkgs]',
+    ]
+    const positive = stacksOf({
+      'setup.py': [...helper, 'setup(name="m", install_requires=deps_list({"torch": "torch>=2.5"}, "torch"))', ''].join(
+        '\n',
+      ),
+    })
+    assert.ok(positive.includes('pytorch'), `the parameter argument was ignored: ${positive.join(', ')}`)
+    const negative = stacksOf({
+      'setup.py': [
+        ...helper,
+        'setup(name="m", install_requires=deps_list({"requests": "requests"}, "torch"))',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(!negative.includes('pytorch'), `the global mapping was used instead: ${negative.join(', ')}`)
+  })
+
+  test('a subscript override written through an alias replaces the base entry', () => {
+    const ids = stacksOf({
+      'setup.py': [
+        'from setuptools import setup',
+        'extras = {"train": ["torch>=2.5"]}',
+        'install_requires = extras',
+        'install_requires["train"] = ["requests"]',
+        'setup(name="m", install_requires=install_requires)',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(!ids.includes('pytorch'), `the overridden requirement was kept: ${ids.join(', ')}`)
+  })
+
+  test('a subscript override written through a name that aliases the base replaces the entry', () => {
+    const ids = stacksOf({
+      'setup.py': [
+        'from setuptools import setup',
+        'extras = {"train": ["torch>=2.5"]}',
+        'alias = extras',
+        'alias["train"] = ["requests"]',
+        'setup(name="m", extras_require=extras)',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(!ids.includes('pytorch'), `the alias override was ignored: ${ids.join(', ')}`)
+  })
+
+  test('an override written through a second-hand alias replaces the base entry', () => {
+    const ids = stacksOf({
+      'setup.py': [
+        'from setuptools import setup',
+        'extras = {"train": ["torch>=2.5"]}',
+        'alias = extras',
+        'second = alias',
+        'second["train"] = ["requests"]',
+        'setup(name="m", extras_require=extras)',
+        '',
+      ].join('\n'),
+    })
+    assert.ok(!ids.includes('pytorch'), `the second-hand alias override was ignored: ${ids.join(', ')}`)
+  })
+
+  test('an alias reassigned the same object still records its later write', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {"train": ["torch>=2.5"]}',
+          'alias = extras',
+          'alias = extras',
+          'alias["train"] = ["requests"]',
+          'setup(name="m", extras_require=extras)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('an alias detached and reattached records a write made after it reattached', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {}',
+          'alias = extras',
+          'alias = {}',
+          'alias = extras',
+          'alias["train"] = ["torch>=2.5"]',
+          'setup(name="m", extras_require=extras)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('too many aliases to enumerate drops the entry rather than guessing', () => {
+    const lines = ['from setuptools import setup', 'extras = {"train": ["torch>=2.5"]}']
+    for (let i = 0; i < 256; i++) lines.push(`a${i} = extras`)
+    lines.push('second = a0', 'second["train"] = ["requests"]', 'setup(name="m", extras_require=extras)', '')
+    assert.ok(!stacksOf({ 'setup.py': lines.join('\n') }).includes('pytorch'))
+  })
+
+  test('a self-assignment does not end an alias object lifetime', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {"train": ["torch>=2.5"]}',
+          'alias = extras',
+          'alias = alias',
+          'alias["train"] = ["requests"]',
+          'setup(name="m", extras_require=extras)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a self-assignment does not end the base object lifetime', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {"train": ["torch>=2.5"]}',
+          'alias = extras',
+          'extras = extras',
+          'extras["train"] = ["requests"]',
+          'setup(name="m", extras_require=alias)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('budget exhaustion in a keyword dictionary drops the mapping rather than guessing', () => {
+    const lines = ['from setuptools import setup', 'kwargs = {"install_requires": ["torch>=2.5"]}', 'options = kwargs']
+    for (let i = 0; i < 256; i++) lines.push(`a${i} = kwargs`)
+    lines.push(
+      'options["install_requires"] = ["torch>=2.5"]',
+      'kwargs["install_requires"] = ["requests"]',
+      'setup(name="m", **options)',
+      '',
+    )
+    assert.ok(!stacksOf({ 'setup.py': lines.join('\n') }).includes('pytorch'))
+  })
+
+  test('an alias override of another key leaves the base entry alone', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'extras = {"train": ["torch>=2.5"]}',
+          'alias = extras',
+          'alias["eval"] = ["requests"]',
+          'setup(name="m", extras_require=extras)',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper does not see an entry a later subscript overrode', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {"torch": "torch>=2.5"}',
+          'deps["torch"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper sees an override written through an alias', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {"torch": "torch>=2.5"}',
+          'table = deps',
+          'table["torch"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper still reads an entry that was not overridden', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {"torch": "torch>=2.5", "vision": "torchvision"}',
+          'deps["vision"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper over a comprehension table sees a later override', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {name: name for name in ("torch", "vision")}',
+          'deps["torch"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper over a comprehension table keeps an entry that was not overridden', () => {
+    assert.ok(
+      stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {name: name for name in ("torch", "vision")}',
+          'deps["vision"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a projection helper sees a write through an alias reassigned the table', () => {
+    assert.ok(
+      !stacksOf({
+        'setup.py': [
+          'from setuptools import setup',
+          'deps = {name: name for name in ("torch",)}',
+          'table = deps',
+          'table = {}',
+          'table = deps',
+          'table["torch"] = "requests"',
+          'def deps_list(*pkgs):',
+          '    return [deps[pkg] for pkg in pkgs]',
+          'setup(name="m", install_requires=deps_list("torch"))',
+          '',
+        ].join('\n'),
+      }).includes('pytorch'),
+    )
+  })
+
+  test('a deep alias chain stops at the depth limit instead of overflowing', () => {
+    const lines = ['from setuptools import setup', 'a0 = []']
+    for (let i = 1; i <= 4000; i++) lines.push(`a${i} = a${i - 1}`)
+    lines.push('setup(name="m", install_requires=a4000)', '')
+    const ids = stacksOf({ 'setup.py': lines.join('\n') })
+    assert.ok(!ids.includes('pytorch'), ids.join(', '))
   })
 
   test('a helper named deps_list is read by its shape, not its name', () => {
@@ -764,6 +1303,15 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     assert.ok(!ids.includes('spring-boot'), ids.join(', '))
   })
 
+  test('a commented-out Gradle plugin is not Spring Boot', () => {
+    const ids = stacksOf({
+      'settings.gradle': 'rootProject.name = "app"\ninclude(":api")\n',
+      'build.gradle': 'plugins { id "java" }\n',
+      'api/build.gradle': '// plugins { id "org.springframework.boot" version "3.5.0" }\nplugins { id "java" }\n',
+    })
+    assert.ok(!ids.includes('spring-boot'), `a commented-out plugin was applied: ${ids.join(', ')}`)
+  })
+
   test('a Spring Boot starter in a Maven reactor module is detected, with its path', () => {
     const profile = profileOf({
       'pom.xml': '<project><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
@@ -841,6 +1389,175 @@ describe('AI and backend frameworks are matched from their own marker', () => {
         'build.gradle.kts': 'plugins { id("java") }\n',
         'core/build.gradle.kts': 'plugins { id("java") }\n',
         'api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a comment inside a Gradle include does not end the list', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle.kts': 'rootProject.name = "app"\ninclude(\n    ":core", // keep this )\n    ":api",\n)\n',
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'core/build.gradle.kts': 'plugins { id("java") }\n',
+        'api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle project whose directory is remapped is still probed', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file("services/api")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle remap written inside a string is not followed', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\nval sample = "project(\':api\').projectDir = file(\'services/api\')"\ninclude(":api")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle include without a leading colon matches its remapped project', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\ninclude("api")\nproject(":api").projectDir = file("services/api")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle remap with a parent segment is normalized', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file("services/duplicate/../api")\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle remap written inside a Kotlin raw string is not followed', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle.kts': [
+          'rootProject.name = "app"',
+          'val sample = """',
+          'project(":api").projectDir = file("services/api")',
+          '"""',
+          'include(":api")',
+          '',
+        ].join('\n'),
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'services/api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a Gradle include written inside a Kotlin raw string is not followed', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle.kts': [
+          'rootProject.name = "app"',
+          'val sample = """',
+          'val x = "a',
+          'include ":fake"',
+          '"""',
+          'include(":api")',
+          '',
+        ].join('\n'),
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'fake/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+        'api/build.gradle.kts': 'plugins { id("java") }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a computed Gradle remap is not read as its first literal', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file("services/api") + suffix\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a bare-string Gradle remap is followed', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle': 'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = "services/api"\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a nested settings file anchors its remap to its own directory', () => {
+    assert.ok(
+      stacksOf({
+        'app/settings.gradle.kts':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file("../services/api")\n',
+        'app/build.gradle.kts': 'plugins { id("java") }\n',
+        'services/api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a multiline Gradle remap is followed', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle.kts':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file(\n    "services/api"\n)\n',
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'services/api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a multiline Gradle remap inside a project block is followed', () => {
+    assert.ok(
+      stacksOf({
+        'settings.gradle.kts':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api") {\n    projectDir = file(\n        "services/api"\n    )\n}\n',
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        'services/api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('a later computed remap invalidates an earlier static one', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle':
+          'rootProject.name = "app"\ninclude(":api")\nproject(":api").projectDir = file("services/api")\nval actual = file("other/api")\nproject(":api").projectDir = actual\n',
+        'build.gradle': 'plugins { id "java" }\n',
+        'services/api/build.gradle': 'plugins { id "org.springframework.boot" version "3.5.0" }\n',
+      }).includes('spring-boot'),
+    )
+  })
+
+  test('an unknown Gradle remap does not fall back to the declared directory', () => {
+    assert.ok(
+      !stacksOf({
+        'settings.gradle.kts':
+          'include(":api")\nproject(":api").projectDir = file("services/api")\nval actualDir = file("other/api")\nproject(":api").projectDir = actualDir\n',
+        'build.gradle.kts': 'plugins { id("java") }\n',
+        // The declared path holds a Spring build, but the project was moved elsewhere.
+        'api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.0" }\n',
+        'other/api/build.gradle.kts': 'plugins { id("java") }\n',
       }).includes('spring-boot'),
     )
   })
