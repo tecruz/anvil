@@ -108,6 +108,16 @@ export interface SourceNote {
    * a source that could not be reached must not erase what it contributed last time.
    */
   answered: boolean
+  /**
+   * Whether *every* query this source was asked answered.
+   *
+   * Optional, and absent means the same as `answered`, so notes written before the field
+   * existed are still complete. A source can answer some queries and fail others -- an org
+   * search succeeds while a keyword search times out -- and that is answered without being
+   * complete. The distinction matters twice: a partial source must not replace all of its
+   * previous entries, and a cache built from it must not be reused as a whole answer.
+   */
+  complete?: boolean
 }
 
 export interface PlaybookDiscovery {
@@ -197,6 +207,31 @@ export function ownerFromGitHubUrl(url: string): { owner: string; repo: string }
 }
 
 /**
+ * How much of a repository description is read when classifying it.
+ *
+ * A GitHub description is normally a sentence. Nothing stops a maintainer from pasting tens
+ * of thousands of characters into it, and reading all of it let a repository that merely
+ * mentioned `agent` 33,000 characters into a catch-all description pass the agent-tooling
+ * filter -- and then drag that whole description into the plan. The repository name and the
+ * head of the description are what a reader takes as the summary of what a project is.
+ */
+const DESCRIPTION_CHARS = 1000
+
+/** The name and the head of the description, lowercased, for sectioning and tooling checks. */
+function classifyText(repo: Pick<SearchResult, 'fullName' | 'description'>): string {
+  return `${repo.fullName} ${descriptionHead(repo.description)}`.toLowerCase()
+}
+
+/** The head of a description, empty when there is none, without a word cut by the bound. */
+function descriptionHead(description: string | null): string {
+  const text = description ?? ''
+  if (text.length <= DESCRIPTION_CHARS) return text
+  const head = text.slice(0, DESCRIPTION_CHARS)
+  const cut = /[a-z0-9]/i.test(text[DESCRIPTION_CHARS] ?? '')
+  return cut ? `${head.replace(/[a-z0-9]+$/i, '')}…` : `${head}…`
+}
+
+/**
  * Which playbook section a repo belongs in, from its name and description.
  *
  * The order is fixed and the first match wins, so the result is a function of the seeds
@@ -204,7 +239,7 @@ export function ownerFromGitHubUrl(url: string): { owner: string; repo: string }
  * that also calls itself a skill should land in `mcp`, which is the more specific claim.
  */
 export function sectionFor(repo: Pick<SearchResult, 'fullName' | 'description'>): LiveResource['section'] {
-  const haystack = `${repo.fullName} ${repo.description ?? ''}`.toLowerCase()
+  const haystack = classifyText(repo)
   if (/\bmcp\b/.test(haystack)) return 'mcp'
   if (/skill/.test(haystack)) return 'skills'
   if (/\bagent\b|\bcli\b|assistant|copilot|opencode|claude/.test(haystack)) return 'agents'
@@ -215,11 +250,12 @@ export function sectionFor(repo: Pick<SearchResult, 'fullName' | 'description'>)
  * True when a repo is agent tooling at all, rather than any repo that mentions the topic.
  *
  * A search for `android cli` returns Android CLI *tools*, not agent tooling for Android,
- * and offering those would put "an APK signer" in a plan whose job is agent guidance.
+ * and offering those would put "an APK signer" in a plan whose job is agent guidance. The
+ * tooling keyword must appear in the name or the head of the description, not tens of
+ * thousands of characters into a catch-all blurb.
  */
 export function isAgentTooling(repo: Pick<SearchResult, 'fullName' | 'description'>): boolean {
-  const haystack = `${repo.fullName} ${repo.description ?? ''}`.toLowerCase()
-  return /agent|skill|\bmcp\b|copilot|claude|opencode|toolkit|assistant/.test(haystack)
+  return /agent|skill|\bmcp\b|copilot|claude|opencode|toolkit|assistant/.test(classifyText(repo))
 }
 
 /**
@@ -288,23 +324,31 @@ export async function searchGitHub(query: string, options: DiscoverOptions): Pro
 
   if (options.gh !== undefined || (await ghIsInstalled())) {
     const run = options.gh ?? defaultGh
-    const res = await run(
-      [
-        'api',
-        '-X',
-        'GET',
-        'search/repositories',
-        '-f',
-        `q=${query}`,
-        '-f',
-        'sort=stars',
-        '-f',
-        'order=desc',
-        '-f',
-        `per_page=${String(perQuery)}`,
-      ],
-      options.cwd,
-    )
+    let res: { stdout: string; stderr: string; exitCode: number }
+    try {
+      res = await run(
+        [
+          'api',
+          '-X',
+          'GET',
+          'search/repositories',
+          '-f',
+          `q=${query}`,
+          '-f',
+          'sort=stars',
+          '-f',
+          'order=desc',
+          '-f',
+          `per_page=${String(perQuery)}`,
+        ],
+        options.cwd,
+      )
+    } catch {
+      // gh is present but could not be run at all -- a broken shim, or an argument cmd.exe
+      // refuses on an untrusted seed. That is "gh is unavailable" by another name, so fall to
+      // the API rather than aborting a discovery run whose other sources still work.
+      return searchViaApi(query, perQuery, options)
+    }
     if (res.exitCode === 0) {
       const parsed = parseSearchResponse(res.stdout)
       if (parsed !== null) {
@@ -335,8 +379,15 @@ export async function searchGitHub(query: string, options: DiscoverOptions): Pro
 let ghInstalled: boolean | null = null
 async function ghIsInstalled(): Promise<boolean> {
   if (ghInstalled !== null) return ghInstalled
-  const res = await runProcess('gh', ['--version'], { cwd: '.' })
-  ghInstalled = res.exitCode === 0
+  try {
+    const res = await runProcess('gh', ['--version'], { cwd: '.' })
+    ghInstalled = res.exitCode === 0
+  } catch {
+    // `runProcess` throws ToolMissing when the binary is absent -- the exact case this probe
+    // exists to detect. A missing gh is a fallback to the REST API, not a failed run, and a
+    // probe that propagated would abort every `plan` on a machine the README supports.
+    ghInstalled = false
+  }
   return ghInstalled
 }
 
@@ -367,7 +418,8 @@ function classifyRepo(
   fetchedAt: string,
 ): DiscoveryEntry {
   const official = isOfficialOrg(repo.owner, seeds)
-  const description = repo.description ?? 'No description on the repository.'
+  const description =
+    repo.description === null ? 'No description on the repository.' : descriptionHead(repo.description)
   const evidence = official
     ? ` Published by ${repo.owner}, one of this playbook's official orgs.`
     : ` ${String(repo.stars)} star(s) on GitHub; found by repository search.`
@@ -440,13 +492,50 @@ export async function discover(
     )
     sources.push({ source: 'github-search', detail: 'no transport available', entries: 0, answered: false })
   } else {
-    sources.push({ source: 'github-search', detail, entries: agentish.length, answered: true })
+    // A source with several queries can be partly answered: the org search succeeded and the
+    // keyword search was rate-limited. `answered` stays true -- some results are real -- but
+    // `complete` records that the source did not have its whole say, so a cache written from
+    // this run is not presented as a finished answer.
+    const complete = failures === 0
+    const partial = complete ? detail : `${detail}; ${String(failures)} of ${String(queries.length)} queries failed`
+    sources.push({
+      source: 'github-search',
+      detail: partial,
+      entries: agentish.length,
+      answered: true,
+      complete,
+    })
+    if (!complete) {
+      warnings.push(
+        `${playbookId}: GitHub answered ${String(queries.length - failures)} of ${String(queries.length)} queries; the rest could not be reached`,
+      )
+    }
     if (agentish.length === 0) {
       warnings.push(`${playbookId}: GitHub answered, but nothing matching these seeds is agent tooling`)
     }
   }
 
   return { playbookId, entries, sources, warnings }
+}
+
+/**
+ * Whether every remote source a playbook asks has answered.
+ *
+ * A playbook asks GitHub when it declares an org or a keyword, and the MCP registry when it
+ * declares an mcp term. This is the per-source merge's question turned around: a run in which
+ * an asked source did not answer is partial, and a cache built from it must not be presented
+ * as a complete one. A missing half is exactly what the next fetch is for.
+ */
+export function remoteSourcesAnswered(seeds: DiscoverSeeds, sources: readonly SourceNote[]): boolean {
+  // Complete, not merely answered: a source that ran two queries and failed one has not
+  // finished answering, and a cache built from it is missing exactly the half that failed.
+  const complete = (source: SourceNote['source']): boolean => {
+    const notes = sources.filter((note) => note.source === source)
+    return notes.length > 0 && notes.every((note) => note.answered && note.complete !== false)
+  }
+  if ((seeds.officialOrgs.length > 0 || seeds.keywords.length > 0) && !complete('github-search')) return false
+  if (seeds.mcp.length > 0 && !complete('mcp-registry')) return false
+  return true
 }
 
 /** Discover every playbook that declares seeds, in id order for a stable report. */

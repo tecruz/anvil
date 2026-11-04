@@ -1,9 +1,10 @@
 # ADR-0013: A stale discovery cache is reported, not merged
 
-- Status: accepted
+- Status: superseded for `plan`/`brief` by [ADR-0017](0017-plan-enriches-by-default.md); the cache-only reader it describes still serves the claim shortlist
 - Date: 2026-10-31
 - Milestone: post-M6
 - Extends: [ADR-0008](0008-live-discovery-keeps-registry-curated.md)
+- Superseded by: [ADR-0017](0017-plan-enriches-by-default.md)
 
 ## Context
 

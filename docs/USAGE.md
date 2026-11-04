@@ -105,6 +105,58 @@ resources, ranked lower because "widely accepted" is a weaker claim than "mainta
 the project"). Guidance the repository already satisfies is left out, and the count of
 what was left out is printed, so the omission is visible rather than silent.
 
+## Offline detection and online discovery
+
+Detection is local; the network is used only to enrich guidance for the technologies
+already matched. The [flow diagram](../README.md#local-detection-online-enrichment) shows
+where the two meet.
+
+**Detection is local.** Anvil reads manifests, source-file signatures, CI configuration
+and documentation to identify languages, frameworks, modules, commands and risk paths.
+It then matches that profile against built-in and locally installed playbooks. It does
+not run the project's build or query GitHub to determine the stack.
+
+**Enrichment is automatic, bounded by the cache.** For each matched playbook, `plan` and
+`brief` scan installed agent skills, read the remote half of a fresh cache, and fetch from
+GitHub search and the MCP registry when the cache is absent, stale or unreadable. A fetch
+writes the cache, so the network cost is once per playbook per seven-day TTL rather than
+once per run.
+
+| Command or mode | Local work | Network discovery |
+| --- | --- | --- |
+| `anvil profile` | Detect the repository's stack and commands | None |
+| `anvil doctor` | Profile, match playbooks, audit and score | None |
+| `anvil plan`, `anvil brief` | Profile, audit, match playbooks, scan installed skills, read a fresh cache, and fetch only what the cache cannot answer | Fetch for a matched, seeded playbook whose cache is missing or stale |
+| `anvil plan --offline`, `anvil brief --offline` | Same local analysis and installed skills, but no discovery cache | None |
+| `anvil plan --refresh`, `anvil brief --refresh` | Same local analysis, plus merge and cache discovered guidance | Fetch for matched playbooks with seeds, even a fresh cache |
+| `anvil playbook discover` | Target matched playbooks in a repository; reuse a fresh cache | Fetch when the cache is absent or stale |
+| `anvil playbook discover --refresh` | Bypass cache reuse and scan installed skills | Fetch again |
+| `anvil playbook discover --local-only` or `--offline` | Scan installed skills only; may update the local cache | None |
+
+Discovery can also target an explicit playbook id. `--all`, or running discovery outside
+a repository, targets all playbooks with discovery seeds instead of only matched ones.
+The cache lives under `~/.anvil/cache/discovery/` by default and expires after seven days.
+A fetch that cannot reach a source keeps the entries that source last contributed, under a
+warning, because a failed source is not evidence that the ecosystem published less.
+`--offline` and `--refresh` cannot be combined on `plan` or `brief`. The optional
+resources written into a claim's context bundle read a fresh cache only, never a fetch,
+because starting work must not wait on the network.
+
+For example, on an Android repository:
+
+```bash
+anvil doctor                       # identify and audit the local project
+anvil plan                         # local facts, then a fresh cache or a fetch
+anvil plan --offline               # never touch the network: local facts and installed skills
+anvil plan --refresh               # fetch again even though the cache is fresh
+```
+
+Discovery searches with terms declared by the playbooks; it does not upload repository
+source files or call a model. Results are labelled live, ranked below curated guidance
+of the same tier, and deduplicated so a curated resource wins the same URL. Discovery
+does not install a skill or connect an agent to an MCP server: it recommends resources.
+`anvil playbook check` is a separate online URL-health check, not stack detection.
+
 ## Working a ticket
 
 ```bash
@@ -311,11 +363,23 @@ last edited the file — and writes a cache under `~/.anvil/cache/discovery`. It
 writes to the registry itself: `--propose` prints YAML for a human to merge by hand, and
 a fetched suggestion is always ranked below one a person reviewed.
 
-The cache expires after seven days. `plan` and `brief` read only a fresh cache: a stale
-one is reported with the age and the command that replaces it, because an old search
-result in the ranked list reads as advice long after it stopped being true. The entries
-stay in the cache, so `anvil playbook discover` can still show them, and `--refresh` is
-the explicit request for a new answer.
+The cache expires after seven days. `plan` and `brief` read a fresh cache and fetch a
+missing or expired one themselves, so an old search result is replaced rather than merged
+as if it were current; `--offline` leaves the network untouched, and `--refresh` forces a
+new answer before the TTL is up. A cache written when a discovered source did not answer,
+answered only some of its queries, or returned an HTTP 200 whose body is not the source's own
+response — a proxy page, an error record, records that are not servers, or those beside real
+ones — is treated as partial and fetched again, so a rate-limited or proxied source is retried rather than
+silently absent for a week. A local-only scan that merges into a complete remote cache keeps
+that completeness and its age, including when the remote answer was empty, so the scan does
+not turn an answered question into a refetch. A playbook seed the registry cannot search — a
+term shorter than its three-character minimum — is rejected on load and skipped rather than
+asked when it sits beside a searchable term. A list with no searchable term at all asks
+nothing, so it is not reported as an answered empty registry and does not erase cached
+servers. A repository is judged as agent tooling
+from its name and a bounded head of its description, and its description is stored bounded,
+so a catch-all blurb cannot admit an unrelated result or flood the output. The entries always
+stay in the cache, so `anvil playbook discover` can show what was last found.
 
 Your own playbooks live in your home directory, never in the repository you are standing
 in: a company playbook is shared by being installed, not by being committed to someone

@@ -93,6 +93,13 @@ describe('sectionFor', () => {
   test('a missing description does not throw', () => {
     assert.equal(sectionFor({ fullName: 'org/x', description: null }), 'community')
   })
+
+  test('a section keyword buried in a huge description does not set the section', () => {
+    // Same bound as the tooling check: a catch-all description that names `mcp` tens of
+    // thousands of characters in is not a repository that is an MCP server.
+    const description = `${'x'.repeat(33_000)} mcp server`
+    assert.equal(sectionFor({ fullName: 'someone/notes', description }), 'community')
+  })
 })
 
 describe('isAgentTooling', () => {
@@ -105,6 +112,18 @@ describe('isAgentTooling', () => {
     // A search for `android cli` returns ordinary Android command-line tools. Offering
     // those in a plan whose job is agent guidance puts an APK signer next to an agent skill.
     assert.equal(isAgentTooling({ fullName: 'some/apk-signer', description: 'Sign Android APKs' }), false)
+  })
+
+  test('rejects a repository whose tooling keyword is buried in a huge description', () => {
+    // A catch-all description can mention `agent` tens of thousands of characters in. Reading
+    // all of it admitted an unrelated repository, and the whole description then landed in the
+    // plan. The name and the head of the description are the summary a reader takes.
+    const description = `${'x'.repeat(33_000)} agent`
+    assert.equal(isAgentTooling({ fullName: 'someone/notes', description }), false)
+  })
+
+  test('the repository name is enough on its own', () => {
+    assert.ok(isAgentTooling({ fullName: 'someone/agent-toolkit', description: null }))
   })
 })
 

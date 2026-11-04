@@ -26,6 +26,7 @@ import {
   matchPlaybooks,
   normalizeUrl,
   parsePlaybook,
+  parsePlaybookFiles,
   parseYamlSubset,
   validatePlaybook,
 } from '@anvil/playbooks'
@@ -123,6 +124,16 @@ describe('discovery seeds in the built-in registry', () => {
       }
     }
   })
+
+  test('every mcp seed is long enough for the registry to search', () => {
+    // The registry rejects a shorter `search` with HTTP 422, so a shorter seed can never
+    // answer and would keep the playbook's cache incomplete. `ci` and `go` shipped this way.
+    for (const p of playbooks) {
+      for (const term of p.discover.mcp) {
+        assert.ok(term.trim().length >= 3, `${p.id}: mcp seed "${term}" is below the registry minimum`)
+      }
+    }
+  })
 })
 
 describe('discover section validation', () => {
@@ -130,12 +141,12 @@ describe('discover section validation', () => {
 
   test('accepts the three seed lists', () => {
     const { playbook, issues } = validatePlaybook(
-      parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['a', 'b']\n  keywords: ['x']\n  mcp: ['y']\n`),
+      parseYamlSubset(`${MINIMAL}discover:\n  officialOrgs: ['a', 'b']\n  keywords: ['x']\n  mcp: ['mcp']\n`),
     )
     assert.deepEqual(issues, [])
     assert.deepEqual(playbook?.discover.officialOrgs, ['a', 'b'])
     assert.deepEqual(playbook?.discover.keywords, ['x'])
-    assert.deepEqual(playbook?.discover.mcp, ['y'])
+    assert.deepEqual(playbook?.discover.mcp, ['mcp'])
   })
 
   test('an absent discover section is empty, not an error', () => {
@@ -166,9 +177,34 @@ describe('discover section validation', () => {
   })
 
   test('rejects a blank keyword or mcp term', () => {
-    const { issues } = validatePlaybook(parseYamlSubset(`${MINIMAL}discover:\n  keywords: ['']\n  mcp: ['  ']\n`))
+    const { playbook, issues } = validatePlaybook(
+      parseYamlSubset(`${MINIMAL}discover:\n  keywords: ['']\n  mcp: ['  ']\n`),
+    )
     assert.ok(issues.some((i) => i.path === 'discover.keywords' && /non-empty/.test(i.message)))
     assert.ok(issues.some((i) => i.path === 'discover.mcp' && /non-empty/.test(i.message)))
+    // The issue alone is not enough: it used to be collected after the "any issue means no
+    // playbook" check, so the file was reported *and* loaded.
+    assert.equal(playbook, null)
+  })
+
+  test('rejects an mcp term below the registry minimum through every entry point', () => {
+    // `ci` and `go` shipped as MCP seeds, and the registry answered every plan with HTTP 422
+    // ("search must contain at least 3 characters"). The query could never complete, so the
+    // cache was refetched forever. Caught here, at the playbook, rather than at the plan.
+    const text = `${MINIMAL}discover:\n  mcp: ['ci']\n`
+    const { playbook, issues } = validatePlaybook(parseYamlSubset(text))
+    assert.ok(issues.some((i) => i.path === 'discover.mcp' && /minimum/.test(i.message)))
+    assert.equal(playbook, null, 'a reported seed must not still produce a playbook')
+    assert.throws(() => parsePlaybook(text, 'toy.yaml'), /minimum/)
+
+    // And the loader must skip it with a warning rather than keep a playbook whose discovery
+    // can never finish.
+    const loaded = parsePlaybookFiles(new Map([['toy.yaml', text]]))
+    assert.deepEqual(loaded.playbooks, [])
+    assert.ok(
+      loaded.warnings.some((w) => /toy\.yaml/.test(w) && /minimum/.test(w)),
+      loaded.warnings.join('; '),
+    )
   })
 
   test('accepts an explicit local-match list, and rejects a blank entry', () => {

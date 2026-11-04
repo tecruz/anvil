@@ -93,4 +93,4 @@ discover:
     - 'go mcp server'
     - 'golang agent skills'
     - 'gopls agent'
-  mcp: ['go', 'golang']
+  mcp: ['golang']

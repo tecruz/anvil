@@ -21,6 +21,7 @@ import {
   type FetchImpl,
   type GhRun,
   matchTerms,
+  mergeBySource,
   proposePlaybookYaml,
   rankForProposal,
   runDiscovery,
@@ -423,6 +424,69 @@ describe('runDiscovery', () => {
       assert.match(first.why, /one of this playbook's official orgs/)
       assert.equal(second.tier, 'community')
       assert.equal(second.owner, null)
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('warns when the MCP registry could not be reached', async () => {
+    // Mirrors the GitHub warning. Without it a registry that could not be reached is silent,
+    // and its absence reads as the reassuring-but-false "the ecosystem published nothing".
+    const h = tempHome()
+    try {
+      const result = await runDiscovery(
+        { id: 'android', discover: ANDROID },
+        { cwd: '.', env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv, fetchImpl: fetchFail, gh: ghFail },
+      )
+      assert.ok(
+        result.warnings.some((w) => /MCP registry could not be reached/.test(w)),
+        result.warnings.join('; '),
+      )
+    } finally {
+      rmSync(h, { recursive: true, force: true })
+    }
+  })
+
+  test('a playbook whose only MCP seed is unsearchable asks nothing and keeps cached servers', async () => {
+    // The schema rejects such a seed, but a playbook built directly can still reach discovery.
+    // Reporting "answered, empty" for a run that made no request would let the merge delete
+    // every cached MCP server, which is the opposite of what happened.
+    const h = tempHome()
+    try {
+      let fetched = 0
+      const result = await runDiscovery(
+        { id: 'toy', discover: { officialOrgs: [], keywords: [], mcp: ['ci'] } },
+        {
+          cwd: '.',
+          env: { ANVIL_CONFIG_HOME: h } as NodeJS.ProcessEnv,
+          gh: ghFail,
+          fetchImpl: async () => {
+            fetched++
+            throw new Error('no request should be made')
+          },
+        },
+      )
+      assert.equal(fetched, 0, 'a term the registry cannot search must not be requested')
+      const note = result.sources.find((s) => s.source === 'mcp-registry')
+      assert.equal(note?.answered, false)
+      assert.equal(note?.complete, false)
+      assert.ok(
+        result.warnings.some((w) => /no MCP seed is long enough/.test(w)),
+        result.warnings.join('; '),
+      )
+
+      const cached = entry({
+        label: 'cached/server',
+        url: 'https://cached.test/mcp',
+        section: 'mcp',
+        source: 'mcp-registry',
+      })
+      const merged = mergeBySource([cached], result.entries, result.sources)
+      assert.deepEqual(
+        merged.map((e) => e.label),
+        ['cached/server'],
+        'a run that asked nothing must not erase what the cache already had',
+      )
     } finally {
       rmSync(h, { recursive: true, force: true })
     }

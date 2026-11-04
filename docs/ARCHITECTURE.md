@@ -34,6 +34,14 @@ The CLI never calls a model. It gathers verified facts, and hands them over. Tha
 is what lets the same behaviour work in Claude Code, in Cursor, in an opencode plugin and
 in a raw shell.
 
+Detection and audit are offline. `plan` and `brief` enrich the result: they add installed
+skills, read a fresh discovery cache, and fetch for any matched playbook whose cache is
+missing or expired. Online discovery uses playbook seeds rather than repository source and
+writes derived results to the user's cache, never to the curated registry; `--offline` is
+the explicit request for no network at all. See the
+[detection/enrichment diagram](../README.md#local-detection-online-enrichment) and
+[command modes](USAGE.md#offline-detection-and-online-discovery).
+
 ## The packages
 
 Thirteen packages, one directory each, no package depending on a higher layer than its

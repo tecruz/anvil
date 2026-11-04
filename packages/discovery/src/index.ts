@@ -62,6 +62,7 @@ export {
   liveConfidence,
   type PlaybookDiscovery,
   queriesFor,
+  remoteSourcesAnswered,
   type SearchResult,
   type SourceNote,
   searchGitHub,

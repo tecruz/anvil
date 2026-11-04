@@ -8,16 +8,20 @@
  * Two rules carry over from the rest of the package, because they are what makes a refresh
  * safe to run in front of a report:
  *
- *   - A source that fails does not remove another source's results. A run that finds
- *     nothing keeps the entries the cache already had, rather than replacing them with
- *     nothing, and says so in the warnings.
+ *   - A source that fails does not remove another source's results. A run in which no
+ *     remote source answered is a failed fetch: it keeps the entries the cache already had
+ *     rather than replacing them with nothing, and says so in the warnings. A run in which
+ *     a source answered and found nothing is an answer, and it replaces that source's
+ *     entries -- including with an empty list. The cache records whether *every* query of
+ *     every asked source answered -- and whether a 200 was actually that source's response --
+ *     so a partial answer is not reused as if it were a complete one.
  *   - Nothing is written to the registry. The cache is derived data in the user's own home
  *     directory, and the next run regenerates it.
  */
 
 import type { DiscoverSeeds } from '@anvil/playbooks'
 import { loadCache, oldestEntryTimestamp, saveCache, usableEntries } from './cache.ts'
-import type { DiscoveryEntry } from './github.ts'
+import { type DiscoveryEntry, remoteSourcesAnswered } from './github.ts'
 import { mergeBySource } from './merge.ts'
 import { type RunOptions, runDiscovery } from './run.ts'
 
@@ -57,28 +61,45 @@ export async function refreshLive(
     const previous = usableEntries(loadCache(playbook.id, env))
     const entries = mergeBySource(previous, result.entries, result.sources)
 
-    if (result.entries.length === 0) {
-      // A refresh that found nothing keeps what the last run found. The cache is only
-      // replaced by an answer, and "no answer" is not an answer -- a plan that lost its
-      // live guidance because a registry was briefly unreachable would look like the
-      // ecosystem having published nothing.
+    // What decides whether anything is written at all is whether a *remote* source answered:
+    // "answered, nothing matched" is an answer, but a run where no remote source answered is
+    // a failed fetch, and it leaves the cache exactly as it was -- a rate limit must not
+    // replace a good answer with nothing.
+    const anyRemoteAnswered = result.sources.some((note) => note.answered && note.source !== 'local-scan')
+    if (!anyRemoteAnswered) {
       if (entries.length > 0) live.set(playbook.id, entries)
       warnings.push(`${playbook.id}: the refresh found nothing; the cached entries were kept`)
       continue
     }
 
-    const path = saveCache(
-      {
-        schemaVersion: 1,
-        playbookId: result.playbookId,
-        // The age of the cache is the age of its oldest entry, so a half that could not be
-        // refreshed keeps reporting itself as old.
-        fetchedAt: oldestEntryTimestamp(entries),
-        entries,
-      },
-      env,
-    )
-    cached.push(path)
+    // Whether the cache is *complete* is a second question: every query of every source the
+    // playbook asks must have answered, and a 200 must have carried that source's response.
+    // A partial cache is still written -- so `discover` and a claim can read what did come
+    // back -- but it is marked, and the default `plan` fetches again rather than presenting a
+    // half-answer as the whole truth.
+    const complete = remoteSourcesAnswered(seeds, result.sources)
+    try {
+      const path = saveCache(
+        {
+          schemaVersion: 1,
+          playbookId: result.playbookId,
+          // The age of the cache is the age of its oldest entry, so a half that could not be
+          // refreshed keeps reporting itself as old.
+          fetchedAt: oldestEntryTimestamp(entries),
+          entries,
+          remoteAnswered: complete,
+        },
+        env,
+      )
+      cached.push(path)
+    } catch (err) {
+      // The cache is derived data. A home directory that cannot be written -- a read-only
+      // mount, a full disk -- costs the next run a repeat fetch; it must not cost this run
+      // the guidance it already has.
+      warnings.push(
+        `${playbook.id}: could not write the discovery cache (${err instanceof Error ? err.message : String(err)}); these entries will not be reused`,
+      )
+    }
     live.set(playbook.id, entries)
   }
 

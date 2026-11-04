@@ -23,6 +23,7 @@
 
 import { AnvilError, ErrorCode, renderTable } from '@anvil/core'
 import {
+  type CacheRead,
   type DiscoveryEntry,
   discoverLocal,
   type FetchImpl,
@@ -34,6 +35,7 @@ import {
   type RunOptions,
   type RunResult,
   refreshLive,
+  remoteSourcesAnswered,
   runDiscovery,
   type SourceNote,
   saveCache,
@@ -104,9 +106,7 @@ export async function runDiscover(
     playbooks = targetsFor(allPlaybooks, { all, repoRoot: ctx.repoRoot }).targets
   }
 
-  const seeded = playbooks.filter(
-    (p) => p.discover.officialOrgs.length > 0 || p.discover.keywords.length > 0 || p.discover.mcp.length > 0,
-  )
+  const seeded = playbooks.filter((p) => hasSeeds(p.discover))
   if (seeded.length === 0) {
     throw new AnvilError(ErrorCode.Usage, 'No playbook in scope declares discovery seeds', {
       hint: 'A playbook needs a `discover:` section with `officialOrgs`, `keywords` or `mcp` before there is anything to look for.',
@@ -114,15 +114,24 @@ export async function runDiscover(
   }
 
   const results: RunResult[] = []
-  const writes: Array<{ playbookId: string; entries: DiscoveryEntry[]; fetchedAt: string }> = []
+  const writes: Array<{ playbookId: string; entries: DiscoveryEntry[]; fetchedAt: string; remoteAnswered: boolean }> =
+    []
   for (const playbook of seeded) {
     const cached = values.refresh === true ? null : loadCache(playbook.id, process.env)
 
-    // A fresh cache already answers the question. Running the searches again to rediscover
-    // what was fetched an hour ago spends a rate limit to produce the same plan, and
-    // `--refresh` is how a caller says the answer has changed. `--local-only` and `--offline`
-    // are the exception: those are requests to look at this machine, so they always scan.
-    if (localOnly !== true && values.offline !== true && cached?.status === 'fresh' && cached.cache !== null) {
+    // A complete fresh cache already answers the question. Running the searches again to
+    // rediscover what was fetched an hour ago spends a rate limit to produce the same plan,
+    // and `--refresh` is how a caller says the answer has changed. A cache marked partial --
+    // a source failed or answered only some queries, or the cache came from `--local-only`
+    // with no remote half -- is not reused: its missing half is what this run is for.
+    // `--local-only` and `--offline` always scan.
+    if (
+      localOnly !== true &&
+      values.offline !== true &&
+      cached?.status === 'fresh' &&
+      cached.cache !== null &&
+      cached.cache.remoteAnswered !== false
+    ) {
       const entries = usableEntries(cached)
       results.push({
         playbookId: playbook.id,
@@ -162,8 +171,25 @@ export async function runDiscover(
     const entries = mergeBySource(prior, result.entries, result.sources)
     // Only what came back is written. A run that found nothing leaves the cache alone, and
     // the file's timestamp is the age of its oldest entry, so a merged cache never looks
-    // fresher than the part of it that is actually old.
-    writes.push({ playbookId: playbook.id, entries, fetchedAt: oldestEntryTimestamp(entries) })
+    // fresher than the part of it that is actually old. The `remoteAnswered` marker records
+    // whether every asked source answered, so a partial cache is not reused as a complete one.
+    //
+    // `--local-only` and `--offline` did not ask the network at all, so recomputing
+    // completeness from their notes would say "no remote source answered" and invalidate a
+    // remote half this run deliberately left untouched. The previous marker is the honest
+    // answer there. The same holds for the cache's age: the remote half is exactly what was
+    // there before, so dating the merged file from the local skill just scanned would extend
+    // a complete empty answer's TTL by a week.
+    const skippedNetwork = localOnly || values.offline === true
+    const priorCache = cached?.cache ?? null
+    writes.push({
+      playbookId: playbook.id,
+      entries,
+      fetchedAt: skippedNetwork && priorCache !== null ? priorCache.fetchedAt : oldestEntryTimestamp(entries),
+      remoteAnswered: skippedNetwork
+        ? preservedRemoteCompleteness(cached, entries)
+        : remoteSourcesAnswered(playbook.discover, result.sources),
+    })
     results.push({ ...result, kept: entries.length - result.entries.length })
   }
 
@@ -207,6 +233,7 @@ export async function runDiscover(
           playbookId: w.playbookId,
           fetchedAt: w.fetchedAt,
           entries: w.entries,
+          remoteAnswered: w.remoteAnswered,
         },
         process.env,
       ),
@@ -343,7 +370,7 @@ export function loadLocalForPlan(
 }
 
 /**
- * The live entries a plan or a brief should merge, and the warnings that came with them.
+ * The live entries that can be read without a fetch: installed skills plus a fresh cache.
  *
  * Two halves with different lifetimes, which is the point of splitting them here:
  *
@@ -352,11 +379,13 @@ export function loadLocalForPlan(
  *     the cache. A stale cache cannot take them away.
  *   - **Remote entries come from the cache, and only when it is fresh.** A stale cache is
  *     reported and left out -- a week-old search result presented as live guidance is noise
- *     dressed as advice. `--refresh` replaces it with a new answer.
+ *     dressed as advice.
+ *
+ * This is the reader `anvil claim` uses for its recommended resources, because a claim must
+ * not wait on a fetch. `plan` and `brief` go through `liveEntriesForPlan`, which enriches by
+ * fetching when the cache cannot answer.
  *
  * A missing or corrupt cache produces a warning and no remote entries, and is not an error.
- * `plan` has to keep working on a machine that has never run `discover`, which is every
- * machine on the first day.
  */
 export function loadLiveForPlan(
   playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
@@ -397,11 +426,15 @@ export function loadLiveForPlan(
  * Three ways to get them, and the flags choose:
  *
  *   - `--offline`: installed skills only. No cache, no network.
- *   - `--refresh`: fetched now, for the playbooks that matched. A refresh that finds
- *     nothing keeps the entries the cache already had, so a registry that is briefly
- *     unreachable costs guidance rather than removing it.
- *   - the default: installed skills plus a fresh cache, read from the home directory. No
- *     network, which is what makes `plan` cheap enough to run on every question.
+ *   - `--refresh`: fetched now, for every seeded playbook, whether the cache is fresh or not.
+ *     A refresh that finds nothing keeps the entries the cache already had, so a registry
+ *     that is briefly unreachable costs guidance rather than removing it.
+ *   - the default: enrich. Installed skills, the remote half of a fresh cache where there is
+ *     one, and a fetch for any seeded playbook whose cache is absent, stale or unreadable.
+ *     The first run after a clone, or after the seven-day TTL, spends the request; the runs
+ *     after it are answered from the cache. `--offline` is how a caller asks for no network
+ *     at all, and `anvil claim`'s recommendations read a fresh cache only, because a claim
+ *     must not wait on a fetch.
  */
 export async function liveEntriesForPlan(
   playbooks: ReadonlyArray<{ id: string; discover: DiscoverSeeds }>,
@@ -421,46 +454,127 @@ export async function liveEntriesForPlan(
   const env = options.env ?? process.env
   if (options.offline) return { live: loadLocalForPlan(playbooks, env), warnings: [] }
 
-  if (!options.refresh) return loadLiveForPlan(playbooks, env)
-
   const refresh = options.refreshLive ?? refreshLive
-  const result = await refresh(playbooks, {
+
+  // `--refresh` is the explicit "ask again": every seeded playbook is fetched, fresh cache or
+  // not, so a caller who knows the answer changed does not have to wait out the TTL.
+  if (options.refresh) {
+    const result = await refresh(playbooks, {
+      cwd: options.cwd,
+      online: true,
+      env,
+      fetchImpl: liveFetch,
+    })
+    const live = mergeLive(new Map<string, DiscoveryEntry[]>(), [result.live, loadLocalForPlan(playbooks, env)])
+    return { live, warnings: result.warnings }
+  }
+
+  // The default enriches: a fresh cache answers with no request, and anything else is fetched
+  // now. Only seeded playbooks are fetched -- one with nothing to look for has nothing to
+  // find -- so this is a single round of requests for the technologies this repository
+  // actually matched, and installing a fresh answer is what makes the next week free.
+  const cached = new Map<string, DiscoveryEntry[]>()
+  const pending: Array<{ id: string; discover: DiscoverSeeds }> = []
+  const warnings: string[] = []
+  for (const playbook of playbooks) {
+    const read = loadCache(playbook.id, env)
+    if (read.status === 'unreadable') {
+      warnings.push(`discovery cache for ${playbook.id} is unreadable (${read.detail}); refetching it`)
+    }
+    // Only a *complete* fresh cache answers. A partial one (a source or query failed, or a
+    // 200 was not the source's response) or a local-only one with no remote half has nothing
+    // complete to reuse, and fetching that missing half is the whole point of enrichment --
+    // so it is fetched, not reused. A cache written before the marker existed is treated as
+    // complete, because reusing it once more is cheaper than a refetch on upgrade, and a
+    // genuinely partial legacy cache ages out within the TTL anyway.
+    if (read.status === 'fresh' && read.cache?.remoteAnswered !== false) {
+      // The remote half only: the local half is re-scanned below, and keeping the cached copy
+      // would resurrect an uninstalled skill and double-list an installed one.
+      appendEntries(
+        cached,
+        playbook.id,
+        usableEntries(read).filter((entry) => entry.source !== 'local-scan'),
+      )
+      continue
+    }
+    if (hasSeeds(playbook.discover)) pending.push(playbook)
+  }
+
+  const local = loadLocalForPlan(playbooks, env)
+  if (pending.length === 0) return { live: mergeLive(new Map<string, DiscoveryEntry[]>(), [local, cached]), warnings }
+
+  const result = await refresh(pending, {
     cwd: options.cwd,
     online: true,
     env,
     fetchImpl: liveFetch,
   })
-  return { live: mergeLocalInto(result.live, loadLocalForPlan(playbooks, env)), warnings: result.warnings }
+  warnings.push(...result.warnings)
+  return { live: mergeLive(new Map<string, DiscoveryEntry[]>(), [local, cached, result.live]), warnings }
+}
+
+/** True when a playbook declares anything the network sources can look for. */
+function hasSeeds(seeds: DiscoverSeeds): boolean {
+  return seeds.officialOrgs.length > 0 || seeds.keywords.length > 0 || seeds.mcp.length > 0
 }
 
 /**
- * Fold re-scanned local skills into a refreshed map without duplicating them.
+ * Whether a run that skipped the network may keep the cache's remote completeness.
  *
- * A refresh already runs the local scan, so this normally changes nothing. It matters when
- * the refresh could not answer for a playbook that still has an installed skill: the machine
- * knows the skill is there, and a failed fetch must not hide it.
+ * A local-only scan merges fresh local entries into the existing cache and leaves every
+ * remote entry exactly as it was. Recomputing completeness from that run's notes would say
+ * "no remote source answered" and make the next plan refetch a cache the user deliberately
+ * did not touch. The previous marker is the honest answer: if the remote half was complete,
+ * it still is; if it was partial, it still is.
+ *
+ * The two markers are treated differently. An explicit `true` records that every remote
+ * question was answered, including the answer "nothing matched" -- adding a local skill
+ * since then does not make that answer disappear, so it is kept even when the cache holds no
+ * remote entries. A legacy cache written before the field existed has no such record: it can
+ * only vouch for a remote half that is still present. A cache holding only local skills has
+ * nothing whose completeness could be preserved, and marking it complete would suppress the
+ * enrichment the default is supposed to perform.
  */
-function mergeLocalInto(
-  live: ReadonlyMap<string, DiscoveryEntry[]>,
-  local: ReadonlyMap<string, DiscoveryEntry[]>,
-): Map<string, DiscoveryEntry[]> {
-  const out = new Map<string, DiscoveryEntry[]>()
-  for (const [id, entries] of live) out.set(id, [...entries])
-  for (const [id, entries] of local) {
-    const existing = out.get(id)
-    if (existing === undefined) {
-      out.set(id, [...entries])
-      continue
-    }
-    const keys = new Set(existing.map(entryKey))
-    for (const entry of entries) {
-      const key = entryKey(entry)
-      if (keys.has(key)) continue
-      keys.add(key)
-      existing.push(entry)
-    }
+function preservedRemoteCompleteness(read: CacheRead | null, entries: readonly DiscoveryEntry[]): boolean {
+  if (read?.cache === null || read?.cache === undefined) return false
+  if (read.cache.remoteAnswered === false) return false
+  if (read.cache.remoteAnswered === true) return true
+  return entries.some((entry) => entry.source !== 'local-scan')
+}
+
+/** Append entries under a playbook id, skipping any identity the map already holds. */
+function appendEntries(live: Map<string, DiscoveryEntry[]>, id: string, entries: readonly DiscoveryEntry[]): void {
+  if (entries.length === 0) return
+  const existing = live.get(id)
+  if (existing === undefined) {
+    live.set(id, [...entries])
+    return
   }
-  return out
+  const keys = new Set(existing.map(entryKey))
+  for (const entry of entries) {
+    const key = entryKey(entry)
+    if (keys.has(key)) continue
+    keys.add(key)
+    existing.push(entry)
+  }
+}
+
+/**
+ * Fold several entry maps into one, in order, deduplicating by identity.
+ *
+ * The sources a plan merges are independent -- installed skills, a fresh cache and a fetch --
+ * and each may know the same resource. Combining them this way keeps a resource that two
+ * sources found from appearing twice, and a local skill that a refresh also scanned from
+ * being listed once per source.
+ */
+function mergeLive(
+  target: Map<string, DiscoveryEntry[]>,
+  sources: readonly ReadonlyMap<string, readonly DiscoveryEntry[]>[],
+): Map<string, DiscoveryEntry[]> {
+  for (const source of sources) {
+    for (const [id, entries] of source) appendEntries(target, id, entries)
+  }
+  return target
 }
 
 /** Identity for the local/remote merge: URL, then install path, then label. */

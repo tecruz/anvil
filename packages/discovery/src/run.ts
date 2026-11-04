@@ -219,7 +219,20 @@ export async function runDiscovery(
       }
     })
     entries.push(...mcpEntries)
-    sources.push({ source: 'mcp-registry', detail: mcp.detail, entries: mcpEntries.length, answered: mcp.answered })
+    sources.push({
+      source: 'mcp-registry',
+      detail: mcp.detail,
+      entries: mcpEntries.length,
+      answered: mcp.answered,
+      complete: mcp.complete,
+    })
+    // Mirrors the GitHub warning. Without it a registry that could not be reached is silent,
+    // and its absence reads as "the ecosystem published nothing" -- the reassuring-but-false
+    // conclusion this package exists to avoid. A registry that answered some terms and failed
+    // others gets its own warning, because that is a partial answer rather than no answer.
+    if (mcp.skipped) warnings.push(`${id}: no MCP seed is long enough for the registry to search; nothing was asked`)
+    else if (!mcp.answered) warnings.push(`${id}: the MCP registry could not be reached`)
+    else if (!mcp.complete) warnings.push(`${id}: the MCP registry answered only part of its queries`)
   }
 
   return { playbookId: id, entries: dedupeEntries(entries), sources, warnings, kept: 0 }

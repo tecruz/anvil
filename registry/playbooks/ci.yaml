@@ -83,4 +83,4 @@ discover:
     - 'github actions agent'
     - 'ci pipeline linter'
     - 'workflow validation'
-  mcp: ['github-actions', 'ci']
+  mcp: ['github-actions']

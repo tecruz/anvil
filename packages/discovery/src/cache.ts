@@ -42,6 +42,17 @@ export interface CacheFile {
    */
   fetchedAt: string
   entries: DiscoveryEntry[]
+  /**
+   * Whether every remote source this playbook asks answered when the cache was written.
+   *
+   * Optional, and absent on caches written before the field existed. A reader that decides
+   * whether to refetch treats an absent value as complete, because reusing an old cache once
+   * more is cheaper than a refetch on every run. `false` means a source was asked and did not
+   * answer, answered only some of its queries, returned a body that is not the source's
+   * response, or that the cache came from `--local-only` with no remote half, so the cache is
+   * partial and its missing half is exactly what a default `plan` fetches.
+   */
+  remoteAnswered?: boolean
 }
 
 export type CacheStatus = 'fresh' | 'stale' | 'absent' | 'unreadable'
@@ -115,6 +126,7 @@ export function loadCache(playbookId: string, env: NodeJS.ProcessEnv = process.e
     playbookId,
     fetchedAt: record.fetchedAt,
     entries: record.entries,
+    ...(typeof record.remoteAnswered === 'boolean' ? { remoteAnswered: record.remoteAnswered } : {}),
   }
   if (age > TTL_MS) {
     const days = Math.round(age / (24 * 60 * 60 * 1000))
