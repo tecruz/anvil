@@ -349,15 +349,21 @@ function resolveInterpreter(
  * case-sensitive even on Windows, where the OS and a child process treat variable names
  * case-insensitively. Looking at own keys only, with a case-insensitive match on Windows,
  * makes the answer the same thing a spawned process would see.
+ *
+ * When a hand-built map holds several casings of one name, the key a child receives is the
+ * one that sorts first by code unit -- Node orders the child environment that way, and the
+ * code-unit-smallest match is the survivor. Picking it (rather than the first inserted or the
+ * case-exact match) keeps a duplicate casing from verifying a value the process never reads.
  */
 function findEnvKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform): string | undefined {
-  if (Object.hasOwn(env, name)) return name
-  if (platform !== 'win32') return undefined
+  if (platform !== 'win32') return Object.hasOwn(env, name) ? name : undefined
   const target = name.toLowerCase()
+  let found: string | undefined
   for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === target) return key
+    if (key.toLowerCase() !== target) continue
+    if (found === undefined || key < found) found = key
   }
-  return undefined
+  return found
 }
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
@@ -418,9 +424,13 @@ export function systemEnvironment(
       const env = options.env ?? process.env
       const key = findEnvKey(env, name, platform)
       if (key === undefined) return 'missing'
+      const value = env[key]
+      // An own entry can hold `undefined` and still appear in `Object.keys`; a child process
+      // does not receive it, so it is missing rather than present.
+      if (value === undefined) return 'missing'
       // An empty value is not a configured value: it would be exported and then read as an
       // empty credential, so it is reported distinctly rather than as present.
-      return env[key] === '' ? 'empty' : 'present'
+      return value === '' ? 'empty' : 'present'
     },
   }
 }

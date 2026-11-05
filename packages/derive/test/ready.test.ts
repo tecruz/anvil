@@ -1033,6 +1033,37 @@ describe('buildReadyReport: declared environment variables', () => {
     assert.equal(environment.envStatus?.('API_TOKEN'), 'missing')
     assert.equal(environment.envStatus?.('api_token'), 'present')
   })
+
+  test('an own entry whose value is undefined is missing, not present', async () => {
+    // `{ API_TOKEN: undefined }` has the key in Object.keys but a child process does not
+    // receive it, so it must not verify.
+    for (const platform of ['linux', 'win32'] as const) {
+      const environment = systemEnvironment({ platform, env: { API_TOKEN: undefined } })
+      assert.equal(environment.envStatus?.('API_TOKEN'), 'missing', platform)
+      const report = await buildReadyReport({
+        profile: profileOf(),
+        matches: [],
+        declared: declaredEnv([{ name: 'API_TOKEN' }]),
+        check: true,
+        environment,
+      })
+      assert.equal(report.status, 'blocked', platform)
+    }
+  })
+
+  test('duplicate casings on Windows resolve to the key a child receives', () => {
+    // Node orders the child environment, and the code-unit-smallest casing survives: here
+    // `API_TOKEN` (uppercase) wins and its empty value is read, not the lower-case one.
+    const lowerFirst = systemEnvironment({ platform: 'win32', env: { api_token: 'set', API_TOKEN: '' } })
+    assert.equal(lowerFirst.envStatus?.('API_TOKEN'), 'empty')
+    assert.equal(lowerFirst.envStatus?.('api_token'), 'empty')
+
+    const upperWins = systemEnvironment({ platform: 'win32', env: { API_TOKEN: 'up', api_token: 'set' } })
+    assert.equal(upperWins.envStatus?.('API_TOKEN'), 'present')
+
+    const mixed = systemEnvironment({ platform: 'win32', env: { Api_Token: 'mid', api_token: 'low' } })
+    assert.equal(mixed.envStatus?.('API_TOKEN'), 'present')
+  })
 })
 
 describe('buildReadyReport: context and conflicts stay visible', () => {
