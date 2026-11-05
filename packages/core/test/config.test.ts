@@ -433,7 +433,16 @@ describe('project: owner-declared capabilities', () => {
   })
 
   test('rejects a reference path that could leave the repository', () => {
-    for (const path of ['../secrets.md', 'docs/../../x.md', '/etc/passwd', 'C:/Windows/win.ini', './docs/a.md']) {
+    for (const path of [
+      '../secrets.md',
+      'docs/../../x.md',
+      '/etc/passwd',
+      'C:/Windows/win.ini',
+      './docs/a.md',
+      'https://example.com/policy.md',
+      'file:///etc/passwd',
+      'ssh://host/policy.md',
+    ]) {
       assert.throws(
         () => mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path }] } }, 'cfg'),
         (err: unknown) => {

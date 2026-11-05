@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import {
   buildReadyReport,
+  connectErrorState,
   isInsideRepository,
+  isLoopbackAddress,
   isRunnableExecutable,
   probeArgsFor,
   type ReadyEnvironment,
@@ -45,6 +48,8 @@ function env(
     services?: Record<string, 'open' | 'closed' | 'inconclusive'>
     /** Repo-relative paths that exist. */
     files?: readonly string[]
+    /** Paths whose status cannot be decided (a permission error, for example). */
+    unreadable?: readonly string[]
   } = {},
 ): ReadyEnvironment {
   const found = new Set(options.found ?? [])
@@ -61,7 +66,12 @@ function env(
       return value === '' ? 'empty' : 'present'
     },
     checkService: async (host, port) => ({ state: options.services?.[`${host}:${port}`] ?? 'inconclusive' }),
-    fileExists: (relPath) => new Set(options.files ?? []).has(relPath),
+    fileStatus: (relPath) =>
+      options.unreadable?.includes(relPath)
+        ? 'unknown'
+        : new Set(options.files ?? []).has(relPath)
+          ? 'present'
+          : 'missing',
   }
 }
 
@@ -97,6 +107,9 @@ function untouchedEnv(): ReadyEnvironment {
     },
     checkService(host, port) {
       throw new Error(`environment.checkService called for ${host}:${port} without --check`)
+    },
+    fileStatus(relPath) {
+      throw new Error(`environment.fileStatus called for ${relPath}`)
     },
   }
 }
@@ -1207,6 +1220,58 @@ describe('buildReadyReport: declared services', () => {
     assert.equal(report.status, 'unknown')
   })
 
+  test('a non-loopback literal is never contacted', async () => {
+    const environment = systemEnvironment({ platform: 'linux' })
+    assert.deepEqual(await environment.checkService?.('10.0.0.1', 1), { state: 'inconclusive' })
+  })
+
+  test('a hostname is pinned to the loopback answer, and a poisoned resolver is refused', async () => {
+    // A real listener on an ephemeral loopback port, reached only through the injected name.
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    assert.ok(port > 0)
+    try {
+      const honest = systemEnvironment({
+        platform: 'linux',
+        lookupRunner: async () => [{ address: '127.0.0.1' }],
+      })
+      assert.deepEqual(await honest.checkService?.('localhost', port), { state: 'open' })
+
+      // The same name answered with a non-loopback address must not be connected to.
+      const poisoned = systemEnvironment({
+        platform: 'linux',
+        lookupRunner: async () => [{ address: '203.0.113.10' }],
+      })
+      assert.deepEqual(await poisoned.checkService?.('localhost', port), { state: 'inconclusive' })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    }
+  })
+
+  test('only a confirmed refusal is unreachable', () => {
+    assert.equal(connectErrorState({ code: 'ECONNREFUSED' }), 'closed')
+    for (const error of [
+      { code: 'ETIMEDOUT' },
+      { code: 'EAI_AGAIN' },
+      { code: 'EHOSTUNREACH' },
+      new Error('no code'),
+      undefined,
+    ]) {
+      assert.equal(connectErrorState(error), 'inconclusive', JSON.stringify(error))
+    }
+  })
+
+  test('isLoopbackAddress accepts only loopback literals', () => {
+    for (const address of ['127.0.0.1', '127.255.255.254', '::1', '::ffff:127.0.0.1']) {
+      assert.equal(isLoopbackAddress(address), true, address)
+    }
+    for (const address of ['0.0.0.0', '10.0.0.1', '192.168.1.1', '::', '2001:db8::1', 'localhost', '']) {
+      assert.equal(isLoopbackAddress(address), false, address)
+    }
+  })
+
   test('a refused service and a missing tool both block', async () => {
     const report = await buildReadyReport({
       profile: profileOf(),
@@ -1296,6 +1361,42 @@ describe('buildReadyReport: approved context references', () => {
     })
     assert.equal(report.references[0]?.status, 'present')
     assert.equal(report.status, 'verified')
+  })
+
+  test('a path whose status cannot be decided is unknown, not missing', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredReferences([{ id: 'adr', path: 'docs/adr/0001.md' }]),
+      check: true,
+      environment: env({ unreadable: ['docs/adr/0001.md'] }),
+    })
+    assert.equal(report.references[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.actions.length, 0, 'unknown is not an accusation')
+  })
+
+  test('a reference that links outside the repository is unknown', async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-ref-root-'))
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-ref-outside-'))
+    temps.push(root, outside)
+    writeFileSync(join(outside, 'policy.md'), 'outside the repository')
+    try {
+      symlinkSync(outside, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      t.skip('directory links are unavailable here')
+      return
+    }
+    const report = await buildReadyReport({
+      profile: profileOf({ root }),
+      matches: [],
+      declared: declaredReferences([{ id: 'policy', path: 'linked/policy.md' }]),
+      check: true,
+      environment: systemEnvironment({ containmentRoot: root }),
+    })
+    assert.equal(report.references[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.actions.length, 0)
   })
 
   test('an environment that cannot answer leaves the reference unknown', async () => {

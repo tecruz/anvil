@@ -40,7 +40,9 @@ export {
 export {
   type BuildReadyOptions,
   buildReadyReport,
+  connectErrorState,
   isInsideRepository,
+  isLoopbackAddress,
   isRunnableExecutable,
   probeArgsFor,
   type ReadinessState,

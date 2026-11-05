@@ -473,13 +473,15 @@ const REFERENCE_SCOPES: readonly DeclaredReferenceScope[] = [
 /**
  * True when `value` is a repository-relative path that cannot escape the repository.
  *
- * An absolute path, a drive letter, or a `..` segment is rejected: a committed config must
- * not be able to point the check at a file outside the repository.
+ * An absolute path, a drive letter, a URL scheme, or a `..` segment is rejected: a committed
+ * config must not be able to point the check at a file outside the repository, and a
+ * reference is a local document, never a remote one. Catching `scheme:` also covers the
+ * Windows drive spelling, since `C:` matches the same shape.
  */
 function isSafeReferencePath(value: string): boolean {
   const path = value.trim()
   if (path === '' || path.startsWith('/') || path.startsWith('\\')) return false
-  if (/^[A-Za-z]:/.test(path)) return false
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path)) return false
   return path.split(/[/\\]+/).every((segment) => segment !== '' && segment !== '.' && segment !== '..')
 }
 

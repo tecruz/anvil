@@ -26,8 +26,9 @@
  *     is text. The only install command that appears is one the owner wrote down.
  */
 
+import { lookup } from 'node:dns/promises'
 import { realpathSync, statSync } from 'node:fs'
-import { Socket } from 'node:net'
+import { isIP, Socket } from 'node:net'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   type DeclaredCommand,
@@ -291,10 +292,13 @@ export interface ReadyEnvironment {
    */
   checkService?(host: string, port: number): Promise<ServiceProbe>
   /**
-   * True when a repo-relative path names a file. Repository-local, never a spawn, and the
-   * file is not read: the check answers "is the owner's pointer still good".
+   * Whether a repo-relative path names a file inside the repository.
+   *
+   * Repository-local, never a spawn, and the file is not read: the check answers "is the
+   * owner's pointer still good". `unknown` is the honest answer when the path cannot be
+   * decided -- a permission error, no repository root, or a link that leaves the repository.
    */
-  fileExists?(relPath: string): boolean
+  fileStatus?(relPath: string): ReadyReferenceStatus
 }
 
 /** True when an executable file at `absPath` can actually be launched. */
@@ -427,12 +431,83 @@ function findEnvKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platf
 const SERVICE_TIMEOUT_MS = 1_000
 
 /**
- * Connect to `host:port` and immediately close, sending nothing.
+ * True when `address` is a loopback IP literal.
  *
- * A refused connection is a real answer (`closed`); a timeout is not, so it is `inconclusive`
- * rather than a blocker -- a slow machine must not turn a running service into a failure.
+ * Checked on the *resolved* address, not on the configured name: `localhost` is whatever the
+ * resolver says it is, and a committed config must not be able to send the connect to a
+ * non-loopback host through a name that merely looks local.
  */
-function connectService(host: string, port: number): Promise<ServiceProbe> {
+export function isLoopbackAddress(address: string): boolean {
+  if (address === '::1') return true
+  if (isIP(address) === 4) return address.startsWith('127.')
+  return /^::ffff:127\./i.test(address)
+}
+
+/**
+ * Whether a socket error is a confirmed refusal.
+ *
+ * Only `ECONNREFUSED` means "nothing is listening". A timeout, an unreachable network or a
+ * resolver failure could not be decided, and reporting them as down would turn a slow or
+ * misconfigured machine into a false blocker.
+ */
+export function connectErrorState(error: unknown): 'closed' | 'inconclusive' {
+  const code = (error as { code?: string } | null)?.code
+  return code === 'ECONNREFUSED' ? 'closed' : 'inconclusive'
+}
+
+/** True when a filesystem error means the path simply is not there. */
+function isAbsentError(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code
+  return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/** `promise` or null when it does not settle within `ms`. Never rejects. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(null)
+      },
+    )
+  })
+}
+
+/** Resolve a hostname to every address the system reports for it. */
+function defaultResolve(host: string): Promise<readonly { address: string }[]> {
+  return lookup(host, { all: true })
+}
+
+/**
+ * The numeric loopback address to connect to, or null when `host` cannot be pinned to one.
+ *
+ * An IP literal is used as given, and must itself be loopback. A name is resolved first, and
+ * only a loopback answer is accepted; the returned address is numeric, so the socket never
+ * performs a second, unpinned resolution.
+ */
+async function resolveLoopback(
+  host: string,
+  resolve: (host: string) => Promise<readonly { address: string }[]>,
+): Promise<string | null> {
+  if (isIP(host) !== 0) return isLoopbackAddress(host) ? host : null
+  const answers = await withTimeout(resolve(host), SERVICE_TIMEOUT_MS)
+  if (answers === null) return null
+  return answers.map((answer) => answer.address).find(isLoopbackAddress) ?? null
+}
+
+/**
+ * Connect to a pinned loopback `address:port` and immediately close, sending nothing.
+ *
+ * A refused connection is a real answer (`closed`); a timeout is not, and neither is any
+ * other socket error, so those are `inconclusive` rather than a blocker -- a slow machine
+ * must not turn a running service into a failure.
+ */
+function connectLoopback(address: string, port: number): Promise<ServiceProbe> {
   return new Promise((resolve) => {
     const socket = new Socket()
     let settled = false
@@ -445,9 +520,21 @@ function connectService(host: string, port: number): Promise<ServiceProbe> {
     socket.setTimeout(SERVICE_TIMEOUT_MS)
     socket.once('connect', () => finish('open'))
     socket.once('timeout', () => finish('inconclusive'))
-    socket.once('error', () => finish('closed'))
-    socket.connect({ host, port })
+    socket.once('error', (error) => finish(connectErrorState(error)))
+    // The address is numeric, so this cannot re-resolve through DNS.
+    socket.connect({ host: address, port })
   })
+}
+
+/** Resolve `host` to a loopback address, then connect to that address. */
+async function connectService(
+  host: string,
+  port: number,
+  resolve: (host: string) => Promise<readonly { address: string }[]>,
+): Promise<ServiceProbe> {
+  const address = await resolveLoopback(host, resolve)
+  if (address === null) return { state: 'inconclusive' }
+  return connectLoopback(address, port)
 }
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
@@ -460,11 +547,14 @@ export function systemEnvironment(
     runner?: typeof runProcess
     /** Overridable for tests: the service connect. Defaults to {@link connectService}. */
     serviceRunner?: (host: string, port: number) => Promise<ServiceProbe>
+    /** Overridable for tests: name resolution for a service host. Defaults to DNS. */
+    lookupRunner?: (host: string) => Promise<readonly { address: string }[]>
   } = {},
 ): ReadyEnvironment {
   const platform = options.platform ?? process.platform
   const runner = options.runner ?? runProcess
-  const serviceRunner = options.serviceRunner ?? connectService
+  const resolve = options.lookupRunner ?? defaultResolve
+  const serviceRunner = options.serviceRunner ?? ((host, port) => connectService(host, port, resolve))
   return {
     resolve(bin) {
       return resolveCommand(bin, options)?.path ?? null
@@ -520,17 +610,29 @@ export function systemEnvironment(
       return value === '' ? 'empty' : 'present'
     },
     checkService(host, port) {
-      // A connect that throws is inconclusive, never a confirmed refusal.
-      return serviceRunner(host, port).catch((): ServiceProbe => ({ state: 'inconclusive' }))
-    },
-    fileExists(relPath) {
-      const root = options.containmentRoot
-      if (root === undefined) return false
+      // A runner that rejects *or throws synchronously* is inconclusive, never a refusal:
+      // `Promise.resolve` normalises both before `.catch` can be reached.
       try {
-        return statSync(join(root, relPath)).isFile()
+        return Promise.resolve(serviceRunner(host, port)).catch((): ServiceProbe => ({ state: 'inconclusive' }))
       } catch {
-        return false
+        return Promise.resolve({ state: 'inconclusive' })
       }
+    },
+    fileStatus(relPath) {
+      const root = options.containmentRoot
+      // Without a root there is nothing to contain the path against, so nothing is asserted.
+      if (root === undefined) return 'unknown'
+      const candidate = join(root, relPath)
+      try {
+        // A path that is genuinely absent is `missing`; anything else (a permission error, a
+        // broken chain) could not be decided, so it is `unknown` rather than an accusation.
+        if (!statSync(candidate).isFile()) return 'missing'
+      } catch (error) {
+        return isAbsentError(error) ? 'missing' : 'unknown'
+      }
+      // A link can leave the repository while the entry itself sits inside it; only a target
+      // that stays inside counts as the approved document.
+      return isInsideRepository(root, candidate) ? 'present' : 'unknown'
     },
   }
 }
@@ -942,8 +1044,7 @@ function collectReferences(declared: readonly DeclaredReference[], environment: 
     scope: entry.scope ?? 'other',
     reason: entry.reason ?? null,
     required: entry.required ?? true,
-    status:
-      environment.fileExists === undefined ? 'unknown' : environment.fileExists(entry.path) ? 'present' : 'missing',
+    status: environment.fileStatus?.(entry.path) ?? 'unknown',
   }))
 }
 

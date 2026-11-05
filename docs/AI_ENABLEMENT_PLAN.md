@@ -45,10 +45,12 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
 - **Declared services** (workstream 2, second slice) — `project.services` names local
   services the project needs on loopback hosts and ports, checked by `anvil ready --check`
   with a bounded TCP connect that sends nothing. A refused connection blocks a required
-  report and proposes a `start:` action carrying no command; a timeout or throw is `unknown`,
-  never a blocker; an optional service is reported without blocking. Only loopback hosts are
-  accepted, so a committed config cannot turn a read-only report into a probe of an arbitrary
-  host, and `reachable` is reachability, not health or authorization.
+  report and proposes a `start:` action carrying no command; a timeout, a resolver failure or
+  any other socket error is `unknown`, never a blocker; an optional service is reported
+  without blocking. Only loopback hosts are accepted, and a hostname is resolved first with
+  only a loopback answer connected to, so a committed config cannot turn a read-only report
+  into a probe of an arbitrary host. `reachable` is reachability, not health or
+  authorization.
 - **Approved context references** (workstream 4, first slice) — `project.references` names
   documents the owner approves as context, each with a repo-relative path and a scope
   (`standards`, `architecture`, `requirements`, `security`, `other`). `anvil ready` checks
@@ -56,9 +58,11 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   action carrying no command, an optional one is reported without blocking. The file is never
   opened or copied, so approving a pointer cannot upload or summarize a sensitive document;
   `anvil brief` lists the approved paths and scopes so an agent knows what to read. An
-  absolute path, a `..` segment or a URL is rejected at config load, so a reference cannot
-  point outside the repository or pull remote material. The check is repository-local and
-  runs whether or not `--check` is given.
+  absolute path, a `..` segment or a URL is rejected at config load, and a link whose target
+  leaves the repository (or a status that cannot be read) is `unknown`, so a reference cannot
+  point outside the repository, pull remote material, or be reported as present when it is
+  not the approved document. The check is repository-local and runs whether or not `--check`
+  is given.
 - **Approved setup actions** (workstream 3, first slice) — a blocked report carries
   `actions`, each with `requiresApproval: true`. The only install command printed is one the
   owner declared; otherwise the action has no command, because anvil will not guess a
