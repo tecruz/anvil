@@ -281,6 +281,131 @@ describe('the starter config is a config anvil accepts', () => {
   })
 })
 
+describe('project: owner-declared capabilities', () => {
+  test('accepts declared commands with a working directory', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          commands: [
+            { kind: 'test', cmd: 'make check', dir: 'build' },
+            { kind: 'build', cmd: 'make' },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.commands, [
+      { kind: 'test', cmd: 'make check', dir: 'build' },
+      { kind: 'build', cmd: 'make' },
+    ])
+  })
+
+  test('accepts declared tools with the optional fields', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          tools: [{ id: 'make', bin: 'gmake', version: '>=4.3 <5', required: false, install: 'apt-get install make' }],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.tools, [
+      { id: 'make', bin: 'gmake', version: '>=4.3 <5', required: false, install: 'apt-get install make' },
+    ])
+  })
+
+  test('rejects a version range anvil cannot evaluate', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: 'newest' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.version: expected a version range/)
+        return true
+      },
+    )
+  })
+
+  test('rejects a malformed identifier in a version range', () => {
+    for (const version of ['1.2.3-rc..1', '1.2.3+.', '9007199254740993.0.0']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.tools\[0\]\.version: expected a version range/)
+          return true
+        },
+        version,
+      )
+    }
+  })
+
+  test('rejects an empty version range', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: ' ' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.version: expected a non-empty version range/)
+        return true
+      },
+    )
+  })
+
+  test('rejects an unknown command kind', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'compile', cmd: 'make' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.commands\[0\]\.kind: expected one of/)
+        return true
+      },
+    )
+  })
+
+  test('rejects an empty cmd and an unknown key in a tool', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'test', cmd: '  ' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.commands\[0\]\.cmd: expected a non-empty string/)
+        return true
+      },
+    )
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', wtf: 1 }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.wtf: unknown configuration key/)
+        return true
+      },
+    )
+  })
+
+  test('rejects a tool with no id', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ reason: 'build' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.id: expected a non-empty string/)
+        return true
+      },
+    )
+  })
+
+  test('a layer that sets commands replaces the array rather than appending', () => {
+    const global = mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'build', cmd: 'make' }] } }, 'global')
+    const repo = mergeConfig(global, { project: { commands: [{ kind: 'test', cmd: 'make check' }] } }, 'repo')
+    assert.deepEqual(repo.project.commands, [{ kind: 'test', cmd: 'make check' }])
+  })
+
+  test('a layer silent about tools keeps the layer below', () => {
+    const global = mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make' }] } }, 'global')
+    const repo = mergeConfig(global, { project: { commands: [{ kind: 'test', cmd: 'make check' }] } }, 'repo')
+    assert.deepEqual(repo.project.tools, [{ id: 'make' }])
+  })
+})
+
 describe('tokenizeCommand', () => {
   // Verify commands are stored and printed as one string but have to reach a process as
   // argv. A whitespace split hands `--tests` the literal `"*Changed*"` including quotes,

@@ -20,12 +20,16 @@ export {
   CONFIG_FILE_NAME,
   type ConfigSource,
   type ConfigSourceKind,
+  type DeclaredCommand,
+  type DeclaredCommandKind,
+  type DeclaredTool,
   defaultConfig,
   ensureParentDir,
   globalConfigPath,
   type LoadConfigOptions,
   loadConfig,
   mergeConfig,
+  type ProjectConfig,
   type ResolvedConfig,
   repoConfigPath,
   SCHEMA_URL,
@@ -77,3 +81,10 @@ export {
   type SchemaVersion,
   VERSION,
 } from './version.ts'
+export {
+  compareVersions,
+  isValidVersionRange,
+  parseVersion,
+  satisfiesVersionRange,
+  type Version,
+} from './version-range.ts'

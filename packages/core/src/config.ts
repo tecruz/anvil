@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode } from './errors.ts'
+import { isValidVersionRange } from './version-range.ts'
 
 export const CONFIG_FILE_NAME = 'anvil.config.json'
 export const CONFIG_DIR_NAME = '.anvil'
@@ -31,6 +32,59 @@ export const CONFIG_DIR_NAME = '.anvil'
  * better than a wrong one. If a schema is published later, this is where it goes.
  */
 export const SCHEMA_URL: string | undefined = undefined
+
+/** The command kinds a project owner can declare, matching the profile's own set. */
+export type DeclaredCommandKind = 'install' | 'build' | 'test' | 'testFast' | 'lint' | 'format' | 'typecheck' | 'run'
+
+/**
+ * A command the project owner declares, for a repository anvil does not detect on its own.
+ *
+ * Declaring a command records an expectation, not evidence that it works and not
+ * authorization to run it. `dir` is repo-relative; the command runs there, which is the one
+ * thing a declaration cannot leave to convention when the project lives in a subdirectory.
+ */
+export interface DeclaredCommand {
+  kind: DeclaredCommandKind
+  cmd: string
+  dir?: string
+}
+
+/** A tool the project needs in the environment. Checked by `anvil ready --check`. */
+export interface DeclaredTool {
+  /** Tool name, and the binary probed unless `bin` says otherwise. */
+  id: string
+  /** The binary to look for on PATH. Defaults to `id`. */
+  bin?: string
+  /** Why the project needs it. */
+  reason?: string
+  /**
+   * The version range the project supports, as a small documented subset of semver
+   * (`>=20 <21`, `^20.11`, `~1.2.3`, `20.x`). Checked against the reported version by
+   * `anvil ready --check`; an unparseable range is a config error.
+   */
+  version?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+  /**
+   * The command that installs it, when the owner knows one. `anvil ready` proposes this as
+   * an action to approve; anvil never runs it.
+   */
+  install?: string
+}
+
+/**
+ * What the project owner says the project needs, for the parts anvil cannot detect.
+ *
+ * The detected profile stays the only source of *detected* facts. This section is the
+ * explicit escape hatch: a technology anvil has no detector for, a tool it cannot infer,
+ * and a working directory it could only guess at.
+ */
+export interface ProjectConfig {
+  /** Owner-declared commands, keyed by kind, for a project anvil cannot detect on its own. */
+  commands: DeclaredCommand[]
+  /** Owner-declared required tools. */
+  tools: DeclaredTool[]
+}
 
 export interface AnvilConfig {
   schemaVersion: 1
@@ -52,6 +106,8 @@ export interface AnvilConfig {
     /** Run external verify commands during `ship`. */
     probeCommands: boolean
   }
+  /** Owner-declared project capabilities, for what detection cannot see. */
+  project: ProjectConfig
 }
 
 export type ConfigSourceKind = 'global' | 'repo' | 'default'
@@ -75,6 +131,7 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
+    project: { commands: [], tools: [] },
   }
 }
 
@@ -127,6 +184,116 @@ function expectEnum<T extends string>(
   return undefined
 }
 
+/** Report a key that the section does not accept. Unknown keys are errors, never ignored. */
+function checkUnknownKeys(
+  obj: Record<string, unknown>,
+  allowed: readonly string[],
+  prefix: string,
+  issues: ValidationIssue[],
+): void {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.includes(key)) issues.push({ path: `${prefix}.${key}`, message: 'unknown configuration key' })
+  }
+}
+
+const DECLARED_COMMAND_KINDS: readonly DeclaredCommandKind[] = [
+  'install',
+  'build',
+  'test',
+  'testFast',
+  'lint',
+  'format',
+  'typecheck',
+  'run',
+]
+
+/**
+ * Validate `project.commands`.
+ *
+ * Returns `undefined` only when the whole value is the wrong shape; individual bad entries
+ * are dropped after being reported, so one typo does not hide the rest.
+ */
+function parseDeclaredCommands(value: unknown, path: string, issues: ValidationIssue[]): DeclaredCommand[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredCommand[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['kind', 'cmd', 'dir'], at, issues)
+    const kind = expectEnum(entry.kind, `${at}.kind`, DECLARED_COMMAND_KINDS, issues)
+    if (typeof entry.cmd !== 'string' || entry.cmd.trim() === '') {
+      issues.push({ path: `${at}.cmd`, message: 'expected a non-empty string' })
+      return
+    }
+    if (entry.dir !== undefined && typeof entry.dir !== 'string') {
+      issues.push({ path: `${at}.dir`, message: 'expected a string' })
+      return
+    }
+    if (kind === undefined) return
+    out.push(entry.dir === undefined ? { kind, cmd: entry.cmd } : { kind, cmd: entry.cmd, dir: entry.dir })
+  })
+  return out
+}
+
+/** Validate `project.tools`. Same per-entry reporting as {@link parseDeclaredCommands}. */
+function parseDeclaredTools(value: unknown, path: string, issues: ValidationIssue[]): DeclaredTool[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredTool[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'bin', 'reason', 'version', 'required', 'install'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    const tool: DeclaredTool = { id: entry.id }
+    for (const key of ['bin', 'reason', 'install'] as const) {
+      if (entry[key] === undefined) continue
+      if (typeof entry[key] !== 'string') {
+        issues.push({ path: `${at}.${key}`, message: 'expected a string' })
+        return
+      }
+      tool[key] = entry[key]
+    }
+    if (entry.version !== undefined) {
+      if (typeof entry.version !== 'string' || entry.version.trim() === '') {
+        issues.push({ path: `${at}.version`, message: 'expected a non-empty version range' })
+        return
+      }
+      if (!isValidVersionRange(entry.version)) {
+        issues.push({
+          path: `${at}.version`,
+          message: 'expected a version range like ">=20 <21", "^20.11", "~1.2.3" or "20.x"',
+        })
+        return
+      }
+      tool.version = entry.version.trim()
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      tool.required = entry.required
+    }
+    out.push(tool)
+  })
+  return out
+}
+
 /**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
@@ -136,7 +303,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   // `$schema` is a standard JSON key that an editor adds by hand; accept and ignore it
   // rather than failing a config that is otherwise valid.
-  const known = new Set(['$schema', 'schemaVersion', 'git', 'provider', 'output', 'features'])
+  const known = new Set(['$schema', 'schemaVersion', 'git', 'provider', 'output', 'features', 'project'])
   for (const key of Object.keys(layer)) {
     if (!known.has(key)) issues.push({ path: key, message: 'unknown configuration key' })
   }
@@ -217,6 +384,22 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (features.probeCommands !== undefined) {
       const probe = expectBoolean(features.probeCommands, 'features.probeCommands', issues)
       if (probe !== undefined) next.features.probeCommands = probe
+    }
+  }
+
+  if (layer.project !== undefined) {
+    const project = expectObject(layer.project, 'project', issues)
+    checkUnknownKeys(project, ['commands', 'tools'], 'project', issues)
+    // Each key replaces its array rather than concatenating: a repo layer that declares its
+    // own commands is answering the question, not adding to the global answer. Keys the
+    // layer is silent about keep the merged value from the layers below.
+    if (project.commands !== undefined) {
+      const commands = parseDeclaredCommands(project.commands, 'project.commands', issues)
+      if (commands !== undefined) next.project.commands = commands
+    }
+    if (project.tools !== undefined) {
+      const tools = parseDeclaredTools(project.tools, 'project.tools', issues)
+      if (tools !== undefined) next.project.tools = tools
     }
   }
 
@@ -303,6 +486,10 @@ export function starterConfigJson(): string {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
+    // The escape hatch for a project anvil cannot detect on its own. Left empty here and
+    // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
+    // write is a claim anvil would be inventing.
+    project: { commands: [], tools: [] },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`

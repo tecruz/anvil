@@ -12,6 +12,7 @@
  * will trust it.
  */
 
+import type { DeclaredCommand, ProjectConfig } from '@anvil/core'
 import type { MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 
@@ -32,12 +33,74 @@ export function bestCommand(profile: ProjectProfile, kind: keyof ProjectProfile[
   return entries[0] as CommandEntry
 }
 
-function bullet(label: string, entry: CommandEntry | null, fallback: string | null): string | null {
+/**
+ * A command chosen for an artifact, with the directory it runs from.
+ *
+ * Declared capabilities are the escape hatch for a project anvil cannot detect on its own, so
+ * they rank above the detected command for the same kind: the owner wrote them down, and the
+ * generated context would otherwise omit exactly the commands the repository needs.
+ */
+interface ChosenCommand {
+  cmd: string
+  source: CommandEntry['source'] | 'declared'
+  evidence: string | null
+  dir: string
+}
+
+function chooseCommand(options: GenerateOptions, kind: keyof ProjectProfile['commands']): ChosenCommand | null {
+  const profile = options.profile
+  const declared: DeclaredCommand | undefined = options.declared?.commands.find((c) => c.kind === kind)
+  if (declared !== undefined) {
+    return {
+      cmd: declared.cmd,
+      source: 'declared',
+      evidence: 'anvil.config.json',
+      dir: declared.dir ?? profile.projectDir,
+    }
+  }
+  const entry = bestCommand(profile, kind)
+  if (entry === null) return null
+  return {
+    cmd: entry.cmd,
+    source: entry.source,
+    evidence: entry.evidence ?? null,
+    dir: profile.projectDir,
+  }
+}
+
+/**
+ * Quote a directory for a `cd` in a generated shell snippet.
+ *
+ * A path with a space (`engine tools`) is not a valid `cd` argument unquoted, so it is
+ * single-quoted; the common path needs no quotes and stays readable.
+ */
+function quoteShellDir(dir: string): string {
+  return /^[A-Za-z0-9_./-]+$/.test(dir) ? dir : `'${dir.replace(/'/g, `'\\''`)}'`
+}
+
+/** The `cd <dir> && ` prefix for a command, or nothing when it runs from the repository root. */
+function cdPrefix(dir: string): string {
+  return dir === '' ? '' : `cd ${quoteShellDir(dir)} && `
+}
+
+function bullet(
+  label: string,
+  entry: ChosenCommand | null,
+  fallback: string | null,
+  defaultDir: string,
+): string | null {
   if (entry === null)
     return fallback === null ? null : `- **${label}:** _not yet defined_ -- add this so the agent can verify its work`
   const source = entry.source === 'documented' ? '' : ` _(${entry.source})_`
-  const evidence = entry.evidence === undefined ? '' : ` \`${entry.evidence}\``
-  return `- **${label}:** \`${entry.cmd}\`${source}${evidence}`
+  // A row whose directory differs from the project directory states it: the document's note
+  // names one directory, and an explicit root override (`dir: ""`) must not be read as running
+  // from the project directory. The common case stays exactly as it was.
+  let dir = ''
+  if (entry.dir !== defaultDir) {
+    dir = entry.dir === '' ? ' (from the repository root)' : ` (from \`${entry.dir}/\`)`
+  }
+  const evidence = entry.evidence === null ? '' : ` \`${entry.evidence}\``
+  return `- **${label}:** \`${entry.cmd}\`${source}${dir}${evidence}`
 }
 
 /**
@@ -61,6 +124,14 @@ function retargetSelfCitations(content: string): string {
 export interface GenerateOptions {
   profile: ProjectProfile
   matches: readonly MatchResult[]
+  /**
+   * Owner-declared capabilities from `anvil.config.json`.
+   *
+   * Optional so nothing has to construct it: generation on a repository with no declarations
+   * behaves exactly as before. When present, a declared command outranks the detected command
+   * for its kind, which is what makes an unrecognized technology usable.
+   */
+  declared?: ProjectConfig
   /** Which artifacts to produce. */
   only?: 'agents-file' | 'skills' | 'all'
 }
@@ -92,6 +163,7 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   // The command table is the single most valuable thing in this file: without it the
   // agent cannot verify anything, which is the blocker the audit reports first.
   const commandRows: string[] = []
+  let declaredRows = 0
   for (const [label, kind] of [
     ['Install', 'install'],
     ['Build', 'build'],
@@ -101,8 +173,10 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
     ['Format', 'format'],
     ['Typecheck', 'typecheck'],
   ] as Array<[string, keyof ProjectProfile['commands']]>) {
-    const b = bullet(label, bestCommand(profile, kind), null)
+    const chosen = chooseCommand(options, kind)
+    const b = bullet(label, chosen, null, profile.projectDir)
     if (b !== null) commandRows.push(b)
+    if (chosen?.source === 'declared') declaredRows++
   }
   if (commandRows.length > 0) {
     lines.push('## Commands')
@@ -120,6 +194,12 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
       lines.push('')
       lines.push(
         `> Some of these are inferred from ecosystem convention rather than defined in this repo. Verify them before relying on them.`,
+      )
+    }
+    if (declaredRows > 0) {
+      lines.push('')
+      lines.push(
+        `> Some of these are declared in \`anvil.config.json\`, not found in this repository. Treat them as the owner's statement of how to work here.`,
       )
     }
     lines.push('')
@@ -220,9 +300,9 @@ function countInferred(profile: ProjectProfile): number {
  */
 export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact | null {
   const { profile } = options
-  const test = bestCommand(profile, 'test')
-  const fast = bestCommand(profile, 'testFast')
-  const lint = bestCommand(profile, 'lint')
+  const test = chooseCommand(options, 'test')
+  const fast = chooseCommand(options, 'testFast')
+  const lint = chooseCommand(options, 'lint')
 
   if (test === null) return null
 
@@ -233,27 +313,32 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
   // directory -- the AGENTS.md template, this skill, and the review command alike. Getting it
   // right in one of three and not the others leaves the two that are not the AGENTS.md
   // actively misleading.
-  const cd = profile.projectDir === '' ? '' : `cd ${profile.projectDir} && `
   const note =
     profile.projectDir === ''
       ? []
-      : [`> The project lives in \`${profile.projectDir}/\`. Run the commands below from that directory.`, '']
-  const run = (cmd: string): string => `${cd}${cmd}`
+      : [
+          // The commands below carry their own `cd`, so the reader starts at the repository
+          // root. Saying "run from this directory" instead would contradict a command that
+          // overrides back to the root (`dir: ""`) and has no `cd`.
+          `> The project lives in \`${profile.projectDir}/\`. Run the commands below from the repository root.`,
+          '',
+        ]
+  const run = (entry: ChosenCommand): string => `${cdPrefix(entry.dir)}${entry.cmd}`
 
   steps.push('1. Run the changed-files subset first:')
   if (fast !== null) {
-    steps.push(`${CODE_FENCE}bash\n${run(fast.cmd)}\n${CODE_FENCE}`)
+    steps.push(`${CODE_FENCE}bash\n${run(fast)}\n${CODE_FENCE}`)
     steps.push('')
   } else {
     steps.push('   _No changed-files subset is defined in this repo. Run the full suite._')
     steps.push('')
   }
   steps.push('2. Run the full suite before you claim the work is done:')
-  steps.push(`${CODE_FENCE}bash\n${run(test.cmd)}\n${CODE_FENCE}`)
+  steps.push(`${CODE_FENCE}bash\n${run(test)}\n${CODE_FENCE}`)
   if (lint !== null) {
     steps.push('')
     steps.push('3. Lint:')
-    steps.push(`${CODE_FENCE}bash\n${run(lint.cmd)}\n${CODE_FENCE}`)
+    steps.push(`${CODE_FENCE}bash\n${run(lint)}\n${CODE_FENCE}`)
   }
 
   const content = [
@@ -290,19 +375,20 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
  */
 export function generateReviewCommand(options: GenerateOptions): GeneratedArtifact | null {
   const { profile } = options
-  const test = bestCommand(profile, 'test')
-  const lint = bestCommand(profile, 'lint')
+  const test = chooseCommand(options, 'test')
+  const lint = chooseCommand(options, 'lint')
   if (test === null && lint === null) return null
 
-  // Same rule as the verify skill: the commands below are ecosystem-relative, so a project in
-  // a subdirectory needs the directory prefixed or the whole command is a trap.
-  const cd = profile.projectDir === '' ? '' : `cd ${profile.projectDir} && `
+  const run = (entry: ChosenCommand): string => `${cdPrefix(entry.dir)}${entry.cmd}`
 
   const body: string[] = []
   body.push('Review the current diff for correctness before it is proposed.')
   if (profile.projectDir !== '') {
     body.push('')
-    body.push(`The project lives in \`${profile.projectDir}/\`, so the commands below run from there.`)
+    // The commands below carry their own `cd`, so the reader starts at the repository root;
+    // a command that overrides back to the root has no prefix and would be wrong from the
+    // project directory.
+    body.push(`The project lives in \`${profile.projectDir}/\`, so the commands below run from the repository root.`)
   }
   body.push('')
   body.push('Recent commits:')
@@ -310,12 +396,12 @@ export function generateReviewCommand(options: GenerateOptions): GeneratedArtifa
   body.push('')
   if (test !== null) {
     body.push('Test results:')
-    body.push(`!\`${cd}${test.cmd}\``)
+    body.push(`!\`${run(test)}\``)
     body.push('')
   }
   if (lint !== null) {
     body.push('Lint results:')
-    body.push(`!\`${cd}${lint.cmd}\``)
+    body.push(`!\`${run(lint)}\``)
     body.push('')
   }
   body.push('Report: correctness problems, missing edge cases, and anything that would be')

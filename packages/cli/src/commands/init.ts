@@ -13,7 +13,7 @@
 
 import { resolve } from 'node:path'
 import { audit, type ReadinessReport } from '@anvil/audit'
-import { AnvilError, ErrorCode, parseCliArgs, renderTable } from '@anvil/core'
+import { AnvilError, ErrorCode, loadConfig, type ProjectConfig, parseCliArgs, renderTable } from '@anvil/core'
 import {
   applyStaging,
   type Brief,
@@ -60,6 +60,8 @@ interface Loaded {
   matches: readonly MatchResult[]
   playbooks: readonly Playbook[]
   warnings: string[]
+  /** Owner-declared capabilities, or undefined when the config declares none. */
+  declared: ProjectConfig | undefined
 }
 
 async function loadAll(ctx: CommandContext, target: string | undefined): Promise<Loaded> {
@@ -80,6 +82,10 @@ async function loadAll(ctx: CommandContext, target: string | undefined): Promise
 
   const { playbooks, warnings } = loadPlaybooks(process.env)
   const matches = matchPlaybooks(profile, playbooks)
+  // The declared capabilities live beside the profile they describe, so `--profile` and the
+  // config layer cannot disagree about which project is being derived.
+  const config = loadConfig({ repoRoot: root }).config
+  const declared = config.project.commands.length > 0 || config.project.tools.length > 0 ? config.project : undefined
   return {
     root,
     profile,
@@ -87,6 +93,7 @@ async function loadAll(ctx: CommandContext, target: string | undefined): Promise
     matches,
     playbooks,
     warnings: [...profileWarnings(profile), ...warnings],
+    declared,
   }
 }
 
@@ -133,7 +140,7 @@ export const briefCommand: Command = {
     }
 
     const dir = typeof args.values.profile === 'string' ? args.values.profile : undefined
-    const { root, profile, report, matches } = await loadAll(ctx, dir)
+    const { root, profile, report, matches, declared } = await loadAll(ctx, dir)
     // From the discovery cache, keyed by the playbooks that matched. Read here rather than
     // inside `buildBrief` so this package stays free of a dependency it does not need, and
     // so a brief can be built with no cache at all on a machine that has never run
@@ -155,6 +162,7 @@ export const briefCommand: Command = {
       matches,
       target: target as BriefTarget,
       read: (rel) => readRepoFile(root, rel),
+      ...(declared === undefined ? {} : { declared }),
       live,
       warnings: liveWarnings,
     })
@@ -248,7 +256,7 @@ export const initCommand: Command = {
     const args = parseCliArgs(rawArgs, initCommand.flags)
     const dir = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const loaded = await loadAll(ctx, dir)
-    const { root, profile, matches, playbooks } = loaded
+    const { root, profile, matches, playbooks, declared } = loaded
 
     const only = (args.values.only as string | undefined) ?? null
     if (only !== null && !['agents-file', 'verify-skill', 'review-command'].includes(only)) {
@@ -261,13 +269,14 @@ export const initCommand: Command = {
       profile: { ...profile, files: undefined, root: undefined },
       report: { score: loaded.report.score, findings: loaded.report.findings },
       playbookIds: playbooks.map((p) => p.id),
+      ...(declared === undefined ? {} : { declared }),
     })
 
     if (args.values.apply === true)
       return applyFlow(ctx, root, currentHash, args.values.json === true, args.values['allow-warnings'] === true)
 
     // ---- build and stage ----
-    const artifacts = buildArtifacts(profile, matches, only)
+    const artifacts = buildArtifacts(profile, matches, declared, only)
     if (artifacts.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'Nothing to generate for this repository', {
         hint: 'A root AGENTS.md is always generated. The others need a test or lint command; check `anvil profile`.',
@@ -327,9 +336,10 @@ export const initCommand: Command = {
 function buildArtifacts(
   profile: ProjectProfile,
   matches: readonly MatchResult[],
+  declared: ProjectConfig | undefined,
   only: string | null,
 ): GeneratedArtifact[] {
-  const options = { profile, matches }
+  const options = declared === undefined ? { profile, matches } : { profile, matches, declared }
   const out: GeneratedArtifact[] = []
   if (only === null || only === 'agents-file') out.push(generateAgentsFile(options))
   if (only === null || only === 'verify-skill') {

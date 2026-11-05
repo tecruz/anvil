@@ -1,0 +1,145 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { after, describe, test } from 'node:test'
+
+/**
+ * End-to-end tests for `anvil ready`.
+ *
+ * These spawn the real CLI, because the report is assembled from four things a unit test
+ * cannot see at once: repo discovery, the detected profile, the declared config layer, and
+ * the environment probe. The unit tests in `@anvil/derive` cover the logic; these cover the
+ * wiring and the exit code.
+ */
+
+const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
+const temps: string[] = []
+after(() => {
+  for (const t of temps) rmSync(t, { recursive: true, force: true })
+})
+
+function repo(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'anvil-ready-'))
+  temps.push(dir)
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content)
+  return dir
+}
+
+interface RunResult {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+function runReady(cwd: string, args: string[]): RunResult {
+  try {
+    const stdout = execFileSync(process.execPath, [CLI, 'ready', ...args], {
+      cwd,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: { ...process.env, NO_COLOR: '1', ANVIL_CONFIG_HOME: join(cwd, '.config-home') },
+    })
+    return { code: 0, stdout, stderr: '' }
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; stderr?: string }
+    return { code: e.status ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }
+  }
+}
+
+function dataOf(result: RunResult): Record<string, unknown> {
+  const envelope = JSON.parse(result.stdout) as { ok: boolean; data: Record<string, unknown> }
+  return envelope.data
+}
+
+describe('anvil ready', () => {
+  test('a detected command is wired through, and an unchecked runner stays unknown', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nRun the tests before committing.\n',
+      'package.json': JSON.stringify({ name: 'ready-fixture', scripts: { test: 'node -e "process.exit(0)"' } }),
+    })
+    const result = runReady(dir, ['--json'])
+    assert.equal(result.code, 0, result.stderr)
+    const data = dataOf(result)
+    const commands = data.commands as Array<{ kind: string; source: string; status: string }>
+    assert.ok(commands.some((c) => c.kind === 'test' && c.source === 'detected' && c.status === 'verified'))
+    // No --check means no runner was verified, and the install command is inferred.
+    assert.equal(data.status, 'unknown')
+  })
+
+  test('a declared tool is unknown without --check and blocked with it', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        schemaVersion: 1,
+        project: { tools: [{ id: 'anvil-definitely-absent-tool', reason: 'the build', required: true }] },
+      }),
+    })
+
+    const unchecked = runReady(dir, ['--json'])
+    const before = dataOf(unchecked)
+    assert.equal(before.status, 'unknown')
+    assert.equal((before.tools as Array<{ status: string }>)[0]?.status, 'unknown')
+
+    const checked = runReady(dir, ['--json', '--check'])
+    assert.equal(checked.code, 0, checked.stderr)
+    const after = dataOf(checked)
+    assert.equal(after.status, 'blocked')
+    assert.equal((after.tools as Array<{ status: string }>)[0]?.status, 'missing')
+    const action = (after.actions as Array<{ id: string; command: string | null }>).find(
+      (a) => a.id === 'provide:anvil-definitely-absent-tool',
+    )
+    assert.equal(action?.command, null, 'no install line is fabricated')
+  })
+
+  test('--fail-on-blocked exits 6 with the report on an ok:false envelope', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: { tools: [{ id: 'anvil-definitely-absent-tool' }] },
+      }),
+    })
+    const result = runReady(dir, ['--json', '--check', '--fail-on-blocked'])
+    assert.equal(result.code, 6, result.stderr)
+    const envelope = JSON.parse(result.stdout) as { ok: boolean; data: { status: string } }
+    assert.equal(envelope.ok, false)
+    assert.equal(envelope.data.status, 'blocked')
+  })
+
+  test('a declared version range blocks when the installed tool is too old', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: { tools: [{ id: 'node', version: '>=999', reason: 'the runtime' }] },
+      }),
+    })
+    const result = runReady(dir, ['--json', '--check'])
+    assert.equal(result.code, 0, result.stderr)
+    const data = dataOf(result)
+    assert.equal(data.status, 'blocked')
+    const tool = (data.tools as Array<{ status: string; versionRange: string; version: string }>)[0]
+    assert.equal(tool?.status, 'incompatible')
+    assert.equal(tool?.versionRange, '>=999')
+    assert.match(tool?.version ?? '', /^\d+\.\d+\.\d+/)
+    const action = (data.actions as Array<{ id: string; command: string | null }>).find((a) => a.id === 'upgrade:node')
+    assert.equal(action?.command, null, 'no install line is fabricated')
+  })
+
+  test('a declared install command is proposed, never run', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: { tools: [{ id: 'anvil-definitely-absent-tool', install: 'echo install-it-yourself' }] },
+      }),
+    })
+    const result = runReady(dir, ['--json', '--check'])
+    const data = dataOf(result)
+    const action = (data.actions as Array<{ id: string; command: string | null; requiresApproval: boolean }>).find(
+      (a) => a.id === 'install:anvil-definitely-absent-tool',
+    )
+    assert.equal(action?.command, 'echo install-it-yourself')
+    assert.equal(action?.requiresApproval, true)
+  })
+})
