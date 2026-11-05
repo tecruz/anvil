@@ -108,6 +108,29 @@ export interface DeclaredService {
   required?: boolean
 }
 
+/** What a declared reference is: a document category, so its authority stays visible. */
+export type DeclaredReferenceScope = 'standards' | 'architecture' | 'requirements' | 'security' | 'other'
+
+/**
+ * A repository document the owner approves as project context, by path.
+ *
+ * Only the path is declared and only its existence is checked. Anvil never fetches it and
+ * never copies its contents into a report, so approval is a pointer a person wrote down, not
+ * permission to upload, summarize or treat the document as authoritative on its own.
+ */
+export interface DeclaredReference {
+  /** Stable name. */
+  id: string
+  /** Repo-relative path to the document. Must stay inside the repository. */
+  path: string
+  /** What the document is, so its scope is not lost. Defaults to `other`. */
+  scope?: DeclaredReferenceScope
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be understood without it. Defaults to true. */
+  required?: boolean
+}
+
 /**
  * What the project owner says the project needs, for the parts anvil cannot detect.
  *
@@ -125,6 +148,8 @@ export interface ProjectConfig {
   env: DeclaredEnvVar[]
   /** Owner-declared local services, checked with a bounded loopback TCP connect. */
   services: DeclaredService[]
+  /** Owner-approved context documents, checked for existence by path. */
+  references: DeclaredReference[]
 }
 
 export interface AnvilConfig {
@@ -172,7 +197,7 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
-    project: { commands: [], tools: [], env: [], services: [] },
+    project: { commands: [], tools: [], env: [], services: [], references: [] },
   }
 }
 
@@ -437,6 +462,81 @@ function parseDeclaredServices(value: unknown, path: string, issues: ValidationI
   return out
 }
 
+const REFERENCE_SCOPES: readonly DeclaredReferenceScope[] = [
+  'standards',
+  'architecture',
+  'requirements',
+  'security',
+  'other',
+]
+
+/**
+ * True when `value` is a repository-relative path that cannot escape the repository.
+ *
+ * An absolute path, a drive letter, or a `..` segment is rejected: a committed config must
+ * not be able to point the check at a file outside the repository.
+ */
+function isSafeReferencePath(value: string): boolean {
+  const path = value.trim()
+  if (path === '' || path.startsWith('/') || path.startsWith('\\')) return false
+  if (/^[A-Za-z]:/.test(path)) return false
+  return path.split(/[/\\]+/).every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+}
+
+/** Validate `project.references`. Paths are repo-relative and must stay inside the repo. */
+function parseDeclaredReferences(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+): DeclaredReference[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredReference[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'path', 'scope', 'reason', 'required'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    if (typeof entry.path !== 'string' || !isSafeReferencePath(entry.path)) {
+      issues.push({
+        path: `${at}.path`,
+        message: 'expected a repo-relative path that stays inside the repository',
+      })
+      return
+    }
+    const reference: DeclaredReference = { id: entry.id, path: entry.path.trim() }
+    if (entry.scope !== undefined) {
+      const scope = expectEnum(entry.scope, `${at}.scope`, REFERENCE_SCOPES, issues)
+      if (scope === undefined) return
+      reference.scope = scope
+    }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      reference.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      reference.required = entry.required
+    }
+    out.push(reference)
+  })
+  return out
+}
+
 /**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
@@ -532,7 +632,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   if (layer.project !== undefined) {
     const project = expectObject(layer.project, 'project', issues)
-    checkUnknownKeys(project, ['commands', 'tools', 'env', 'services'], 'project', issues)
+    checkUnknownKeys(project, ['commands', 'tools', 'env', 'services', 'references'], 'project', issues)
     // Each key replaces its array rather than concatenating: a repo layer that declares its
     // own commands is answering the question, not adding to the global answer. Keys the
     // layer is silent about keep the merged value from the layers below.
@@ -551,6 +651,10 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (project.services !== undefined) {
       const services = parseDeclaredServices(project.services, 'project.services', issues)
       if (services !== undefined) next.project.services = services
+    }
+    if (project.references !== undefined) {
+      const references = parseDeclaredReferences(project.references, 'project.references', issues)
+      if (references !== undefined) next.project.references = references
     }
   }
 
@@ -640,7 +744,7 @@ export function starterConfigJson(): string {
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and
     // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
     // write is a claim anvil would be inventing.
-    project: { commands: [], tools: [], env: [], services: [] },
+    project: { commands: [], tools: [], env: [], services: [], references: [] },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`

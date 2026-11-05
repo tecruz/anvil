@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -194,6 +194,39 @@ describe('anvil ready', () => {
 
     const unchecked = runReady(dir, ['--json'])
     assert.equal((dataOf(unchecked).services as Array<{ status: string }>)[0]?.status, 'unknown')
+  })
+
+  test('a declared reference is checked by path only, and a missing one blocks', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: { references: [{ id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture' }] },
+      }),
+    })
+    mkdirSync(join(dir, 'docs', 'adr'), { recursive: true })
+    writeFileSync(join(dir, 'docs', 'adr', '0001.md'), 'SENTINEL-DOCUMENT-CONTENT')
+
+    const present = runReady(dir, ['--json'])
+    assert.equal(present.code, 0, present.stderr)
+    const data = dataOf(present)
+    const reference = (data.references as Array<{ path: string; scope: string; status: string }>)[0]
+    assert.equal(reference?.status, 'present')
+    assert.equal(reference?.scope, 'architecture')
+    assert.equal(data.status, 'verified')
+    assert.ok(!present.stdout.includes('SENTINEL-DOCUMENT-CONTENT'), 'the document is never read into the report')
+
+    writeFileSync(
+      join(dir, 'anvil.config.json'),
+      JSON.stringify({ project: { references: [{ id: 'adr', path: 'docs/adr/missing.md' }] } }),
+    )
+    const missing = runReady(dir, ['--json', '--fail-on-blocked'])
+    assert.equal(missing.code, 6, 'a missing required reference gates CI without --check')
+    const missingData = dataOf(missing)
+    assert.equal((missingData.references as Array<{ status: string }>)[0]?.status, 'missing')
+    const action = (missingData.actions as Array<{ id: string; command: string | null }>).find(
+      (a) => a.id === 'restore:adr',
+    )
+    assert.equal(action?.command, null, 'no restore command is fabricated')
   })
 
   test('a declared install command is proposed, never run', () => {

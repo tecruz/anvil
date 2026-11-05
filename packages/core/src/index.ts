@@ -23,6 +23,8 @@ export {
   type DeclaredCommand,
   type DeclaredCommandKind,
   type DeclaredEnvVar,
+  type DeclaredReference,
+  type DeclaredReferenceScope,
   type DeclaredService,
   type DeclaredTool,
   defaultConfig,

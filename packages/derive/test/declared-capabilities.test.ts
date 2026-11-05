@@ -30,6 +30,7 @@ describe('declared capabilities reach generated context', () => {
         tools: [],
         env: [],
         services: [],
+        references: [],
       },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `mystery-cli check` _\(declared\)_ \(from `engine\/`\)/)
@@ -45,6 +46,7 @@ describe('declared capabilities reach generated context', () => {
         tools: [],
         env: [],
         services: [],
+        references: [],
       },
     })
     assert.ok(artifact, 'a declared test command is enough to generate the skill')
@@ -70,6 +72,7 @@ describe('declared capabilities reach generated context', () => {
         tools: [],
         env: [],
         services: [],
+        references: [],
       },
     })
     assert.ok(artifact)
@@ -80,7 +83,13 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateAgentsFile({
       profile: profileOf({ projectDir: 'engine' }),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [], services: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+      },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `node root-check\.js` _\(declared\)_ \(from the repository root\)/)
   })
@@ -91,7 +100,13 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateVerifySkill({
       profile: profileOf({ projectDir: 'engine' }),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [], services: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+      },
     })
     assert.ok(artifact)
     assert.match(artifact.content, /Run the commands below from the repository root/)
@@ -109,7 +124,13 @@ describe('declared capabilities reach generated context', () => {
       matches: noMatches,
       target: 'all',
       read: () => null,
-      declared: { commands: [{ kind: 'test', cmd: 'make check', dir: 'engine' }], tools: [], env: [], services: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'make check', dir: 'engine' }],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+      },
     })
     const declared = brief.commands.find((c) => c.source === 'declared')
     assert.equal(declared?.cmd, 'make check')

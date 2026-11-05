@@ -49,13 +49,24 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   never a blocker; an optional service is reported without blocking. Only loopback hosts are
   accepted, so a committed config cannot turn a read-only report into a probe of an arbitrary
   host, and `reachable` is reachability, not health or authorization.
+- **Approved context references** (workstream 4, first slice) — `project.references` names
+  documents the owner approves as context, each with a repo-relative path and a scope
+  (`standards`, `architecture`, `requirements`, `security`, `other`). `anvil ready` checks
+  only that the document exists: a missing required one blocks and proposes a `restore:`
+  action carrying no command, an optional one is reported without blocking. The file is never
+  opened or copied, so approving a pointer cannot upload or summarize a sensitive document;
+  `anvil brief` lists the approved paths and scopes so an agent knows what to read. An
+  absolute path, a `..` segment or a URL is rejected at config load, so a reference cannot
+  point outside the repository or pull remote material. The check is repository-local and
+  runs whether or not `--check` is given.
 - **Approved setup actions** (workstream 3, first slice) — a blocked report carries
   `actions`, each with `requiresApproval: true`. The only install command printed is one the
   owner declared; otherwise the action has no command, because anvil will not guess a
   package manager. Nothing in the report is run, and a path tool is never executed.
 
-Still proposed: automatic install/configure with verification, company-context sources,
-and real-agent evaluation evidence.
+Still proposed: automatic install/configure with verification, richer company-context
+sources (staleness and contradiction checks beyond path existence), and real-agent
+evaluation evidence.
 
 ## Goal
 
@@ -187,9 +198,12 @@ be inferred entirely from source code.
 
 ### Acceptance
 
-- [ ] Context retains its source and scope, and missing references are reported.
-- [ ] Undocumented business expectations remain questions, not generated facts.
-- [ ] Sensitive context is not uploaded merely because a reference exists.
+- [x] Context retains its source and scope, and missing references are reported. Approved
+  references carry their scope and path, and a missing required document is a blocker.
+- [ ] Undocumented business expectations remain questions, not generated facts. _Partial:
+  a reference is a pointer, not a claim; nothing about its contents is generated._
+- [x] Sensitive context is not uploaded merely because a reference exists. Anvil checks the
+  path exists and never opens, copies or summarizes the document.
 - [ ] Source code is treated as evidence of implementation, not automatically as the
   definition of correct product behavior.
 

@@ -413,6 +413,61 @@ describe('project: owner-declared capabilities', () => {
     )
   })
 
+  test('accepts approved context references with a scope', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          references: [
+            { id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture', reason: 'the decisions' },
+            { id: 'style', path: 'docs/style.md', required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.references, [
+      { id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture', reason: 'the decisions' },
+      { id: 'style', path: 'docs/style.md', required: false },
+    ])
+  })
+
+  test('rejects a reference path that could leave the repository', () => {
+    for (const path of ['../secrets.md', 'docs/../../x.md', '/etc/passwd', 'C:/Windows/win.ini', './docs/a.md']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.references\[0\]\.path: expected a repo-relative path/)
+          return true
+        },
+        path,
+      )
+    }
+  })
+
+  test('rejects an unknown scope and an unknown reference key', () => {
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path: 'a.md', scope: 'secrets' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.references\[0\]\.scope: expected one of/)
+        return true
+      },
+    )
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path: 'a.md', url: 'https://x' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.references\[0\]\.url: unknown configuration key/)
+        return true
+      },
+      'references are paths, never URLs: anvil does not fetch remote material',
+    )
+  })
+
   test('rejects a version range anvil cannot evaluate', () => {
     assert.throws(
       () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: 'newest' }] } }, 'cfg'),

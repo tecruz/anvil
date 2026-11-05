@@ -243,6 +243,13 @@ reports three states and never guesses between them.
   healthy, ready to serve requests, or authorized for the credentials at hand. Only loopback
   hosts are accepted, so a committed config cannot turn the report into a probe of an
   arbitrary host, and nothing is sent to the service. Without `--check` nothing is contacted.
+- **References** — documents the owner approved as project context in `project.references`,
+  each with a path and a scope (`standards`, `architecture`, `requirements`, `security` or
+  `other`). Anvil checks only that the path exists: a missing required document is `blocked`
+  and proposes a `restore:` action, while an optional one is reported without blocking. The
+  file is never opened, so approving a pointer cannot copy its contents into a report, and a
+  path that could leave the repository — or a URL — is rejected at config load. The check is
+  repository-local, so it runs whether or not `--check` is given.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
@@ -329,7 +336,7 @@ Two layers, repo-local wins:
   "provider": { "default": "local" },
   "output": { "color": "auto" },
   "features": { "probeCommands": false },
-  "project": { "commands": [], "tools": [], "env": [], "services": [] }
+  "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
 }
 ```
 
@@ -368,6 +375,14 @@ Two layers, repo-local wins:
   `host` defaults to `127.0.0.1` and must be a loopback name (`localhost`, `127.0.0.1`,
   `::1`, `[::1]`): a committed config must not be able to make a read-only report reach an
   arbitrary host. The connect sends no data and only observes whether a socket opens.
+- `project.references` — documents the owner approves as context, checked for existence by
+  `anvil ready`. Each entry is `{ "id": "...", "path": "docs/adr/0001.md", "scope":
+  "architecture", "reason": "...", "required": true }`. `scope` defaults to `other` and is one
+  of `standards`, `architecture`, `requirements`, `security`, `other`; `required` defaults to
+  true. `path` must be repo-relative and may not contain `..` or name an absolute path, and a
+  `url` key is rejected: anvil points at approved local documents and does not fetch remote
+  material. Only existence is checked, never the contents. Approved references are also
+  listed by path and scope in `anvil brief`, so an agent knows what to read.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year.

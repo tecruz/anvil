@@ -39,6 +39,19 @@ export interface BriefModule {
   dependsOn: string[]
 }
 
+/**
+ * An approved context document, by path and scope only.
+ *
+ * The brief names what the owner approved so an agent can open it; it never carries the
+ * document's contents, so approving a pointer cannot upload a sensitive document.
+ */
+export interface BriefReference {
+  id: string
+  path: string
+  scope: string
+  reason: string | null
+}
+
 export interface BriefFileExcerpt {
   path: string
   /** File contents, truncated. Only for the allowlisted manifest shapes. */
@@ -107,6 +120,8 @@ export interface Brief {
   }>
   /** Excerpts from a small allowlist of manifest files. Never secrets. */
   excerpts: BriefFileExcerpt[]
+  /** Approved context documents, by path and scope only. Their contents are never copied. */
+  references: BriefReference[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
   gaps: string[]
   /**
@@ -305,6 +320,12 @@ export function buildBrief(options: BuildBriefOptions): Brief {
     playbooks,
     findings,
     excerpts,
+    references: (options.declared?.references ?? []).map((r) => ({
+      id: r.id,
+      path: r.path,
+      scope: r.scope ?? 'other',
+      reason: r.reason ?? null,
+    })),
     gaps: computeGaps(report, profile),
     warnings: [...(options.warnings ?? [])],
   }

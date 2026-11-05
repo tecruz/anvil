@@ -32,6 +32,8 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'no
 import {
   type DeclaredCommand,
   type DeclaredEnvVar,
+  type DeclaredReference,
+  type DeclaredReferenceScope,
   type DeclaredService,
   type ProjectConfig,
   parseVersion,
@@ -139,6 +141,21 @@ export interface ServiceProbe {
   state: 'open' | 'closed' | 'inconclusive'
 }
 
+/** Whether an approved context document is where the owner said it is. */
+export type ReadyReferenceStatus = 'present' | 'missing' | 'unknown'
+
+/** One owner-approved context document. Only its existence is checked; it is never read. */
+export interface ReadyReference {
+  id: string
+  /** Repo-relative path, as declared. */
+  path: string
+  /** What kind of document it is, kept so its authority stays visible. */
+  scope: DeclaredReferenceScope
+  reason: string | null
+  required: boolean
+  status: ReadyReferenceStatus
+}
+
 export interface ReadyAction {
   id: string
   summary: string
@@ -162,6 +179,7 @@ export interface ReadyReport {
   tools: ReadyTool[]
   env: ReadyEnvVar[]
   services: ReadyService[]
+  references: ReadyReference[]
   context: ReadyContext[]
   actions: ReadyAction[]
   warnings: string[]
@@ -272,6 +290,11 @@ export interface ReadyEnvironment {
    * assumed reachable. Never sends a byte, so it cannot carry credentials to the service.
    */
   checkService?(host: string, port: number): Promise<ServiceProbe>
+  /**
+   * True when a repo-relative path names a file. Repository-local, never a spawn, and the
+   * file is not read: the check answers "is the owner's pointer still good".
+   */
+  fileExists?(relPath: string): boolean
 }
 
 /** True when an executable file at `absPath` can actually be launched. */
@@ -500,6 +523,15 @@ export function systemEnvironment(
       // A connect that throws is inconclusive, never a confirmed refusal.
       return serviceRunner(host, port).catch((): ServiceProbe => ({ state: 'inconclusive' }))
     },
+    fileExists(relPath) {
+      const root = options.containmentRoot
+      if (root === undefined) return false
+      try {
+        return statSync(join(root, relPath)).isFile()
+      } catch {
+        return false
+      }
+    },
   }
 }
 
@@ -539,20 +571,25 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
   const tools = await collectTools(profile, matches, declared, check, environment)
   const env = collectEnv(declared.env, check, environment)
   const services = await collectServices(declared.services, check, environment)
+  const references = collectReferences(declared.references, environment)
   const context = collectContext(profile)
   const warnings = collectWarnings(profile, declared.commands)
-  const actions = proposeActions(tools, env, services, context)
+  const actions = proposeActions(tools, env, services, references, context)
   // Only required needs decide the status. An optional, playbook-suggested tool or a
   // non-required variable or service is guidance, not a need: its absence must not turn a
   // ready repository into an unknown one.
   const requiredReadiness = tools.filter((t) => t.required).map(toolState)
   const requiredEnvReadiness = env.filter((e) => e.required).map(envState)
   const requiredServiceReadiness = services.filter((s) => s.required).map(serviceState)
+  const requiredReferenceReadiness = references.filter((r) => r.required).map(referenceState)
   const hasRequiredNeeds =
-    tools.some((t) => t.required) || env.some((e) => e.required) || services.some((s) => s.required)
+    tools.some((t) => t.required) ||
+    env.some((e) => e.required) ||
+    services.some((s) => s.required) ||
+    references.some((r) => r.required)
   const status = overallStatus(
     commands,
-    [...requiredReadiness, ...requiredEnvReadiness, ...requiredServiceReadiness],
+    [...requiredReadiness, ...requiredEnvReadiness, ...requiredServiceReadiness, ...requiredReferenceReadiness],
     context,
     warnings,
     hasRequiredNeeds,
@@ -563,6 +600,7 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     ...requiredReadiness,
     ...requiredEnvReadiness,
     ...requiredServiceReadiness,
+    ...requiredReferenceReadiness,
     ...context.map((c) => c.status),
   ]
 
@@ -581,6 +619,7 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     tools,
     env,
     services,
+    references,
     context,
     actions,
     warnings,
@@ -888,6 +927,32 @@ function serviceState(service: ReadyService): ReadinessState {
   return 'blocked'
 }
 
+/**
+ * Check each approved reference is where the owner said it is.
+ *
+ * Repository-local and non-executing, so it is checked whether or not `--check` is passed:
+ * `--check` governs the environment, and the repository is already read to build the report.
+ * The file is never opened, so an approved-but-sensitive document is not read, copied or
+ * summarized merely because it was referenced.
+ */
+function collectReferences(declared: readonly DeclaredReference[], environment: ReadyEnvironment): ReadyReference[] {
+  return declared.map((entry) => ({
+    id: entry.id,
+    path: entry.path,
+    scope: entry.scope ?? 'other',
+    reason: entry.reason ?? null,
+    required: entry.required ?? true,
+    status:
+      environment.fileExists === undefined ? 'unknown' : environment.fileExists(entry.path) ? 'present' : 'missing',
+  }))
+}
+
+function referenceState(reference: ReadyReference): ReadinessState {
+  if (reference.status === 'present') return 'verified'
+  if (reference.status === 'unknown') return 'unknown'
+  return 'blocked'
+}
+
 function collectContext(profile: ProjectProfile): ReadyContext[] {
   // A global instruction file is the developer's, not the repository's, and is not shipped
   // with the code: it is not evidence that this repository has project context.
@@ -949,6 +1014,7 @@ function proposeActions(
   tools: readonly ReadyTool[],
   env: readonly ReadyEnvVar[],
   services: readonly ReadyService[],
+  references: readonly ReadyReference[],
   context: readonly ReadyContext[],
 ): ReadyAction[] {
   const actions: ReadyAction[] = []
@@ -1022,6 +1088,20 @@ function proposeActions(
       reason: `${service.id} is required but nothing is accepting connections on ${service.host}:${service.port}${
         service.reason === null ? '' : ` (${service.reason})`
       }; start the service before running this project`,
+    })
+  }
+
+  for (const reference of references) {
+    if (!reference.required || reference.status !== 'missing') continue
+    actions.push({
+      id: `restore:${reference.id}`,
+      summary: `Restore ${reference.path}`,
+      // No command: anvil does not know what the document should contain.
+      command: null,
+      requiresApproval: true,
+      reason: `${reference.path} is approved as ${reference.scope} context but does not exist${
+        reference.reason === null ? '' : ` (${reference.reason})`
+      }; restore it or remove the declaration`,
     })
   }
 

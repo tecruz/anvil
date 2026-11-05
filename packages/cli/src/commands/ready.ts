@@ -29,8 +29,9 @@ export const readyCommand: Command = {
     'each tool is a PATH lookup and a bounded version probe; a declared version range is',
     'compared with the reported version. Declared environment variables are checked for',
     'presence by name only -- a value is never read into the report. Declared services are',
-    'checked with a bounded loopback TCP connect, which sends no data. The repository is',
-    'never built or tested, and no setup action is run.',
+    'checked with a bounded loopback TCP connect, which sends no data. Approved context',
+    'references are checked for existence only; the document is never read. The repository',
+    'is never built or tested, and no setup action is run.',
     '',
     '--check             probe the environment (opt-in; the only mode that spawns)',
     '--fail-on-blocked   exit 6 when the report is blocked, for a CI gate',
@@ -73,6 +74,7 @@ export const readyCommand: Command = {
           .map((t) => t.id),
         ...report.env.filter((e) => e.required && (e.status === 'missing' || e.status === 'empty')).map((e) => e.name),
         ...report.services.filter((s) => s.required && s.status === 'unreachable').map((s) => s.id),
+        ...report.references.filter((r) => r.required && r.status === 'missing').map((r) => r.id),
         ...report.context.filter((c) => c.status === 'blocked').map((c) => c.id),
       ]
       const err = new AnvilError(
@@ -211,6 +213,20 @@ function renderReady(report: ReadyReport, style: Style): string {
             const address = s.dim(` ${x.host}:${x.port}`)
             const reason = x.reason === null ? '' : s.dim(` -- ${x.reason}`)
             return `  ${x.id.padEnd(20)} ${statusTag(x.status, s)} ${req}${address}${reason}`
+          })
+          .join('\n'),
+  )
+
+  out.push('')
+  out.push(s.bold('References'))
+  out.push(
+    report.references.length === 0
+      ? s.dim('  (none declared)')
+      : report.references
+          .map((r) => {
+            const req = r.required ? s.yellow('required') : s.dim('optional')
+            const reason = r.reason === null ? '' : s.dim(` -- ${r.reason}`)
+            return `  ${r.path.padEnd(32)} ${statusTag(r.status, s)} ${req} ${s.dim(r.scope)}${reason}`
           })
           .join('\n'),
   )
