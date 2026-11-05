@@ -353,7 +353,8 @@ Two layers, repo-local wins:
   ready --check`. Each entry is `{ "name": "DATABASE_URL", "reason": "...", "required": true }`.
   `required` defaults to true. A declaration names a variable only; anvil never reads or
   writes its value, and a `value` key is a config error. The name must be one a shell can
-  export (`[A-Za-z_][A-Za-z0-9_]*`).
+  export (`[A-Za-z_][A-Za-z0-9_]*`). On Windows, names are matched case-insensitively, the
+  way the OS and a spawned process treat them; elsewhere they match exactly.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year.

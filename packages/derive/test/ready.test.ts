@@ -999,6 +999,40 @@ describe('buildReadyReport: declared environment variables', () => {
     assert.equal(report.env[0]?.status, 'unknown')
     assert.equal(report.status, 'unknown')
   })
+
+  test('an absent name that collides with an inherited property is missing, not present', async () => {
+    // `env['constructor']` returns Object.prototype.constructor, so a truthy lookup would
+    // verify a variable that is not set.
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      const report = await buildReadyReport({
+        profile: profileOf(),
+        matches: [],
+        declared: declaredEnv([{ name }]),
+        check: true,
+        environment: systemEnvironment({ platform: 'linux', env: {} }),
+      })
+      assert.equal(report.env[0]?.status, 'missing', name)
+      assert.equal(report.status, 'blocked', name)
+    }
+  })
+
+  test('only own keys count: an inherited environment entry is not a variable', async () => {
+    const inherited = Object.create({ API_TOKEN: 'inherited' }) as NodeJS.ProcessEnv
+    const environment = systemEnvironment({ platform: 'linux', env: inherited })
+    assert.equal(environment.envStatus?.('API_TOKEN'), 'missing')
+  })
+
+  test('a Windows environment matches variable names case-insensitively', () => {
+    const environment = systemEnvironment({ platform: 'win32', env: { api_token: 'set' } })
+    assert.equal(environment.envStatus?.('API_TOKEN'), 'present')
+    assert.equal(environment.envStatus?.('Api_Token'), 'present')
+  })
+
+  test('a non-Windows environment matches names exactly', () => {
+    const environment = systemEnvironment({ platform: 'linux', env: { api_token: 'set' } })
+    assert.equal(environment.envStatus?.('API_TOKEN'), 'missing')
+    assert.equal(environment.envStatus?.('api_token'), 'present')
+  })
 })
 
 describe('buildReadyReport: context and conflicts stay visible', () => {

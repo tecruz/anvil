@@ -341,6 +341,25 @@ function resolveInterpreter(
   return fallback === null ? null : resolve(fallback.path)
 }
 
+/**
+ * The own key in `env` that holds `name`, or `undefined` when it is not present.
+ *
+ * `env[name]` is wrong twice over: it walks the prototype chain, so an absent variable named
+ * `constructor` reads as the inherited function and is reported `present`, and it is
+ * case-sensitive even on Windows, where the OS and a child process treat variable names
+ * case-insensitively. Looking at own keys only, with a case-insensitive match on Windows,
+ * makes the answer the same thing a spawned process would see.
+ */
+function findEnvKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platform): string | undefined {
+  if (Object.hasOwn(env, name)) return name
+  if (platform !== 'win32') return undefined
+  const target = name.toLowerCase()
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === target) return key
+  }
+  return undefined
+}
+
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
   options: {
@@ -397,11 +416,11 @@ export function systemEnvironment(
     },
     envStatus(name) {
       const env = options.env ?? process.env
-      const value = env[name]
-      if (value === undefined) return 'missing'
+      const key = findEnvKey(env, name, platform)
+      if (key === undefined) return 'missing'
       // An empty value is not a configured value: it would be exported and then read as an
       // empty credential, so it is reported distinctly rather than as present.
-      return value === '' ? 'empty' : 'present'
+      return env[key] === '' ? 'empty' : 'present'
     },
   }
 }
