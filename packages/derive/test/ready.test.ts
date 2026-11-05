@@ -1250,6 +1250,45 @@ describe('buildReadyReport: declared services', () => {
     }
   })
 
+  test('every loopback answer is tried, so an IPv6-first resolution still finds an IPv4 listener', async () => {
+    // DNS commonly lists `::1` before `127.0.0.1`. A listener on one family must not be
+    // reported as down because the other was answered first.
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    assert.ok(port > 0)
+    try {
+      const ipv6First = systemEnvironment({
+        platform: 'linux',
+        lookupRunner: async () => [{ address: '::1' }, { address: '127.0.0.1' }],
+      })
+      assert.deepEqual(await ipv6First.checkService?.('localhost', port), { state: 'open' })
+
+      // A non-loopback answer is dropped, and a loopback answer after it is still used.
+      const mixed = systemEnvironment({
+        platform: 'linux',
+        lookupRunner: async () => [{ address: '203.0.113.10' }, { address: '127.0.0.1' }],
+      })
+      assert.deepEqual(await mixed.checkService?.('localhost', port), { state: 'open' })
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    }
+  })
+
+  test('all loopback answers refused is a confirmed refusal', async () => {
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    const environment = systemEnvironment({
+      platform: 'linux',
+      lookupRunner: async () => [{ address: '127.0.0.1' }],
+    })
+    assert.deepEqual(await environment.checkService?.('localhost', port), { state: 'closed' })
+  })
+
   test('only a confirmed refusal is unreachable', () => {
     assert.equal(connectErrorState({ code: 'ECONNREFUSED' }), 'closed')
     for (const error of [
@@ -1393,6 +1432,62 @@ describe('buildReadyReport: approved context references', () => {
       declared: declaredReferences([{ id: 'policy', path: 'linked/policy.md' }]),
       check: true,
       environment: systemEnvironment({ containmentRoot: root }),
+    })
+    assert.equal(report.references[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('a missing or directory path behind a link out of the repository is unknown', async (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-ref-absent-'))
+    const outside = mkdtempSync(join(tmpdir(), 'anvil-ref-absent-out-'))
+    temps.push(root, outside)
+    try {
+      symlinkSync(outside, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      t.skip('directory links are unavailable here')
+      return
+    }
+    const environment = systemEnvironment({ containmentRoot: root })
+    const declared = declaredReferences([{ id: 'policy', path: 'linked/policy.md' }])
+
+    // `outside/policy.md` is deliberately absent: containment is decided before existence, so
+    // a missing file behind a link that leaves the repository is `unknown`, not a `missing`
+    // document to restore.
+    const absent = await buildReadyReport({
+      profile: profileOf({ root }),
+      matches: [],
+      declared,
+      check: true,
+      environment,
+    })
+    assert.equal(absent.references[0]?.status, 'unknown')
+    assert.equal(absent.status, 'unknown')
+    assert.equal(absent.actions.length, 0)
+
+    // A directory where a document is expected is likewise not a decidable `missing`.
+    mkdirSync(join(outside, 'policy.md'))
+    const directory = await buildReadyReport({
+      profile: profileOf({ root }),
+      matches: [],
+      declared,
+      check: true,
+      environment,
+    })
+    assert.equal(directory.references[0]?.status, 'unknown')
+    assert.equal(directory.actions.length, 0)
+  })
+
+  test('a containment root that cannot be resolved leaves every reference unknown', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-ref-noroot-'))
+    temps.push(root)
+    const report = await buildReadyReport({
+      profile: profileOf({ root }),
+      matches: [],
+      declared: declaredReferences([{ id: 'policy', path: 'docs/policy.md' }]),
+      check: true,
+      // The containment root does not exist, so nothing can be placed inside it.
+      environment: systemEnvironment({ containmentRoot: join(root, '__absent_root__') }),
     })
     assert.equal(report.references[0]?.status, 'unknown')
     assert.equal(report.status, 'unknown')

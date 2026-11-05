@@ -27,7 +27,7 @@
  */
 
 import { lookup } from 'node:dns/promises'
-import { realpathSync, statSync } from 'node:fs'
+import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { isIP, Socket } from 'node:net'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -461,6 +461,52 @@ function isAbsentError(error: unknown): boolean {
   return code === 'ENOENT' || code === 'ENOTDIR'
 }
 
+/**
+ * `path` with every link resolved, or null when it cannot be canonicalized.
+ *
+ * Unlike {@link safeRealpath}, a failure is *not* papered over with the lexical path: a
+ * containment decision made on an unresolved path can only guess where it points.
+ */
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The deepest part of `path` (itself when it exists) that can be resolved, or null when the
+ * path cannot be placed.
+ *
+ * A reference may name a file that is not there yet, so the final component cannot be
+ * canonicalized. Its containing directory can still be a link that leaves the repository,
+ * though, so containment is decided against the deepest ancestor that exists. A path whose
+ * stat fails for a reason other than absence -- a permission error, or a link that cannot be
+ * followed -- is undecidable and yields null.
+ */
+function containmentBase(path: string): string | null {
+  let current = resolve(path)
+  for (;;) {
+    try {
+      statSync(current)
+      return current
+    } catch (error) {
+      if (!isAbsentError(error)) return null
+    }
+    // `lstat` does not follow the final component, so a link whose target cannot be reached
+    // (a broken or unresolvable link) is visible here. Where such a link leads is unknown.
+    try {
+      if (lstatSync(current).isSymbolicLink()) return null
+    } catch {
+      // Not a readable entry at all; the parent can still be checked.
+    }
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
+}
+
 /** `promise` or null when it does not settle within `ms`. Never rejects. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
   return new Promise((resolve) => {
@@ -484,20 +530,23 @@ function defaultResolve(host: string): Promise<readonly { address: string }[]> {
 }
 
 /**
- * The numeric loopback address to connect to, or null when `host` cannot be pinned to one.
+ * Every numeric loopback address `host` may be reached at, or null when none can be pinned.
  *
  * An IP literal is used as given, and must itself be loopback. A name is resolved first, and
- * only a loopback answer is accepted; the returned address is numeric, so the socket never
- * performs a second, unpinned resolution.
+ * only loopback answers are kept; the returned addresses are numeric, so the socket never
+ * performs a second, unpinned resolution. Every answer is kept, not just the first: a name
+ * that resolves to both `::1` and `127.0.0.1` is reachable through either, and a listener on
+ * one family must not be reported as down because the other answered first.
  */
 async function resolveLoopback(
   host: string,
   resolve: (host: string) => Promise<readonly { address: string }[]>,
-): Promise<string | null> {
-  if (isIP(host) !== 0) return isLoopbackAddress(host) ? host : null
+): Promise<string[] | null> {
+  if (isIP(host) !== 0) return isLoopbackAddress(host) ? [host] : null
   const answers = await withTimeout(resolve(host), SERVICE_TIMEOUT_MS)
   if (answers === null) return null
-  return answers.map((answer) => answer.address).find(isLoopbackAddress) ?? null
+  const loopback = answers.map((answer) => answer.address).filter(isLoopbackAddress)
+  return loopback.length > 0 ? loopback : null
 }
 
 /**
@@ -526,15 +575,35 @@ function connectLoopback(address: string, port: number): Promise<ServiceProbe> {
   })
 }
 
-/** Resolve `host` to a loopback address, then connect to that address. */
+/**
+ * Try each pinned loopback address until one answers.
+ *
+ * `open` wins as soon as it is seen. `closed` is reported only when *every* candidate
+ * refused; if any candidate could not be decided, the answer is `inconclusive` rather than a
+ * refusal, because a listener on the undecided address would make a refusal a false blocker.
+ */
+async function connectCandidates(addresses: readonly string[], port: number): Promise<ServiceProbe> {
+  let sawClosed = false
+  let sawInconclusive = false
+  for (const address of addresses) {
+    const probe = await connectLoopback(address, port)
+    if (probe.state === 'open') return probe
+    if (probe.state === 'closed') sawClosed = true
+    else sawInconclusive = true
+  }
+  if (sawInconclusive) return { state: 'inconclusive' }
+  return { state: sawClosed ? 'closed' : 'inconclusive' }
+}
+
+/** Resolve `host` to its loopback addresses, then connect to the first that answers. */
 async function connectService(
   host: string,
   port: number,
   resolve: (host: string) => Promise<readonly { address: string }[]>,
 ): Promise<ServiceProbe> {
-  const address = await resolveLoopback(host, resolve)
-  if (address === null) return { state: 'inconclusive' }
-  return connectLoopback(address, port)
+  const addresses = await resolveLoopback(host, resolve)
+  if (addresses === null) return { state: 'inconclusive' }
+  return connectCandidates(addresses, port)
 }
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
@@ -622,17 +691,26 @@ export function systemEnvironment(
       const root = options.containmentRoot
       // Without a root there is nothing to contain the path against, so nothing is asserted.
       if (root === undefined) return 'unknown'
+      // The repository boundary must itself resolve: a root that cannot be canonicalized (it
+      // is gone, or a link on the way cannot be read) leaves containment undecidable.
+      const rootReal = realpathOrNull(root)
+      if (rootReal === null) return 'unknown'
       const candidate = join(root, relPath)
+      // Decide containment before existence. A link can leave the repository while the entry
+      // itself sits inside it, so a path that resolves outside -- or cannot be resolved -- is
+      // `unknown` even when the file is absent, rather than a `missing` that accuses the owner.
+      const base = containmentBase(candidate)
+      if (base === null) return 'unknown'
+      const baseReal = realpathOrNull(base)
+      if (baseReal === null || !isWithin(rootReal, baseReal)) return 'unknown'
       try {
-        // A path that is genuinely absent is `missing`; anything else (a permission error, a
-        // broken chain) could not be decided, so it is `unknown` rather than an accusation.
-        if (!statSync(candidate).isFile()) return 'missing'
+        // The path is inside the repository, so its existence is now a decidable fact. A path
+        // that is genuinely absent is `missing`; anything else (a permission error, a broken
+        // chain) could not be decided, so it is `unknown` rather than an accusation.
+        return statSync(candidate).isFile() ? 'present' : 'missing'
       } catch (error) {
         return isAbsentError(error) ? 'missing' : 'unknown'
       }
-      // A link can leave the repository while the entry itself sits inside it; only a target
-      // that stays inside counts as the approved document.
-      return isInsideRepository(root, candidate) ? 'present' : 'unknown'
     },
   }
 }

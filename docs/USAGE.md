@@ -243,18 +243,21 @@ reports three states and never guesses between them.
   healthy, ready to serve requests, or authorized for the credentials at hand. Only loopback
   hosts are accepted, so a committed config cannot turn the report into a probe of an
   arbitrary host, and nothing is sent to the service. A hostname is resolved first and the
-  connect is pinned to a loopback address, so a name that resolves elsewhere is `unknown`
-  rather than contacted. Only a refused connection is `unreachable` — a timeout or any other
-  socket error stays `unknown`. Without `--check` nothing is contacted.
+  connect is pinned to a loopback address — every loopback answer is tried, so a name that
+  resolves to both `::1` and `127.0.0.1` reaches whichever family is listening — and a name
+  that resolves only elsewhere is `unknown` rather than contacted. Only a refused connection
+  is `unreachable`; a timeout or any other socket error stays `unknown`. Without `--check`
+  nothing is contacted.
 - **References** — documents the owner approved as project context in `project.references`,
   each with a path and a scope (`standards`, `architecture`, `requirements`, `security` or
   `other`). Anvil checks only that the path exists: a missing required document is `blocked`
   and proposes a `restore:` action, while an optional one is reported without blocking. The
   file is never opened, so approving a pointer cannot copy its contents into a report, and a
   path that could leave the repository — or a URL — is rejected at config load. A link whose
-  target leaves the repository, or a status that cannot be read, is `unknown` rather than
-  `missing` or a pass. The check is repository-local, so it runs whether or not `--check` is
-  given.
+  target leaves the repository, a link whose target cannot be followed, or a path whose
+  containment cannot be established is `unknown` rather than `missing` or a pass: containment
+  is decided before existence, so an absent file behind an external link is not a false
+  `restore`. The check is repository-local, so it runs whether or not `--check` is given.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
