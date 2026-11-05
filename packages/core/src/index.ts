@@ -23,6 +23,7 @@ export {
   type DeclaredCommand,
   type DeclaredCommandKind,
   type DeclaredEnvVar,
+  type DeclaredService,
   type DeclaredTool,
   defaultConfig,
   ensureParentDir,

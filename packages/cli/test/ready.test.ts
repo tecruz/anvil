@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -156,6 +157,43 @@ describe('anvil ready', () => {
 
     const unchecked = runReady(dir, ['--json'])
     assert.equal((dataOf(unchecked).env as Array<{ status: string }>)[0]?.status, 'unknown')
+  })
+
+  test('a declared service is checked with a loopback connect, and a refused one blocks', async () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({ project: { services: [] } }),
+    })
+
+    // A real listener: bound to an ephemeral loopback port, then declared in the config.
+    const server = createServer()
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address !== null ? address.port : 0
+    assert.ok(port > 0)
+    try {
+      const config = JSON.stringify({ project: { services: [{ id: 'app', port, reason: 'the app' }] } })
+      writeFileSync(join(dir, 'anvil.config.json'), config)
+
+      const up = runReady(dir, ['--json', '--check'])
+      assert.equal(up.code, 0, up.stderr)
+      const upData = dataOf(up)
+      assert.equal((upData.services as Array<{ status: string }>)[0]?.status, 'reachable')
+      assert.equal(upData.status, 'verified')
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+    }
+
+    // The same port with nothing listening: refused, blocked, and no startup command guessed.
+    const down = runReady(dir, ['--json', '--check'])
+    const downData = dataOf(down)
+    assert.equal((downData.services as Array<{ status: string }>)[0]?.status, 'unreachable')
+    assert.equal(downData.status, 'blocked')
+    const action = (downData.actions as Array<{ id: string; command: string | null }>).find((a) => a.id === 'start:app')
+    assert.equal(action?.command, null, 'no startup line is fabricated')
+
+    const unchecked = runReady(dir, ['--json'])
+    assert.equal((dataOf(unchecked).services as Array<{ status: string }>)[0]?.status, 'unknown')
   })
 
   test('a declared install command is proposed, never run', () => {

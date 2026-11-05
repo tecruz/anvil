@@ -51,8 +51,11 @@ export {
   type ReadyEnvStatus,
   type ReadyEnvVar,
   type ReadyReport,
+  type ReadyService,
+  type ReadyServiceStatus,
   type ReadyTool,
   type ReadyToolStatus,
+  type ServiceProbe,
   systemEnvironment,
   type ToolProbe,
 } from './ready.ts'

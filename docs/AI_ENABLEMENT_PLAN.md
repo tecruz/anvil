@@ -42,13 +42,20 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   variable it has never seen a value for. Only presence is observed: no value is read into
   the report, a `value` key in the config is rejected, and a present variable is never
   presented as a working credential.
+- **Declared services** (workstream 2, second slice) — `project.services` names local
+  services the project needs on loopback hosts and ports, checked by `anvil ready --check`
+  with a bounded TCP connect that sends nothing. A refused connection blocks a required
+  report and proposes a `start:` action carrying no command; a timeout or throw is `unknown`,
+  never a blocker; an optional service is reported without blocking. Only loopback hosts are
+  accepted, so a committed config cannot turn a read-only report into a probe of an arbitrary
+  host, and `reachable` is reachability, not health or authorization.
 - **Approved setup actions** (workstream 3, first slice) — a blocked report carries
   `actions`, each with `requiresApproval: true`. The only install command printed is one the
   owner declared; otherwise the action has no command, because anvil will not guess a
   package manager. Nothing in the report is run, and a path tool is never executed.
 
 Still proposed: automatic install/configure with verification, company-context sources,
-service readiness, and real-agent evaluation evidence.
+and real-agent evaluation evidence.
 
 ## Goal
 
@@ -124,10 +131,11 @@ build, run and verify the project.
 
 ### Acceptance
 
-- [ ] Missing tools, incompatible versions and unavailable services are reported
-  separately from source-code or test failures. _Partial: missing, unrunnable and
-  version-incompatible tools, and missing or empty required environment variables, are
-  reported; services are not yet checked._
+- [x] Missing tools, incompatible versions and unavailable services are reported
+  separately from source-code or test failures. Missing, unrunnable and version-incompatible
+  tools, missing or empty required environment variables, and refused loopback services are
+  all reported as their own kind of blocker; a service's reachability is not presented as
+  health or authorization.
 - [x] Environment checks and setup never run implicitly during repository profiling.
 - [x] Secret values are not copied into generated context or diagnostic output.
 - [ ] Restricted credentials, missing corporate access and unavailable hardware

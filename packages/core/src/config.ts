@@ -89,11 +89,32 @@ export interface DeclaredEnvVar {
 }
 
 /**
+ * A local service the project needs, checked by `anvil ready --check` with a TCP connect.
+ *
+ * Deliberately loopback-only: a committed `anvil.config.json` must not be able to make a
+ * read-only readiness report reach an arbitrary host. Only whether something accepts a
+ * connection is observed, which is not proof the service is healthy or authorized for use.
+ */
+export interface DeclaredService {
+  /** Stable name, used in the report and proposed actions. */
+  id: string
+  /** Loopback host to connect to. Defaults to `127.0.0.1`. */
+  host?: string
+  /** TCP port the service listens on. */
+  port: number
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/**
  * What the project owner says the project needs, for the parts anvil cannot detect.
  *
  * The detected profile stays the only source of *detected* facts. This section is the
  * explicit escape hatch: a technology anvil has no detector for, a tool it cannot infer,
- * a working directory it could only guess at, and a credential only the environment holds.
+ * a working directory it could only guess at, a credential only the environment holds, and
+ * a service this machine has to be running.
  */
 export interface ProjectConfig {
   /** Owner-declared commands, keyed by kind, for a project anvil cannot detect on its own. */
@@ -102,6 +123,8 @@ export interface ProjectConfig {
   tools: DeclaredTool[]
   /** Owner-declared environment variables, checked for presence by name. */
   env: DeclaredEnvVar[]
+  /** Owner-declared local services, checked with a bounded loopback TCP connect. */
+  services: DeclaredService[]
 }
 
 export interface AnvilConfig {
@@ -149,7 +172,7 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
-    project: { commands: [], tools: [], env: [] },
+    project: { commands: [], tools: [], env: [], services: [] },
   }
 }
 
@@ -358,6 +381,62 @@ function parseDeclaredEnv(value: unknown, path: string, issues: ValidationIssue[
   return out
 }
 
+/** The hosts anvil will connect to for a declared service. Loopback only, by design. */
+const LOOPBACK_HOSTS: readonly string[] = ['localhost', '127.0.0.1', '::1', '[::1]']
+
+/** Validate `project.services`. Loopback hosts only; a port is mandatory. */
+function parseDeclaredServices(value: unknown, path: string, issues: ValidationIssue[]): DeclaredService[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredService[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'host', 'port', 'reason', 'required'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    if (typeof entry.port !== 'number' || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) {
+      issues.push({ path: `${at}.port`, message: 'expected an integer port between 1 and 65535' })
+      return
+    }
+    const service: DeclaredService = { id: entry.id, port: entry.port }
+    if (entry.host !== undefined) {
+      if (typeof entry.host !== 'string' || !LOOPBACK_HOSTS.includes(entry.host)) {
+        // A readiness report must not be usable as a request to probe an arbitrary host.
+        issues.push({
+          path: `${at}.host`,
+          message: `expected a loopback host (${LOOPBACK_HOSTS.join(', ')})`,
+        })
+        return
+      }
+      service.host = entry.host
+    }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      service.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      service.required = entry.required
+    }
+    out.push(service)
+  })
+  return out
+}
+
 /**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
@@ -453,7 +532,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   if (layer.project !== undefined) {
     const project = expectObject(layer.project, 'project', issues)
-    checkUnknownKeys(project, ['commands', 'tools', 'env'], 'project', issues)
+    checkUnknownKeys(project, ['commands', 'tools', 'env', 'services'], 'project', issues)
     // Each key replaces its array rather than concatenating: a repo layer that declares its
     // own commands is answering the question, not adding to the global answer. Keys the
     // layer is silent about keep the merged value from the layers below.
@@ -468,6 +547,10 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (project.env !== undefined) {
       const env = parseDeclaredEnv(project.env, 'project.env', issues)
       if (env !== undefined) next.project.env = env
+    }
+    if (project.services !== undefined) {
+      const services = parseDeclaredServices(project.services, 'project.services', issues)
+      if (services !== undefined) next.project.services = services
     }
   }
 
@@ -557,7 +640,7 @@ export function starterConfigJson(): string {
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and
     // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
     // write is a claim anvil would be inventing.
-    project: { commands: [], tools: [], env: [] },
+    project: { commands: [], tools: [], env: [], services: [] },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`

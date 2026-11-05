@@ -27,10 +27,12 @@
  */
 
 import { realpathSync, statSync } from 'node:fs'
+import { Socket } from 'node:net'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   type DeclaredCommand,
   type DeclaredEnvVar,
+  type DeclaredService,
   type ProjectConfig,
   parseVersion,
   resolveCommand,
@@ -113,6 +115,30 @@ export interface ReadyEnvVar {
   status: ReadyEnvStatus
 }
 
+/**
+ * Whether something is accepting connections on a declared service's port.
+ *
+ * `reachable` is not `healthy`: it says a socket opened, not that the service is ready to
+ * serve requests, speaks the expected protocol, or would accept the credentials at hand.
+ */
+export type ReadyServiceStatus = 'reachable' | 'unreachable' | 'unknown'
+
+/** One owner-declared local service and whether anything is listening. */
+export interface ReadyService {
+  id: string
+  /** The loopback host that was connected to. */
+  host: string
+  port: number
+  reason: string | null
+  required: boolean
+  status: ReadyServiceStatus
+}
+
+/** The result of one bounded connect: open, refused, or not decided before the timeout. */
+export interface ServiceProbe {
+  state: 'open' | 'closed' | 'inconclusive'
+}
+
 export interface ReadyAction {
   id: string
   summary: string
@@ -135,6 +161,7 @@ export interface ReadyReport {
   commands: ReadyCommand[]
   tools: ReadyTool[]
   env: ReadyEnvVar[]
+  services: ReadyService[]
   context: ReadyContext[]
   actions: ReadyAction[]
   warnings: string[]
@@ -238,6 +265,13 @@ export interface ReadyEnvironment {
    * variable is declared, the answer is `unknown`, which is the fail-closed direction.
    */
   envStatus?(name: string): ReadyEnvStatus
+  /**
+   * Whether something accepts a TCP connection on `host:port`, within a bounded time.
+   *
+   * Optional like {@link envStatus}: absent, and a declared service is `unknown` rather than
+   * assumed reachable. Never sends a byte, so it cannot carry credentials to the service.
+   */
+  checkService?(host: string, port: number): Promise<ServiceProbe>
 }
 
 /** True when an executable file at `absPath` can actually be launched. */
@@ -366,6 +400,33 @@ function findEnvKey(env: NodeJS.ProcessEnv, name: string, platform: NodeJS.Platf
   return found
 }
 
+/** How long a service connect may take before it is `unknown` rather than a blocker. */
+const SERVICE_TIMEOUT_MS = 1_000
+
+/**
+ * Connect to `host:port` and immediately close, sending nothing.
+ *
+ * A refused connection is a real answer (`closed`); a timeout is not, so it is `inconclusive`
+ * rather than a blocker -- a slow machine must not turn a running service into a failure.
+ */
+function connectService(host: string, port: number): Promise<ServiceProbe> {
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    let settled = false
+    const finish = (state: ServiceProbe['state']): void => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve({ state })
+    }
+    socket.setTimeout(SERVICE_TIMEOUT_MS)
+    socket.once('connect', () => finish('open'))
+    socket.once('timeout', () => finish('inconclusive'))
+    socket.once('error', () => finish('closed'))
+    socket.connect({ host, port })
+  })
+}
+
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
   options: {
@@ -374,10 +435,13 @@ export function systemEnvironment(
     containmentRoot?: string
     /** Overridable for tests: the launcher. Defaults to {@link runProcess}. */
     runner?: typeof runProcess
+    /** Overridable for tests: the service connect. Defaults to {@link connectService}. */
+    serviceRunner?: (host: string, port: number) => Promise<ServiceProbe>
   } = {},
 ): ReadyEnvironment {
   const platform = options.platform ?? process.platform
   const runner = options.runner ?? runProcess
+  const serviceRunner = options.serviceRunner ?? connectService
   return {
     resolve(bin) {
       return resolveCommand(bin, options)?.path ?? null
@@ -432,6 +496,10 @@ export function systemEnvironment(
       // empty credential, so it is reported distinctly rather than as present.
       return value === '' ? 'empty' : 'present'
     },
+    checkService(host, port) {
+      // A connect that throws is inconclusive, never a confirmed refusal.
+      return serviceRunner(host, port).catch((): ServiceProbe => ({ state: 'inconclusive' }))
+    },
   }
 }
 
@@ -470,18 +538,21 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
   const commands = collectCommands(profile, declared.commands)
   const tools = await collectTools(profile, matches, declared, check, environment)
   const env = collectEnv(declared.env, check, environment)
+  const services = await collectServices(declared.services, check, environment)
   const context = collectContext(profile)
   const warnings = collectWarnings(profile, declared.commands)
-  const actions = proposeActions(tools, env, context)
+  const actions = proposeActions(tools, env, services, context)
   // Only required needs decide the status. An optional, playbook-suggested tool or a
-  // non-required variable is guidance, not a need: its absence must not turn a ready
-  // repository into an unknown one.
+  // non-required variable or service is guidance, not a need: its absence must not turn a
+  // ready repository into an unknown one.
   const requiredReadiness = tools.filter((t) => t.required).map(toolState)
   const requiredEnvReadiness = env.filter((e) => e.required).map(envState)
-  const hasRequiredNeeds = tools.some((t) => t.required) || env.some((e) => e.required)
+  const requiredServiceReadiness = services.filter((s) => s.required).map(serviceState)
+  const hasRequiredNeeds =
+    tools.some((t) => t.required) || env.some((e) => e.required) || services.some((s) => s.required)
   const status = overallStatus(
     commands,
-    [...requiredReadiness, ...requiredEnvReadiness],
+    [...requiredReadiness, ...requiredEnvReadiness, ...requiredServiceReadiness],
     context,
     warnings,
     hasRequiredNeeds,
@@ -491,6 +562,7 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     ...commands.map((c) => c.status),
     ...requiredReadiness,
     ...requiredEnvReadiness,
+    ...requiredServiceReadiness,
     ...context.map((c) => c.status),
   ]
 
@@ -508,6 +580,7 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     commands,
     tools,
     env,
+    services,
     context,
     actions,
     warnings,
@@ -778,6 +851,43 @@ function envState(item: ReadyEnvVar): ReadinessState {
   return 'blocked'
 }
 
+/**
+ * Decide each declared service's reachability. Without `--check` nothing is contacted.
+ *
+ * A connect that could not be decided (`inconclusive`) is `unknown`, never a blocker: a slow
+ * machine must not report a running service as down.
+ */
+async function collectServices(
+  declared: readonly DeclaredService[],
+  check: boolean,
+  environment: ReadyEnvironment,
+): Promise<ReadyService[]> {
+  return Promise.all(
+    declared.map(async (entry) => {
+      // `[::1]` is the URL spelling of the IPv6 loopback; the socket wants it unbracketed.
+      const host = (entry.host ?? '127.0.0.1').replace(/^\[(.*)\]$/, '$1')
+      const service: ReadyService = {
+        id: entry.id,
+        host,
+        port: entry.port,
+        reason: entry.reason ?? null,
+        required: entry.required ?? true,
+        status: 'unknown',
+      }
+      if (!check || environment.checkService === undefined) return service
+      const probe = await environment.checkService(host, entry.port)
+      service.status = probe.state === 'open' ? 'reachable' : probe.state === 'closed' ? 'unreachable' : 'unknown'
+      return service
+    }),
+  )
+}
+
+function serviceState(service: ReadyService): ReadinessState {
+  if (service.status === 'reachable') return 'verified'
+  if (service.status === 'unknown') return 'unknown'
+  return 'blocked'
+}
+
 function collectContext(profile: ProjectProfile): ReadyContext[] {
   // A global instruction file is the developer's, not the repository's, and is not shipped
   // with the code: it is not evidence that this repository has project context.
@@ -838,6 +948,7 @@ function collectWarnings(profile: ProjectProfile, declared: readonly DeclaredCom
 function proposeActions(
   tools: readonly ReadyTool[],
   env: readonly ReadyEnvVar[],
+  services: readonly ReadyService[],
   context: readonly ReadyContext[],
 ): ReadyAction[] {
   const actions: ReadyAction[] = []
@@ -897,6 +1008,21 @@ function proposeActions(
         }; set it in your environment before running this project`,
       })
     }
+  }
+
+  for (const service of services) {
+    if (!service.required || service.status !== 'unreachable') continue
+    actions.push({
+      id: `start:${service.id}`,
+      summary: `Start ${service.id}`,
+      // No command: anvil does not know whether this is Docker, Compose or a local process,
+      // and a guessed startup line is the kind of confident wrong answer it refuses.
+      command: null,
+      requiresApproval: true,
+      reason: `${service.id} is required but nothing is accepting connections on ${service.host}:${service.port}${
+        service.reason === null ? '' : ` (${service.reason})`
+      }; start the service before running this project`,
+    })
   }
 
   for (const item of context) {

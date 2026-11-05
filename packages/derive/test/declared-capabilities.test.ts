@@ -25,7 +25,12 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateAgentsFile({
       profile: profileOf(),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'mystery-cli check', dir: 'engine' }], tools: [], env: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'mystery-cli check', dir: 'engine' }],
+        tools: [],
+        env: [],
+        services: [],
+      },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `mystery-cli check` _\(declared\)_ \(from `engine\/`\)/)
     assert.match(artifact.content, /Some of these are declared in `anvil\.config\.json`/)
@@ -35,7 +40,12 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateVerifySkill({
       profile: profileOf(),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'mystery-cli check', dir: 'engine' }], tools: [], env: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'mystery-cli check', dir: 'engine' }],
+        tools: [],
+        env: [],
+        services: [],
+      },
     })
     assert.ok(artifact, 'a declared test command is enough to generate the skill')
     assert.match(artifact.content, /cd engine && mystery-cli check/)
@@ -55,7 +65,12 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateVerifySkill({
       profile: profileOf(),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'node check.js', dir: 'engine tools' }], tools: [], env: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'node check.js', dir: 'engine tools' }],
+        tools: [],
+        env: [],
+        services: [],
+      },
     })
     assert.ok(artifact)
     assert.match(artifact.content, /cd 'engine tools' && node check\.js/)
@@ -65,7 +80,7 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateAgentsFile({
       profile: profileOf({ projectDir: 'engine' }),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [], services: [] },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `node root-check\.js` _\(declared\)_ \(from the repository root\)/)
   })
@@ -76,7 +91,7 @@ describe('declared capabilities reach generated context', () => {
     const artifact = generateVerifySkill({
       profile: profileOf({ projectDir: 'engine' }),
       matches: noMatches,
-      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'node root-check.js', dir: '' }], tools: [], env: [], services: [] },
     })
     assert.ok(artifact)
     assert.match(artifact.content, /Run the commands below from the repository root/)
@@ -94,7 +109,7 @@ describe('declared capabilities reach generated context', () => {
       matches: noMatches,
       target: 'all',
       read: () => null,
-      declared: { commands: [{ kind: 'test', cmd: 'make check', dir: 'engine' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'make check', dir: 'engine' }], tools: [], env: [], services: [] },
     })
     const declared = brief.commands.find((c) => c.source === 'declared')
     assert.equal(declared?.cmd, 'make check')

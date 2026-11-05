@@ -41,6 +41,8 @@ function env(
     runnable?: readonly string[]
     /** Declared variable names and the values the fake environment holds for them. */
     variables?: Record<string, string>
+    /** Answer per `host:port`, as a loopback connect would find it. */
+    services?: Record<string, 'open' | 'closed' | 'inconclusive'>
   } = {},
 ): ReadyEnvironment {
   const found = new Set(options.found ?? [])
@@ -56,6 +58,7 @@ function env(
       if (value === undefined) return 'missing'
       return value === '' ? 'empty' : 'present'
     },
+    checkService: async (host, port) => ({ state: options.services?.[`${host}:${port}`] ?? 'inconclusive' }),
   }
 }
 
@@ -89,6 +92,9 @@ function untouchedEnv(): ReadyEnvironment {
     envStatus(name) {
       throw new Error(`environment.envStatus called for ${name} without --check`)
     },
+    checkService(host, port) {
+      throw new Error(`environment.checkService called for ${host}:${port} without --check`)
+    },
   }
 }
 
@@ -100,7 +106,7 @@ function playbookMatch(id: string, verify: string[]): MatchResult {
   } as unknown as MatchResult
 }
 
-const noDeclared = { commands: [], tools: [], env: [] }
+const noDeclared = { commands: [], tools: [], env: [], services: [] }
 
 describe('isRunnableExecutable', () => {
   test('a non-executable file is not runnable, and a real executable is', () => {
@@ -148,7 +154,7 @@ describe('buildReadyReport: status vocabulary', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [], services: [] },
       check: false,
       environment: env(),
     })
@@ -213,7 +219,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ commands: { test: [{ cmd: 'pytest', source: 'detected', evidence: 'x:1' }] } }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'make' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'make' }], env: [], services: [] },
       check: false,
       environment: untouchedEnv(),
     })
@@ -276,7 +282,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'evil' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'evil' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => repoBin,
@@ -296,7 +302,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'evil' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'evil' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => repoBin,
@@ -316,7 +322,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => '/usr/local/bin/node',
@@ -481,7 +487,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ root: repo }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'linked' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'linked' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => entry,
@@ -519,7 +525,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ root: alias }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'go' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'go' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => candidate,
@@ -540,7 +546,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node-abs', bin: absolute }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node-abs', bin: absolute }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => {
@@ -571,6 +577,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
         ],
         tools: [],
         env: [],
+        services: [],
       },
       check: true,
       environment: env({ found: ['node'] }),
@@ -590,7 +597,12 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: './check.cmd test', dir: 'engine' }], tools: [], env: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: './check.cmd test', dir: 'engine' }],
+        tools: [],
+        env: [],
+        services: [],
+      },
       check: true,
       environment: {
         resolve: () => {
@@ -615,7 +627,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ commands: { test: [{ cmd: 'obsolete-runner test', source: 'inferred' }] } }),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: 'node check.js' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'node check.js' }], tools: [], env: [], services: [] },
       check: true,
       environment: env({ found: ['node'] }),
     })
@@ -646,6 +658,7 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
         commands: [],
         tools: [{ id: 'make', reason: 'the build', required: true, install: 'apt-get install -y make' }],
         env: [],
+        services: [],
       },
       check: true,
       environment: env({ found: [] }),
@@ -662,7 +675,7 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'mystery-tool' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'mystery-tool' }], env: [], services: [] },
       check: true,
       environment: env({ found: [] }),
     })
@@ -675,7 +688,7 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'make' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'make' }], env: [], services: [] },
       check: true,
       environment: env({ found: ['make'], probes: { make: { ok: true, version: '4.4.1' } } }),
     })
@@ -705,7 +718,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '>=20 <21' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node', version: '>=20 <21' }], env: [], services: [] },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
     })
@@ -790,7 +803,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'tool', version: '4.5.6' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'tool', version: '4.5.6' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => 'C:\\external\\tool.exe',
@@ -812,7 +825,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'python', version: '3.13.0' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'python', version: '3.13.0' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => 'C:\\external\\python.exe',
@@ -828,7 +841,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '>=22' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node', version: '>=22' }], env: [], services: [] },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
     })
@@ -850,6 +863,7 @@ describe('buildReadyReport: declared version ranges', () => {
         commands: [],
         tools: [{ id: 'node', version: '>=22', install: 'install-node-22' }],
         env: [],
+        services: [],
       },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
@@ -864,7 +878,7 @@ describe('buildReadyReport: declared version ranges', () => {
       const report = await buildReadyReport({
         profile: profileOf(),
         matches: [],
-        declared: { commands: [], tools: [{ id: 'node', version: '>=20' }], env: [] },
+        declared: { commands: [], tools: [{ id: 'node', version: '>=20' }], env: [], services: [] },
         check: true,
         environment: env({ found: ['node'], probes: { node: { ok: true, version } } }),
       })
@@ -879,7 +893,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'gradlew', bin: './gradlew', version: '>=8' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'gradlew', bin: './gradlew', version: '>=8' }], env: [], services: [] },
       check: true,
       environment: {
         resolve: () => {
@@ -900,7 +914,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '>=22', required: false }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node', version: '>=22', required: false }], env: [], services: [] },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
     })
@@ -914,7 +928,7 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '^20' }], env: [] },
+      declared: { commands: [], tools: [{ id: 'node', version: '^20' }], env: [], services: [] },
       check: false,
       environment: untouchedEnv(),
     })
@@ -929,6 +943,7 @@ describe('buildReadyReport: declared environment variables', () => {
     commands: [],
     tools: [],
     env,
+    services: [],
   })
 
   test('a present variable verifies, and its value never enters the report', async () => {
@@ -1066,6 +1081,121 @@ describe('buildReadyReport: declared environment variables', () => {
   })
 })
 
+describe('buildReadyReport: declared services', () => {
+  const declaredServices = (
+    services: Array<{ id: string; host?: string; port: number; reason?: string; required?: boolean }>,
+  ) => ({ commands: [], tools: [], env: [], services })
+
+  test('a listening service verifies, and only reachability is claimed', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'postgres', port: 5432, reason: 'the database' }]),
+      check: true,
+      environment: env({ services: { '127.0.0.1:5432': 'open' } }),
+    })
+    assert.equal(report.services[0]?.status, 'reachable')
+    assert.equal(report.services[0]?.host, '127.0.0.1')
+    assert.equal(report.status, 'verified')
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('a refused connection blocks and proposes no startup command', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'postgres', port: 5432, reason: 'the database' }]),
+      check: true,
+      environment: env({ services: { '127.0.0.1:5432': 'closed' } }),
+    })
+    assert.equal(report.services[0]?.status, 'unreachable')
+    assert.equal(report.status, 'blocked')
+    const action = report.actions.find((a) => a.id === 'start:postgres')
+    assert.ok(action, 'a start action is proposed')
+    assert.equal(action.command, null, 'anvil must not guess a startup line')
+    assert.match(action.reason, /127\.0\.0\.1:5432/)
+  })
+
+  test('an inconclusive connect is unknown, not a blocker', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'postgres', port: 5432 }]),
+      check: true,
+      environment: env({ services: { '127.0.0.1:5432': 'inconclusive' } }),
+    })
+    assert.equal(report.services[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.summary.blocked, 0)
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('an optional service is reported but does not block', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'redis', port: 6379, required: false }]),
+      check: true,
+      environment: env({ services: { '127.0.0.1:6379': 'closed' } }),
+    })
+    assert.equal(report.services[0]?.status, 'unreachable')
+    assert.equal(report.status, 'unknown', 'nothing required was identified')
+    assert.equal(report.summary.blocked, 0)
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('an explicit loopback host is honoured', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'redis', host: 'localhost', port: 6379 }]),
+      check: true,
+      environment: env({ services: { 'localhost:6379': 'open' } }),
+    })
+    assert.equal(report.services[0]?.host, 'localhost')
+    assert.equal(report.services[0]?.status, 'reachable')
+    assert.equal(report.status, 'verified')
+  })
+
+  test('a bracketed IPv6 loopback is unbracketed for the connect', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'redis', host: '[::1]', port: 6379 }]),
+      check: true,
+      environment: env({ services: { '::1:6379': 'open' } }),
+    })
+    assert.equal(report.services[0]?.host, '::1')
+    assert.equal(report.services[0]?.status, 'reachable')
+  })
+
+  test('without --check no service is contacted', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredServices([{ id: 'postgres', port: 5432 }]),
+      check: false,
+      environment: untouchedEnv(),
+    })
+    assert.equal(report.services[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+  })
+
+  test('a refused service and a missing tool both block', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: { commands: [], tools: [{ id: 'missing-tool' }], env: [], services: [{ id: 'db', port: 5432 }] },
+      check: true,
+      environment: env({ services: { '127.0.0.1:5432': 'closed' } }),
+    })
+    assert.equal(report.status, 'blocked')
+    assert.equal(report.summary.blocked, 2)
+    assert.ok(report.actions.some((a) => a.id === 'start:db'))
+    assert.ok(report.actions.some((a) => a.id === 'provide:missing-tool'))
+  })
+})
+
 describe('buildReadyReport: context and conflicts stay visible', () => {
   test('no instruction file is blocked and proposes `anvil init`', async () => {
     const report = await buildReadyReport({
@@ -1116,7 +1246,7 @@ describe('buildReadyReport: context and conflicts stay visible', () => {
         commands: { test: [{ cmd: 'npm test', source: 'detected', evidence: 'package.json:12' }] },
       }),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [] },
+      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [], services: [] },
       check: false,
       environment: env(),
     })

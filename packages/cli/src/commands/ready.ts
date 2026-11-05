@@ -28,7 +28,8 @@ export const readyCommand: Command = {
     'Without --check, no process is spawned and every tool is `unknown`. With --check,',
     'each tool is a PATH lookup and a bounded version probe; a declared version range is',
     'compared with the reported version. Declared environment variables are checked for',
-    'presence by name only -- a value is never read into the report. The repository is',
+    'presence by name only -- a value is never read into the report. Declared services are',
+    'checked with a bounded loopback TCP connect, which sends no data. The repository is',
     'never built or tested, and no setup action is run.',
     '',
     '--check             probe the environment (opt-in; the only mode that spawns)',
@@ -71,6 +72,7 @@ export const readyCommand: Command = {
           )
           .map((t) => t.id),
         ...report.env.filter((e) => e.required && (e.status === 'missing' || e.status === 'empty')).map((e) => e.name),
+        ...report.services.filter((s) => s.required && s.status === 'unreachable').map((s) => s.id),
         ...report.context.filter((c) => c.status === 'blocked').map((c) => c.id),
       ]
       const err = new AnvilError(
@@ -102,6 +104,10 @@ function statusTag(status: string, style: Style): string {
       return style.green(status === 'available' ? 'available' : 'verified ')
     case 'present':
       return style.green('present  ')
+    case 'reachable':
+      return style.green('reachable')
+    case 'unreachable':
+      return style.red('refused  ')
     case 'empty':
       return style.red('empty    ')
     case 'blocked':
@@ -190,6 +196,21 @@ function renderReady(report: ReadyReport, style: Style): string {
             const req = e.required ? s.yellow('required') : s.dim('optional')
             const reason = e.reason === null ? '' : s.dim(` -- ${e.reason}`)
             return `  ${e.name.padEnd(20)} ${statusTag(e.status, s)} ${req}${reason}`
+          })
+          .join('\n'),
+  )
+
+  out.push('')
+  out.push(s.bold('Services'))
+  out.push(
+    report.services.length === 0
+      ? s.dim('  (none declared)')
+      : report.services
+          .map((x) => {
+            const req = x.required ? s.yellow('required') : s.dim('optional')
+            const address = s.dim(` ${x.host}:${x.port}`)
+            const reason = x.reason === null ? '' : s.dim(` -- ${x.reason}`)
+            return `  ${x.id.padEnd(20)} ${statusTag(x.status, s)} ${req}${address}${reason}`
           })
           .join('\n'),
   )

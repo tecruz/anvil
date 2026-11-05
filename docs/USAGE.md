@@ -236,6 +236,13 @@ reports three states and never guesses between them.
   `blocked`; an optional one is reported without blocking. `anvil ready` never reads a value
   into its report and never proposes an `export` line, so a secret cannot leak into the
   output. Without `--check` no variable is consulted and every one is `unknown`.
+- **Services** — local services the owner declared in `project.services`, checked with a
+  bounded TCP connect. A required service that nothing is accepting connections on is
+  `blocked`; an optional one is reported without blocking; a connect that times out or throws
+  is `unknown`, never a blocker. `reachable` means a socket opened — not that the service is
+  healthy, ready to serve requests, or authorized for the credentials at hand. Only loopback
+  hosts are accepted, so a committed config cannot turn the report into a probe of an
+  arbitrary host, and nothing is sent to the service. Without `--check` nothing is contacted.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
@@ -322,7 +329,7 @@ Two layers, repo-local wins:
   "provider": { "default": "local" },
   "output": { "color": "auto" },
   "features": { "probeCommands": false },
-  "project": { "commands": [], "tools": [], "env": [] }
+  "project": { "commands": [], "tools": [], "env": [], "services": [] }
 }
 ```
 
@@ -355,6 +362,12 @@ Two layers, repo-local wins:
   writes its value, and a `value` key is a config error. The name must be one a shell can
   export (`[A-Za-z_][A-Za-z0-9_]*`). On Windows, names are matched case-insensitively, the
   way the OS and a spawned process treat them; elsewhere they match exactly.
+- `project.services` — local services the project needs, checked by `anvil ready --check`
+  with a bounded TCP connect. Each entry is `{ "id": "...", "host": "...", "port": 5432,
+  "reason": "...", "required": true }`. `port` is mandatory, `required` defaults to true, and
+  `host` defaults to `127.0.0.1` and must be a loopback name (`localhost`, `127.0.0.1`,
+  `::1`, `[::1]`): a committed config must not be able to make a read-only report reach an
+  arbitrary host. The connect sends no data and only observes whether a socket opens.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year.

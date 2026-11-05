@@ -361,6 +361,58 @@ describe('project: owner-declared capabilities', () => {
     assert.deepEqual(mergeConfig(global, { project: { env: [{ name: 'B' }] } }, 'repo').project.env, [{ name: 'B' }])
   })
 
+  test('accepts declared loopback services, with defaults for host and required', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          services: [
+            { id: 'postgres', port: 5432, reason: 'the database' },
+            { id: 'redis', host: 'localhost', port: 6379, required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.services, [
+      { id: 'postgres', port: 5432, reason: 'the database' },
+      { id: 'redis', host: 'localhost', port: 6379, required: false },
+    ])
+  })
+
+  test('rejects a non-loopback service host, a bad port, and an unknown key', () => {
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', host: 'db.internal', port: 5432 }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.services\[0\]\.host: expected a loopback host/)
+        return true
+      },
+      'a committed config must not be able to probe an arbitrary host',
+    )
+    for (const port of [0, 65536, 1.5, '5432']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', port }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.services\[0\]\.port: expected an integer port/)
+          return true
+        },
+        String(port),
+      )
+    }
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', port: 5432, url: 'postgres://x' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.services\[0\]\.url: unknown configuration key/)
+        return true
+      },
+    )
+  })
+
   test('rejects a version range anvil cannot evaluate', () => {
     assert.throws(
       () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: 'newest' }] } }, 'cfg'),
