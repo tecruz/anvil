@@ -48,6 +48,8 @@ export {
   type ReadyCommandSource,
   type ReadyContext,
   type ReadyEnvironment,
+  type ReadyEnvStatus,
+  type ReadyEnvVar,
   type ReadyReport,
   type ReadyTool,
   type ReadyToolStatus,

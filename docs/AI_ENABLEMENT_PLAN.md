@@ -35,6 +35,13 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   suggestions, which are optional. Working directories are honoured: a relative executable is
   resolved from the directory its command runs in, and an absolute one is used as given.
   Without `--check` nothing is spawned.
+- **Declared environment variables** (workstream 2, first slice) — `project.env` names the
+  variables a project needs; `anvil ready --check` reports each as `present`, `empty`,
+  `missing` or `unknown`. A missing required variable, or one set to an empty value, blocks a
+  required report, and the proposed action carries no command because anvil cannot set a
+  variable it has never seen a value for. Only presence is observed: no value is read into
+  the report, a `value` key in the config is rejected, and a present variable is never
+  presented as a working credential.
 - **Approved setup actions** (workstream 3, first slice) — a blocked report carries
   `actions`, each with `requiresApproval: true`. The only install command printed is one the
   owner declared; otherwise the action has no command, because anvil will not guess a
@@ -119,7 +126,8 @@ build, run and verify the project.
 
 - [ ] Missing tools, incompatible versions and unavailable services are reported
   separately from source-code or test failures. _Partial: missing, unrunnable and
-  version-incompatible tools are reported; services are not yet checked._
+  version-incompatible tools, and missing or empty required environment variables, are
+  reported; services are not yet checked._
 - [x] Environment checks and setup never run implicitly during repository profiling.
 - [x] Secret values are not copied into generated context or diagnostic output.
 - [ ] Restricted credentials, missing corporate access and unavailable hardware

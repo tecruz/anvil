@@ -30,6 +30,7 @@ function describe(config: AnvilConfig): Array<[string, string]> {
     ['features.probeCommands', String(config.features.probeCommands)],
     ['project.commands', String(config.project.commands.length)],
     ['project.tools', String(config.project.tools.length)],
+    ['project.env', String(config.project.env.length)],
   ]
 }
 

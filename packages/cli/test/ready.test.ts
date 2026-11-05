@@ -34,13 +34,13 @@ interface RunResult {
   stderr: string
 }
 
-function runReady(cwd: string, args: string[]): RunResult {
+function runReady(cwd: string, args: string[], extraEnv: Record<string, string> = {}): RunResult {
   try {
     const stdout = execFileSync(process.execPath, [CLI, 'ready', ...args], {
       cwd,
       encoding: 'utf8',
       stdio: 'pipe',
-      env: { ...process.env, NO_COLOR: '1', ANVIL_CONFIG_HOME: join(cwd, '.config-home') },
+      env: { ...process.env, NO_COLOR: '1', ANVIL_CONFIG_HOME: join(cwd, '.config-home'), ...extraEnv },
     })
     return { code: 0, stdout, stderr: '' }
   } catch (err) {
@@ -125,6 +125,37 @@ describe('anvil ready', () => {
     assert.match(tool?.version ?? '', /^\d+\.\d+\.\d+/)
     const action = (data.actions as Array<{ id: string; command: string | null }>).find((a) => a.id === 'upgrade:node')
     assert.equal(action?.command, null, 'no install line is fabricated')
+  })
+
+  test('a declared environment variable is checked by name, and its value never appears', () => {
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: { env: [{ name: 'ANVIL_TEST_SECRET', reason: 'the API' }] },
+      }),
+    })
+
+    const missing = runReady(dir, ['--json', '--check'])
+    assert.equal(missing.code, 0, missing.stderr)
+    const missingData = dataOf(missing)
+    assert.equal(missingData.status, 'blocked')
+    const missingVar = (missingData.env as Array<{ name: string; status: string }>)[0]
+    assert.equal(missingVar?.status, 'missing')
+    const setAction = (missingData.actions as Array<{ id: string; command: string | null }>).find(
+      (a) => a.id === 'set:ANVIL_TEST_SECRET',
+    )
+    assert.equal(setAction?.command, null, 'no export line is fabricated')
+
+    const present = runReady(dir, ['--json', '--check'], { ANVIL_TEST_SECRET: 'do-not-print-me' })
+    const presentData = dataOf(present)
+    assert.equal((presentData.env as Array<{ status: string }>)[0]?.status, 'present')
+    assert.ok(!present.stdout.includes('do-not-print-me'), 'the value must not be copied into the report')
+
+    const gated = runReady(dir, ['--json', '--check', '--fail-on-blocked'])
+    assert.equal(gated.code, 6, 'a missing required variable gates CI')
+
+    const unchecked = runReady(dir, ['--json'])
+    assert.equal((dataOf(unchecked).env as Array<{ status: string }>)[0]?.status, 'unknown')
   })
 
   test('a declared install command is proposed, never run', () => {

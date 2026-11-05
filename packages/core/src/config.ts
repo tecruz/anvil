@@ -73,17 +73,35 @@ export interface DeclaredTool {
 }
 
 /**
+ * An environment variable the project needs. Checked by `anvil ready --check`, by name only.
+ *
+ * A declaration is the variable's *name*. Anvil never reads the declaration for a value and
+ * never writes a value into its report; presence is the only thing it can honestly check, and
+ * a present variable is not proof that the credential behind it is valid or authorized.
+ */
+export interface DeclaredEnvVar {
+  /** The variable name, as the shell and the process environment spell it. */
+  name: string
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/**
  * What the project owner says the project needs, for the parts anvil cannot detect.
  *
  * The detected profile stays the only source of *detected* facts. This section is the
  * explicit escape hatch: a technology anvil has no detector for, a tool it cannot infer,
- * and a working directory it could only guess at.
+ * a working directory it could only guess at, and a credential only the environment holds.
  */
 export interface ProjectConfig {
   /** Owner-declared commands, keyed by kind, for a project anvil cannot detect on its own. */
   commands: DeclaredCommand[]
   /** Owner-declared required tools. */
   tools: DeclaredTool[]
+  /** Owner-declared environment variables, checked for presence by name. */
+  env: DeclaredEnvVar[]
 }
 
 export interface AnvilConfig {
@@ -131,7 +149,7 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
-    project: { commands: [], tools: [] },
+    project: { commands: [], tools: [], env: [] },
   }
 }
 
@@ -295,6 +313,52 @@ function parseDeclaredTools(value: unknown, path: string, issues: ValidationIssu
 }
 
 /**
+ * The shape of an environment variable name.
+ *
+ * Deliberately conservative: a name that a shell could not export is a typo, and accepting it
+ * would make `anvil ready` report on a variable that can never be set.
+ */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** Validate `project.env`. Names only; a value never appears in the configuration. */
+function parseDeclaredEnv(value: unknown, path: string, issues: ValidationIssue[]): DeclaredEnvVar[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredEnvVar[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['name', 'reason', 'required'], at, issues)
+    if (typeof entry.name !== 'string' || !ENV_NAME.test(entry.name)) {
+      issues.push({ path: `${at}.name`, message: 'expected an environment variable name like "DATABASE_URL"' })
+      return
+    }
+    const declared: DeclaredEnvVar = { name: entry.name }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      declared.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      declared.required = entry.required
+    }
+    out.push(declared)
+  })
+  return out
+}
+
+/**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
  */
@@ -389,7 +453,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   if (layer.project !== undefined) {
     const project = expectObject(layer.project, 'project', issues)
-    checkUnknownKeys(project, ['commands', 'tools'], 'project', issues)
+    checkUnknownKeys(project, ['commands', 'tools', 'env'], 'project', issues)
     // Each key replaces its array rather than concatenating: a repo layer that declares its
     // own commands is answering the question, not adding to the global answer. Keys the
     // layer is silent about keep the merged value from the layers below.
@@ -400,6 +464,10 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (project.tools !== undefined) {
       const tools = parseDeclaredTools(project.tools, 'project.tools', issues)
       if (tools !== undefined) next.project.tools = tools
+    }
+    if (project.env !== undefined) {
+      const env = parseDeclaredEnv(project.env, 'project.env', issues)
+      if (env !== undefined) next.project.env = env
     }
   }
 
@@ -489,7 +557,7 @@ export function starterConfigJson(): string {
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and
     // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
     // write is a claim anvil would be inventing.
-    project: { commands: [], tools: [] },
+    project: { commands: [], tools: [], env: [] },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`

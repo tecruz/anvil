@@ -30,6 +30,7 @@ import { realpathSync, statSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   type DeclaredCommand,
+  type DeclaredEnvVar,
   type ProjectConfig,
   parseVersion,
   resolveCommand,
@@ -93,6 +94,25 @@ export interface ReadyContext {
   evidence: string[]
 }
 
+/**
+ * How an environment variable's presence was decided.
+ *
+ * `present` means the process environment defines it with a non-empty value; `empty` means
+ * the name is defined but the value is empty, which is a misconfiguration rather than a pass.
+ * Only presence is observed, so a present value is never evidence that the credential behind
+ * it is valid.
+ */
+export type ReadyEnvStatus = 'present' | 'empty' | 'missing' | 'unknown'
+
+/** One owner-declared environment variable and whether it is present. Its value is never read. */
+export interface ReadyEnvVar {
+  /** The variable name. Anvil never reads or reports a value. */
+  name: string
+  reason: string | null
+  required: boolean
+  status: ReadyEnvStatus
+}
+
 export interface ReadyAction {
   id: string
   summary: string
@@ -108,12 +128,13 @@ export interface ReadyReport {
   root: string
   /** The directory the project's commands run from. `''` means the repository root. */
   projectDir: string
-  /** True when the environment was probed (`--check`). False means tools are `unknown`. */
+  /** True when the environment was probed (`--check`). False means tools and env are `unknown`. */
   checked: boolean
   status: ReadinessState
   summary: { verified: number; blocked: number; unknown: number }
   commands: ReadyCommand[]
   tools: ReadyTool[]
+  env: ReadyEnvVar[]
   context: ReadyContext[]
   actions: ReadyAction[]
   warnings: string[]
@@ -210,6 +231,13 @@ export interface ReadyEnvironment {
   probe(execPath: string): Promise<ToolProbe>
   /** True when a path names a runnable executable. Never executes it. */
   isRunnable(absPath: string): boolean
+  /**
+   * The presence of an environment variable, by name. Never returns the value.
+   *
+   * Optional so a test that declares no variables need not implement it; when absent and a
+   * variable is declared, the answer is `unknown`, which is the fail-closed direction.
+   */
+  envStatus?(name: string): ReadyEnvStatus
 }
 
 /** True when an executable file at `absPath` can actually be launched. */
@@ -367,6 +395,14 @@ export function systemEnvironment(
     isRunnable(absPath) {
       return isRunnableExecutable(absPath, platform)
     },
+    envStatus(name) {
+      const env = options.env ?? process.env
+      const value = env[name]
+      if (value === undefined) return 'missing'
+      // An empty value is not a configured value: it would be exported and then read as an
+      // empty credential, so it is reported distinctly rather than as present.
+      return value === '' ? 'empty' : 'present'
+    },
   }
 }
 
@@ -404,23 +440,28 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
 
   const commands = collectCommands(profile, declared.commands)
   const tools = await collectTools(profile, matches, declared, check, environment)
+  const env = collectEnv(declared.env, check, environment)
   const context = collectContext(profile)
   const warnings = collectWarnings(profile, declared.commands)
-  const actions = proposeActions(tools, context)
-  // Only required tools decide the status. An optional, playbook-suggested tool is guidance,
-  // not a need: its absence must not turn a ready repository into an unknown one.
+  const actions = proposeActions(tools, env, context)
+  // Only required needs decide the status. An optional, playbook-suggested tool or a
+  // non-required variable is guidance, not a need: its absence must not turn a ready
+  // repository into an unknown one.
   const requiredReadiness = tools.filter((t) => t.required).map(toolState)
+  const requiredEnvReadiness = env.filter((e) => e.required).map(envState)
+  const hasRequiredNeeds = tools.some((t) => t.required) || env.some((e) => e.required)
   const status = overallStatus(
     commands,
-    requiredReadiness,
+    [...requiredReadiness, ...requiredEnvReadiness],
     context,
     warnings,
-    tools.some((t) => t.required),
+    hasRequiredNeeds,
   )
 
   const states: ReadinessState[] = [
     ...commands.map((c) => c.status),
     ...requiredReadiness,
+    ...requiredEnvReadiness,
     ...context.map((c) => c.status),
   ]
 
@@ -437,6 +478,7 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     },
     commands,
     tools,
+    env,
     context,
     actions,
     warnings,
@@ -685,6 +727,28 @@ function toolState(tool: ReadyTool): ReadinessState {
   return 'blocked'
 }
 
+/**
+ * Read the presence of each declared variable. No value is read into the report.
+ *
+ * Without `--check` the answer is `unknown`: whether a variable is set is an environment
+ * fact, and the read-only default does not consult the environment.
+ */
+function collectEnv(declared: readonly DeclaredEnvVar[], check: boolean, environment: ReadyEnvironment): ReadyEnvVar[] {
+  return declared.map((entry) => ({
+    name: entry.name,
+    reason: entry.reason ?? null,
+    required: entry.required ?? true,
+    status: check ? (environment.envStatus?.(entry.name) ?? 'unknown') : 'unknown',
+  }))
+}
+
+function envState(item: ReadyEnvVar): ReadinessState {
+  if (item.status === 'present') return 'verified'
+  if (item.status === 'unknown') return 'unknown'
+  // `missing` and `empty` both block: an empty value is not a usable configuration.
+  return 'blocked'
+}
+
 function collectContext(profile: ProjectProfile): ReadyContext[] {
   // A global instruction file is the developer's, not the repository's, and is not shipped
   // with the code: it is not evidence that this repository has project context.
@@ -742,7 +806,11 @@ function collectWarnings(profile: ProjectProfile, declared: readonly DeclaredCom
   return warnings
 }
 
-function proposeActions(tools: readonly ReadyTool[], context: readonly ReadyContext[]): ReadyAction[] {
+function proposeActions(
+  tools: readonly ReadyTool[],
+  env: readonly ReadyEnvVar[],
+  context: readonly ReadyContext[],
+): ReadyAction[] {
   const actions: ReadyAction[] = []
 
   for (const tool of tools) {
@@ -780,6 +848,24 @@ function proposeActions(tools: readonly ReadyTool[], context: readonly ReadyCont
         reason: `${tool.id} is required and was not found on PATH${
           tool.reason === null ? '' : ` (${tool.reason})`
         }; install it, or declare an \`install\` command for it in anvil.config.json`,
+      })
+    }
+  }
+
+  for (const item of env) {
+    if (!item.required) continue
+    if (item.status === 'missing' || item.status === 'empty') {
+      const state = item.status === 'empty' ? 'is set to an empty value' : 'is not set'
+      actions.push({
+        id: `set:${item.name}`,
+        summary: `Provide ${item.name}`,
+        // No command: anvil cannot set an environment variable it has never seen a value
+        // for, and a guessed `export` line would be a secret written into a report.
+        command: null,
+        requiresApproval: true,
+        reason: `${item.name} is required and ${state}${
+          item.reason === null ? '' : ` (${item.reason})`
+        }; set it in your environment before running this project`,
       })
     }
   }

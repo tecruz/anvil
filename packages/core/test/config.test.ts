@@ -316,6 +316,51 @@ describe('project: owner-declared capabilities', () => {
     ])
   })
 
+  test('accepts declared environment variables by name', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          env: [
+            { name: 'DATABASE_URL', reason: 'the database' },
+            { name: 'OPTIONAL_FLAG', required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.env, [
+      { name: 'DATABASE_URL', reason: 'the database' },
+      { name: 'OPTIONAL_FLAG', required: false },
+    ])
+  })
+
+  test('rejects a value in an environment declaration, and a name a shell cannot export', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { env: [{ name: 'API_TOKEN', value: 'secret' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.env\[0\]\.value: unknown configuration key/)
+        return true
+      },
+      'a value key is rejected: anvil never stores a secret in the config',
+    )
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { env: [{ name: 'not a name' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.env\[0\]\.name: expected an environment variable name/)
+        return true
+      },
+    )
+  })
+
+  test('an env layer replaces the array and a silent layer keeps the one below', () => {
+    const global = mergeConfig(defaultConfig(), { project: { env: [{ name: 'A' }] } }, 'global')
+    assert.deepEqual(mergeConfig(global, { project: { tools: [{ id: 'make' }] } }, 'repo').project.env, [{ name: 'A' }])
+    assert.deepEqual(mergeConfig(global, { project: { env: [{ name: 'B' }] } }, 'repo').project.env, [{ name: 'B' }])
+  })
+
   test('rejects a version range anvil cannot evaluate', () => {
     assert.throws(
       () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: 'newest' }] } }, 'cfg'),

@@ -22,6 +22,7 @@ export {
   type ConfigSourceKind,
   type DeclaredCommand,
   type DeclaredCommandKind,
+  type DeclaredEnvVar,
   type DeclaredTool,
   defaultConfig,
   ensureParentDir,

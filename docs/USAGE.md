@@ -231,6 +231,11 @@ reports three states and never guesses between them.
   called compatible or incompatible. A runner for an inferred command, an alternative
   command, a second declaration of the same kind, or a playbook suggestion is non-blocking
   information. Without `--check` no process is spawned and every tool is `unknown`.
+- **Environment variables** — variables the owner declared in `project.env`, checked for
+  presence by name only. A missing required variable, or one set to an empty value, is
+  `blocked`; an optional one is reported without blocking. `anvil ready` never reads a value
+  into its report and never proposes an `export` line, so a secret cannot leak into the
+  output. Without `--check` no variable is consulted and every one is `unknown`.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
@@ -317,7 +322,7 @@ Two layers, repo-local wins:
   "provider": { "default": "local" },
   "output": { "color": "auto" },
   "features": { "probeCommands": false },
-  "project": { "commands": [], "tools": [] }
+  "project": { "commands": [], "tools": [], "env": [] }
 }
 ```
 
@@ -344,6 +349,11 @@ Two layers, repo-local wins:
   rejected when the config loads; a version it cannot read is `unknown`, never a pass. That
   includes a version with an unsupported suffix or more than three components: it is not
   truncated to a shorter version that might pass.
+- `project.env` — environment variables the project needs, checked for presence by `anvil
+  ready --check`. Each entry is `{ "name": "DATABASE_URL", "reason": "...", "required": true }`.
+  `required` defaults to true. A declaration names a variable only; anvil never reads or
+  writes its value, and a `value` key is a config error. The name must be one a shell can
+  export (`[A-Za-z_][A-Za-z0-9_]*`).
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year.
