@@ -498,8 +498,11 @@ function containmentBase(path: string): string | null {
     // (a broken or unresolvable link) is visible here. Where such a link leads is unknown.
     try {
       if (lstatSync(current).isSymbolicLink()) return null
-    } catch {
-      // Not a readable entry at all; the parent can still be checked.
+    } catch (error) {
+      // An absent entry means the parent can still be checked. Any other error -- a permission
+      // failure, an I/O error -- leaves the path undecidable: reporting it `missing` would
+      // accuse the owner of losing a document that may be present but unreadable.
+      if (!isAbsentError(error)) return null
     }
     const parent = dirname(current)
     if (parent === current) return null

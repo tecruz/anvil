@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1492,6 +1493,47 @@ describe('buildReadyReport: approved context references', () => {
     assert.equal(report.references[0]?.status, 'unknown')
     assert.equal(report.status, 'unknown')
     assert.equal(report.actions.length, 0)
+  })
+
+  test('a link whose metadata cannot be read is unknown, not missing', async () => {
+    // `stat` reports the entry as absent, but reading the link itself fails with something
+    // other than absence -- a permission or I/O error. That path is undecidable, so it must
+    // not become a `missing` that proposes a `restore`. Real filesystems rarely produce this
+    // exact combination, so it is injected.
+    const root = mkdtempSync(join(tmpdir(), 'anvil-ref-lstat-'))
+    temps.push(root)
+    const candidate = join(root, 'policy.md')
+    const fsModule = createRequire(import.meta.url)('node:fs') as {
+      statSync: (path: string, ...args: unknown[]) => unknown
+      lstatSync: (path: string, ...args: unknown[]) => unknown
+    }
+    const originalStat = fsModule.statSync
+    const originalLstat = fsModule.lstatSync
+    fsModule.statSync = (path, ...args) => {
+      if (path === candidate) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+      return originalStat(path, ...args)
+    }
+    fsModule.lstatSync = (path, ...args) => {
+      if (path === candidate) throw Object.assign(new Error('denied'), { code: 'EACCES' })
+      return originalLstat(path, ...args)
+    }
+    syncBuiltinESMExports()
+    try {
+      const report = await buildReadyReport({
+        profile: profileOf({ root }),
+        matches: [],
+        declared: declaredReferences([{ id: 'policy', path: 'policy.md' }]),
+        check: false,
+        environment: systemEnvironment({ containmentRoot: root }),
+      })
+      assert.equal(report.references[0]?.status, 'unknown')
+      assert.equal(report.status, 'unknown')
+      assert.equal(report.actions.length, 0)
+    } finally {
+      fsModule.statSync = originalStat
+      fsModule.lstatSync = originalLstat
+      syncBuiltinESMExports()
+    }
   })
 
   test('an environment that cannot answer leaves the reference unknown', async () => {
