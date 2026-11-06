@@ -55,6 +55,8 @@ Three things worth knowing before you install:
 ```bash
 anvil doctor            # audit this repository, with a score and the reasoning
 anvil init              # derive AGENTS.md, a verify skill and a review command
+anvil ready             # describe project needs; --check opts into environment probes
+anvil setup plan        # review owner-declared setup commands; never execute or approve
 anvil playbook check    # check the playbook registry for dead links
 anvil playbook discover # find agent tooling the curated registry does not know yet
 anvil mcp               # serve doctor, plan and crew status to an MCP client over stdio
