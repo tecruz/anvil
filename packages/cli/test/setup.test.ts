@@ -4,8 +4,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -13,8 +15,10 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import type { SetupPlan, SetupPlanValidation } from '@anvil/derive'
+import { pathToFileURL } from 'node:url'
+import { buildSetupPlan, type SetupPlan, type SetupPlanValidation, validateSetupPlan } from '@anvil/derive'
 import { normalizeGitPath } from '@anvil/git'
+import { worktreeFromStatus } from '../src/commands/setup.ts'
 
 const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
 const roots: string[] = []
@@ -294,5 +298,82 @@ describe('anvil setup', () => {
     const truncated = run(root, ['plan', '--max-files', '1', '--json'])
     assert.equal(truncated.code, 0, truncated.stdout)
     assert.equal((JSON.parse(truncated.stdout) as { data: SetupPlan }).data.repository.worktree, 'unknown')
+  })
+
+  test('a Git warning on stderr cannot become a clean snapshot or a current plan', () => {
+    const root = repo()
+    // This is the shape Git produces when a working directory cannot be opened: exit 0,
+    // empty stdout and a warning on stderr. Treating that as clean would validate as current.
+    const status = { stdout: '', stderr: "warning: could not open directory 'private/'\n", exitCode: 0 }
+    assert.equal(worktreeFromStatus(status), 'unknown')
+    assert.equal(worktreeFromStatus({ stdout: ' M tracked.txt\0', stderr: '', exitCode: 0 }), 'dirty')
+    const plan = buildSetupPlan({
+      repository: {
+        root: normalizeGitPath(root),
+        head: git(root, 'rev-parse', 'HEAD').trim(),
+        worktree: worktreeFromStatus(status),
+      },
+      declared: { commands: [], tools: [], env: [], services: [], references: [] },
+      projectDir: '',
+    })
+    assert.equal(plan.repository.worktree, 'unknown')
+    assert.equal(validateSetupPlan(structuredClone(plan), plan).status, 'unknown')
+  })
+
+  test('assume-unchanged and skip-worktree entries cannot hide a dirty file', () => {
+    for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+      const root = repo()
+      writeFileSync(join(root, 'tracked.txt'), 'one\n')
+      commit(root)
+      git(root, 'update-index', flag, 'tracked.txt')
+      writeFileSync(join(root, 'tracked.txt'), 'two\n')
+      assert.equal(proposal(root).repository.worktree, 'unknown', flag)
+    }
+  })
+
+  test('a split index is refused without refreshing shared index metadata', () => {
+    const root = repo()
+    git(root, 'update-index', '--split-index')
+    const shared = readdirSync(join(root, '.git')).find((name) => name.startsWith('sharedindex.'))
+    assert.ok(shared, 'expected update-index --split-index to create a shared index')
+    const path = join(root, '.git', shared)
+    const past = new Date('2020-01-01T00:00:00Z')
+    utimesSync(path, past, past)
+    const before = statSync(path).mtimeMs
+    const plan = proposal(root)
+    assert.equal(plan.repository.worktree, 'unknown')
+    // Reading a split index refreshes this file even with --no-optional-locks.
+    assert.equal(statSync(path).mtimeMs, before)
+    assert.equal(run(root, ['validate', '--plan', save(plan), '--json']).code, 5)
+  })
+
+  test('setup metadata reads never lazily fetch missing promisor objects', (t) => {
+    const work = scratch()
+    const source = repo()
+    const origin = join(work, 'origin.git')
+    git(work, 'clone', '--bare', source, origin)
+    git(origin, 'config', 'uploadpack.allowFilter', 'true')
+    const target = join(work, 'partial')
+    git(work, 'clone', '--no-local', '--filter=tree:0', '--no-checkout', pathToFileURL(origin).href, target)
+    // Confirm the fixture is actually missing the HEAD tree; some Git versions keep it.
+    try {
+      execFileSync('git', ['cat-file', '-e', 'HEAD^{tree}'], {
+        cwd: target,
+        stdio: 'pipe',
+        env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+      })
+      t.skip('this Git kept the filtered tree locally')
+      return
+    } catch {
+      // Expected: the tree is absent until a lazy fetch asks the promisor remote.
+    }
+    const trace = join(work, 'trace.txt')
+    const result = run(target, ['plan', '--json'], { GIT_TRACE: trace })
+    assert.equal(result.code, 0, result.stdout)
+    const plan = (JSON.parse(result.stdout) as { data: SetupPlan }).data
+    assert.equal(plan.repository.worktree, 'unknown')
+    // A trace line for `fetch origin` is the observable form of the implicit fetch.
+    assert.ok(existsSync(trace), 'expected GIT_TRACE output')
+    assert.doesNotMatch(readFileSync(trace, 'utf8'), /fetch origin/)
   })
 })

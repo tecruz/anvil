@@ -36,6 +36,18 @@ export interface RunOptions {
   maxBuffer?: number
 }
 
+/**
+ * Environment for metadata-only reads.
+ *
+ * A promisor remote makes commands such as `rev-parse` or `status` spawn an implicit
+ * `git fetch` when an object is absent locally. Discovery and setup must never fetch:
+ * they report what the local repository contains, and an unavailable object is unknown.
+ * Copying the caller's environment keeps its overrides while forcing the guard on.
+ */
+export function readOnlyGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, GIT_NO_LAZY_FETCH: '1' }
+}
+
 /** Run a git subcommand with an argument array. Never invokes a shell. */
 export async function git(args: string[], options: RunOptions = {}): Promise<RunResult> {
   try {
@@ -115,20 +127,23 @@ export interface GitRepoInfo {
 }
 
 export async function discoverRepo(cwd: string): Promise<GitRepoInfo | null> {
-  const toplevel = await git(['rev-parse', '--show-toplevel'], { cwd })
+  const env = readOnlyGitEnv()
+  const toplevel = await git(['rev-parse', '--show-toplevel'], { cwd, env })
   if (toplevel.exitCode !== 0) return null
   const root = normalizeGitPath(toplevel.stdout)
   if (root === '') return null
 
   const [branchRes, remoteRes, headRes, commonRes, gitDirRes] = await Promise.all([
-    git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd }),
-    git(['remote', 'get-url', 'origin'], { cwd }),
+    git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, env }),
+    git(['remote', 'get-url', 'origin'], { cwd, env }),
     git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], {
       cwd,
+      env,
     }),
-    git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }),
+    git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, env }),
     git(['rev-parse', '--path-format=absolute', '--absolute-git-dir'], {
       cwd,
+      env,
     }),
   ])
 

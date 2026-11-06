@@ -1,53 +1,97 @@
 /** Read-only setup proposals. No installer, approval writer or environment probes. */
-import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import { buildSetupPlan, type SetupPlan, type SetupRepositoryState, validateSetupPlan } from '@anvil/derive'
-import { git, normalizeGitPath } from '@anvil/git'
+import { git, normalizeGitPath, type RunResult, readOnlyGitEnv } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command } from './types.ts'
 
-/** Git must not execute fsmonitor, clean/process filters or submodule-local helpers. */
-async function repositoryState(root: string): Promise<SetupRepositoryState> {
+/**
+ * Classify `git status`. A non-zero exit is incomplete, and so is a warning on stderr:
+ * Git can report `could not open directory` while exiting 0 with empty stdout, which
+ * must not become `clean`.
+ */
+export function worktreeFromStatus(result: RunResult): SetupRepositoryState['worktree'] {
+  if (result.exitCode !== 0 || result.stderr.trim() !== '') return 'unknown'
+  return result.stdout === '' ? 'clean' : 'dirty'
+}
+
+function succeeded(result: RunResult): boolean {
+  return result.exitCode === 0 && result.stderr.trim() === ''
+}
+
+/**
+ * A split index is rewritten (its `sharedindex.*` mtime is refreshed) by merely reading
+ * it, even with `--no-optional-locks`. Detect it before any command that reads the index.
+ */
+async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): Promise<boolean> {
+  const [config, indexPath] = await Promise.all([
+    call(['config', '--bool', '--get', 'core.splitIndex']),
+    call(['rev-parse', '--path-format=absolute', '--git-path', 'index']),
+  ])
+  if (config.exitCode === 0) {
+    if (config.stderr.trim() !== '' || config.stdout.trim() === 'true') return true
+  } else if (config.exitCode !== 1 || config.stderr.trim() !== '') {
+    // The setting cannot be read, so the index cannot be proven safe to read either.
+    return true
+  }
+  if (!succeeded(indexPath)) return true
+  try {
+    const indexDir = dirname(normalizeGitPath(indexPath.stdout))
+    return readdirSync(indexDir).some((name) => name.startsWith('sharedindex.'))
+  } catch {
+    return true
+  }
+}
+
+/** Git must not fetch missing objects, execute fsmonitor, filters or submodule-local helpers. */
+export async function repositoryState(root: string, run: typeof git = git): Promise<SetupRepositoryState> {
+  const env = readOnlyGitEnv()
   const options = ['--no-optional-locks', '-c', 'core.fsmonitor=false']
-  const [top, head, filters, index] = await Promise.all([
-    git([...options, 'rev-parse', '--show-toplevel'], { cwd: root }),
-    git([...options, 'rev-parse', '--verify', 'HEAD^{commit}'], { cwd: root }),
+  const call = (args: string[]) => run([...options, ...args], { cwd: root, env })
+  const [top, head, filters, split] = await Promise.all([
+    call(['rev-parse', '--show-toplevel']),
+    call(['rev-parse', '--verify', 'HEAD^{commit}']),
     // Names only: configured commands may contain credentials and are never copied out.
-    git([...options, 'config', '--null', '--name-only', '--get-regexp', '^filter\\.'], { cwd: root }),
-    git([...options, 'ls-files', '--stage', '-z'], { cwd: root }),
+    call(['config', '--null', '--name-only', '--get-regexp', '^filter\\.']),
+    splitIndexActive(call),
   ])
   // A nested --profile must not bind its proposal to a different enclosing project.
   // Compare paths the same way repository discovery does: git may report a different
   // drive-letter case or separator style than Node's JavaScript realpath.
-  const topPath = top.exitCode === 0 && top.stdout.trim() !== '' ? normalizeGitPath(top.stdout) : null
+  const topPath = succeeded(top) && top.stdout.trim() !== '' ? normalizeGitPath(top.stdout) : null
   const isRoot = topPath !== null && topPath === root
   const state: SetupRepositoryState = {
     root,
-    head: isRoot && head.exitCode === 0 ? head.stdout.trim() : null,
+    head: isRoot && succeeded(head) ? head.stdout.trim() : null,
     worktree: 'unknown',
   }
-  // Do not recurse into submodules, whose local Git configuration can name more helpers.
-  // Until recursive capture has its own safety boundary, their state is undecidable here.
-  if (!isRoot || index.exitCode !== 0 || index.stdout.split('\0').some((entry) => entry.startsWith('160000 '))) {
-    return state
-  }
-  if (filters.exitCode !== 0 && filters.exitCode !== 1) return state
+  // Without a readable commit there is no complete snapshot to validate against.
+  if (!isRoot || state.head === null) return state
+  if ((filters.exitCode !== 0 && filters.exitCode !== 1) || filters.stderr.trim() !== '') return state
+  // Do not run status or read the index when a split index would be rewritten on read.
+  if (split) return state
   for (const key of filters.stdout.split('\0').filter(Boolean)) {
     if (!/\.(clean|smudge|process|required)$/.test(key)) continue
+    // Filter keys are validated by the same pattern above; they are names, not commands.
     options.push('-c', `${key}=${key.endsWith('.required') ? 'false' : ''}`)
     options.push('-c', `${key.slice(0, key.lastIndexOf('.'))}.required=false`)
   }
+  // One index read supplies both mode (gitlinks, 160000) and the -v flag column.
+  const index = await call(['ls-files', '--stage', '-v', '-z'])
+  if (!succeeded(index)) return state
+  for (const entry of index.stdout.split('\0')) {
+    if (entry === '') continue
+    const [tag, mode] = entry.split(' ', 2)
+    // A lowercase tag is assume-unchanged; `S` is skip-worktree. Either hides
+    // working-tree changes, so status alone cannot establish a clean snapshot.
+    if (mode === '160000' || tag === 'S' || /^[a-z]$/.test(tag ?? '')) return state
+  }
   // A disabled filter can conservatively make a transformed working copy appear dirty.
   // That is preferable to executing a helper just to decide whether a proposal is current.
-  const status = await git(
-    [...options, 'status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=all'],
-    { cwd: root },
-  )
-  return {
-    ...state,
-    worktree: status.exitCode !== 0 ? 'unknown' : status.stdout === '' ? 'clean' : 'dirty',
-  }
+  const status = await call(['status', '--porcelain=v1', '-z', '--untracked-files=normal', '--ignore-submodules=all'])
+  return { ...state, worktree: worktreeFromStatus(status) }
 }
 
 /** Bounded read of a user-selected regular JSON file, never a device or directory. */

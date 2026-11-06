@@ -76,10 +76,19 @@ probe, service connection or online discovery. They use Git metadata commands, w
 repository-configured fsmonitor disabled and optional index writes disabled. The selected
 plan file must be regular JSON no larger than 1 MiB.
 
+Implicit object fetching is disabled (`GIT_NO_LAZY_FETCH=1`), including during repository
+discovery. A partial clone whose local objects are unavailable is reported as `unknown`
+rather than triggering a network fetch. A warning on Git's stderr is also treated as an
+incomplete observation, even when the command exits 0.
+
 Configured clean/process filters are also disabled: Git status can otherwise execute them
 while comparing files. A filtered working copy may therefore conservatively appear dirty.
 Repositories with submodules are reported as unknown without recursively checking them,
-because submodule-local configuration can name additional helpers.
+because submodule-local configuration can name additional helpers. An index that hides
+working-tree state is likewise `unknown`: `assume-unchanged` and `skip-worktree` entries
+suppress modified files, and a split index is not read at all because merely reading it
+refreshes its `sharedindex.*` metadata. These cases are refused before index-reading
+commands run.
 
 Validation compares the saved payload with a newly generated plan, not just its claimed
 digest. It refuses changed commands, added fields, forged approval fields, changed effective
