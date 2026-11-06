@@ -27,13 +27,15 @@ function succeeded(result: RunResult): boolean {
  *
  * `sharedindex.*` is not guaranteed to sit beside the index. A relocated `GIT_INDEX_FILE`
  * can point outside the Git directory while the shared index stays in the Git directory,
- * and a symlinked index resolves elsewhere again, so both the index directory (as given,
- * and following links) and the resolved Git directory are checked.
+ * and a linked index resolves elsewhere again, so both the index directory (as Git was
+ * given it, without following links) and the resolved Git directory are checked.
  */
-async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): Promise<boolean> {
+async function splitIndexActive(root: string, call: (args: string[]) => Promise<RunResult>): Promise<boolean> {
   const [config, indexPath, gitDirPath] = await Promise.all([
     call(['config', '--bool', '--get', 'core.splitIndex']),
-    call(['rev-parse', '--path-format=absolute', '--git-path', 'index']),
+    // No --path-format: Git falls back to a shared index beside the index path *as given*,
+    // and the canonical form resolves a symlinked index away from that directory.
+    call(['rev-parse', '--git-path', 'index']),
     call(['rev-parse', '--path-format=absolute', '--absolute-git-dir']),
   ])
   if (config.exitCode === 0) {
@@ -44,10 +46,12 @@ async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): P
   }
   if (!succeeded(indexPath) || !succeeded(gitDirPath)) return true
   try {
-    const index = resolve(indexPath.stdout.trim())
-    const dirs = new Set([dirname(index), dirname(normalizeGitPath(index)), normalizeGitPath(gitDirPath.stdout.trim())])
+    const index = resolve(root, indexPath.stdout.trim())
+    const dirs = new Set([dirname(index), normalizeGitPath(gitDirPath.stdout.trim())])
     for (const dir of dirs) {
-      if (readdirSync(dir).some((name) => name.startsWith('sharedindex.'))) return true
+      // A case-insensitive filesystem can open `sharedindex.*` under any casing, so any
+      // casing is treated as a shared index rather than risk reading one.
+      if (readdirSync(dir).some((name) => name.toLowerCase().startsWith('sharedindex.'))) return true
     }
     return false
   } catch {
@@ -69,7 +73,7 @@ export async function repositoryState(root: string, run: typeof git = git): Prom
     call(['rev-parse', '--verify', 'HEAD^{commit}']),
     // Names only: configured commands may contain credentials and are never copied out.
     call(['config', '--null', '--name-only', '--get-regexp', '^filter\\.']),
-    splitIndexActive(call),
+    splitIndexActive(root, call),
   ])
   // A nested --profile must not bind its proposal to a different enclosing project.
   // Compare paths the same way repository discovery does: git may report a different

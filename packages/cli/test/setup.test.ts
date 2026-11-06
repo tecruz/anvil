@@ -441,4 +441,43 @@ describe('anvil setup', () => {
     assert.equal(plan.repository.worktree, 'unknown')
     assert.equal(statSync(path).mtimeMs, before)
   })
+
+  test('a shared index filename is refused without regard to case', () => {
+    const root = repo()
+    // A case-insensitive filesystem can open `sharedindex.*` under any casing.
+    writeFileSync(join(root, '.git', `SHAREDINDEX.${'a'.repeat(40)}`), '')
+    assert.equal(proposal(root).repository.worktree, 'unknown')
+  })
+
+  test('a shared index beside the index path as given is not missed', async () => {
+    const root = normalizeGitPath(repo())
+    const lexical = mkdtempSync(join(tmpdir(), 'anvil-lexical-'))
+    const canonical = mkdtempSync(join(tmpdir(), 'anvil-canonical-'))
+    roots.push(lexical, canonical)
+    writeFileSync(join(lexical, `sharedindex.${'a'.repeat(40)}`), '')
+    let indexRead = false
+    const runner: typeof gitExec = async (args) => {
+      if (args.includes('config')) return { stdout: '', stderr: '', exitCode: 1 }
+      if (args.includes('--show-toplevel')) return { stdout: `${root}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--verify')) return { stdout: `${'b'.repeat(40)}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--git-path')) {
+        // Git falls back to a shared index beside the path as given; the canonical form
+        // resolves a linked index away from that directory.
+        const value = args.includes('--path-format=absolute') ? join(canonical, 'index') : join(lexical, 'index')
+        return { stdout: `${value}\n`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('--absolute-git-dir')) {
+        return { stdout: `${join(root, '.git')}\n`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('ls-files')) {
+        indexRead = true
+        return { stdout: `H 100644 ${'c'.repeat(40)} 0\ttracked.txt\0`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('status')) return { stdout: '', stderr: '', exitCode: 0 }
+      throw new Error(`Unexpected command: ${args.join(' ')}`)
+    }
+    const state = await repositoryState(root, runner)
+    assert.equal(state.worktree, 'unknown')
+    assert.equal(indexRead, false)
+  })
 })

@@ -124,8 +124,9 @@ export async function hasPromisorRemote(
     }),
   ])
   if (!noConfigMatch(promisor)) {
-    // An unreadable configuration cannot prove the absence of a promisor remote.
-    if (promisor.exitCode !== 0) return true
+    // An unreadable configuration cannot prove the absence of a promisor remote, and a
+    // warning on stderr means the reading was incomplete even when the exit code was 0.
+    if (promisor.exitCode !== 0 || promisor.stderr.trim() !== '') return true
     for (const entry of promisor.stdout.split('\0')) {
       if (entry === '') continue
       // Entries are `key\nvalue\0`; anything unexpected is treated as promisor presence.

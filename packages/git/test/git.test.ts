@@ -112,6 +112,18 @@ describe('hasPromisorRemote', () => {
     const broken: GitRunner = async () => ({ stdout: '', stderr: 'error: bad config\n', exitCode: 128 })
     assert.equal(await hasPromisorRemote(dir, { run: broken }), true)
   })
+
+  test('fails closed when a promisor probe warns even though it exits 0', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    // `promisor=false` alone would prove absence, but the warning says the read was
+    // incomplete, so the answer must be the conservative one.
+    const warned: GitRunner = async (args) =>
+      args.some((arg) => arg.includes('promisor'))
+        ? { stdout: 'remote.origin.promisor\nfalse\0', stderr: 'warning: could not read all config\n', exitCode: 0 }
+        : { stdout: '', stderr: '', exitCode: 1 }
+    assert.equal(await hasPromisorRemote(dir, { run: warned }), true)
+  })
 })
 
 describe('discoverRepo', () => {
