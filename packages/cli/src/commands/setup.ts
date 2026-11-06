@@ -1,9 +1,9 @@
 /** Read-only setup proposals. No installer, approval writer or environment probes. */
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import { buildSetupPlan, type SetupPlan, type SetupRepositoryState, validateSetupPlan } from '@anvil/derive'
-import { git } from '@anvil/git'
+import { git, normalizeGitPath } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command } from './types.ts'
 
@@ -18,7 +18,10 @@ async function repositoryState(root: string): Promise<SetupRepositoryState> {
     git([...options, 'ls-files', '--stage', '-z'], { cwd: root }),
   ])
   // A nested --profile must not bind its proposal to a different enclosing project.
-  const isRoot = top.exitCode === 0 && realpathSync(top.stdout.trim()) === root
+  // Compare paths the same way repository discovery does: git may report a different
+  // drive-letter case or separator style than Node's JavaScript realpath.
+  const topPath = top.exitCode === 0 && top.stdout.trim() !== '' ? normalizeGitPath(top.stdout) : null
+  const isRoot = topPath !== null && topPath === root
   const state: SetupRepositoryState = {
     root,
     head: isRoot && head.exitCode === 0 ? head.stdout.trim() : null,
@@ -112,7 +115,7 @@ export const setupCommand: Command = {
     }
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const profile = await loadProfile(ctx, target, parseMaxFiles(args.values['max-files']))
-    const root = realpathSync(profile.root)
+    const root = normalizeGitPath(profile.root)
     const declared = loadConfig({ repoRoot: root }).config.project
     const repository = await repositoryState(root)
     // Incomplete detection cannot be treated as an approval-ready repository snapshot.

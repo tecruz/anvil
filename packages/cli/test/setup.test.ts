@@ -1,10 +1,20 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import type { SetupPlan, SetupPlanValidation } from '@anvil/derive'
+import { normalizeGitPath } from '@anvil/git'
 
 const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
 const roots: string[] = []
@@ -163,6 +173,26 @@ describe('anvil setup', () => {
     assert.equal(plan.actions[0]?.command, 'right')
     assert.equal(plan.actions[0]?.cwd, 'app')
     assert.equal(plan.repository.head, git(target, 'rev-parse', 'HEAD').trim())
+    // A path-comparison regression must not silently degrade the target to `unknown`.
+    assert.equal(plan.repository.worktree, 'clean')
+    assert.equal(plan.repository.root, normalizeGitPath(target))
+  })
+
+  test('a directory alias for the repository root keeps a clean snapshot', (t) => {
+    const root = repo({ commands: [{ kind: 'install', cmd: 'npm ci' }] })
+    const alias = join(scratch(), 'alias')
+    try {
+      symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+    } catch {
+      t.skip('directory aliases are unavailable here')
+      return
+    }
+    const result = run(alias, ['plan', '--profile', alias, '--json'])
+    assert.equal(result.code, 0, result.stdout)
+    const plan = (JSON.parse(result.stdout) as { data: SetupPlan }).data
+    assert.equal(plan.repository.root, normalizeGitPath(root))
+    assert.equal(plan.repository.head, git(root, 'rev-parse', 'HEAD').trim())
+    assert.equal(plan.repository.worktree, 'clean')
   })
 
   test('there is no execute, approve, apply or implicit checking mode', () => {
