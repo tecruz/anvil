@@ -35,6 +35,7 @@ import { mcpCommand } from './commands/mcp.ts'
 import { planCommand } from './commands/plan.ts'
 import { playbookCommand } from './commands/playbook.ts'
 import { readyCommand } from './commands/ready.ts'
+import { setupCommand } from './commands/setup.ts'
 import { shipCommand } from './commands/ship.ts'
 import type { Command, CommandContext } from './commands/types.ts'
 import { versionCommand } from './commands/version.ts'
@@ -56,6 +57,7 @@ const COMMANDS: Command[] = [
   profileCommand,
   readyCommand,
   releaseCommand,
+  setupCommand,
   shipCommand,
   statusCommand,
   versionCommand,

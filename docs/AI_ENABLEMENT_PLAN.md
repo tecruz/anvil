@@ -1,7 +1,7 @@
 # Plan: broader AI enablement
 
-Status: **In progress. The first slice of workstreams 1 and 2 is implemented; the rest is
-still proposed.**
+Status: **In progress. Readiness declarations and diagnostics, approved reference pointers,
+and inspect-only setup proposals are implemented. Execution and richer context remain proposed.**
 Prepared: 2026-11-04.
 
 ## Implemented so far: `anvil ready`
@@ -68,6 +68,14 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   `actions`, each with `requiresApproval: true`. The only install command printed is one the
   owner declared; otherwise the action has no command, because anvil will not guess a
   package manager. Nothing in the report is run, and a path tool is never executed.
+- **Reviewable setup proposals** (workstream 3, inspect-only slice) — `anvil setup plan`
+  emits a deterministic proposal for owner-declared install commands with exact text,
+  working directories and declaration-field provenance. A digest binds it to effective
+  declarations and repository state; `anvil setup validate --plan <file>` refuses changed,
+  dirty, unknown or tampered proposals. Permissions, file effects and immutable resource
+  pins are explicitly unknown. Validation never grants approval or executes anything;
+  see [the proposal contract](SETUP_PLANS.md). Execution adapters and approval records
+  remain proposed, not implemented.
 
 Still proposed: automatic install/configure with verification, richer company-context
 sources (staleness and contradiction checks beyond path existence), and real-agent
