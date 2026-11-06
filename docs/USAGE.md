@@ -211,6 +211,81 @@ What each step does:
 commits, reported separately because they need different handling. `anvil status
 --orphans` also lists worktrees git knows about that no claim references.
 
+## Checking readiness: `anvil ready`
+
+`anvil ready` answers the question an engineer asks on their first day in a repository they
+did not write: what does this project need from this machine, and is any of it missing? It
+reports three states and never guesses between them.
+
+- **Commands** — how to build, test and run, from the detected profile and from any
+  commands the owner declared in `anvil.config.json`. Each command keeps its real source:
+  `documented` and `detected` are `verified`, while `inferred` (a convention anvil guessed)
+  and `declared` (the owner's word) are `unknown`, because declaring or inferring a command
+  is not observing it. Declared commands also reach the files `anvil init` writes, so the
+  same capability an `anvil ready` report describes is the one the agent is given.
+- **Environment** — the tools the project's own effective commands need, plus any the owner
+  declared. A missing required tool is `blocked`; a tool that is found but fails to run is
+  `unavailable`, which is also a blocker and not a pass. When the owner declared a version
+  range, the reported version is compared with it: outside the range is `incompatible` and
+  blocks, while a version that cannot be read or parsed stays `unknown` rather than being
+  called compatible or incompatible. A runner for an inferred command, an alternative
+  command, a second declaration of the same kind, or a playbook suggestion is non-blocking
+  information. Without `--check` no process is spawned and every tool is `unknown`.
+- **Environment variables** — variables the owner declared in `project.env`, checked for
+  presence by name only. A missing required variable, or one set to an empty value, is
+  `blocked`; an optional one is reported without blocking. `anvil ready` never reads a value
+  into its report and never proposes an `export` line, so a secret cannot leak into the
+  output. Without `--check` no variable is consulted and every one is `unknown`.
+- **Services** — local services the owner declared in `project.services`, checked with a
+  bounded TCP connect. A required service that nothing is accepting connections on is
+  `blocked`; an optional one is reported without blocking; a connect that times out or throws
+  is `unknown`, never a blocker. `reachable` means a socket opened — not that the service is
+  healthy, ready to serve requests, or authorized for the credentials at hand. Only loopback
+  hosts are accepted, so a committed config cannot turn the report into a probe of an
+  arbitrary host, and nothing is sent to the service. A hostname is resolved first and the
+  connect is pinned to a loopback address — every loopback answer is tried, so a name that
+  resolves to both `::1` and `127.0.0.1` reaches whichever family is listening — and a name
+  that resolves only elsewhere is `unknown` rather than contacted. Only a refused connection
+  is `unreachable`; a timeout or any other socket error stays `unknown`. Without `--check`
+  nothing is contacted.
+- **References** — documents the owner approved as project context in `project.references`,
+  each with a path and a scope (`standards`, `architecture`, `requirements`, `security` or
+  `other`). Anvil checks only that the path exists: a missing required document is `blocked`
+  and proposes a `restore:` action, while an optional one is reported without blocking. The
+  file is never opened, so approving a pointer cannot copy its contents into a report, and a
+  path that could leave the repository — or a URL — is rejected at config load. A link whose
+  target leaves the repository, a link whose target cannot be followed, or a path whose
+  containment cannot be established is `unknown` rather than `missing` or a pass: containment
+  is decided before existence, so an absent file behind an external link is not a false
+  `restore`. The check is repository-local, so it runs whether or not `--check` is given.
+- **Context** — what the agent reads first. A global instruction file is not repository
+  context, so a global-only setup is `unknown`, not `verified`.
+
+`--check` never runs repository-controlled code. A bare tool name that resolves outside the
+repository is probed with a bounded, tool-specific command (`go version`, not `go --version`;
+`xcodebuild -version`). The probe runs the exact path it checked, so a `PATH` change between
+the check and the run cannot redirect it. A Windows `.cmd`/`.bat` shim runs through an
+interpreter anvil resolves to an absolute path and pins itself -- never the bare `cmd.exe`
+fallback; an interpreter that cannot be resolved, or that lives inside the repository, makes
+the probe `unknown` instead of running. A path-shaped tool (`. ./gradlew`), a bare name that
+resolves *inside* the repository (a `node_modules/.bin` shim), or a repository-local symlink
+whose target is elsewhere, is only checked for existence and runnability — it is never
+executed, so a committed config cannot turn a read-only report into code execution. This
+holds even when the repository is reached through a directory alias. A repository whose
+commands and tools anvil cannot identify is `unknown`, never `verified`.
+
+Nothing in the report has run. `anvil ready` never runs the project's build or tests, and
+never runs a setup action. When something required is missing it proposes an action under
+`actions`, each with `requiresApproval: true`; the only install command it prints is one the
+owner wrote down in `anvil.config.json`. `--fail-on-blocked` exits 6 when the report is
+blocked, for a CI gate.
+
+```bash
+anvil ready                 # read-only; every tool is unknown
+anvil ready --check         # probe the environment (opt-in; the only mode that spawns)
+anvil ready --fail-on-blocked
+```
+
 ## Command reference
 
 Every command takes `--json` and `--no-color`, and `--help` prints the flags it
@@ -222,6 +297,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--apply` writes them. |
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
+| `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
 | `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |
@@ -267,7 +343,8 @@ Two layers, repo-local wins:
   "git": { "defaultBaseBranch": null, "worktreeRoot": null },
   "provider": { "default": "local" },
   "output": { "color": "auto" },
-  "features": { "probeCommands": false }
+  "features": { "probeCommands": false },
+  "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
 }
 ```
 
@@ -278,6 +355,43 @@ Two layers, repo-local wins:
 - `provider.default` — the ticket provider used when a reference carries none.
 - `output.color` — `auto`, `always` or `never`.
 - `features.probeCommands` — run the project's verify commands during `ship`.
+- `project.commands` — commands the owner declares for a project anvil cannot detect on
+  its own. Each entry is `{ "kind": "build" | "test" | ..., "cmd": "...", "dir": "..." }`;
+  `dir` is the repo-relative working directory and defaults to the repository root. A
+  declaration is recorded as `unknown` by `anvil ready` — declaring a command is not
+  observing it, and is not authorization to run it — and it is carried into the AGENTS.md and
+  verify skill `anvil init` generates, so an undetected technology is still usable.
+- `project.tools` — tools the project needs in the environment, checked by `anvil ready
+  --check`. Each entry is `{ "id": "...", "bin": "...", "reason": "...", "version": "...",
+  "required": true, "install": "..." }`. `required` defaults to true. `install`, when
+  present, is a command `anvil ready` *proposes* and never runs. `version` is a small,
+  documented subset of semantic-version ranges: exact (`1.2.3`), comparators
+  (`>=18 <21`), partial lines (`20`, `20.11`), wildcards (`20.x`), caret/tilde
+  (`^20.11`, `~1.2.3`) and alternatives (`^18 || ^20`). A range anvil cannot evaluate is
+  rejected when the config loads; a version it cannot read is `unknown`, never a pass. That
+  includes a version with an unsupported suffix or more than three components: it is not
+  truncated to a shorter version that might pass.
+- `project.env` — environment variables the project needs, checked for presence by `anvil
+  ready --check`. Each entry is `{ "name": "DATABASE_URL", "reason": "...", "required": true }`.
+  `required` defaults to true. A declaration names a variable only; anvil never reads or
+  writes its value, and a `value` key is a config error. The name must be one a shell can
+  export (`[A-Za-z_][A-Za-z0-9_]*`). On Windows, names are matched case-insensitively, the
+  way the OS and a spawned process treat them; elsewhere they match exactly.
+- `project.services` — local services the project needs, checked by `anvil ready --check`
+  with a bounded TCP connect. Each entry is `{ "id": "...", "host": "...", "port": 5432,
+  "reason": "...", "required": true }`. `port` is mandatory, `required` defaults to true, and
+  `host` defaults to `127.0.0.1` and must be a loopback name (`localhost`, `127.0.0.1`,
+  `::1`, `[::1]`): a committed config must not be able to make a read-only report reach an
+  arbitrary host. The name is resolved first and only a loopback answer is connected to. The
+  connect sends no data and only observes whether a socket opens.
+- `project.references` — documents the owner approves as context, checked for existence by
+  `anvil ready`. Each entry is `{ "id": "...", "path": "docs/adr/0001.md", "scope":
+  "architecture", "reason": "...", "required": true }`. `scope` defaults to `other` and is one
+  of `standards`, `architecture`, `requirements`, `security`, `other`; `required` defaults to
+  true. `path` must be repo-relative and may not contain `..` or name an absolute path, and a
+  `url` key is rejected: anvil points at approved local documents and does not fetch remote
+  material. Only existence is checked, never the contents. Approved references are also
+  listed by path and scope in `anvil brief`, so an agent knows what to read.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year.

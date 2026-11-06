@@ -30,6 +30,11 @@ Five stages, and the order is the design:
 5. **Claim / ship** — do the work in a worktree, and put it back on the remote in an
    order where a failure cannot lose anything.
 
+`anvil ready` reads the profile, the matched playbooks and the owner-declared capabilities
+and reports what an AI needs and whether it is present (`verified`, `blocked`, `unknown`).
+It is non-executing unless `--check` is passed, and it proposes setup actions rather than
+running them.
+
 The CLI never calls a model. It gathers verified facts, and hands them over. That split
 is what lets the same behaviour work in Claude Code, in Cursor, in an opencode plugin and
 in a raw shell.
@@ -92,6 +97,7 @@ published — the profile, the report, the plan, the brief, the envelope — car
 | `Finding` | `packages/audit/src/types.ts` | one rule's verdict: `pass`, `warn`, `fail` or `na`, a severity, evidence, and a fix |
 | `Plan` | `packages/playbooks/src/plan.ts` | ranked suggestions in three tiers, with the satisfied ones counted and left out |
 | `Brief` | `packages/derive/src/brief.ts` | verified facts and the `gaps` that keep generated guidance honest |
+| `ReadyReport` | `packages/derive/src/ready.ts` | what an AI needs and whether it is here: commands, tools, context, and the setup actions proposed (never run) |
 | `Ticket` | `packages/tickets/src/index.ts` | the canonical ticket: the provider's own `state`, a normalized one, and the raw payload |
 | `Envelope` | `packages/core/src/output.ts` | the `--json` shape: `{ schemaVersion, ok, command, data \| error }` |
 | `ExitCode` | `packages/core/src/errors.ts` | the process exit code, which is public and does not change |

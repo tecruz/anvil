@@ -88,12 +88,20 @@ export function hashInputs(input: {
     findings: Array<{ id: string; status: string; severity: string }>
   }
   playbookIds: readonly string[]
+  /**
+   * Owner-declared capabilities, when present.
+   *
+   * Omitted from the canonical form when absent, so a repository with no declarations keeps
+   * the exact hash it had before this input existed.
+   */
+  declared?: unknown
 }): string {
   const canonical = JSON.stringify({
     commands: input.profile,
     findings: input.report.findings.map((f) => [f.id, f.status, f.severity]),
     score: input.report.score,
     playbooks: [...input.playbookIds].sort(),
+    declared: input.declared,
   })
   return sha256(canonical)
 }

@@ -42,7 +42,7 @@ function detectHost(remote: string): VcsHost {
  * with total confidence. The enclosing repo is consulted only for provenance (host,
  * remote, default branch).
  */
-async function loadProfile(
+export async function loadProfile(
   ctx: CommandContext,
   target: string | undefined,
   maxFiles?: number,
@@ -69,7 +69,7 @@ async function loadProfile(
   ).profile
 }
 
-function parseMaxFiles(value: unknown): number | undefined {
+export function parseMaxFiles(value: unknown): number | undefined {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !/^\d+$/.test(value) || Number(value) < 1) {
     throw new AnvilError(ErrorCode.Usage, `Invalid --max-files: ${String(value)}`, {

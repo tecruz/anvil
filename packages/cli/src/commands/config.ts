@@ -28,6 +28,11 @@ function describe(config: AnvilConfig): Array<[string, string]> {
     ['provider.default', config.provider.default],
     ['output.color', config.output.color],
     ['features.probeCommands', String(config.features.probeCommands)],
+    ['project.commands', String(config.project.commands.length)],
+    ['project.tools', String(config.project.tools.length)],
+    ['project.env', String(config.project.env.length)],
+    ['project.services', String(config.project.services.length)],
+    ['project.references', String(config.project.references.length)],
   ]
 }
 

@@ -281,6 +281,292 @@ describe('the starter config is a config anvil accepts', () => {
   })
 })
 
+describe('project: owner-declared capabilities', () => {
+  test('accepts declared commands with a working directory', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          commands: [
+            { kind: 'test', cmd: 'make check', dir: 'build' },
+            { kind: 'build', cmd: 'make' },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.commands, [
+      { kind: 'test', cmd: 'make check', dir: 'build' },
+      { kind: 'build', cmd: 'make' },
+    ])
+  })
+
+  test('accepts declared tools with the optional fields', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          tools: [{ id: 'make', bin: 'gmake', version: '>=4.3 <5', required: false, install: 'apt-get install make' }],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.tools, [
+      { id: 'make', bin: 'gmake', version: '>=4.3 <5', required: false, install: 'apt-get install make' },
+    ])
+  })
+
+  test('accepts declared environment variables by name', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          env: [
+            { name: 'DATABASE_URL', reason: 'the database' },
+            { name: 'OPTIONAL_FLAG', required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.env, [
+      { name: 'DATABASE_URL', reason: 'the database' },
+      { name: 'OPTIONAL_FLAG', required: false },
+    ])
+  })
+
+  test('rejects a value in an environment declaration, and a name a shell cannot export', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { env: [{ name: 'API_TOKEN', value: 'secret' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.env\[0\]\.value: unknown configuration key/)
+        return true
+      },
+      'a value key is rejected: anvil never stores a secret in the config',
+    )
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { env: [{ name: 'not a name' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.env\[0\]\.name: expected an environment variable name/)
+        return true
+      },
+    )
+  })
+
+  test('an env layer replaces the array and a silent layer keeps the one below', () => {
+    const global = mergeConfig(defaultConfig(), { project: { env: [{ name: 'A' }] } }, 'global')
+    assert.deepEqual(mergeConfig(global, { project: { tools: [{ id: 'make' }] } }, 'repo').project.env, [{ name: 'A' }])
+    assert.deepEqual(mergeConfig(global, { project: { env: [{ name: 'B' }] } }, 'repo').project.env, [{ name: 'B' }])
+  })
+
+  test('accepts declared loopback services, with defaults for host and required', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          services: [
+            { id: 'postgres', port: 5432, reason: 'the database' },
+            { id: 'redis', host: 'localhost', port: 6379, required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.services, [
+      { id: 'postgres', port: 5432, reason: 'the database' },
+      { id: 'redis', host: 'localhost', port: 6379, required: false },
+    ])
+  })
+
+  test('rejects a non-loopback service host, a bad port, and an unknown key', () => {
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', host: 'db.internal', port: 5432 }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.services\[0\]\.host: expected a loopback host/)
+        return true
+      },
+      'a committed config must not be able to probe an arbitrary host',
+    )
+    for (const port of [0, 65536, 1.5, '5432']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', port }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.services\[0\]\.port: expected an integer port/)
+          return true
+        },
+        String(port),
+      )
+    }
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { services: [{ id: 'db', port: 5432, url: 'postgres://x' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.services\[0\]\.url: unknown configuration key/)
+        return true
+      },
+    )
+  })
+
+  test('accepts approved context references with a scope', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          references: [
+            { id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture', reason: 'the decisions' },
+            { id: 'style', path: 'docs/style.md', required: false },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.references, [
+      { id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture', reason: 'the decisions' },
+      { id: 'style', path: 'docs/style.md', required: false },
+    ])
+  })
+
+  test('rejects a reference path that could leave the repository', () => {
+    for (const path of [
+      '../secrets.md',
+      'docs/../../x.md',
+      '/etc/passwd',
+      'C:/Windows/win.ini',
+      './docs/a.md',
+      'https://example.com/policy.md',
+      'file:///etc/passwd',
+      'ssh://host/policy.md',
+    ]) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.references\[0\]\.path: expected a repo-relative path/)
+          return true
+        },
+        path,
+      )
+    }
+  })
+
+  test('rejects an unknown scope and an unknown reference key', () => {
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path: 'a.md', scope: 'secrets' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.references\[0\]\.scope: expected one of/)
+        return true
+      },
+    )
+    assert.throws(
+      () =>
+        mergeConfig(defaultConfig(), { project: { references: [{ id: 'x', path: 'a.md', url: 'https://x' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.references\[0\]\.url: unknown configuration key/)
+        return true
+      },
+      'references are paths, never URLs: anvil does not fetch remote material',
+    )
+  })
+
+  test('rejects a version range anvil cannot evaluate', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: 'newest' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.version: expected a version range/)
+        return true
+      },
+    )
+  })
+
+  test('rejects a malformed identifier in a version range', () => {
+    for (const version of ['1.2.3-rc..1', '1.2.3+.', '9007199254740993.0.0']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.tools\[0\]\.version: expected a version range/)
+          return true
+        },
+        version,
+      )
+    }
+  })
+
+  test('rejects an empty version range', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', version: ' ' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.version: expected a non-empty version range/)
+        return true
+      },
+    )
+  })
+
+  test('rejects an unknown command kind', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'compile', cmd: 'make' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.commands\[0\]\.kind: expected one of/)
+        return true
+      },
+    )
+  })
+
+  test('rejects an empty cmd and an unknown key in a tool', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'test', cmd: '  ' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.commands\[0\]\.cmd: expected a non-empty string/)
+        return true
+      },
+    )
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make', wtf: 1 }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.wtf: unknown configuration key/)
+        return true
+      },
+    )
+  })
+
+  test('rejects a tool with no id', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { tools: [{ reason: 'build' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.tools\[0\]\.id: expected a non-empty string/)
+        return true
+      },
+    )
+  })
+
+  test('a layer that sets commands replaces the array rather than appending', () => {
+    const global = mergeConfig(defaultConfig(), { project: { commands: [{ kind: 'build', cmd: 'make' }] } }, 'global')
+    const repo = mergeConfig(global, { project: { commands: [{ kind: 'test', cmd: 'make check' }] } }, 'repo')
+    assert.deepEqual(repo.project.commands, [{ kind: 'test', cmd: 'make check' }])
+  })
+
+  test('a layer silent about tools keeps the layer below', () => {
+    const global = mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make' }] } }, 'global')
+    const repo = mergeConfig(global, { project: { commands: [{ kind: 'test', cmd: 'make check' }] } }, 'repo')
+    assert.deepEqual(repo.project.tools, [{ id: 'make' }])
+  })
+})
+
 describe('tokenizeCommand', () => {
   // Verify commands are stored and printed as one string but have to reach a process as
   // argv. A whitespace split hands `--tests` the literal `"*Changed*"` including quotes,

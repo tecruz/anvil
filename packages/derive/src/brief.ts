@@ -16,6 +16,7 @@
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
+import type { ProjectConfig } from '@anvil/core'
 import { curatedTrust, liveTrust, type MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile, RiskPath } from '@anvil/profile'
 
@@ -24,16 +25,31 @@ export type BriefTarget = 'agents' | 'commands' | 'skills' | 'all'
 export interface BriefCommand {
   kind: string
   cmd: string
-  source: CommandEntry['source']
+  source: CommandEntry['source'] | 'declared'
   /** The first command of a kind is the one anvil uses; the rest are real candidates. */
   primary: boolean
   evidence: string | null
+  /** Repo-relative directory the command runs from. `''` means the repository root. */
+  dir: string
 }
 
 export interface BriefModule {
   id: string
   path: string
   dependsOn: string[]
+}
+
+/**
+ * An approved context document, by path and scope only.
+ *
+ * The brief names what the owner approved so an agent can open it; it never carries the
+ * document's contents, so approving a pointer cannot upload a sensitive document.
+ */
+export interface BriefReference {
+  id: string
+  path: string
+  scope: string
+  reason: string | null
 }
 
 export interface BriefFileExcerpt {
@@ -104,6 +120,8 @@ export interface Brief {
   }>
   /** Excerpts from a small allowlist of manifest files. Never secrets. */
   excerpts: BriefFileExcerpt[]
+  /** Approved context documents, by path and scope only. Their contents are never copied. */
+  references: BriefReference[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
   gaps: string[]
   /**
@@ -141,6 +159,8 @@ export interface BuildBriefOptions {
   target: BriefTarget
   /** Reads a repo-relative file. Injected so tests do not need a real repo. */
   read: (relPath: string) => string | null
+  /** Owner-declared capabilities, carried so an unrecognized technology is still described. */
+  declared?: ProjectConfig
   /** Findings to omit, so a `brief --for agents` is not swamped by unrelated rules. */
   relevantLayers?: readonly string[]
   /**
@@ -191,14 +211,30 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   const { profile, report, matches, target, read } = options
 
   const commands: BriefCommand[] = []
-  for (const kind of Object.keys(profile.commands).sort()) {
+  const declaredCommands = options.declared?.commands ?? []
+  const commandKinds = [...new Set([...Object.keys(profile.commands), ...declaredCommands.map((c) => c.kind)])].sort()
+  for (const kind of commandKinds) {
+    // Declared commands lead: the owner overrides the detected command for that kind, and the
+    // detected one is kept beside it so the model sees both rather than a silent replacement.
+    const declaredForKind = declaredCommands.filter((c) => c.kind === kind)
+    declaredForKind.forEach((entry, index) => {
+      commands.push({
+        kind,
+        cmd: entry.cmd,
+        source: 'declared',
+        primary: index === 0,
+        evidence: 'anvil.config.json',
+        dir: entry.dir ?? profile.projectDir,
+      })
+    })
     for (const [index, entry] of (profile.commands[kind as keyof typeof profile.commands] ?? []).entries()) {
       commands.push({
         kind,
         cmd: entry.cmd,
         source: entry.source,
-        primary: index === 0,
+        primary: index === 0 && declaredForKind.length === 0,
         evidence: entry.evidence ?? null,
+        dir: profile.projectDir,
       })
     }
   }
@@ -284,6 +320,12 @@ export function buildBrief(options: BuildBriefOptions): Brief {
     playbooks,
     findings,
     excerpts,
+    references: (options.declared?.references ?? []).map((r) => ({
+      id: r.id,
+      path: r.path,
+      scope: r.scope ?? 'other',
+      reason: r.reason ?? null,
+    })),
     gaps: computeGaps(report, profile),
     warnings: [...(options.warnings ?? [])],
   }

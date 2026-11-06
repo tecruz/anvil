@@ -1078,6 +1078,29 @@ describe('global flags work on every command', () => {
   })
 })
 
+describe('declared capabilities reach the brief', () => {
+  test('a references-only config is carried into anvil brief', () => {
+    // Regression: `loadAll` used to pass declarations only when commands or tools existed, so
+    // a config that declared only references produced an empty `references` list.
+    const dir = tempDir('anvil-brief-refs-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(
+      join(dir, 'anvil.config.json'),
+      JSON.stringify({
+        project: { references: [{ id: 'adr', path: 'docs/adr/0001.md', scope: 'architecture' }] },
+      }),
+    )
+    const res = runAnvil(['brief', '--json', '--offline'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const envelope = JSON.parse(res.stdout) as { ok: boolean; data: { references: Array<{ path: string }> } }
+    assert.equal(envelope.ok, true)
+    assert.deepEqual(
+      envelope.data.references.map((r) => r.path),
+      ['docs/adr/0001.md'],
+    )
+  })
+})
+
 describe('per-command help', () => {
   test('--help shows usage and flags for a command', () => {
     const res = runAnvil(['config', '--help'])

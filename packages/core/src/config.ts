@@ -18,6 +18,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { AnvilError, ErrorCode } from './errors.ts'
+import { isValidVersionRange } from './version-range.ts'
 
 export const CONFIG_FILE_NAME = 'anvil.config.json'
 export const CONFIG_DIR_NAME = '.anvil'
@@ -31,6 +32,125 @@ export const CONFIG_DIR_NAME = '.anvil'
  * better than a wrong one. If a schema is published later, this is where it goes.
  */
 export const SCHEMA_URL: string | undefined = undefined
+
+/** The command kinds a project owner can declare, matching the profile's own set. */
+export type DeclaredCommandKind = 'install' | 'build' | 'test' | 'testFast' | 'lint' | 'format' | 'typecheck' | 'run'
+
+/**
+ * A command the project owner declares, for a repository anvil does not detect on its own.
+ *
+ * Declaring a command records an expectation, not evidence that it works and not
+ * authorization to run it. `dir` is repo-relative; the command runs there, which is the one
+ * thing a declaration cannot leave to convention when the project lives in a subdirectory.
+ */
+export interface DeclaredCommand {
+  kind: DeclaredCommandKind
+  cmd: string
+  dir?: string
+}
+
+/** A tool the project needs in the environment. Checked by `anvil ready --check`. */
+export interface DeclaredTool {
+  /** Tool name, and the binary probed unless `bin` says otherwise. */
+  id: string
+  /** The binary to look for on PATH. Defaults to `id`. */
+  bin?: string
+  /** Why the project needs it. */
+  reason?: string
+  /**
+   * The version range the project supports, as a small documented subset of semver
+   * (`>=20 <21`, `^20.11`, `~1.2.3`, `20.x`). Checked against the reported version by
+   * `anvil ready --check`; an unparseable range is a config error.
+   */
+  version?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+  /**
+   * The command that installs it, when the owner knows one. `anvil ready` proposes this as
+   * an action to approve; anvil never runs it.
+   */
+  install?: string
+}
+
+/**
+ * An environment variable the project needs. Checked by `anvil ready --check`, by name only.
+ *
+ * A declaration is the variable's *name*. Anvil never reads the declaration for a value and
+ * never writes a value into its report; presence is the only thing it can honestly check, and
+ * a present variable is not proof that the credential behind it is valid or authorized.
+ */
+export interface DeclaredEnvVar {
+  /** The variable name, as the shell and the process environment spell it. */
+  name: string
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/**
+ * A local service the project needs, checked by `anvil ready --check` with a TCP connect.
+ *
+ * Deliberately loopback-only: a committed `anvil.config.json` must not be able to make a
+ * read-only readiness report reach an arbitrary host. Only whether something accepts a
+ * connection is observed, which is not proof the service is healthy or authorized for use.
+ */
+export interface DeclaredService {
+  /** Stable name, used in the report and proposed actions. */
+  id: string
+  /** Loopback host to connect to. Defaults to `127.0.0.1`. */
+  host?: string
+  /** TCP port the service listens on. */
+  port: number
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/** What a declared reference is: a document category, so its authority stays visible. */
+export type DeclaredReferenceScope = 'standards' | 'architecture' | 'requirements' | 'security' | 'other'
+
+/**
+ * A repository document the owner approves as project context, by path.
+ *
+ * Only the path is declared and only its existence is checked. Anvil never fetches it and
+ * never copies its contents into a report, so approval is a pointer a person wrote down, not
+ * permission to upload, summarize or treat the document as authoritative on its own.
+ */
+export interface DeclaredReference {
+  /** Stable name. */
+  id: string
+  /** Repo-relative path to the document. Must stay inside the repository. */
+  path: string
+  /** What the document is, so its scope is not lost. Defaults to `other`. */
+  scope?: DeclaredReferenceScope
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be understood without it. Defaults to true. */
+  required?: boolean
+}
+
+/**
+ * What the project owner says the project needs, for the parts anvil cannot detect.
+ *
+ * The detected profile stays the only source of *detected* facts. This section is the
+ * explicit escape hatch: a technology anvil has no detector for, a tool it cannot infer,
+ * a working directory it could only guess at, a credential only the environment holds, and
+ * a service this machine has to be running.
+ */
+export interface ProjectConfig {
+  /** Owner-declared commands, keyed by kind, for a project anvil cannot detect on its own. */
+  commands: DeclaredCommand[]
+  /** Owner-declared required tools. */
+  tools: DeclaredTool[]
+  /** Owner-declared environment variables, checked for presence by name. */
+  env: DeclaredEnvVar[]
+  /** Owner-declared local services, checked with a bounded loopback TCP connect. */
+  services: DeclaredService[]
+  /** Owner-approved context documents, checked for existence by path. */
+  references: DeclaredReference[]
+}
 
 export interface AnvilConfig {
   schemaVersion: 1
@@ -52,6 +172,8 @@ export interface AnvilConfig {
     /** Run external verify commands during `ship`. */
     probeCommands: boolean
   }
+  /** Owner-declared project capabilities, for what detection cannot see. */
+  project: ProjectConfig
 }
 
 export type ConfigSourceKind = 'global' | 'repo' | 'default'
@@ -75,6 +197,7 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
+    project: { commands: [], tools: [], env: [], services: [], references: [] },
   }
 }
 
@@ -127,6 +250,295 @@ function expectEnum<T extends string>(
   return undefined
 }
 
+/** Report a key that the section does not accept. Unknown keys are errors, never ignored. */
+function checkUnknownKeys(
+  obj: Record<string, unknown>,
+  allowed: readonly string[],
+  prefix: string,
+  issues: ValidationIssue[],
+): void {
+  for (const key of Object.keys(obj)) {
+    if (!allowed.includes(key)) issues.push({ path: `${prefix}.${key}`, message: 'unknown configuration key' })
+  }
+}
+
+const DECLARED_COMMAND_KINDS: readonly DeclaredCommandKind[] = [
+  'install',
+  'build',
+  'test',
+  'testFast',
+  'lint',
+  'format',
+  'typecheck',
+  'run',
+]
+
+/**
+ * Validate `project.commands`.
+ *
+ * Returns `undefined` only when the whole value is the wrong shape; individual bad entries
+ * are dropped after being reported, so one typo does not hide the rest.
+ */
+function parseDeclaredCommands(value: unknown, path: string, issues: ValidationIssue[]): DeclaredCommand[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredCommand[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['kind', 'cmd', 'dir'], at, issues)
+    const kind = expectEnum(entry.kind, `${at}.kind`, DECLARED_COMMAND_KINDS, issues)
+    if (typeof entry.cmd !== 'string' || entry.cmd.trim() === '') {
+      issues.push({ path: `${at}.cmd`, message: 'expected a non-empty string' })
+      return
+    }
+    if (entry.dir !== undefined && typeof entry.dir !== 'string') {
+      issues.push({ path: `${at}.dir`, message: 'expected a string' })
+      return
+    }
+    if (kind === undefined) return
+    out.push(entry.dir === undefined ? { kind, cmd: entry.cmd } : { kind, cmd: entry.cmd, dir: entry.dir })
+  })
+  return out
+}
+
+/** Validate `project.tools`. Same per-entry reporting as {@link parseDeclaredCommands}. */
+function parseDeclaredTools(value: unknown, path: string, issues: ValidationIssue[]): DeclaredTool[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredTool[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'bin', 'reason', 'version', 'required', 'install'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    const tool: DeclaredTool = { id: entry.id }
+    for (const key of ['bin', 'reason', 'install'] as const) {
+      if (entry[key] === undefined) continue
+      if (typeof entry[key] !== 'string') {
+        issues.push({ path: `${at}.${key}`, message: 'expected a string' })
+        return
+      }
+      tool[key] = entry[key]
+    }
+    if (entry.version !== undefined) {
+      if (typeof entry.version !== 'string' || entry.version.trim() === '') {
+        issues.push({ path: `${at}.version`, message: 'expected a non-empty version range' })
+        return
+      }
+      if (!isValidVersionRange(entry.version)) {
+        issues.push({
+          path: `${at}.version`,
+          message: 'expected a version range like ">=20 <21", "^20.11", "~1.2.3" or "20.x"',
+        })
+        return
+      }
+      tool.version = entry.version.trim()
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      tool.required = entry.required
+    }
+    out.push(tool)
+  })
+  return out
+}
+
+/**
+ * The shape of an environment variable name.
+ *
+ * Deliberately conservative: a name that a shell could not export is a typo, and accepting it
+ * would make `anvil ready` report on a variable that can never be set.
+ */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** Validate `project.env`. Names only; a value never appears in the configuration. */
+function parseDeclaredEnv(value: unknown, path: string, issues: ValidationIssue[]): DeclaredEnvVar[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredEnvVar[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['name', 'reason', 'required'], at, issues)
+    if (typeof entry.name !== 'string' || !ENV_NAME.test(entry.name)) {
+      issues.push({ path: `${at}.name`, message: 'expected an environment variable name like "DATABASE_URL"' })
+      return
+    }
+    const declared: DeclaredEnvVar = { name: entry.name }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      declared.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      declared.required = entry.required
+    }
+    out.push(declared)
+  })
+  return out
+}
+
+/** The hosts anvil will connect to for a declared service. Loopback only, by design. */
+const LOOPBACK_HOSTS: readonly string[] = ['localhost', '127.0.0.1', '::1', '[::1]']
+
+/** Validate `project.services`. Loopback hosts only; a port is mandatory. */
+function parseDeclaredServices(value: unknown, path: string, issues: ValidationIssue[]): DeclaredService[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredService[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'host', 'port', 'reason', 'required'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    if (typeof entry.port !== 'number' || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) {
+      issues.push({ path: `${at}.port`, message: 'expected an integer port between 1 and 65535' })
+      return
+    }
+    const service: DeclaredService = { id: entry.id, port: entry.port }
+    if (entry.host !== undefined) {
+      if (typeof entry.host !== 'string' || !LOOPBACK_HOSTS.includes(entry.host)) {
+        // A readiness report must not be usable as a request to probe an arbitrary host.
+        issues.push({
+          path: `${at}.host`,
+          message: `expected a loopback host (${LOOPBACK_HOSTS.join(', ')})`,
+        })
+        return
+      }
+      service.host = entry.host
+    }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      service.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      service.required = entry.required
+    }
+    out.push(service)
+  })
+  return out
+}
+
+const REFERENCE_SCOPES: readonly DeclaredReferenceScope[] = [
+  'standards',
+  'architecture',
+  'requirements',
+  'security',
+  'other',
+]
+
+/**
+ * True when `value` is a repository-relative path that cannot escape the repository.
+ *
+ * An absolute path, a drive letter, a URL scheme, or a `..` segment is rejected: a committed
+ * config must not be able to point the check at a file outside the repository, and a
+ * reference is a local document, never a remote one. Catching `scheme:` also covers the
+ * Windows drive spelling, since `C:` matches the same shape.
+ */
+function isSafeReferencePath(value: string): boolean {
+  const path = value.trim()
+  if (path === '' || path.startsWith('/') || path.startsWith('\\')) return false
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(path)) return false
+  return path.split(/[/\\]+/).every((segment) => segment !== '' && segment !== '.' && segment !== '..')
+}
+
+/** Validate `project.references`. Paths are repo-relative and must stay inside the repo. */
+function parseDeclaredReferences(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+): DeclaredReference[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredReference[] = []
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'path', 'scope', 'reason', 'required'], at, issues)
+    if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+      issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+      return
+    }
+    if (typeof entry.path !== 'string' || !isSafeReferencePath(entry.path)) {
+      issues.push({
+        path: `${at}.path`,
+        message: 'expected a repo-relative path that stays inside the repository',
+      })
+      return
+    }
+    const reference: DeclaredReference = { id: entry.id, path: entry.path.trim() }
+    if (entry.scope !== undefined) {
+      const scope = expectEnum(entry.scope, `${at}.scope`, REFERENCE_SCOPES, issues)
+      if (scope === undefined) return
+      reference.scope = scope
+    }
+    if (entry.reason !== undefined) {
+      if (typeof entry.reason !== 'string') {
+        issues.push({ path: `${at}.reason`, message: 'expected a string' })
+        return
+      }
+      reference.reason = entry.reason
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      reference.required = entry.required
+    }
+    out.push(reference)
+  })
+  return out
+}
+
 /**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
@@ -136,7 +548,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   // `$schema` is a standard JSON key that an editor adds by hand; accept and ignore it
   // rather than failing a config that is otherwise valid.
-  const known = new Set(['$schema', 'schemaVersion', 'git', 'provider', 'output', 'features'])
+  const known = new Set(['$schema', 'schemaVersion', 'git', 'provider', 'output', 'features', 'project'])
   for (const key of Object.keys(layer)) {
     if (!known.has(key)) issues.push({ path: key, message: 'unknown configuration key' })
   }
@@ -217,6 +629,34 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (features.probeCommands !== undefined) {
       const probe = expectBoolean(features.probeCommands, 'features.probeCommands', issues)
       if (probe !== undefined) next.features.probeCommands = probe
+    }
+  }
+
+  if (layer.project !== undefined) {
+    const project = expectObject(layer.project, 'project', issues)
+    checkUnknownKeys(project, ['commands', 'tools', 'env', 'services', 'references'], 'project', issues)
+    // Each key replaces its array rather than concatenating: a repo layer that declares its
+    // own commands is answering the question, not adding to the global answer. Keys the
+    // layer is silent about keep the merged value from the layers below.
+    if (project.commands !== undefined) {
+      const commands = parseDeclaredCommands(project.commands, 'project.commands', issues)
+      if (commands !== undefined) next.project.commands = commands
+    }
+    if (project.tools !== undefined) {
+      const tools = parseDeclaredTools(project.tools, 'project.tools', issues)
+      if (tools !== undefined) next.project.tools = tools
+    }
+    if (project.env !== undefined) {
+      const env = parseDeclaredEnv(project.env, 'project.env', issues)
+      if (env !== undefined) next.project.env = env
+    }
+    if (project.services !== undefined) {
+      const services = parseDeclaredServices(project.services, 'project.services', issues)
+      if (services !== undefined) next.project.services = services
+    }
+    if (project.references !== undefined) {
+      const references = parseDeclaredReferences(project.references, 'project.references', issues)
+      if (references !== undefined) next.project.references = references
     }
   }
 
@@ -303,6 +743,10 @@ export function starterConfigJson(): string {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
+    // The escape hatch for a project anvil cannot detect on its own. Left empty here and
+    // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
+    // write is a claim anvil would be inventing.
+    project: { commands: [], tools: [], env: [], services: [], references: [] },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`
