@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,8 +18,8 @@ import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { buildSetupPlan, type SetupPlan, type SetupPlanValidation, validateSetupPlan } from '@anvil/derive'
-import { normalizeGitPath } from '@anvil/git'
-import { worktreeFromStatus } from '../src/commands/setup.ts'
+import { git as gitExec, normalizeGitPath } from '@anvil/git'
+import { repositoryState, worktreeFromStatus } from '../src/commands/setup.ts'
 
 const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
 const roots: string[] = []
@@ -375,5 +376,69 @@ describe('anvil setup', () => {
     // A trace line for `fetch origin` is the observable form of the implicit fetch.
     assert.ok(existsSync(trace), 'expected GIT_TRACE output')
     assert.doesNotMatch(readFileSync(trace, 'utf8'), /fetch origin/)
+  })
+
+  test('a promisor remote on a Git without --no-lazy-fetch fails closed instead of fetching', async () => {
+    const root = normalizeGitPath(repo())
+    const guarded: boolean[] = []
+    // Simulate Git < 2.45: configuration is readable, but `--no-lazy-fetch` is unknown and
+    // must abort the read rather than let it become an implicit fetch.
+    const older: typeof gitExec = async (args, options) => {
+      guarded.push(options?.noLazyFetch === true)
+      if (args[0] === 'config' && args.includes('--get-regexp')) {
+        return args.some((arg) => arg.includes('promisor'))
+          ? { stdout: 'remote.origin.promisor\ntrue\0', stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: '', exitCode: 1 }
+      }
+      if (options?.noLazyFetch === true) {
+        return { stdout: '', stderr: "error: unknown option `no-lazy-fetch'\n", exitCode: 129 }
+      }
+      return { stdout: '', stderr: '', exitCode: 1 }
+    }
+    const state = await repositoryState(root, older)
+    assert.equal(state.worktree, 'unknown')
+    assert.equal(state.head, null)
+    assert.ok(guarded.some(Boolean), 'expected the guard to be requested once a promisor is detected')
+  })
+
+  test('a repository without a promisor remote never requests --no-lazy-fetch', async () => {
+    const root = normalizeGitPath(repo())
+    const flags: boolean[] = []
+    const wrapped: typeof gitExec = async (args, options) => {
+      flags.push(options?.noLazyFetch === true)
+      return gitExec(args, options)
+    }
+    const state = await repositoryState(root, wrapped)
+    assert.equal(state.worktree, 'clean')
+    assert.ok(flags.length > 0, 'expected metadata reads to run')
+    // A non-promisor repository must keep working on a Git that predates the flag.
+    assert.ok(flags.every((flag) => flag === false))
+  })
+
+  test('a relocated split index cannot refresh a shared index in the Git directory', () => {
+    const root = repo()
+    const outside = scratch()
+    const relocated = join(outside, 'custom-index')
+    // Start from the real index so the working tree still matches HEAD afterwards.
+    copyFileSync(join(root, '.git', 'index'), relocated)
+    const env = { GIT_INDEX_FILE: relocated }
+    execFileSync('git', ['update-index', '--split-index'], {
+      cwd: root,
+      stdio: 'pipe',
+      env: { ...process.env, ...env },
+    })
+    const shared = readdirSync(join(root, '.git')).find((name) => name.startsWith('sharedindex.'))
+    assert.ok(shared, 'expected a shared index in the Git directory')
+    const path = join(root, '.git', shared)
+    const past = new Date('2020-01-01T00:00:00Z')
+    utimesSync(path, past, past)
+    const before = statSync(path).mtimeMs
+    // The index lives outside .git; its shared index does not. Checking only the index
+    // directory would read the index and refresh the shared index's metadata.
+    const result = run(root, ['plan', '--json'], env)
+    assert.equal(result.code, 0, result.stdout)
+    const plan = (JSON.parse(result.stdout) as { data: SetupPlan }).data
+    assert.equal(plan.repository.worktree, 'unknown')
+    assert.equal(statSync(path).mtimeMs, before)
   })
 })

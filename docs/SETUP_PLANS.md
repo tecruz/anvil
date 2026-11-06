@@ -76,8 +76,11 @@ probe, service connection or online discovery. They use Git metadata commands, w
 repository-configured fsmonitor disabled and optional index writes disabled. The selected
 plan file must be regular JSON no larger than 1 MiB.
 
-Implicit object fetching is disabled (`GIT_NO_LAZY_FETCH=1`), including during repository
-discovery. A partial clone whose local objects are unavailable is reported as `unknown`
+Implicit object fetching is disabled. `GIT_NO_LAZY_FETCH=1` is set for metadata reads, and
+when a promisor remote or partial-clone filter is configured, `--no-lazy-fetch` is also
+passed explicitly. That flag exists only in Git 2.45 and later, so an older Git fails the
+read closed instead of letting it fetch; a repository without a promisor remote is
+unaffected. A partial clone whose local objects are unavailable is reported as `unknown`
 rather than triggering a network fetch. A warning on Git's stderr is also treated as an
 incomplete observation, even when the command exits 0.
 
@@ -87,8 +90,9 @@ Repositories with submodules are reported as unknown without recursively checkin
 because submodule-local configuration can name additional helpers. An index that hides
 working-tree state is likewise `unknown`: `assume-unchanged` and `skip-worktree` entries
 suppress modified files, and a split index is not read at all because merely reading it
-refreshes its `sharedindex.*` metadata. These cases are refused before index-reading
-commands run.
+refreshes its `sharedindex.*` metadata. The split-index check looks in both the index's own
+directory and the resolved Git directory, so a relocated `GIT_INDEX_FILE` or a linked index
+cannot hide a shared index. These cases are refused before index-reading commands run.
 
 Validation compares the saved payload with a newly generated plan, not just its claimed
 digest. It refuses changed commands, added fields, forged approval fields, changed effective

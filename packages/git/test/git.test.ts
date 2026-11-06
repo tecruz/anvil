@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { discoverRepo, git, gitOrThrow } from '@anvil/git'
+import { discoverRepo, type GitRunner, git, gitOrThrow, hasPromisorRemote } from '@anvil/git'
 
 const roots: string[] = []
 
@@ -75,6 +75,42 @@ describe('git', () => {
     const res = await git(['-C', dir, 'rev-parse', '--is-inside-work-tree'])
     assert.equal(res.exitCode, 0)
     assert.equal(res.stdout.trim(), 'true')
+  })
+})
+
+describe('hasPromisorRemote', () => {
+  test('is false without promisor configuration', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    assert.equal(await hasPromisorRemote(dir), false)
+  })
+
+  test('is true when a remote is a promisor', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    execFileSync('git', ['config', 'remote.origin.promisor', 'true'], { cwd: dir, stdio: 'pipe' })
+    assert.equal(await hasPromisorRemote(dir), true)
+  })
+
+  test('is false when the only promisor remote is explicitly disabled', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    execFileSync('git', ['config', 'remote.origin.promisor', 'false'], { cwd: dir, stdio: 'pipe' })
+    assert.equal(await hasPromisorRemote(dir), false)
+  })
+
+  test('is true for a partial-clone filter even without the promisor flag', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    execFileSync('git', ['config', 'remote.origin.partialclonefilter', 'blob:none'], { cwd: dir, stdio: 'pipe' })
+    assert.equal(await hasPromisorRemote(dir), true)
+  })
+
+  test('fails closed when the promisor configuration cannot be read', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    const broken: GitRunner = async () => ({ stdout: '', stderr: 'error: bad config\n', exitCode: 128 })
+    assert.equal(await hasPromisorRemote(dir, { run: broken }), true)
   })
 })
 

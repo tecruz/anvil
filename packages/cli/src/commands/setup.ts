@@ -3,7 +3,7 @@ import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, statS
 import { dirname, resolve } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import { buildSetupPlan, type SetupPlan, type SetupRepositoryState, validateSetupPlan } from '@anvil/derive'
-import { git, normalizeGitPath, type RunResult, readOnlyGitEnv } from '@anvil/git'
+import { git, hasPromisorRemote, normalizeGitPath, type RunResult, readOnlyGitEnv } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command } from './types.ts'
 
@@ -24,11 +24,17 @@ function succeeded(result: RunResult): boolean {
 /**
  * A split index is rewritten (its `sharedindex.*` mtime is refreshed) by merely reading
  * it, even with `--no-optional-locks`. Detect it before any command that reads the index.
+ *
+ * `sharedindex.*` is not guaranteed to sit beside the index. A relocated `GIT_INDEX_FILE`
+ * can point outside the Git directory while the shared index stays in the Git directory,
+ * and a symlinked index resolves elsewhere again, so both the index directory (as given,
+ * and following links) and the resolved Git directory are checked.
  */
 async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): Promise<boolean> {
-  const [config, indexPath] = await Promise.all([
+  const [config, indexPath, gitDirPath] = await Promise.all([
     call(['config', '--bool', '--get', 'core.splitIndex']),
     call(['rev-parse', '--path-format=absolute', '--git-path', 'index']),
+    call(['rev-parse', '--path-format=absolute', '--absolute-git-dir']),
   ])
   if (config.exitCode === 0) {
     if (config.stderr.trim() !== '' || config.stdout.trim() === 'true') return true
@@ -36,10 +42,14 @@ async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): P
     // The setting cannot be read, so the index cannot be proven safe to read either.
     return true
   }
-  if (!succeeded(indexPath)) return true
+  if (!succeeded(indexPath) || !succeeded(gitDirPath)) return true
   try {
-    const indexDir = dirname(normalizeGitPath(indexPath.stdout))
-    return readdirSync(indexDir).some((name) => name.startsWith('sharedindex.'))
+    const index = resolve(indexPath.stdout.trim())
+    const dirs = new Set([dirname(index), dirname(normalizeGitPath(index)), normalizeGitPath(gitDirPath.stdout.trim())])
+    for (const dir of dirs) {
+      if (readdirSync(dir).some((name) => name.startsWith('sharedindex.'))) return true
+    }
+    return false
   } catch {
     return true
   }
@@ -48,8 +58,12 @@ async function splitIndexActive(call: (args: string[]) => Promise<RunResult>): P
 /** Git must not fetch missing objects, execute fsmonitor, filters or submodule-local helpers. */
 export async function repositoryState(root: string, run: typeof git = git): Promise<SetupRepositoryState> {
   const env = readOnlyGitEnv()
+  // `GIT_NO_LAZY_FETCH` only exists in Git 2.45 and later. When a promisor remote is
+  // configured, also ask for `--no-lazy-fetch`: on an older Git the unknown option makes
+  // the read fail closed instead of fetching. Non-promisor repositories are unaffected.
+  const noLazyFetch = await hasPromisorRemote(root, { env, run })
   const options = ['--no-optional-locks', '-c', 'core.fsmonitor=false']
-  const call = (args: string[]) => run([...options, ...args], { cwd: root, env })
+  const call = (args: string[]) => run([...options, ...args], { cwd: root, env, noLazyFetch })
   const [top, head, filters, split] = await Promise.all([
     call(['rev-parse', '--show-toplevel']),
     call(['rev-parse', '--verify', 'HEAD^{commit}']),
