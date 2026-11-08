@@ -73,6 +73,28 @@ export {
   validateSetupPlan,
 } from './setup.ts'
 export {
+  buildSetupExecutionPlan,
+  extractSetupExecutionRequest,
+  isSafeSetupExecutionPath,
+  isSetupExecutionPlan,
+  LOCAL_SKILL_ADAPTER,
+  LOCAL_SKILL_ADAPTER_FINGERPRINT,
+  MAX_SOURCE_BYTES,
+  SETUP_EXECUTION_PLAN_KIND,
+  type SetupExecutionDirectoryOperation,
+  type SetupExecutionEffects,
+  SetupExecutionError,
+  type SetupExecutionFileOperation,
+  type SetupExecutionOperation,
+  type SetupExecutionPlan,
+  type SetupExecutionPlanValidation,
+  type SetupExecutionRequest,
+  type SetupExecutionSkill,
+  type SetupExecutionSource,
+  type SetupExecutionVerification,
+  validateSetupExecutionPlan,
+} from './setup-execution.ts'
+export {
   type ApplyPrecondition,
   applyStaging,
   checkApplyPreconditions,

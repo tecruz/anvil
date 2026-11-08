@@ -1,8 +1,20 @@
-/** Read-only setup proposals. No installer, approval writer or environment probes. */
+/** Read-only setup plans. No installer, approval writer, apply command or environment probes. */
 import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
-import { buildSetupPlan, type SetupPlan, type SetupRepositoryState, validateSetupPlan } from '@anvil/derive'
+import {
+  buildSetupExecutionPlan,
+  buildSetupPlan,
+  extractSetupExecutionRequest,
+  isSetupExecutionPlan,
+  SetupExecutionError,
+  type SetupExecutionPlan,
+  type SetupExecutionPlanValidation,
+  type SetupPlan,
+  type SetupRepositoryState,
+  validateSetupExecutionPlan,
+  validateSetupPlan,
+} from '@anvil/derive'
 import { git, normalizeGitPath, probePromisorRemote, type RunResult, readOnlyGitEnv } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command } from './types.ts'
@@ -171,15 +183,20 @@ function readPlan(path: string): unknown {
 
 export const setupCommand: Command = {
   name: 'setup',
-  summary: 'Generate or validate a setup proposal; never execute or approve it.',
-  usage: 'anvil setup <plan|validate> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>]',
+  summary: 'Generate or validate a setup plan; never execute or approve it.',
+  usage:
+    'anvil setup <plan|validate> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--adapter local-skill --source <file> --name <name>]',
   details: [
-    'plan       Describe owner-declared install commands and emit a content-addressed proposal.',
+    'plan       Describe owner-declared install commands, or plan one local-skill installation.',
     'validate   Compare saved plan JSON with fresh inputs; requires --plan <file>.',
+    '',
+    'plan --adapter local-skill --source <repo-relative-file> --name <name>',
+    '           Build an inspect-only execution plan for one repository-local SKILL.md.',
     '',
     'No setup commands, version probes, service connections or file writes are performed.',
     'Only Git metadata commands run. No approval is granted, even when a plan is current.',
-    'Permissions, file changes and immutable resource references remain unknown.',
+    'Opaque install commands remain proposal-only; they cannot become executable through approval.',
+    'A local-skill plan is create-only and refuses an existing destination.',
     "Save the JSON envelope's data object outside the worktree (or in an ignored file).",
     'Validation refuses changed, dirty or unknown repository state; it is not a sandbox.',
   ].join('\n'),
@@ -189,43 +206,169 @@ export const setupCommand: Command = {
     profile: { type: 'string' },
     'max-files': { type: 'string' },
     plan: { type: 'string' },
+    adapter: { type: 'string' },
+    source: { type: 'string' },
+    name: { type: 'string' },
   },
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, setupCommand.flags)
     const sub = args.positionals[0]
     const planPath = args.values.plan
-    if (
-      args.positionals.length !== 1 ||
-      (sub !== 'plan' && sub !== 'validate') ||
-      (sub === 'validate' && (typeof planPath !== 'string' || planPath === '')) ||
-      (sub === 'plan' && planPath !== undefined)
-    ) {
-      throw new AnvilError(ErrorCode.Usage, 'Use setup plan, or setup validate --plan <file>', {
-        hint: 'There is no setup execution or approval command.',
-      })
+    const adapter = typeof args.values.adapter === 'string' ? args.values.adapter : undefined
+    const source = typeof args.values.source === 'string' ? args.values.source : undefined
+    const name = typeof args.values.name === 'string' ? args.values.name : undefined
+    const usage = (message: string, hint: string) => new AnvilError(ErrorCode.Usage, message, { hint })
+
+    if (args.positionals.length !== 1 || (sub !== 'plan' && sub !== 'validate')) {
+      throw usage('Use setup plan, or setup validate --plan <file>', 'There is no setup execution or approval command.')
     }
+    if (sub === 'validate') {
+      if (typeof planPath !== 'string' || planPath === '') {
+        throw usage('setup validate requires --plan <file>', 'Save the JSON data object produced by setup plan.')
+      }
+      if (adapter !== undefined || source !== undefined || name !== undefined) {
+        throw usage(
+          'setup validate reads adapter inputs from the saved plan',
+          'Do not pass --adapter, --source or --name with validate.',
+        )
+      }
+    } else {
+      if (planPath !== undefined) {
+        throw usage('setup plan does not take --plan <file>', 'Use setup validate --plan <file>.')
+      }
+      if (adapter === undefined && (source !== undefined || name !== undefined)) {
+        throw usage('--source and --name require --adapter local-skill', 'Choose an explicit adapter.')
+      }
+      if (adapter !== undefined) {
+        if (adapter !== 'local-skill') {
+          throw usage('Unsupported setup adapter', 'Use --adapter local-skill; no other adapter is implemented.')
+        }
+        if (source === undefined || source === '') {
+          throw usage(
+            '--adapter local-skill requires --source <repo-relative-file>',
+            'The source must be a file inside this repository.',
+          )
+        }
+        if (name === undefined || name === '') {
+          throw usage(
+            '--adapter local-skill requires --name <skill-name>',
+            'The name must match the skill name in its frontmatter.',
+          )
+        }
+      }
+    }
+
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const profile = await loadProfile(ctx, target, parseMaxFiles(args.values['max-files']))
     const root = normalizeGitPath(profile.root)
-    const declared = loadConfig({ repoRoot: root }).config.project
     const repository = await repositoryState(root)
     // Incomplete detection cannot be treated as an approval-ready repository snapshot.
     if (profile.diagnostics.truncated || profile.diagnostics.failedDetectors.length > 0) repository.worktree = 'unknown'
-    const plan = buildSetupPlan({ repository, declared, projectDir: profile.projectDir })
+
     if (sub === 'plan') {
-      ctx.out(plan, () => renderPlan(plan))
+      if (adapter === undefined) {
+        const declared = loadConfig({ repoRoot: root }).config.project
+        const plan = buildSetupPlan({ repository, declared, projectDir: profile.projectDir })
+        ctx.out(plan, () => renderPlan(plan))
+      } else {
+        const plan = buildSetupExecutionPlan({ repository, sourcePath: source as string, name: name as string })
+        ctx.out(plan, () => renderExecutionPlan(plan))
+      }
       return
     }
-    const validation = validateSetupPlan(readPlan(resolve(ctx.cwd, planPath as string)), plan)
+
+    const saved = readPlan(resolve(ctx.cwd, planPath as string))
+    const validation = isSetupExecutionPlan(saved)
+      ? executionValidation(saved, repository)
+      : validateSetupPlan(
+          saved,
+          buildSetupPlan({
+            repository,
+            declared: loadConfig({ repoRoot: root }).config.project,
+            projectDir: profile.projectDir,
+          }),
+        )
     if (validation.status !== 'current') {
       const error = new AnvilError(ErrorCode.PreflightFailed, validation.reason, {
-        hint: 'Generate a fresh proposal from a clean commit and review it. No setup or approval has occurred.',
+        hint: 'Generate a fresh plan from a clean commit and review it. No setup or approval has occurred.',
       })
       ctx.outFailure(validation, error, () => `${validation.status}: ${validation.reason}\n`)
       return error.exitCode
     }
     ctx.out(validation, () => `${validation.status}: ${validation.reason}`)
   },
+}
+
+/**
+ * Validate an execution plan against current inputs. The saved plan supplies only the
+ * bounded adapter inputs; it never supplies approval, a destination or a command.
+ */
+function executionValidation(saved: unknown, repository: SetupRepositoryState): SetupExecutionPlanValidation {
+  const result = (status: SetupExecutionPlanValidation['status'], reason: string): SetupExecutionPlanValidation => ({
+    schemaVersion: 1,
+    status,
+    approval: 'not-granted',
+    executed: false,
+    reason,
+  })
+  let request: ReturnType<typeof extractSetupExecutionRequest>
+  try {
+    request = extractSetupExecutionRequest(saved)
+  } catch (cause) {
+    return result('invalid', cause instanceof Error ? cause.message : 'Unsupported setup-execution-plan format.')
+  }
+  let current: SetupExecutionPlan
+  try {
+    current = buildSetupExecutionPlan({ repository, sourcePath: request.sourcePath, name: request.name })
+  } catch (cause) {
+    if (cause instanceof SetupExecutionError) return result(cause.validationStatus, cause.message)
+    if (cause instanceof AnvilError) return result('invalid', cause.message)
+    throw cause
+  }
+  return validateSetupExecutionPlan(saved, current)
+}
+
+function fenceFor(content: string): string {
+  let longest = 0
+  for (const match of content.matchAll(/`+/g)) longest = Math.max(longest, match[0].length)
+  return '`'.repeat(Math.max(3, longest + 1))
+}
+
+function renderExecutionPlan(plan: SetupExecutionPlan): string {
+  const lines = [
+    `Execution plan: ${plan.digest}`,
+    `adapter: ${plan.adapter} (fingerprint ${plan.adapterFingerprint})`,
+    `root: ${plan.repository.root}`,
+    `HEAD: ${plan.repository.head ?? 'unknown'} (${plan.repository.worktree})`,
+    `source: ${plan.source.path} (${plan.source.bytes} bytes, sha256 ${plan.source.sha256})`,
+    `destination: ${plan.skill.destination}`,
+    'Not approved. Nothing executed. This slice has no approval or apply command.',
+    '',
+    'Operations:',
+  ]
+  for (const operation of plan.operations) {
+    if (operation.kind === 'write-file') {
+      lines.push(
+        `  ${operation.kind} ${operation.path} (${operation.precondition}; ${operation.bytes} bytes; sha256 ${operation.sha256}; publish ${operation.publish})`,
+      )
+    } else {
+      lines.push(`  ${operation.kind} ${operation.path} (${operation.precondition})`)
+    }
+  }
+  lines.push(
+    '',
+    'Effects: filesystem only; no processes, network or credentials; overwrite: false; delete: false.',
+    `Verification: ${plan.verification.id} (${plan.verification.scope})`,
+    `  ${plan.verification.proves}`,
+    '',
+    'Skill content:',
+    `${fenceFor(plan.source.content)}markdown`,
+    plan.source.content,
+    fenceFor(plan.source.content),
+    '',
+    ...plan.warnings.map((warning) => `Warning: ${warning}`),
+  )
+  return lines.join('\n')
 }
 
 function renderPlan(plan: SetupPlan): string {

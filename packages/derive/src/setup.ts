@@ -5,8 +5,8 @@
  * tokenized nor expanded, and its permissions, file effects and immutable resource identity
  * cannot be inferred. A digest detects changes; it is not an authorization token or sandbox.
  */
-import { createHash } from 'node:crypto'
 import { AnvilError, ErrorCode, type ProjectConfig } from '@anvil/core'
+import { canonicalJson, digestJson } from './canonical.ts'
 
 export interface SetupRepositoryState {
   /** Physical directory, not a remote URL (which could contain credentials). */
@@ -58,24 +58,9 @@ export interface SetupPlanValidation {
   reason: string
 }
 
-/** Canonical JSON: object insertion order is irrelevant; array order remains significant. */
-function canonical(value: unknown, depth = 0): string {
-  if (depth > 50) throw new Error('Plan is too deeply nested')
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
-  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${Array.from(value, (entry) => canonical(entry, depth + 1)).join(',')}]`
-  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
-    throw new Error('Expected JSON data')
-  }
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${canonical(record[key], depth + 1)}`)
-    .join(',')}}`
-}
-
+/** Canonical JSON lives in `canonical.ts`; both setup contracts compare the same way. */
 function digest(value: unknown): string {
-  return createHash('sha256').update(canonical(value)).digest('hex')
+  return digestJson(value)
 }
 
 function checkedDirectory(dir: string): string {
@@ -190,7 +175,7 @@ export function validateSetupPlan(saved: unknown, current: SetupPlan): SetupPlan
       return result('invalid', 'The saved plan digest does not match its contents.')
     // Compare the entire object, not just an attacker-supplied digest. This also rejects extra
     // fields (including forged approvals) and malformed structures with recomputed digests.
-    if (canonical(saved) !== canonical(current)) {
+    if (canonicalJson(saved) !== canonicalJson(current)) {
       return result('stale', 'The saved plan differs from the current repository state or effective declarations.')
     }
   } catch {

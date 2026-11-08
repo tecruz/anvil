@@ -211,7 +211,7 @@ What each step does:
 commits, reported separately because they need different handling. `anvil status
 --orphans` also lists worktrees git knows about that no claim references.
 
-## Reviewing setup proposals: `anvil setup`
+## Reviewing setup plans: `anvil setup`
 
 `anvil setup plan` emits a deterministic, content-addressed proposal from owner-declared
 install commands (`project.commands` entries with `kind: "install"`, and
@@ -220,26 +220,44 @@ needed. Each action keeps the exact command, working directory, declaration sour
 version requirement. Permissions, file effects and immutable resource pins stay explicitly
 unknown, rather than being inferred from arbitrary command text.
 
+The original owner-declared proposal is unchanged:
+
 ```bash
 anvil setup plan
 anvil setup plan --json
 anvil setup validate --plan ../setup-plan.json --json
 ```
 
+The same command can plan one bounded, create-only skill installation:
+
+```bash
+anvil setup plan --adapter local-skill --source docs/skills/release-notes.md --name release-notes
+anvil setup plan --adapter local-skill --source docs/skills/release-notes.md --name release-notes --json
+anvil setup validate --plan ../execution-plan.json --json
+```
+
+The source must be a repository-relative regular UTF-8 file of at most 128 KiB. Its
+frontmatter name must equal `--name`, and the destination `.agents/skills/<name>/SKILL.md`
+must not exist. The plan shows the exact source content, destination, operations, effects and
+verification scope. It refuses absolute paths, traversal, `.git` paths, symbolic links,
+junctions, non-regular files and existing destinations. It never downloads, runs a script or
+overwrites anything.
+
 Save the JSON envelope's **data object**, outside the worktree or in an ignored file. The
-validator compares its digest, physical repository root, clean HEAD and effective
-declarations with a freshly generated plan. It refuses stale or tampered proposals and
-dirty or unknown repository state. Validation is not approval: every result remains
-`approval: "not-granted"` and `executed: false`.
+validator compares its digest, physical repository root, clean HEAD and inputs with a freshly
+generated plan. It refuses stale or tampered plans, changed source bytes, a destination that
+appeared since planning, and dirty or unknown repository state. Validation is not approval:
+every result remains `approval: "not-granted"` and `executed: false`.
 
 There is no execution, approval or `--check` mode here. Neither command runs an install,
 version probe, repository script or service connection, or writes a staging bundle. Git
 metadata is read with fsmonitor and optional index writes disabled. Existing configuration
-is untouched and environment values are never expanded into command text. Literal secrets
-must not be embedded in declarations, since those commands are displayed verbatim.
+and existing skill content are untouched, and environment values are never expanded into
+command text. Literal secrets must not be embedded in declarations, since those commands are
+displayed verbatim.
 
-See [the setup proposal contract](SETUP_PLANS.md) for the payload, validation exit codes,
-repository-state limits and requirements for a later execution adapter.
+See [the setup plan contracts](SETUP_PLANS.md) for both payloads, validation exit codes,
+repository-state limits and requirements for approval and application.
 
 ## Checking readiness: `anvil ready`
 
@@ -328,6 +346,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
+| `anvil setup` | `plan`, `validate` — inspect-only owner-command proposals and one create-only `local-skill` execution plan. Never approves or applies. |
 | `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |
