@@ -99,21 +99,33 @@ function noConfigMatch(result: RunResult): boolean {
 }
 
 /**
- * True when this repository can lazily fetch missing objects from a promisor remote.
+ * Result of probing local configuration for a promisor remote.
+ */
+export interface PromisorRemoteProbe {
+  /** A promisor remote may exist, so `--no-lazy-fetch` must be requested. */
+  present: boolean
+  /** Both configuration reads completed without warnings or unexpected results. */
+  complete: boolean
+}
+
+/**
+ * Probe this repository for a promisor remote.
  *
  * Lazy fetching is driven by configuration, not by the presence of promisor packs: Git
  * consults `remote.<name>.promisor` (and the partial-clone keys around it) before deciding
  * to run an implicit fetch. Detecting it locally needs no object access and no network.
  *
- * The answer is deliberately fail-closed. If the configuration cannot be read, or a value
- * cannot be parsed, the caller must assume objects may be fetched. Non-promisor
- * repositories return `false`, which keeps them working on Git versions that do not know
- * about `--no-lazy-fetch`.
+ * The answer is deliberately fail-closed in two separate ways. `present` is true whenever
+ * configuration cannot prove absence, so callers enable the fetch guard. `complete` is
+ * false whenever a read warned or returned something unexpected, so callers must keep
+ * reporting the repository as unknown instead of treating the probe as a clean fact.
+ * Non-promisor repositories return `{ present: false, complete: true }`, which keeps them
+ * working on Git versions that do not know about `--no-lazy-fetch`.
  */
-export async function hasPromisorRemote(
+export async function probePromisorRemote(
   cwd: string,
   options: { env?: NodeJS.ProcessEnv; run?: GitRunner } = {},
-): Promise<boolean> {
+): Promise<PromisorRemoteProbe> {
   const run = options.run ?? git
   const env = options.env ?? process.env
   const [promisor, partial] = await Promise.all([
@@ -123,23 +135,37 @@ export async function hasPromisorRemote(
       env,
     }),
   ])
+  const incomplete = (): PromisorRemoteProbe => ({ present: true, complete: false })
+  // A warning means the configuration was only partly read, even when the exit code was 0.
+  if (promisor.stderr.trim() !== '' || partial.stderr.trim() !== '') return incomplete()
+  let present = false
   if (!noConfigMatch(promisor)) {
-    // An unreadable configuration cannot prove the absence of a promisor remote, and a
-    // warning on stderr means the reading was incomplete even when the exit code was 0.
-    if (promisor.exitCode !== 0 || promisor.stderr.trim() !== '') return true
+    // An unreadable configuration cannot prove the absence of a promisor remote.
+    if (promisor.exitCode !== 0 || promisor.stdout.trim() === '') return incomplete()
     for (const entry of promisor.stdout.split('\0')) {
       if (entry === '') continue
       // Entries are `key\nvalue\0`; anything unexpected is treated as promisor presence.
       const separator = entry.indexOf('\n')
-      if (separator === -1) return true
+      if (separator === -1) return incomplete()
       const value = entry.slice(separator + 1).trim()
-      if (value === 'true') return true
-      if (value !== 'false') return true
+      if (value === 'true') present = true
+      else if (value !== 'false') return incomplete()
     }
   }
   // A partial-clone filter or extension names a promisor source even without the flag.
-  if (!noConfigMatch(partial)) return true
-  return false
+  if (!noConfigMatch(partial)) {
+    if (partial.exitCode !== 0) return incomplete()
+    present = true
+  }
+  return { present, complete: true }
+}
+
+/** Convenience wrapper for callers that only need the fetch guard. */
+export async function hasPromisorRemote(
+  cwd: string,
+  options: { env?: NodeJS.ProcessEnv; run?: GitRunner } = {},
+): Promise<boolean> {
+  return (await probePromisorRemote(cwd, options)).present
 }
 
 export async function gitOrThrow(args: string[], options: RunOptions = {}): Promise<string> {

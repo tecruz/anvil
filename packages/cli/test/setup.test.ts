@@ -480,4 +480,59 @@ describe('anvil setup', () => {
     assert.equal(state.worktree, 'unknown')
     assert.equal(indexRead, false)
   })
+
+  test('a promisor probe warning keeps the snapshot unknown and the saved plan stale', async () => {
+    const root = normalizeGitPath(repo())
+    const saved = proposal(root)
+    assert.equal(saved.repository.worktree, 'clean')
+    const warned: typeof gitExec = async (args, options) => {
+      if (args.includes('--get-regexp')) {
+        return args.some((arg) => arg.includes('promisor'))
+          ? { stdout: 'remote.origin.promisor\nfalse\0', stderr: 'warning: could not read all config\n', exitCode: 0 }
+          : { stdout: '', stderr: '', exitCode: 1 }
+      }
+      return gitExec(args, options)
+    }
+    const state = await repositoryState(root, warned)
+    // The probe cannot prove absence, so no later clean read may turn the snapshot clean.
+    assert.equal(state.worktree, 'unknown')
+    const current = buildSetupPlan({
+      repository: state,
+      declared: { commands: [], tools: [], env: [], services: [], references: [] },
+      projectDir: '',
+    })
+    assert.equal(validateSetupPlan(saved, current).status, 'stale')
+  })
+
+  test('a shared index behind a symlink-plus-dotdot parent is not missed', {
+    skip: process.platform === 'win32' ? 'Windows normalizes .. before resolving links' : false,
+  }, async () => {
+    const root = normalizeGitPath(repo())
+    const outside = scratch()
+    mkdirSync(join(outside, 'child'))
+    symlinkSync(join(outside, 'child'), join(root, 'link'))
+    // `/root/link/..` is `outside`, not `root`: `resolve()` would collapse `..` first.
+    writeFileSync(join(outside, `sharedindex.${'a'.repeat(40)}`), '')
+    let indexRead = false
+    const runner: typeof gitExec = async (args) => {
+      if (args.includes('config')) return { stdout: '', stderr: '', exitCode: 1 }
+      if (args.includes('--show-toplevel')) return { stdout: `${root}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--verify')) return { stdout: `${'b'.repeat(40)}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--git-path')) {
+        // Build the path textually: `join()` would collapse `..` before Git sees it.
+        return { stdout: `${root}/link/../index\n`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('--absolute-git-dir')) {
+        return { stdout: `${join(root, '.git')}\n`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('ls-files') || args.includes('status')) {
+        indexRead = true
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      throw new Error(`Unexpected command: ${args.join(' ')}`)
+    }
+    const state = await repositoryState(root, runner)
+    assert.equal(state.worktree, 'unknown')
+    assert.equal(indexRead, false)
+  })
 })

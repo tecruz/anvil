@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { discoverRepo, type GitRunner, git, gitOrThrow, hasPromisorRemote } from '@anvil/git'
+import { discoverRepo, type GitRunner, git, gitOrThrow, hasPromisorRemote, probePromisorRemote } from '@anvil/git'
 
 const roots: string[] = []
 
@@ -123,6 +123,15 @@ describe('hasPromisorRemote', () => {
         ? { stdout: 'remote.origin.promisor\nfalse\0', stderr: 'warning: could not read all config\n', exitCode: 0 }
         : { stdout: '', stderr: '', exitCode: 1 }
     assert.equal(await hasPromisorRemote(dir, { run: warned }), true)
+    // The boolean alone loses why it is true; callers that report repository state need
+    // the incomplete observation too, or they would call the snapshot clean.
+    assert.deepEqual(await probePromisorRemote(dir, { run: warned }), { present: true, complete: false })
+  })
+
+  test('reports a complete absence only when both configuration reads finish cleanly', async () => {
+    const dir = tempDir()
+    initRepoWithCommit(dir)
+    assert.deepEqual(await probePromisorRemote(dir), { present: false, complete: true })
   })
 })
 

@@ -1,9 +1,9 @@
 /** Read-only setup proposals. No installer, approval writer or environment probes. */
-import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs'
+import { dirname, isAbsolute, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import { buildSetupPlan, type SetupPlan, type SetupRepositoryState, validateSetupPlan } from '@anvil/derive'
-import { git, hasPromisorRemote, normalizeGitPath, type RunResult, readOnlyGitEnv } from '@anvil/git'
+import { git, normalizeGitPath, probePromisorRemote, type RunResult, readOnlyGitEnv } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command } from './types.ts'
 
@@ -46,8 +46,16 @@ async function splitIndexActive(root: string, call: (args: string[]) => Promise<
   }
   if (!succeeded(indexPath) || !succeeded(gitDirPath)) return true
   try {
-    const index = resolve(root, indexPath.stdout.trim())
-    const dirs = new Set([dirname(index), normalizeGitPath(gitDirPath.stdout.trim())])
+    // Resolve the *parent* with filesystem semantics, not `resolve()`, which collapses
+    // `..` lexically. With `link -> /outside/child`, `/repo/link/../index` is really
+    // `/outside/index`, and Git looks for a shared index beside `/outside`. Keeping the
+    // final component unresolved also preserves the directory a linked index was named in.
+    const reportedIndex = indexPath.stdout.trim()
+    const lexicalParent = dirname(isAbsolute(reportedIndex) ? reportedIndex : `${root}${sep}${reportedIndex}`)
+    // No `normalizeGitPath` here: its fallback collapses `..` lexically when realpath
+    // fails, which could scan the wrong directory. A failure must stay `unknown`.
+    const indexParent = realpathSync.native(lexicalParent)
+    const dirs = new Set([indexParent, normalizeGitPath(gitDirPath.stdout.trim())])
     for (const dir of dirs) {
       // A case-insensitive filesystem can open `sharedindex.*` under any casing, so any
       // casing is treated as a shared index rather than risk reading one.
@@ -65,7 +73,10 @@ export async function repositoryState(root: string, run: typeof git = git): Prom
   // `GIT_NO_LAZY_FETCH` only exists in Git 2.45 and later. When a promisor remote is
   // configured, also ask for `--no-lazy-fetch`: on an older Git the unknown option makes
   // the read fail closed instead of fetching. Non-promisor repositories are unaffected.
-  const noLazyFetch = await hasPromisorRemote(root, { env, run })
+  // An incomplete probe still requests the guard, but also keeps the whole snapshot
+  // unknown: a configuration read that warned cannot prove either presence or absence.
+  const promisor = await probePromisorRemote(root, { env, run })
+  const noLazyFetch = promisor.present
   const options = ['--no-optional-locks', '-c', 'core.fsmonitor=false']
   const call = (args: string[]) => run([...options, ...args], { cwd: root, env, noLazyFetch })
   const [top, head, filters, split] = await Promise.all([
@@ -87,6 +98,9 @@ export async function repositoryState(root: string, run: typeof git = git): Prom
   }
   // Without a readable commit there is no complete snapshot to validate against.
   if (!isRoot || state.head === null) return state
+  // A warning during the promisor probe leaves configuration partly unread, so the
+  // snapshot cannot be called clean even when every later command succeeds.
+  if (!promisor.complete) return state
   if ((filters.exitCode !== 0 && filters.exitCode !== 1) || filters.stderr.trim() !== '') return state
   // Do not run status or read the index when a split index would be rewritten on read.
   if (split) return state
