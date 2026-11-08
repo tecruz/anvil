@@ -65,6 +65,14 @@ export {
   type ToolProbe,
 } from './ready.ts'
 export {
+  buildSetupPlan,
+  type SetupPlan,
+  type SetupPlanAction,
+  type SetupPlanValidation,
+  type SetupRepositoryState,
+  validateSetupPlan,
+} from './setup.ts'
+export {
   type ApplyPrecondition,
   applyStaging,
   checkApplyPreconditions,

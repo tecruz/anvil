@@ -34,12 +34,35 @@ export interface RunOptions {
   cwd?: string
   env?: NodeJS.ProcessEnv
   maxBuffer?: number
+  /**
+   * Prepend `--no-lazy-fetch` (Git 2.45+). Metadata reads pass this only when a promisor
+   * remote is configured; on older Git the unknown option fails the command closed instead
+   * of letting it fetch missing objects.
+   */
+  noLazyFetch?: boolean
+}
+
+/**
+ * Environment for metadata-only reads.
+ *
+ * A promisor remote makes commands such as `rev-parse` or `status` spawn an implicit
+ * `git fetch` when an object is absent locally. Discovery and setup must never fetch:
+ * they report what the local repository contains, and an unavailable object is unknown.
+ * Copying the caller's environment keeps its overrides while forcing the guard on.
+ *
+ * `GIT_NO_LAZY_FETCH` only exists in Git 2.45 and later, so callers that read objects must
+ * also ask for `--no-lazy-fetch` via {@link RunOptions.noLazyFetch} when
+ * {@link hasPromisorRemote} is true. See that function for why the flag is conditional.
+ */
+export function readOnlyGitEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, GIT_NO_LAZY_FETCH: '1' }
 }
 
 /** Run a git subcommand with an argument array. Never invokes a shell. */
 export async function git(args: string[], options: RunOptions = {}): Promise<RunResult> {
+  const argv = options.noLazyFetch === true ? ['--no-lazy-fetch', ...args] : args
   try {
-    const { stdout, stderr } = await execFileAsync('git', args, {
+    const { stdout, stderr } = await execFileAsync('git', argv, {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.env === undefined ? {} : { env: options.env }),
       maxBuffer: options.maxBuffer ?? 8 * 1024 * 1024,
@@ -65,6 +88,84 @@ export async function git(args: string[], options: RunOptions = {}): Promise<Run
       cause: err,
     })
   }
+}
+
+/** The shape of {@link git}, so callers can inject a runner in tests. */
+export type GitRunner = (args: string[], options?: RunOptions) => Promise<RunResult>
+
+/** True when `git config --get-regexp` proved the pattern had no matches. */
+function noConfigMatch(result: RunResult): boolean {
+  return result.exitCode === 1 && result.stderr.trim() === '' && result.stdout.trim() === ''
+}
+
+/**
+ * Result of probing local configuration for a promisor remote.
+ */
+export interface PromisorRemoteProbe {
+  /** A promisor remote may exist, so `--no-lazy-fetch` must be requested. */
+  present: boolean
+  /** Both configuration reads completed without warnings or unexpected results. */
+  complete: boolean
+}
+
+/**
+ * Probe this repository for a promisor remote.
+ *
+ * Lazy fetching is driven by configuration, not by the presence of promisor packs: Git
+ * consults `remote.<name>.promisor` (and the partial-clone keys around it) before deciding
+ * to run an implicit fetch. Detecting it locally needs no object access and no network.
+ *
+ * The answer is deliberately fail-closed in two separate ways. `present` is true whenever
+ * configuration cannot prove absence, so callers enable the fetch guard. `complete` is
+ * false whenever a read warned or returned something unexpected, so callers must keep
+ * reporting the repository as unknown instead of treating the probe as a clean fact.
+ * Non-promisor repositories return `{ present: false, complete: true }`, which keeps them
+ * working on Git versions that do not know about `--no-lazy-fetch`.
+ */
+export async function probePromisorRemote(
+  cwd: string,
+  options: { env?: NodeJS.ProcessEnv; run?: GitRunner } = {},
+): Promise<PromisorRemoteProbe> {
+  const run = options.run ?? git
+  const env = options.env ?? process.env
+  const [promisor, partial] = await Promise.all([
+    run(['config', '--bool', '--null', '--get-regexp', '^remote\\..*\\.promisor$'], { cwd, env }),
+    run(['config', '--null', '--get-regexp', '^(extensions|core)\\.partialclone$|^remote\\..*\\.partialclonefilter$'], {
+      cwd,
+      env,
+    }),
+  ])
+  const incomplete = (): PromisorRemoteProbe => ({ present: true, complete: false })
+  // A warning means the configuration was only partly read, even when the exit code was 0.
+  if (promisor.stderr.trim() !== '' || partial.stderr.trim() !== '') return incomplete()
+  let present = false
+  if (!noConfigMatch(promisor)) {
+    // An unreadable configuration cannot prove the absence of a promisor remote.
+    if (promisor.exitCode !== 0 || promisor.stdout.trim() === '') return incomplete()
+    for (const entry of promisor.stdout.split('\0')) {
+      if (entry === '') continue
+      // Entries are `key\nvalue\0`; anything unexpected is treated as promisor presence.
+      const separator = entry.indexOf('\n')
+      if (separator === -1) return incomplete()
+      const value = entry.slice(separator + 1).trim()
+      if (value === 'true') present = true
+      else if (value !== 'false') return incomplete()
+    }
+  }
+  // A partial-clone filter or extension names a promisor source even without the flag.
+  if (!noConfigMatch(partial)) {
+    if (partial.exitCode !== 0) return incomplete()
+    present = true
+  }
+  return { present, complete: true }
+}
+
+/** Convenience wrapper for callers that only need the fetch guard. */
+export async function hasPromisorRemote(
+  cwd: string,
+  options: { env?: NodeJS.ProcessEnv; run?: GitRunner } = {},
+): Promise<boolean> {
+  return (await probePromisorRemote(cwd, options)).present
 }
 
 export async function gitOrThrow(args: string[], options: RunOptions = {}): Promise<string> {
@@ -115,20 +216,23 @@ export interface GitRepoInfo {
 }
 
 export async function discoverRepo(cwd: string): Promise<GitRepoInfo | null> {
-  const toplevel = await git(['rev-parse', '--show-toplevel'], { cwd })
+  const env = readOnlyGitEnv()
+  const toplevel = await git(['rev-parse', '--show-toplevel'], { cwd, env })
   if (toplevel.exitCode !== 0) return null
   const root = normalizeGitPath(toplevel.stdout)
   if (root === '') return null
 
   const [branchRes, remoteRes, headRes, commonRes, gitDirRes] = await Promise.all([
-    git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd }),
-    git(['remote', 'get-url', 'origin'], { cwd }),
+    git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, env }),
+    git(['remote', 'get-url', 'origin'], { cwd, env }),
     git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], {
       cwd,
+      env,
     }),
-    git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd }),
+    git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, env }),
     git(['rev-parse', '--path-format=absolute', '--absolute-git-dir'], {
       cwd,
+      env,
     }),
   ])
 

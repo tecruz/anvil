@@ -211,6 +211,36 @@ What each step does:
 commits, reported separately because they need different handling. `anvil status
 --orphans` also lists worktrees git knows about that no claim references.
 
+## Reviewing setup proposals: `anvil setup`
+
+`anvil setup plan` emits a deterministic, content-addressed proposal from owner-declared
+install commands (`project.commands` entries with `kind: "install"`, and
+`project.tools[].install`). It never invents commands or decides that installation is
+needed. Each action keeps the exact command, working directory, declaration source and
+version requirement. Permissions, file effects and immutable resource pins stay explicitly
+unknown, rather than being inferred from arbitrary command text.
+
+```bash
+anvil setup plan
+anvil setup plan --json
+anvil setup validate --plan ../setup-plan.json --json
+```
+
+Save the JSON envelope's **data object**, outside the worktree or in an ignored file. The
+validator compares its digest, physical repository root, clean HEAD and effective
+declarations with a freshly generated plan. It refuses stale or tampered proposals and
+dirty or unknown repository state. Validation is not approval: every result remains
+`approval: "not-granted"` and `executed: false`.
+
+There is no execution, approval or `--check` mode here. Neither command runs an install,
+version probe, repository script or service connection, or writes a staging bundle. Git
+metadata is read with fsmonitor and optional index writes disabled. Existing configuration
+is untouched and environment values are never expanded into command text. Literal secrets
+must not be embedded in declarations, since those commands are displayed verbatim.
+
+See [the setup proposal contract](SETUP_PLANS.md) for the payload, validation exit codes,
+repository-state limits and requirements for a later execution adapter.
+
 ## Checking readiness: `anvil ready`
 
 `anvil ready` answers the question an engineer asks on their first day in a repository they
