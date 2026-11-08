@@ -535,4 +535,31 @@ describe('anvil setup', () => {
     assert.equal(state.worktree, 'unknown')
     assert.equal(indexRead, false)
   })
+
+  test('a leading space in the index path is not trimmed away', async () => {
+    const root = normalizeGitPath(repo())
+    // Both directories exist, so trimming would scan the wrong one and miss the shared
+    // index. A leading space is a valid filename character, not formatting.
+    mkdirSync(join(root, ' index-dir'))
+    mkdirSync(join(root, 'index-dir'))
+    writeFileSync(join(root, ' index-dir', `sharedindex.${'a'.repeat(40)}`), '')
+    let indexRead = false
+    const runner: typeof gitExec = async (args) => {
+      if (args.includes('config')) return { stdout: '', stderr: '', exitCode: 1 }
+      if (args.includes('--show-toplevel')) return { stdout: `${root}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--verify')) return { stdout: `${'b'.repeat(40)}\n`, stderr: '', exitCode: 0 }
+      if (args.includes('--git-path')) return { stdout: ' index-dir/index\n', stderr: '', exitCode: 0 }
+      if (args.includes('--absolute-git-dir')) {
+        return { stdout: `${join(root, '.git')}\n`, stderr: '', exitCode: 0 }
+      }
+      if (args.includes('ls-files') || args.includes('status')) {
+        indexRead = true
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      throw new Error(`Unexpected command: ${args.join(' ')}`)
+    }
+    const state = await repositoryState(root, runner)
+    assert.equal(state.worktree, 'unknown')
+    assert.equal(indexRead, false)
+  })
 })

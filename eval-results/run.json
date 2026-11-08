@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "runId": "201e31ea-6181-4507-8363-fe34f8d88f7b",
-  "startedAt": "2026-11-08T18:33:00.032Z",
-  "completedAt": "2026-11-08T18:33:19.405Z",
+  "runId": "56b5d962-0f69-4c8d-ad4e-0987894a1976",
+  "startedAt": "2026-11-08T21:27:58.868Z",
+  "completedAt": "2026-11-08T21:28:18.597Z",
   "completionState": "completed",
-  "commitSha": "cd4177f068814c76e9916bfda2f7957316593012",
-  "implementation": "49eeeb84dbc1c8c22a637be916994c37db11d5732cfedbecf2d42be80e3b0189",
-  "bundleDigest": "4b2daa903f8c4d14f4ab1598c8d432e113ed5fe9cbb8b442ca1ca04e79f64c30",
+  "commitSha": "57a8c9cb12f137741af1ba2645e72c9fc55cec9b",
+  "implementation": "5122981b2c8817626398d32f8cdcb069e5966d57daac37e2204059e45fcfd16f",
+  "bundleDigest": "5a0d6546cbf800370c7a6ca965bcc5eefa9eda42f564d1b9e85d85ebe1ab5363",
   "harnessDigest": "17422704e931f853f4b8d996cac8ae1c20e286c80a1fb9eb9ae495eb47338867",
   "models": [
     {
@@ -19,7 +19,7 @@
   "publishTranscripts": false,
   "subset": false,
   "repetitions": 1,
-  "seed": "01f7b49e-8f2d-477d-a75b-44788a03fc2a",
+  "seed": "8a12af1c-c2ff-4d9c-bbc6-3d19bdcaaf44",
   "order": "alternate",
   "scenarioHashes": {
     "tiny-code-change": {
@@ -71,8 +71,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:00.102Z",
-          "completedAt": "2026-11-08T18:33:01.764Z",
+          "startedAt": "2026-11-08T21:27:58.937Z",
+          "completedAt": "2026-11-08T21:28:00.666Z",
           "state": "completed"
         }
       ],
@@ -82,7 +82,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1646,
+      "durationMs": 1712,
       "transcript": ""
     },
     {
@@ -96,8 +96,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:01.769Z",
-          "completedAt": "2026-11-08T18:33:04.565Z",
+          "startedAt": "2026-11-08T21:28:00.670Z",
+          "completedAt": "2026-11-08T21:28:03.548Z",
           "state": "completed"
         }
       ],
@@ -107,7 +107,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2781,
+      "durationMs": 2864,
       "transcript": ""
     },
     {
@@ -121,8 +121,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:04.573Z",
-          "completedAt": "2026-11-08T18:33:05.963Z",
+          "startedAt": "2026-11-08T21:28:03.556Z",
+          "completedAt": "2026-11-08T21:28:04.937Z",
           "state": "completed"
         }
       ],
@@ -132,7 +132,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1377,
+      "durationMs": 1365,
       "transcript": ""
     },
     {
@@ -146,8 +146,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:05.967Z",
-          "completedAt": "2026-11-08T18:33:08.553Z",
+          "startedAt": "2026-11-08T21:28:04.941Z",
+          "completedAt": "2026-11-08T21:28:07.609Z",
           "state": "completed"
         }
       ],
@@ -157,7 +157,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2570,
+      "durationMs": 2653,
       "transcript": ""
     },
     {
@@ -171,8 +171,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:08.562Z",
-          "completedAt": "2026-11-08T18:33:10.770Z",
+          "startedAt": "2026-11-08T21:28:07.621Z",
+          "completedAt": "2026-11-08T21:28:09.825Z",
           "state": "completed"
         }
       ],
@@ -182,7 +182,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2185,
+      "durationMs": 2182,
       "transcript": ""
     },
     {
@@ -196,8 +196,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:10.774Z",
-          "completedAt": "2026-11-08T18:33:14.151Z",
+          "startedAt": "2026-11-08T21:28:09.830Z",
+          "completedAt": "2026-11-08T21:28:13.342Z",
           "state": "completed"
         }
       ],
@@ -207,7 +207,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3353,
+      "durationMs": 3484,
       "transcript": ""
     },
     {
@@ -221,8 +221,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:14.162Z",
-          "completedAt": "2026-11-08T18:33:16.187Z",
+          "startedAt": "2026-11-08T21:28:13.350Z",
+          "completedAt": "2026-11-08T21:28:15.314Z",
           "state": "completed"
         }
       ],
@@ -232,7 +232,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2005,
+      "durationMs": 1943,
       "transcript": ""
     },
     {
@@ -246,8 +246,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-08T18:33:16.193Z",
-          "completedAt": "2026-11-08T18:33:19.327Z",
+          "startedAt": "2026-11-08T21:28:15.318Z",
+          "completedAt": "2026-11-08T21:28:18.519Z",
           "state": "completed"
         }
       ],
@@ -257,7 +257,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3111,
+      "durationMs": 3180,
       "transcript": ""
     }
   ]

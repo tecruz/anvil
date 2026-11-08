@@ -92,10 +92,10 @@ because submodule-local configuration can name additional helpers. An index that
 working-tree state is likewise `unknown`: `assume-unchanged` and `skip-worktree` entries
 suppress modified files, and a split index is not read at all because merely reading it
 refreshes its `sharedindex.*` metadata. The split-index check looks in the index's own
-directory as `GIT_INDEX_FILE` was given (resolving `..` with filesystem semantics) and in
-the resolved Git directory, and matches the name without regard to case, so a relocated,
-linked or differently-cased shared index cannot hide one. These cases are refused before
-index-reading commands run.
+directory as `GIT_INDEX_FILE` was given (resolving `..` with filesystem semantics and
+keeping filename whitespace) and in the resolved Git directory, and matches the name
+without regard to case, so a relocated, linked or differently-cased shared index cannot
+hide one. These cases are refused before index-reading commands run.
 
 Validation compares the saved payload with a newly generated plan, not just its claimed
 digest. It refuses changed commands, added fields, forged approval fields, changed effective

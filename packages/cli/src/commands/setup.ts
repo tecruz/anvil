@@ -22,6 +22,18 @@ function succeeded(result: RunResult): boolean {
 }
 
 /**
+ * Parse a single path from Git's line output without trimming filename whitespace.
+ * A leading or trailing space is a valid filename character and changes which directory
+ * Git reads, so only the terminating newline is removed. Output that cannot be parsed
+ * unambiguously (no terminator, or an embedded newline) stays `null` and thus `unknown`.
+ */
+function outputPath(result: RunResult): string | null {
+  if (!result.stdout.endsWith('\n')) return null
+  const path = result.stdout.slice(0, -1)
+  return path === '' || /[\r\n]/.test(path) ? null : path
+}
+
+/**
  * A split index is rewritten (its `sharedindex.*` mtime is refreshed) by merely reading
  * it, even with `--no-optional-locks`. Detect it before any command that reads the index.
  *
@@ -45,17 +57,20 @@ async function splitIndexActive(root: string, call: (args: string[]) => Promise<
     return true
   }
   if (!succeeded(indexPath) || !succeeded(gitDirPath)) return true
+  const reportedIndex = outputPath(indexPath)
+  const reportedGitDir = outputPath(gitDirPath)
+  // Ambiguous output cannot be scanned safely, so the index is not read.
+  if (reportedIndex === null || reportedGitDir === null) return true
   try {
     // Resolve the *parent* with filesystem semantics, not `resolve()`, which collapses
     // `..` lexically. With `link -> /outside/child`, `/repo/link/../index` is really
     // `/outside/index`, and Git looks for a shared index beside `/outside`. Keeping the
     // final component unresolved also preserves the directory a linked index was named in.
-    const reportedIndex = indexPath.stdout.trim()
     const lexicalParent = dirname(isAbsolute(reportedIndex) ? reportedIndex : `${root}${sep}${reportedIndex}`)
     // No `normalizeGitPath` here: its fallback collapses `..` lexically when realpath
     // fails, which could scan the wrong directory. A failure must stay `unknown`.
     const indexParent = realpathSync.native(lexicalParent)
-    const dirs = new Set([indexParent, normalizeGitPath(gitDirPath.stdout.trim())])
+    const dirs = new Set([indexParent, realpathSync.native(reportedGitDir)])
     for (const dir of dirs) {
       // A case-insensitive filesystem can open `sharedindex.*` under any casing, so any
       // casing is treated as a shared index rather than risk reading one.
