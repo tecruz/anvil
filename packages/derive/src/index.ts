@@ -78,6 +78,7 @@ export {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  prepareSetupApprovalStore,
   type ReadSetupApprovalGrantResult,
   readSetupApprovalGrant,
   revokeSetupApproval,

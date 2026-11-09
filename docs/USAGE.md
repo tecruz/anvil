@@ -261,15 +261,17 @@ anvil setup revoke --grant <id>
 ```
 
 `approve` rebuilds the plan, requires it to be current, shows it, and then asks you to
-**type the plan digest** on the terminal. A digest passed as a flag is not consent, so there
-is no `--yes`, and the plan is revalidated after you confirm — a repository that moved while
-you were reading is caught. A grant authorizes one application attempt, for that plan, that
-repository, that source hash and that adapter behaviour, and expires after ten minutes.
-Grants live under `~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the
-location. The store must be a real directory owned by you, not writable by group or other and
-not inside the repository, or it is refused. `approval` prints `active`, `expired`, `revoked`,
-`consumed`, `stale`, `invalid` or `unknown`, and exits non-zero for anything but `active`.
-`revoke` is terminal.
+**type the plan digest on an interactive terminal**. A digest passed as a flag is not consent,
+so there is no `--yes`, and piped input is refused because it is not a review. The plan is
+revalidated after you confirm — a repository that moved while you were reading is caught — and
+again before the grant is read back. A grant authorizes one application attempt, for that
+plan, that repository, that source hash and that adapter behaviour, and expires after ten
+minutes. Grants live under `~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the
+location. The store must be a real, private directory owned by you, not writable by group or
+other (on Windows, owned by you with no other principal in its access control list), and not
+inside the repository, or it is refused. `approval` prints `active`, `expired`, `revoked`, `consumed`, `stale`, `invalid` or
+`unknown`, and exits non-zero for anything but `active`. `revoke` is terminal, and a revoked
+grant stays inspectable even after its repository is gone.
 
 There is no apply, install or execute command here. None of these run an install, version
 probe, repository script or service connection, or write a staging bundle, and approving a

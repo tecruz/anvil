@@ -1,5 +1,16 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -12,6 +23,7 @@ import {
   gradeSetupApprovalGrant,
   inspectSetupApproval,
   LOCAL_SKILL_ADAPTER,
+  prepareSetupApprovalStore,
   readSetupApprovalGrant,
   revokeSetupApproval,
   SETUP_APPROVAL_TTL_MS,
@@ -44,11 +56,29 @@ function planFor(root: string, name = 'my-skill') {
   write(root, 'skill.md', skill(name))
   return buildSetupExecutionPlan({ repository: repository(root), sourcePath: 'skill.md', name })
 }
-/** A repository scratch dir plus an approval store that lives outside it. */
+/** A repository scratch dir plus a prepared, private approval store that lives outside it. */
 function fixture(): { repo: string; store: string; env: NodeJS.ProcessEnv } {
   const repo = scratch('anvil-approval-repo-')
   const store = scratch('anvil-approval-store-')
-  return { repo, store, env: { ...process.env, ANVIL_APPROVAL_HOME: store } }
+  const env: NodeJS.ProcessEnv = { ...process.env, ANVIL_APPROVAL_HOME: store }
+  // Harden the store the same way a real grant would, so Windows ACL checks see a private
+  // directory rather than the inherited temporary-directory ACL.
+  prepareSetupApprovalStore(env)
+  return { repo, store, env }
+}
+
+/** Run the system `icacls` by absolute path, so a repository checkout cannot shadow it. */
+function icacls(...args: string[]): void {
+  const path = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+  execFileSync(path, args, { windowsHide: true })
+}
+/** The raw SDDL export of an object's ACL, for comparing it before and after an operation. */
+function aclDump(path: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'anvil-acl-'))
+  roots.push(dir)
+  const file = join(dir, 'acl.txt')
+  icacls(path, '/save', file)
+  return readFileSync(file, 'utf16le')
 }
 
 const ID = '11111111-2222-4333-8444-555555555555'
@@ -241,6 +271,7 @@ describe('setup approval grants', () => {
     const repo = scratch('anvil-approval-repo-')
     const plan = planFor(repo)
     const realStore = scratch('anvil-approval-store-')
+    prepareSetupApprovalStore({ ...process.env, ANVIL_APPROVAL_HOME: realStore })
     const elsewhere = scratch('anvil-approval-elsewhere-')
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
 
@@ -271,6 +302,7 @@ describe('setup approval grants', () => {
 
     // A symlinked grant file is refused as unreadable.
     const store2 = scratch('anvil-approval-store2-')
+    prepareSetupApprovalStore({ ...process.env, ANVIL_APPROVAL_HOME: store2 })
     mkdirSync(join(store2, ID2))
     try {
       symlinkSync(join(elsewhere, 'grant.json'), join(store2, ID2, 'grant.json'))
@@ -307,6 +339,94 @@ describe('setup approval grants', () => {
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
     assert.throws(() => saveSetupApprovalGrant(grant, { env }), AnvilError)
     assert.equal(inspectSetupApproval(ID, null, { env }).status, 'unknown')
+  })
+
+  test('a record another user could write is not authority on POSIX', (t) => {
+    if (process.platform === 'win32') {
+      t.skip('POSIX ownership and permission bits do not apply on Windows')
+      return
+    }
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    const at = new Date(T0.getTime() + 1000)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'active')
+
+    // A writable grant directory is refused even though the store root is private.
+    chmodSync(join(store, ID), 0o777)
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
+    chmodSync(join(store, ID), 0o700)
+
+    // A writable grant file is refused too.
+    chmodSync(join(store, ID, 'grant.json'), 0o666)
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
+  })
+
+  test('a Windows store another principal can reach is not authority', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows access control lists only')
+      return
+    }
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    const at = new Date(T0.getTime() + 1000)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'active')
+
+    // A foreign SID makes the store unusable authority, even though it still names the user.
+    icacls(store, '/grant', '*S-1-1-0:(OI)(CI)F')
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
+  })
+
+  test('a Windows child record another user could write is not authority', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows access control lists only')
+      return
+    }
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    const at = new Date(T0.getTime() + 1000)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'active')
+
+    // The store root stays private; only the grant directory is loosened, so the record
+    // directory itself must be checked, not just the root.
+    icacls(join(store, ID), '/grant', '*S-1-1-0:(OI)(CI)F')
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
+  })
+
+  test('a linked Windows store is refused without modifying its target', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows junctions only')
+      return
+    }
+    const target = scratch('anvil-approval-target-')
+    const linkParent = scratch('anvil-approval-link-')
+    const store = join(linkParent, 'store')
+    try {
+      symlinkSync(target, store, 'junction')
+    } catch {
+      t.skip('junctions are unavailable here')
+      return
+    }
+    const repo = scratch('anvil-approval-repo-')
+    const plan = planFor(repo)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    // A refusal must not touch the target the link points at.
+    const before = aclDump(target)
+    assert.throws(() => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }), AnvilError)
+    assert.equal(aclDump(target), before)
+  })
+
+  test('a terminal record survives the removal of its checkout', () => {
+    const { repo, env } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    assert.equal(revokeSetupApproval(ID, { env }).status, 'revoked')
+    // Removing the repository must not hide the terminal state or block a repeat revocation.
+    rmSync(repo, { recursive: true, force: true })
+    assert.equal(inspectSetupApproval(ID, null, { env }).status, 'revoked')
+    assert.equal(revokeSetupApproval(ID, { env }).status, 'revoked')
   })
 
   test('saving writes only to the store, never into the repository', () => {

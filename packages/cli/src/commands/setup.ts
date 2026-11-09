@@ -311,7 +311,7 @@ export const setupCommand: Command = {
       if (profile.diagnostics.truncated || profile.diagnostics.failedDetectors.length > 0) state.worktree = 'unknown'
       return state
     }
-    let repository = await refreshRepository()
+    const repository = await refreshRepository()
 
     if (sub === 'plan') {
       if (adapter === undefined) {
@@ -333,50 +333,21 @@ export const setupCommand: Command = {
           hint: 'Owner-command proposals remain inspect-only; use setup plan --adapter local-skill.',
         })
       }
-      const first = resolveExecutionPlan(saved, repository)
-      if (first.validation.status !== 'current' || first.plan === null) {
-        const error = new AnvilError(ErrorCode.PreflightFailed, first.validation.reason, {
-          hint: 'Generate a fresh plan from a clean commit and review it before approving.',
+      try {
+        const record = await approveSetupPlan({
+          saved,
+          repository,
+          confirm: (plan) => confirmPlanDigest(ctx, plan),
+          refresh: refreshRepository,
         })
-        ctx.outFailure(first.validation, error, () => `${first.validation.status}: ${first.validation.reason}\n`)
-        return error.exitCode
+        ctx.out(record, () => renderApproval(record))
+      } catch (cause) {
+        if (cause instanceof SetupApprovalRefusal) {
+          ctx.outFailure(cause.payload, cause, () => `${cause.payload.status}: ${cause.payload.reason}\n`)
+          return cause.exitCode
+        }
+        throw cause
       }
-
-      // Show the plan, then challenge the reviewer to type its digest. A machine-readable
-      // digest passed on the command line is not consent, so it is not accepted as one.
-      const entered = await confirmPlanDigest(ctx, first.plan)
-      if (entered === null || entered === '') {
-        throw usage('setup approve needs an interactive confirmation', 'Type the full plan digest when prompted.')
-      }
-      // The repository may have moved while the reviewer read; revalidate after confirming.
-      repository = await refreshRepository()
-      const second = resolveExecutionPlan(saved, repository)
-      if (second.validation.status !== 'current' || second.plan === null) {
-        const error = new AnvilError(ErrorCode.PreflightFailed, second.validation.reason, {
-          hint: 'The plan changed while you were confirming it. Review the fresh plan and approve again.',
-        })
-        ctx.outFailure(second.validation, error, () => `${second.validation.status}: ${second.validation.reason}\n`)
-        return error.exitCode
-      }
-      if (entered !== second.plan.digest) {
-        throw new AnvilError(ErrorCode.PreflightFailed, 'The confirmation does not match the current plan digest.', {
-          hint: 'Run setup plan again, read the digest, and type it exactly when prompted.',
-        })
-      }
-
-      const grant = buildSetupApprovalGrant(second.plan)
-      saveSetupApprovalGrant(grant)
-      // Read the record back, so a plan that moved between the write and the read cannot be
-      // reported as a successful approval.
-      const record = inspectSetupApproval(grant.id, repository)
-      if (record.status !== 'active') {
-        const error = new AnvilError(ErrorCode.PreflightFailed, record.reason, {
-          hint: 'The plan changed before the grant completed. Inspect the grant, then approve again.',
-        })
-        ctx.outFailure(record, error, () => `${record.status}: ${record.reason}\n`)
-        return error.exitCode
-      }
-      ctx.out(record, () => renderApproval(record))
       return
     }
 
@@ -412,37 +383,136 @@ async function currentRepositoryState(ctx: CommandContext): Promise<SetupReposit
 }
 
 /**
- * Show the plan and read the reviewer's confirmation. The digest must be typed (or piped) on
- * stdin: a flag cannot prove that anyone looked at the plan. In JSON mode the prompt goes to
- * stderr so stdout stays a single JSON document.
+ * The approval flow, with confirmation and repository refresh injected so the ordering can be
+ * exercised without a terminal: show the plan, read the digest, revalidate, publish, then read
+ * the record back against freshly read state.
+ */
+export interface SetupApprovalFlow {
+  saved: unknown
+  repository: SetupRepositoryState
+  confirm(plan: SetupExecutionPlan): Promise<string | null>
+  refresh(): Promise<SetupRepositoryState>
+  env?: NodeJS.ProcessEnv
+}
+
+/** A refusal that carries the validation or record the caller should report on the envelope. */
+export class SetupApprovalRefusal extends AnvilError {
+  readonly payload: SetupExecutionPlanValidation | SetupApprovalRecord
+
+  constructor(payload: SetupExecutionPlanValidation | SetupApprovalRecord, hint: string) {
+    super(ErrorCode.PreflightFailed, payload.reason, { hint })
+    this.name = 'SetupApprovalRefusal'
+    this.payload = payload
+  }
+}
+
+/**
+ * Approve one current local-skill plan, returning the active grant record.
+ *
+ * A refused approval throws: a {@link SetupApprovalRefusal} carries the validation or record
+ * to report, and anything else is a usage or internal error. Nothing is written to the
+ * repository.
+ */
+export async function approveSetupPlan(flow: SetupApprovalFlow): Promise<SetupApprovalRecord> {
+  const storeOptions = flow.env === undefined ? {} : { env: flow.env }
+  const first = resolveExecutionPlan(flow.saved, flow.repository)
+  if (first.validation.status !== 'current' || first.plan === null) {
+    throw new SetupApprovalRefusal(
+      first.validation,
+      'Generate a fresh plan from a clean commit and review it before approving.',
+    )
+  }
+  const entered = await flow.confirm(first.plan)
+  if (entered === null || entered === '') {
+    throw new AnvilError(ErrorCode.Usage, 'setup approve needs an interactive confirmation', {
+      hint: 'Type the full plan digest when prompted.',
+    })
+  }
+  // The repository may have moved while the reviewer read; revalidate after confirming.
+  const revalidated = await flow.refresh()
+  const second = resolveExecutionPlan(flow.saved, revalidated)
+  if (second.validation.status !== 'current' || second.plan === null) {
+    throw new SetupApprovalRefusal(
+      second.validation,
+      'The plan changed while you were confirming it. Review the fresh plan and approve again.',
+    )
+  }
+  if (entered !== second.plan.digest) {
+    throw new AnvilError(ErrorCode.PreflightFailed, 'The confirmation does not match the current plan digest.', {
+      hint: 'Run setup plan again, read the digest, and type it exactly when prompted.',
+    })
+  }
+
+  const grant = buildSetupApprovalGrant(second.plan)
+  saveSetupApprovalGrant(grant, storeOptions)
+  // Read the record back against freshly read state, so a repository that moved during
+  // publication cannot be reported as a successful approval.
+  const record = inspectSetupApproval(grant.id, await flow.refresh(), storeOptions)
+  if (record.status !== 'active') {
+    throw new SetupApprovalRefusal(
+      record,
+      'The plan changed before the grant completed. Inspect the grant, then approve again.',
+    )
+  }
+  return record
+}
+
+/**
+ * Show the plan and read the reviewer's confirmation from an interactive terminal.
+ *
+ * The plan is always shown, in text and JSON mode alike, so nobody approves bytes they have
+ * not seen; in JSON mode the preview and prompt go to stderr so stdout stays one document. A
+ * non-interactive stdin is refused: piped input is not a review, and a digest passed as a
+ * flag is not consent either.
  */
 async function confirmPlanDigest(ctx: CommandContext, plan: SetupExecutionPlan): Promise<string | null> {
-  if (!ctx.json) ctx.say(renderExecutionPlan(plan))
+  const preview = renderExecutionPlan(plan)
+  if (ctx.json) ctx.writeError(`${preview}\n`)
+  else ctx.say(preview)
+  if (process.stdin.isTTY !== true) {
+    throw new AnvilError(ErrorCode.Usage, 'setup approve requires an interactive terminal', {
+      hint: 'Run it from a terminal and type the plan digest. Piped input is not a review.',
+    })
+  }
   const prompt = 'Type the plan digest to confirm this approval: '
   if (ctx.json) ctx.writeError(prompt)
   else ctx.writeRaw(prompt)
   return readStdinLine()
 }
 
-/** Read one line from stdin; null when stdin ends before a line arrives. */
+/**
+ * Read one line from stdin, then release it so the process can exit; null at end of input.
+ * The listeners are removed and the stream is paused on every completion path, otherwise a
+ * resume that never sees a newline keeps the event loop alive.
+ */
 function readStdinLine(): Promise<string | null> {
   return new Promise((resolvePromise) => {
     const stdin = process.stdin
     let data = ''
     let settled = false
-    const done = (value: string | null) => {
+    const finish = (value: string | null) => {
       if (settled) return
       settled = true
+      stdin.off('data', onData)
+      stdin.off('end', onEnd)
+      stdin.off('error', onError)
+      stdin.pause()
+      // A paused stdin still holds the event loop open, so release it: reading is finished
+      // and the command must be able to exit.
+      if (typeof stdin.unref === 'function') stdin.unref()
       resolvePromise(value)
     }
-    stdin.setEncoding('utf8')
-    stdin.on('data', (chunk: string) => {
+    const onData = (chunk: string) => {
       data += chunk
       const newline = data.indexOf('\n')
-      if (newline !== -1) done(data.slice(0, newline).trim())
-    })
-    stdin.on('end', () => done(data.trim() === '' ? null : data.trim()))
-    stdin.on('error', () => done(null))
+      if (newline !== -1) finish(data.slice(0, newline).trim())
+    }
+    const onEnd = () => finish(data.trim() === '' ? null : data.trim())
+    const onError = () => finish(null)
+    stdin.setEncoding('utf8')
+    stdin.on('data', onData)
+    stdin.on('end', onEnd)
+    stdin.on('error', onError)
     stdin.resume()
   })
 }

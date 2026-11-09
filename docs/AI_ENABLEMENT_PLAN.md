@@ -89,11 +89,13 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
 - **Single-use approval grants** (workstream 3, first authority slice) — `anvil setup approve
   --plan <file>` records a separate, single-use grant outside the repository, bound to the plan
   digest, adapter fingerprint, repository root and clean HEAD, source hash, destination and
-  ordered operations. It shows the plan and asks the reviewer to type the full plan digest; a
-  digest passed as a flag is not consent, and the plan is revalidated after confirmation.
+  ordered operations. It shows the plan and asks the reviewer to type the full plan digest at
+  an interactive terminal; a digest passed as a flag is not consent, piped input is refused,
+  and the plan is revalidated after confirmation and before the record is read back.
   `anvil setup approval --grant <id>` reports `active`, `expired`, `revoked`, `consumed`,
   `stale`, `invalid` or `unknown`, and `anvil setup revoke --grant <id>` withdraws it. The
-  store must be a real, user-owned directory outside the repository. Grants expire after ten
+  store must be a real, private, user-owned directory outside the repository (on Windows,
+  owned by you with no other principal in its ACL). Grants expire after ten
   minutes and carry one application attempt. There is still no apply command, and approving
   never writes to the repository; see [the plan contracts](SETUP_PLANS.md) and
   [ADR-0019](adr/0019-approval-authority-is-a-user-owned-store.md).

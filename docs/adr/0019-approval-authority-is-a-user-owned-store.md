@@ -28,17 +28,25 @@ binds.**
 - The store is deliberately **not** the config home. `ANVIL_CONFIG_HOME` may point inside a
   repository, so a repository could otherwise choose where its own authority lives.
   `ANVIL_APPROVAL_HOME` is an explicit, process-level override; a config file cannot set it.
-  The store is checked on every read and write: a real, user-owned directory that is not
-  writable by group or other and does not sit inside the repository the grant approves. A
-  refusal creates nothing.
+  The store is checked on every read and write: a real directory outside the repository the
+  grant approves, private to the current user. On POSIX that means the current user owns the
+  store, the grant directory and every record file, with no group or other write bit (the
+  store is created `0700`, records `0600`). On Windows it means the same three levels are owned
+  by the current user and name no other principal in their access control lists; Node cannot
+  read a Windows ACL, so a system PowerShell reports the owner and the entry SIDs (never the
+  localized display names), and an ACL that cannot be read is refused. A store reached through
+  a link is rejected before any access control list is touched, so a refusal never modifies
+  anything.
 - A grant binds the plan digest, adapter fingerprint, physical repository root and clean HEAD,
   source path/hash/size, destination, and a digest of the ordered operations including their
   preconditions. It names no approval identity: terminal confirmation is not identity.
-- **The confirmation is typed, not a flag.** `approve` shows the plan and reads the full plan
-  digest from the terminal; a digest passed as a command-line argument is not consent, and a
-  bare `--yes` would launder a glance into approval. The plan is revalidated after the
-  confirmation, so a repository that moved while the reviewer read is caught. An empty
-  confirmation is a usage error; a mismatched one is a refusal.
+- **The confirmation is typed at an interactive terminal, not a flag or a pipe.** `approve`
+  shows the plan (on stderr in `--json` mode, so stdout stays one document) and reads the full
+  plan digest from a terminal; a digest passed as a command-line argument is not consent, a
+  bare `--yes` would launder a glance into approval, and piped input is refused because it is
+  not a review. The plan is revalidated after the confirmation, and again before the record is
+  read back, so a repository that moved while the reviewer read, or during publication, is
+  caught. A missing or empty confirmation is a usage error; a mismatched one is a refusal.
 - **Grants are short-lived and single-use.** The default lifetime is ten minutes, and
   `maxAttempts` is one. `consumeSetupApproval` reserves the attempt and reports whether this
   call won it, and application must call it after full revalidation and before its first
@@ -65,8 +73,11 @@ repository.
   crashed application requires fresh approval rather than a silent retry.
 - The grant is reusable contract surface for future adapters, but only `local-skill` can be
   approved today, and opaque owner-declared install commands still cannot be approved at all.
-- The store adds another `~/.anvil/` directory to reason about, with its own link and
-  containment checks rather than reusing the repository state helpers.
+- The store adds another `~/.anvil/` directory to reason about, with its own link,
+  ownership/ACL and containment checks rather than reusing the repository state helpers.
+- A terminal record is self-describing: it stays inspectable, and revocable, after the checkout
+  it names is removed, because containment is resolved without requiring the repository to
+  still exist.
 
 ## Alternatives rejected
 

@@ -189,12 +189,14 @@ anvil setup revoke --grant <id>
 ```
 
 `anvil setup approve` rebuilds the plan from the saved adapter inputs, requires the result to
-be `current`, and refuses anything but a `local-skill` execution plan. It then shows the plan
-and **challenges the reviewer to type its full digest on stdin**; a machine-readable digest
-passed as a flag is not consent, and there is no `--yes`. The plan is revalidated after the
-confirmation, so a repository that moved while the reviewer read is caught. An empty
-confirmation is a usage error (**2**); a digest that does not match the current plan is a
-refusal (**5**).
+be `current`, and refuses anything but a `local-skill` execution plan. It then **shows the
+plan** (on stderr in `--json` mode, so stdout stays one document) and reads the **full plan
+digest typed on an interactive terminal**; a digest passed as a flag is not consent, and piped
+or otherwise non-interactive input is refused. The plan is revalidated after the confirmation,
+so a repository that moved while the reviewer read is caught, and again before the record is
+read back, so a repository that moved during publication cannot be reported as approved. A
+non-interactive confirmation is a usage error (**2**), as is an empty one; a digest that does
+not match the current plan, or a plan that moved, is a refusal (**5**).
 
 The grant records the plan digest, adapter fingerprint, physical repository root and clean
 HEAD, source path/hash/size, destination, an operations digest, the issue and expiry times,
@@ -220,13 +222,20 @@ Grants are stored under a dedicated user-owned directory
 choose where its own authority lives. `ANVIL_APPROVAL_HOME` is an explicit, process-level
 override; a config file cannot set it.
 
-The store is authority, so it is checked on every read and write: it must be a real directory
-(not a symlink or junction) owned by the current user and not writable by group or other, and
-it must lie outside the repository the grant approves. A refusal leaves nothing created. The
-grant record is written with no-replace semantics and read without following links or
-multiply-linked files. These checks are fail-closed: an uninspectable store is `unknown`, and
-a record with an unknown field, a future issue time, or a duplicated binding that disagrees
-with the plan is `invalid` or `stale`, never `active`.
+The store is authority, so it is checked on every read and write. It must be a real directory
+(not a symlink or junction) that lies outside the repository the grant approves and that is
+private to the current user: on POSIX the store, the grant directory and every record file
+must be owned by the current user with no group or other write bit (the store is created `0700`
+and records `0600`, regardless of umask); on Windows the same three levels must be owned by the
+current user and grant access to the current user only, and a foreign owner, a foreign access
+control entry, or an ACL that cannot be read is refused. A refusal leaves nothing created, and a
+store reached through a link is rejected before any access control list is touched, so a
+rejected approval never modifies anything. The grant record is written with
+no-replace semantics and read without following links or multiply-linked files. These checks
+are fail-closed: an uninspectable store is `unknown`, and a record with an unknown field, a
+future issue time, or a duplicated binding that disagrees with the plan is `invalid` or
+`stale`, never `active`. A terminal record stays inspectable, and revocable, after the checkout
+it names is removed.
 
 `anvil setup approval --grant <id>` reports one status:
 

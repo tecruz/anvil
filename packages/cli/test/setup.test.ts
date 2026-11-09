@@ -25,7 +25,7 @@ import {
   validateSetupPlan,
 } from '@anvil/derive'
 import { git as gitExec, normalizeGitPath } from '@anvil/git'
-import { repositoryState, worktreeFromStatus } from '../src/commands/setup.ts'
+import { approveSetupPlan, repositoryState, SetupApprovalRefusal, worktreeFromStatus } from '../src/commands/setup.ts'
 
 const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
 const roots: string[] = []
@@ -739,52 +739,122 @@ describe('anvil setup', () => {
     assert.equal(git(root, 'status', '--porcelain'), '')
   })
 
-  test('an approval grant is issued after a typed confirmation, inspected and revoked', () => {
+  test('approve requires an interactive terminal and writes nothing when it is refused', () => {
     const root = repo()
     writeFileSync(join(root, 'skill.md'), skillContent())
     commit(root)
     const plan = executionPlan(root)
     const saved = saveData(plan)
-    const env = approvalEnv()
+    const store = mkdtempSync(join(tmpdir(), 'anvil-approvals-'))
+    roots.push(store)
+    const env = { ANVIL_APPROVAL_HOME: store }
+
+    // A piped digest is not a review: stdin is not a terminal, so approval is refused and no
+    // grant is written.
+    const refused = run(root, ['approve', '--plan', saved, '--json'], env, `${plan.digest}\n`)
+    assert.equal(refused.code, 2, refused.stdout + refused.stderr)
+    assert.equal(existsSync(join(root, '.agents')), false)
+    assert.deepEqual(readdirSync(store), [])
+  })
+
+  test('the approval flow shows the plan, issues an active grant and never touches the repository', async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const state = await repositoryState(normalizeGitPath(root))
+    const store = mkdtempSync(join(tmpdir(), 'anvil-approvals-'))
+    roots.push(store)
+    const env = { ANVIL_APPROVAL_HOME: store }
     const before = git(root, 'status', '--porcelain')
 
-    // Confirmation is typed, not a flag: an empty stdin approves nothing, and a wrong digest
-    // is refused.
-    assert.equal(run(root, ['approve', '--plan', saved], env).code, 2)
-    assert.equal(run(root, ['approve', '--plan', saved], env, 'deadbeef\n').code, 5)
-
-    // Human mode shows the plan and content before asking for the digest.
-    const text = run(root, ['approve', '--plan', saved], env, `${plan.digest}\n`)
-    assert.equal(text.code, 0, text.stdout)
-    assert.match(text.stdout, /Execution plan:/)
-    assert.match(text.stdout, /Skill content:/)
-    assert.match(text.stdout, /Approval: active/)
-
-    // JSON mode keeps stdout a single document and reads the digest from stdin.
-    const approved = run(root, ['approve', '--plan', saved, '--json'], env, `${plan.digest}\n`)
-    assert.equal(approved.code, 0, approved.stdout + approved.stderr)
-    const record = JSON.parse(approved.stdout) as {
-      data: { id: string; status: string; grant: { planDigest: string } }
-    }
-    assert.equal(record.data.status, 'active')
-    assert.equal(record.data.grant.planDigest, plan.digest)
-    const grantId = record.data.id
+    const shown: SetupExecutionPlan[] = []
+    const record = await approveSetupPlan({
+      saved: plan,
+      repository: state,
+      confirm: async (planShown) => {
+        shown.push(planShown)
+        return planShown.digest
+      },
+      refresh: async () => state,
+      env,
+    })
+    assert.equal(record.status, 'active')
+    assert.equal(shown.length, 1)
+    assert.equal(shown[0]?.digest, plan.digest)
 
     // Approving writes to the store only: nothing lands in the repository.
     assert.equal(existsSync(join(root, '.agents')), false)
     assert.equal(git(root, 'status', '--porcelain'), before)
 
-    const shown = run(root, ['approval', '--grant', grantId, '--json'], env)
-    assert.equal(shown.code, 0, shown.stdout)
-    assert.equal((JSON.parse(shown.stdout) as { data: { status: string } }).data.status, 'active')
+    // The same grant is inspectable and revocable through the CLI.
+    const shownRecord = run(root, ['approval', '--grant', record.id, '--json'], env)
+    assert.equal(shownRecord.code, 0, shownRecord.stdout)
+    assert.equal((JSON.parse(shownRecord.stdout) as { data: { status: string } }).data.status, 'active')
 
-    const revoked = run(root, ['revoke', '--grant', grantId, '--json'], env)
+    const revoked = run(root, ['revoke', '--grant', record.id, '--json'], env)
     assert.equal(revoked.code, 0, revoked.stdout)
     assert.equal((JSON.parse(revoked.stdout) as { data: { status: string } }).data.status, 'revoked')
+  })
 
-    const after = run(root, ['approval', '--grant', grantId, '--json'], env)
-    assert.equal(after.code, 5)
-    assert.equal((JSON.parse(after.stdout) as { data: { status: string } }).data.status, 'revoked')
+  test('approve refuses a plan that moved while the reviewer read it', async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const before = await repositoryState(normalizeGitPath(root))
+    const store = mkdtempSync(join(tmpdir(), 'anvil-approvals-'))
+    roots.push(store)
+    const env = { ANVIL_APPROVAL_HOME: store }
+
+    await assert.rejects(
+      () =>
+        approveSetupPlan({
+          saved: plan,
+          repository: before,
+          confirm: async () => {
+            // The repository changes between showing the plan and refreshing it.
+            writeFileSync(join(root, 'skill.md'), skillContent('my-skill', 'Changed while reading.\n'))
+            commit(root)
+            return plan.digest
+          },
+          refresh: () => repositoryState(normalizeGitPath(root)),
+          env,
+        }),
+      (error: unknown) => error instanceof SetupApprovalRefusal && error.payload.status === 'stale',
+    )
+    assert.deepEqual(readdirSync(store), [])
+  })
+
+  test('approve refuses an approval whose repository moved during publication', async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const before = await repositoryState(normalizeGitPath(root))
+    const store = mkdtempSync(join(tmpdir(), 'anvil-approvals-'))
+    roots.push(store)
+    const env = { ANVIL_APPROVAL_HOME: store }
+
+    let refreshes = 0
+    await assert.rejects(
+      () =>
+        approveSetupPlan({
+          saved: plan,
+          repository: before,
+          confirm: async () => plan.digest,
+          refresh: async () => {
+            refreshes += 1
+            // Revalidation after confirmation sees the same commit; the readback after
+            // publication sees a moved HEAD, so the grant must not be reported active.
+            return refreshes === 1 ? before : { ...before, head: 'b'.repeat(40) }
+          },
+          env,
+        }),
+      (error: unknown) => error instanceof SetupApprovalRefusal,
+    )
+    // The grant was written, but it is not reported as a successful approval.
+    assert.equal(readdirSync(store).length, 1)
   })
 
   test('approval refuses a stale plan and a non-execution proposal', () => {

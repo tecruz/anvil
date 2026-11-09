@@ -16,6 +16,7 @@
  * (revoked, consumed) are decided by a single no-replace record, so two transitions cannot
  * both win. This does not defend against another process running as the same user.
  */
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -30,7 +31,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 import { digestJson } from './canonical.ts'
@@ -60,6 +61,9 @@ const MAX_RECORD_BYTES = 64 * 1024
 const GRANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Group/other write bits: the store must not be writable by anyone but its owner. */
 const STORE_FORBIDDEN_BITS = 0o022
+/** Private modes, applied explicitly so a permissive umask cannot widen the store. */
+const PRIVATE_DIRECTORY_MODE = 0o700
+const PRIVATE_FILE_MODE = 0o600
 /** A grant cannot be issued in the future; a little slack absorbs a clock adjustment. */
 const ISSUED_AT_SKEW_MS = 5_000
 
@@ -156,6 +160,15 @@ export function approvalStoreDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.ANVIL_APPROVAL_HOME
   if (override !== undefined && override !== '') return resolve(override)
   return join(homedir(), '.anvil', 'approvals', 'setup', 'v1')
+}
+
+/**
+ * Create the approval store if needed and make it private, returning its path. Exposed so a
+ * caller can prepare the store before the first grant, and so tests can build a usable store
+ * without issuing a grant.
+ */
+export function prepareSetupApprovalStore(env: NodeJS.ProcessEnv = process.env): string {
+  return ensureStoreRoot(env)
 }
 
 /** The ordered operations, canonicalized, so a precondition change invalidates a grant. */
@@ -350,14 +363,14 @@ function readRegularFile(path: string, maxBytes: number): string | null {
 function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' {
   const data = `${JSON.stringify(value, null, 2)}\n`
   const temp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`)
-  writeFileSync(temp, data, { encoding: 'utf8', flag: 'wx' })
+  writeFileSync(temp, data, { encoding: 'utf8', flag: 'wx', mode: PRIVATE_FILE_MODE })
   try {
     linkSync(temp, path)
     return 'written'
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === 'EEXIST') return 'exists'
     try {
-      writeFileSync(path, data, { encoding: 'utf8', flag: 'wx' })
+      writeFileSync(path, data, { encoding: 'utf8', flag: 'wx', mode: PRIVATE_FILE_MODE })
       return 'written'
     } catch (fallback) {
       if ((fallback as NodeJS.ErrnoException).code === 'EEXIST') return 'exists'
@@ -372,26 +385,181 @@ function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' 
   }
 }
 
-/**
- * Why the store is not safe to treat as authority, or null when it is.
- *
- * Ownership and permissions are checked on POSIX only: a Windows `lstat` does not report a
- * meaningful owner or mode, and the ACL is what governs access there. A store another user
- * can write is not authority, so the check is fail-closed on every read and write.
- */
-function storeProtectionProblem(storeDir: string): string | null {
+/** Why a path is not a plain, inspectable directory or file, or null when it is. */
+function structureProblem(path: string, kind: 'directory' | 'file'): string | null {
   let stat: ReturnType<typeof lstatSync>
   try {
-    stat = lstatSync(storeDir)
+    stat = lstatSync(path)
   } catch {
-    return 'The approval store cannot be inspected.'
+    return `The approval ${kind} cannot be inspected.`
   }
-  if (stat.isSymbolicLink()) return 'The approval store is a symbolic link or junction.'
-  if (!stat.isDirectory()) return 'The approval store is not a directory.'
+  if (stat.isSymbolicLink()) return `The approval ${kind} is a symbolic link or junction.`
+  if (kind === 'directory' ? !stat.isDirectory() : !stat.isFile()) {
+    return `The approval ${kind} is not a ${kind}.`
+  }
+  return null
+}
+
+/**
+ * POSIX ownership and mode for one record: it must belong to this user and must not be
+ * writable by group or other. On Windows these bits are meaningless and the ACL check below
+ * governs instead, so this returns null there.
+ */
+function posixProtectionProblem(path: string, kind: 'directory' | 'file'): string | null {
   if (process.platform === 'win32') return null
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch {
+    return `The approval ${kind} cannot be inspected.`
+  }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (uid !== undefined && stat.uid !== uid) return 'The approval store is not owned by the current user.'
-  if ((stat.mode & STORE_FORBIDDEN_BITS) !== 0) return 'The approval store is writable by group or other users.'
+  if (uid !== undefined && stat.uid !== uid) return `The approval ${kind} is not owned by the current user.`
+  if ((stat.mode & STORE_FORBIDDEN_BITS) !== 0) {
+    return `The approval ${kind} is writable by group or other users.`
+  }
+  return null
+}
+
+/**
+ * Why one record path is not private, or null when it is.
+ *
+ * A record another user could write is not authority, so the check applies to the store, every
+ * grant directory and every record file, not only the store root. POSIX uses ownership and mode
+ * bits; Windows uses the object's access control list, because a Windows `lstat` reports no
+ * meaningful owner or mode.
+ */
+function protectionProblem(path: string, kind: 'directory' | 'file'): string | null {
+  const structure = structureProblem(path, kind)
+  if (structure !== null) return structure
+  if (process.platform === 'win32') return windowsProtectionProblem(path, kind)
+  return posixProtectionProblem(path, kind)
+}
+
+/** The `<domain>\<user>` name Windows uses for the current user's account. */
+function windowsSelfPrincipal(): string | null {
+  const user = process.env.USERNAME ?? userInfo().username
+  if (user === undefined || user === '') return null
+  const domain = process.env.USERDOMAIN ?? process.env.COMPUTERNAME ?? ''
+  return domain === '' ? user : `${domain}\\${user}`
+}
+
+/** An absolute path to a Windows system tool: never a PATH or working-directory lookup. */
+function windowsSystemExecutable(...segments: string[]): string | null {
+  const root = process.env.SystemRoot ?? process.env.windir
+  if (root === undefined || root === '') return null
+  return join(root, 'System32', ...segments)
+}
+
+/** The absolute path to Windows PowerShell, which ships with every supported Windows. */
+function windowsPowerShell(): string | null {
+  return windowsSystemExecutable('WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
+
+/**
+ * Run a Windows system tool from its own directory, returning its output or null when it cannot
+ * be run. The executable path is absolute and the working directory holds no repository, so
+ * neither the search path nor a checked-out binary can be chosen by a repository.
+ */
+function runWindowsTool(executable: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string | null {
+  try {
+    return execFileSync(executable, args, {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 20_000,
+      cwd: dirname(executable),
+      env: { ...process.env, ...extraEnv },
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A fixed PowerShell program that reports the current user's SID, an object's owner SID and the
+ * SID of every allow entry.
+ *
+ * Reading the .NET security objects returns SIDs rather than the localized display names
+ * `icacls` prints, so the check cannot be fooled by a name that merely ends with the current
+ * user's name. The object path is handed over in the environment and never interpolated into
+ * the program, so a path can never become code.
+ */
+const WINDOWS_ACL_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '$p = $env:ANVIL_APPROVAL_ACL_PATH',
+  "Write-Output ('S:' + [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)",
+  '$acl = if ([System.IO.Directory]::Exists($p)) { [System.IO.Directory]::GetAccessControl($p) } else { [System.IO.File]::GetAccessControl($p) }',
+  "Write-Output ('O:' + $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value)",
+  'foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {',
+  "  Write-Output ('A:' + $rule.AccessControlType.ToString() + ':' + $rule.IdentityReference.Value)",
+  '}',
+].join('\n')
+
+interface WindowsAcl {
+  self: string
+  owner: string
+  allow: string[]
+}
+
+/** The current user, owner and allow SIDs of one object, or null when they cannot be read. */
+function readWindowsAcl(path: string): WindowsAcl | null {
+  const shell = windowsPowerShell()
+  if (shell === null) return null
+  const output = runWindowsTool(
+    shell,
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_ACL_SCRIPT],
+    { ANVIL_APPROVAL_ACL_PATH: path },
+  )
+  if (output === null) return null
+  const acl: WindowsAcl = { self: '', owner: '', allow: [] }
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line.startsWith('S:')) acl.self = line.slice(2)
+    else if (line.startsWith('O:')) acl.owner = line.slice(2)
+    else if (line.startsWith('A:Allow:')) acl.allow.push(line.slice('A:Allow:'.length))
+  }
+  if (acl.self === '' || acl.owner === '') return null
+  return acl
+}
+
+/**
+ * The SIDs an allow entry or owner may name without being another user: SYSTEM, the built-in
+ * Administrators group and the two owner pseudo-accounts. Administrators can already take
+ * ownership of anything, so naming them adds no authority; naming another ordinary user does.
+ */
+const WINDOWS_TRUSTED_SIDS = new Set(['S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-3-4'])
+
+/**
+ * Whether a Windows object denies everyone but the current user.
+ *
+ * Node cannot read a Windows ACL, so a system PowerShell reads it and reports SIDs. The owner
+ * and every allow entry must name the current user (or a trusted system account): the owner of
+ * an object can always rewrite its access control list, so a foreign owner is a refusal even
+ * when the current list looks private. Output that cannot be read is also a refusal, which
+ * keeps the check fail-closed.
+ */
+function windowsProtectionProblem(path: string, kind: 'directory' | 'file'): string | null {
+  const acl = readWindowsAcl(path)
+  if (acl === null) return `The approval ${kind} access control list cannot be read.`
+  if (acl.owner !== acl.self && !WINDOWS_TRUSTED_SIDS.has(acl.owner)) {
+    return `The approval ${kind} is owned by ${acl.owner}.`
+  }
+  if (acl.allow.length === 0) return `The approval ${kind} has no access control entry for its owner.`
+  for (const sid of acl.allow) {
+    if (sid === acl.self || WINDOWS_TRUSTED_SIDS.has(sid)) continue
+    return `The approval ${kind} grants access to ${sid}.`
+  }
+  return null
+}
+
+/** Restrict a Windows store to the current user, dropping every inherited entry. */
+function hardenWindowsStore(storeDir: string): string | null {
+  const principal = windowsSelfPrincipal()
+  if (principal === null) return 'The current Windows user cannot be identified.'
+  const icacls = windowsSystemExecutable('icacls.exe')
+  if (icacls === null) return 'The Windows icacls tool cannot be located.'
+  const output = runWindowsTool(icacls, [storeDir, '/inheritance:r', '/grant:r', `${principal}:(OI)(CI)F`])
+  if (output === null) return 'The approval store access control list could not be restricted.'
   return null
 }
 
@@ -423,15 +591,17 @@ function isInsideOrEqual(root: string, target: string): boolean {
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))
 }
 
-/** Refuse to keep authority for a repository inside that repository, before anything is created. */
+/**
+ * Refuse to keep authority for a repository inside that repository, before anything is
+ * created.
+ *
+ * Both paths are resolved through their deepest existing ancestor rather than requiring the
+ * repository to still exist, so a record stays inspectable -- and revocable -- after its
+ * checkout has been removed. Containment is still decided physically, so a store reached
+ * through a link inside the repository is still refused.
+ */
 function assertStoreOutsideRepository(storeDir: string, repositoryRoot: string): void {
-  let repo: string
-  try {
-    repo = realpathSync.native(repositoryRoot)
-  } catch (cause) {
-    throw new AnvilError(ErrorCode.PreflightFailed, 'The repository root cannot be resolved', { cause })
-  }
-  if (isInsideOrEqual(repo, resolveThroughExisting(storeDir))) {
+  if (isInsideOrEqual(resolveThroughExisting(repositoryRoot), resolveThroughExisting(storeDir))) {
     throw new AnvilError(ErrorCode.PreflightFailed, 'The approval store must live outside the repository it approves', {
       hint: 'Set ANVIL_APPROVAL_HOME to a directory outside the repository, or use the default under your home.',
     })
@@ -450,20 +620,40 @@ function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
     return null
   }
   if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unsafe'
-  return storeProtectionProblem(dir) === null ? { dir } : 'unsafe'
+  return protectionProblem(dir, 'directory') === null ? { dir } : 'unsafe'
 }
 
+/**
+ * Create the store if needed and make it private. On Windows the inherited access control
+ * list is replaced with one entry for the current user; if that cannot be done the store is
+ * refused, because an unprotected store is not authority.
+ */
 function ensureStoreRoot(env: NodeJS.ProcessEnv | undefined): string {
   const dir = approvalStoreDir(env)
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    mkdirSync(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
   } catch (cause) {
     throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the approval store at ${dir}`, {
       hint: 'Set ANVIL_APPROVAL_HOME to a writable directory outside the repository, or use the default under your home.',
       cause,
     })
   }
-  const problem = storeProtectionProblem(dir)
+  // Reject a store that is not a real directory before touching its access control list: a
+  // refused store must never be modified. `mkdirSync` follows a link, so this is where a
+  // store reached through a symbolic link or junction is caught.
+  const structure = structureProblem(dir, 'directory')
+  if (structure !== null) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${structure}`, {
+      hint: 'The approval store must be a real directory, not a link or a file.',
+    })
+  }
+  const hardening = process.platform === 'win32' ? hardenWindowsStore(dir) : null
+  if (hardening !== null) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${hardening}`, {
+      hint: 'The approval store must be a private directory for your user. Choose a location you own.',
+    })
+  }
+  const problem = protectionProblem(dir, 'directory')
   if (problem !== null) {
     throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${problem}`, {
       hint: 'The approval store must be a real directory owned by your user, not writable by group or other.',
@@ -505,9 +695,20 @@ export function readSetupApprovalGrant(
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     return { ok: false, status: 'unknown', reason: 'The approval record is a symlink or not a directory.' }
   }
-  const raw = readRegularFile(join(dir, GRANT_FILE), MAX_RECORD_BYTES)
+  // A record directory another user can write is not a record anvil can trust, even when the
+  // store root itself is private.
+  const dirProblem = protectionProblem(dir, 'directory')
+  if (dirProblem !== null) {
+    return { ok: false, status: 'unknown', reason: `The approval record is not private: ${dirProblem}` }
+  }
+  const grantPath = join(dir, GRANT_FILE)
+  const raw = readRegularFile(grantPath, MAX_RECORD_BYTES)
   if (raw === null)
     return { ok: false, status: 'invalid', reason: 'The approval grant record is missing or unreadable.' }
+  const fileProblem = protectionProblem(grantPath, 'file')
+  if (fileProblem !== null) {
+    return { ok: false, status: 'unknown', reason: `The approval grant record is not private: ${fileProblem}` }
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -541,7 +742,7 @@ export function saveSetupApprovalGrant(
   const storeDir = ensureStoreRoot(options.env)
   const dir = join(storeDir, grant.id)
   try {
-    mkdirSync(dir)
+    mkdirSync(dir, { mode: PRIVATE_DIRECTORY_MODE })
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === 'EEXIST') {
       throw new AnvilError(ErrorCode.PreflightFailed, `An approval grant ${grant.id} already exists.`, {
@@ -579,6 +780,8 @@ function readTransition(dir: string): TransitionState {
     return (cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unknown'
   }
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) return 'unknown'
+  // A transition record another user can rewrite could revoke or consume a grant at will.
+  if (protectionProblem(path, 'file') !== null) return 'unknown'
   const raw = readRegularFile(path, MAX_RECORD_BYTES)
   if (raw === null) return 'unknown'
   try {
