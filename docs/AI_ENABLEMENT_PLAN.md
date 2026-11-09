@@ -87,14 +87,15 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   [the plan contracts](SETUP_PLANS.md) and
   [ADR-0018](adr/0018-approved-local-skill-installation.md).
 - **Single-use approval grants** (workstream 3, first authority slice) — `anvil setup approve
-  --plan <file> --confirm <plan-digest>` records a separate, single-use grant outside the
-  repository, bound to the plan digest, adapter fingerprint, repository root and clean HEAD,
-  source hash, destination and ordered operations. The confirmation is the full plan digest,
-  not a boolean flag. `anvil setup approval --grant <id>` reports `active`, `expired`,
-  `revoked`, `consumed`, `stale`, `invalid` or `unknown`, and `anvil setup revoke --grant
-  <id>` withdraws it. Grants expire after ten minutes and carry one application attempt.
-  There is still no apply command, and approving never writes to the repository; see
-  [the plan contracts](SETUP_PLANS.md) and
+  --plan <file>` records a separate, single-use grant outside the repository, bound to the plan
+  digest, adapter fingerprint, repository root and clean HEAD, source hash, destination and
+  ordered operations. It shows the plan and asks the reviewer to type the full plan digest; a
+  digest passed as a flag is not consent, and the plan is revalidated after confirmation.
+  `anvil setup approval --grant <id>` reports `active`, `expired`, `revoked`, `consumed`,
+  `stale`, `invalid` or `unknown`, and `anvil setup revoke --grant <id>` withdraws it. The
+  store must be a real, user-owned directory outside the repository. Grants expire after ten
+  minutes and carry one application attempt. There is still no apply command, and approving
+  never writes to the repository; see [the plan contracts](SETUP_PLANS.md) and
   [ADR-0019](adr/0019-approval-authority-is-a-user-owned-store.md).
 
 Still proposed: application with independent verification, automatic tool installation,

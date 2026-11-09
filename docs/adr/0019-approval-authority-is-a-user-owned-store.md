@@ -22,27 +22,32 @@ recomputed by anyone. It also lets a repository anvil does not own carry its own
 **Approval is a grant held in a protected, user-owned store, and the digest is only what it
 binds.**
 
-- `anvil setup approve --plan <file> --confirm <plan-digest>` writes a
-  `setup-approval-grant` (`kind: "setup-approval-grant"`, `permission:
-  "apply-local-skill-once"`) under `~/.anvil/approvals/setup/v1/<id>/grant.json`.
+- `anvil setup approve --plan <file>` writes a `setup-approval-grant` (`kind:
+  "setup-approval-grant"`, `permission: "apply-local-skill-once"`) under
+  `~/.anvil/approvals/setup/v1/<id>/grant.json`.
 - The store is deliberately **not** the config home. `ANVIL_CONFIG_HOME` may point inside a
   repository, so a repository could otherwise choose where its own authority lives.
   `ANVIL_APPROVAL_HOME` is an explicit, process-level override; a config file cannot set it.
-  Persisting refuses a store that is a symlink, not a directory, or inside the repository the
-  grant approves.
+  The store is checked on every read and write: a real, user-owned directory that is not
+  writable by group or other and does not sit inside the repository the grant approves. A
+  refusal creates nothing.
 - A grant binds the plan digest, adapter fingerprint, physical repository root and clean HEAD,
   source path/hash/size, destination, and a digest of the ordered operations including their
   preconditions. It names no approval identity: terminal confirmation is not identity.
-- **The confirmation is the full plan digest, not a boolean.** `--yes` would launder a glance
-  into approval; naming the digest forces the reviewer to state what is approved. A missing
+- **The confirmation is typed, not a flag.** `approve` shows the plan and reads the full plan
+  digest from the terminal; a digest passed as a command-line argument is not consent, and a
+  bare `--yes` would launder a glance into approval. The plan is revalidated after the
+  confirmation, so a repository that moved while the reviewer read is caught. An empty
   confirmation is a usage error; a mismatched one is a refusal.
 - **Grants are short-lived and single-use.** The default lifetime is ten minutes, and
-  `maxAttempts` is one. `consumeSetupApproval` reserves the attempt atomically, and application
-  must call it after full revalidation and before its first repository mutation, so a crash or
-  partial failure burns the attempt. There is no automatic retry.
+  `maxAttempts` is one. `consumeSetupApproval` reserves the attempt and reports whether this
+  call won it, and application must call it after full revalidation and before its first
+  repository mutation, so a crash or partial failure burns the attempt. There is no automatic
+  retry. Revocation and reservation share one no-replace state record, so they cannot both win.
 - Inspection reports `active`, `expired`, `revoked`, `consumed`, `stale`, `invalid` or
   `unknown`. Terminal states win: a revoked or consumed grant is never active. Revocation is
-  terminal and idempotent, and a consumed grant cannot be revoked. Every record stays
+  terminal and idempotent, and a consumed grant cannot be revoked. With no current repository
+  state to check, a non-terminal grant is `unknown`, never `active`. Every record stays
   `executed: false` and `executionSupported: false`.
 
 **This change still applies nothing.** It adds grants, inspection, revocation and reservation.

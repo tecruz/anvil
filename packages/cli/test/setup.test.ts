@@ -64,7 +64,7 @@ function repo(project: Record<string, unknown> = {}): string {
   commit(root)
   return root
 }
-function run(cwd: string, args: string[], extraEnv: Record<string, string> = {}) {
+function run(cwd: string, args: string[], extraEnv: Record<string, string> = {}, input?: string) {
   try {
     return {
       code: 0,
@@ -72,6 +72,7 @@ function run(cwd: string, args: string[], extraEnv: Record<string, string> = {})
         cwd,
         encoding: 'utf8',
         stdio: 'pipe',
+        input,
         env: { ...process.env, NO_COLOR: '1', ANVIL_CONFIG_HOME: join(cwd, '.config-home'), ...extraEnv },
       }),
     }
@@ -738,7 +739,7 @@ describe('anvil setup', () => {
     assert.equal(git(root, 'status', '--porcelain'), '')
   })
 
-  test('an approval grant is issued, inspected and revoked without touching the repository', () => {
+  test('an approval grant is issued after a typed confirmation, inspected and revoked', () => {
     const root = repo()
     writeFileSync(join(root, 'skill.md'), skillContent())
     commit(root)
@@ -747,11 +748,20 @@ describe('anvil setup', () => {
     const env = approvalEnv()
     const before = git(root, 'status', '--porcelain')
 
-    // Confirmation is the full plan digest, not a boolean flag.
+    // Confirmation is typed, not a flag: an empty stdin approves nothing, and a wrong digest
+    // is refused.
     assert.equal(run(root, ['approve', '--plan', saved], env).code, 2)
-    assert.equal(run(root, ['approve', '--plan', saved, '--confirm', 'deadbeef'], env).code, 5)
+    assert.equal(run(root, ['approve', '--plan', saved], env, 'deadbeef\n').code, 5)
 
-    const approved = run(root, ['approve', '--plan', saved, '--confirm', plan.digest, '--json'], env)
+    // Human mode shows the plan and content before asking for the digest.
+    const text = run(root, ['approve', '--plan', saved], env, `${plan.digest}\n`)
+    assert.equal(text.code, 0, text.stdout)
+    assert.match(text.stdout, /Execution plan:/)
+    assert.match(text.stdout, /Skill content:/)
+    assert.match(text.stdout, /Approval: active/)
+
+    // JSON mode keeps stdout a single document and reads the digest from stdin.
+    const approved = run(root, ['approve', '--plan', saved, '--json'], env, `${plan.digest}\n`)
     assert.equal(approved.code, 0, approved.stdout + approved.stderr)
     const record = JSON.parse(approved.stdout) as {
       data: { id: string; status: string; grant: { planDigest: string } }
@@ -787,30 +797,29 @@ describe('anvil setup', () => {
 
     // An owner-command proposal is not a local-skill execution plan.
     const ownerPlan = proposal(root)
-    assert.equal(
-      run(root, ['approve', '--plan', save(ownerPlan), '--confirm', ownerPlan.digest, '--json'], env).code,
-      5,
-    )
+    assert.equal(run(root, ['approve', '--plan', save(ownerPlan), '--json'], env, `${ownerPlan.digest}\n`).code, 5)
 
     // A stale plan (new HEAD, changed source) cannot be approved even with its own digest.
     writeFileSync(join(root, 'skill.md'), skillContent('my-skill', 'A changed body.\n'))
     commit(root)
-    assert.equal(run(root, ['approve', '--plan', saved, '--confirm', plan.digest, '--json'], env).code, 5)
+    assert.equal(run(root, ['approve', '--plan', saved, '--json'], env, `${plan.digest}\n`).code, 5)
   })
 
-  test('approval flags are strict and never mix with plan or validate modes', () => {
+  test('approval flags are strict and a confirmation flag is not accepted', () => {
     const root = repo()
     const env = approvalEnv()
     for (const args of [
-      ['approve', '--confirm', 'x'],
-      ['approve', '--plan', 'plan.json'],
+      ['approve'],
       ['approval'],
       ['revoke'],
       ['approval', '--grant', 'x', '--plan', 'plan.json'],
-      ['approve', '--plan', 'plan.json', '--confirm', 'x', '--grant', 'x'],
-      ['validate', '--plan', 'plan.json', '--confirm', 'x'],
-      ['plan', '--confirm', 'x'],
+      ['approve', '--plan', 'plan.json', '--grant', 'x'],
+      ['validate', '--plan', 'plan.json', '--grant', 'x'],
+      ['plan', '--grant', 'x'],
+      ['plan', '--plan', 'plan.json'],
       ['apply', '--plan', 'plan.json'],
+      // A digest passed as a flag is not consent and is not a known flag.
+      ['approve', '--confirm', 'x'],
     ]) {
       const result = run(root, [...args, '--json'], env)
       assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)

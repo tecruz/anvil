@@ -85,6 +85,7 @@ export {
   SETUP_APPROVAL_KIND,
   SETUP_APPROVAL_PERMISSION,
   SETUP_APPROVAL_TTL_MS,
+  type SetupApprovalConsumption,
   type SetupApprovalGrant,
   type SetupApprovalGrantOptions,
   type SetupApprovalRecord,

@@ -190,11 +190,11 @@ export const setupCommand: Command = {
   name: 'setup',
   summary: 'Generate, validate, approve or revoke a setup plan; never execute or apply it.',
   usage:
-    'anvil setup <plan|validate|approve|approval|revoke> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--confirm <plan-digest>] [--adapter local-skill --source <file> --name <name>]',
+    'anvil setup <plan|validate|approve|approval|revoke> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter local-skill --source <file> --name <name>]',
   details: [
     'plan       Describe owner-declared install commands, or plan one local-skill installation.',
     'validate   Compare saved plan JSON with fresh inputs; requires --plan <file>.',
-    'approve    Grant one application of a current local-skill plan; requires --plan <file> --confirm <plan-digest>.',
+    'approve    Grant one application of a current local-skill plan; requires --plan <file> and a typed confirmation.',
     'approval   Inspect a stored grant; requires --grant <id>.',
     'revoke     Withdraw a stored grant; requires --grant <id>.',
     '',
@@ -215,7 +215,6 @@ export const setupCommand: Command = {
     'max-files': { type: 'string' },
     plan: { type: 'string' },
     grant: { type: 'string' },
-    confirm: { type: 'string' },
     adapter: { type: 'string' },
     source: { type: 'string' },
     name: { type: 'string' },
@@ -225,7 +224,6 @@ export const setupCommand: Command = {
     const sub = args.positionals[0]
     const planPath = args.values.plan
     const grantId = typeof args.values.grant === 'string' ? args.values.grant : undefined
-    const confirm = typeof args.values.confirm === 'string' ? args.values.confirm : undefined
     const adapter = typeof args.values.adapter === 'string' ? args.values.adapter : undefined
     const source = typeof args.values.source === 'string' ? args.values.source : undefined
     const name = typeof args.values.name === 'string' ? args.values.name : undefined
@@ -243,8 +241,6 @@ export const setupCommand: Command = {
         throw usage(`setup ${sub} reads the grant id`, `Do not pass --adapter, --source or --name with ${sub}.`)
       }
       if (planPath !== undefined) throw usage(`setup ${sub} does not take --plan <file>`, 'Use --grant <id>.')
-      if (confirm !== undefined)
-        throw usage(`setup ${sub} does not take --confirm`, 'Confirmation belongs to setup approve.')
       if (typeof grantId !== 'string' || grantId === '') {
         throw usage(`setup ${sub} requires --grant <id>`, 'Use the grant id printed by setup approve.')
       }
@@ -254,8 +250,6 @@ export const setupCommand: Command = {
       }
       if (grantId !== undefined)
         throw usage('setup plan does not take --grant <id>', 'Use setup approval --grant <id>.')
-      if (confirm !== undefined)
-        throw usage('setup plan does not take --confirm', 'Confirmation belongs to setup approve.')
       if (adapter === undefined && (source !== undefined || name !== undefined)) {
         throw usage('--source and --name require --adapter local-skill', 'Choose an explicit adapter.')
       }
@@ -288,15 +282,6 @@ export const setupCommand: Command = {
       }
       if (grantId !== undefined)
         throw usage(`setup ${sub} does not take --grant <id>`, 'Use setup approval --grant <id>.')
-      if (sub === 'validate' && confirm !== undefined) {
-        throw usage('setup validate does not take --confirm', 'Confirmation belongs to setup approve.')
-      }
-      if (sub === 'approve' && (confirm === undefined || confirm === '')) {
-        throw usage(
-          'setup approve requires --confirm <plan-digest>',
-          'Pass the full plan digest printed by setup plan as an explicit confirmation.',
-        )
-      }
     }
 
     // approval and revoke read the user-owned grant store; neither needs a repository.
@@ -320,9 +305,13 @@ export const setupCommand: Command = {
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const profile = await loadProfile(ctx, target, parseMaxFiles(args.values['max-files']))
     const root = normalizeGitPath(profile.root)
-    const repository = await repositoryState(root)
     // Incomplete detection cannot be treated as an approval-ready repository snapshot.
-    if (profile.diagnostics.truncated || profile.diagnostics.failedDetectors.length > 0) repository.worktree = 'unknown'
+    const refreshRepository = async (): Promise<SetupRepositoryState> => {
+      const state = await repositoryState(root)
+      if (profile.diagnostics.truncated || profile.diagnostics.failedDetectors.length > 0) state.worktree = 'unknown'
+      return state
+    }
+    let repository = await refreshRepository()
 
     if (sub === 'plan') {
       if (adapter === undefined) {
@@ -344,23 +333,49 @@ export const setupCommand: Command = {
           hint: 'Owner-command proposals remain inspect-only; use setup plan --adapter local-skill.',
         })
       }
-      const { plan, validation } = resolveExecutionPlan(saved, repository)
-      if (validation.status !== 'current' || plan === null) {
-        const error = new AnvilError(ErrorCode.PreflightFailed, validation.reason, {
+      const first = resolveExecutionPlan(saved, repository)
+      if (first.validation.status !== 'current' || first.plan === null) {
+        const error = new AnvilError(ErrorCode.PreflightFailed, first.validation.reason, {
           hint: 'Generate a fresh plan from a clean commit and review it before approving.',
         })
-        ctx.outFailure(validation, error, () => `${validation.status}: ${validation.reason}\n`)
+        ctx.outFailure(first.validation, error, () => `${first.validation.status}: ${first.validation.reason}\n`)
         return error.exitCode
       }
-      if (confirm !== plan.digest) {
+
+      // Show the plan, then challenge the reviewer to type its digest. A machine-readable
+      // digest passed on the command line is not consent, so it is not accepted as one.
+      const entered = await confirmPlanDigest(ctx, first.plan)
+      if (entered === null || entered === '') {
+        throw usage('setup approve needs an interactive confirmation', 'Type the full plan digest when prompted.')
+      }
+      // The repository may have moved while the reviewer read; revalidate after confirming.
+      repository = await refreshRepository()
+      const second = resolveExecutionPlan(saved, repository)
+      if (second.validation.status !== 'current' || second.plan === null) {
+        const error = new AnvilError(ErrorCode.PreflightFailed, second.validation.reason, {
+          hint: 'The plan changed while you were confirming it. Review the fresh plan and approve again.',
+        })
+        ctx.outFailure(second.validation, error, () => `${second.validation.status}: ${second.validation.reason}\n`)
+        return error.exitCode
+      }
+      if (entered !== second.plan.digest) {
         throw new AnvilError(ErrorCode.PreflightFailed, 'The confirmation does not match the current plan digest.', {
-          hint: `Review the plan, then re-run with --confirm ${plan.digest}`,
+          hint: 'Run setup plan again, read the digest, and type it exactly when prompted.',
         })
       }
-      const grant = buildSetupApprovalGrant(plan)
+
+      const grant = buildSetupApprovalGrant(second.plan)
       saveSetupApprovalGrant(grant)
-      // Read the record back so the emitted result is what was actually persisted.
+      // Read the record back, so a plan that moved between the write and the read cannot be
+      // reported as a successful approval.
       const record = inspectSetupApproval(grant.id, repository)
+      if (record.status !== 'active') {
+        const error = new AnvilError(ErrorCode.PreflightFailed, record.reason, {
+          hint: 'The plan changed before the grant completed. Inspect the grant, then approve again.',
+        })
+        ctx.outFailure(record, error, () => `${record.status}: ${record.reason}\n`)
+        return error.exitCode
+      }
       ctx.out(record, () => renderApproval(record))
       return
     }
@@ -394,6 +409,42 @@ async function currentRepositoryState(ctx: CommandContext): Promise<SetupReposit
   } catch {
     return null
   }
+}
+
+/**
+ * Show the plan and read the reviewer's confirmation. The digest must be typed (or piped) on
+ * stdin: a flag cannot prove that anyone looked at the plan. In JSON mode the prompt goes to
+ * stderr so stdout stays a single JSON document.
+ */
+async function confirmPlanDigest(ctx: CommandContext, plan: SetupExecutionPlan): Promise<string | null> {
+  if (!ctx.json) ctx.say(renderExecutionPlan(plan))
+  const prompt = 'Type the plan digest to confirm this approval: '
+  if (ctx.json) ctx.writeError(prompt)
+  else ctx.writeRaw(prompt)
+  return readStdinLine()
+}
+
+/** Read one line from stdin; null when stdin ends before a line arrives. */
+function readStdinLine(): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    const stdin = process.stdin
+    let data = ''
+    let settled = false
+    const done = (value: string | null) => {
+      if (settled) return
+      settled = true
+      resolvePromise(value)
+    }
+    stdin.setEncoding('utf8')
+    stdin.on('data', (chunk: string) => {
+      data += chunk
+      const newline = data.indexOf('\n')
+      if (newline !== -1) done(data.slice(0, newline).trim())
+    })
+    stdin.on('end', () => done(data.trim() === '' ? null : data.trim()))
+    stdin.on('error', () => done(null))
+    stdin.resume()
+  })
 }
 
 function renderApproval(record: SetupApprovalRecord): string {

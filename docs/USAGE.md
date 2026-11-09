@@ -255,19 +255,21 @@ the plan itself always reports `approval: "not-granted"`.
 Approval is a separate, single-use grant, stored outside the repository:
 
 ```bash
-anvil setup approve --plan ../execution-plan.json --confirm <plan-digest>
+anvil setup approve --plan ../execution-plan.json
 anvil setup approval --grant <id>
 anvil setup revoke --grant <id>
 ```
 
-`approve` rebuilds the plan and requires it to be current, then requires `--confirm` to be the
-**full plan digest** — the deliberate act is naming exactly what is approved, not typing
-`yes`. A grant authorizes one application attempt, for that plan, that repository, that source
-hash and that adapter behaviour, and expires after ten minutes. Grants live under
-`~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the location, and the store is
-refused if it is a symlink or sits inside the repository. `approval` prints `active`,
-`expired`, `revoked`, `consumed`, `stale`, `invalid` or `unknown`, and exits non-zero for
-anything but `active`. `revoke` is terminal.
+`approve` rebuilds the plan, requires it to be current, shows it, and then asks you to
+**type the plan digest** on the terminal. A digest passed as a flag is not consent, so there
+is no `--yes`, and the plan is revalidated after you confirm — a repository that moved while
+you were reading is caught. A grant authorizes one application attempt, for that plan, that
+repository, that source hash and that adapter behaviour, and expires after ten minutes.
+Grants live under `~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the
+location. The store must be a real directory owned by you, not writable by group or other and
+not inside the repository, or it is refused. `approval` prints `active`, `expired`, `revoked`,
+`consumed`, `stale`, `invalid` or `unknown`, and exits non-zero for anything but `active`.
+`revoke` is terminal.
 
 There is no apply, install or execute command here. None of these run an install, version
 probe, repository script or service connection, or write a staging bundle, and approving a

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "runId": "cd3284f3-474e-45ca-b094-c75bcfe9e795",
-  "startedAt": "2026-11-09T12:35:03.448Z",
-  "completedAt": "2026-11-09T12:35:26.389Z",
+  "runId": "3523ec27-901e-4252-a27a-3556ae89627c",
+  "startedAt": "2026-11-09T14:30:30.944Z",
+  "completedAt": "2026-11-09T14:30:54.027Z",
   "completionState": "completed",
-  "commitSha": "041cc48d2b7cc27f9096f728a2a213f1799a60b2",
-  "implementation": "38bd75afe469bdd02bd0c07d8c09178737e1d347cd3e5d8ba2c7a31c383617ff",
-  "bundleDigest": "e42d09dbf6819fc808bcbc1c42e60b1ef29d481609824c59b365eec66c22eddb",
+  "commitSha": "0a2930d0cb3e93576384410847d44ea80dbbf3a6",
+  "implementation": "31586f0fe143a39ff314ecffd0078dbe48683882d47a3f8bbe92703d52e67ef9",
+  "bundleDigest": "d4aabeed1ca85431f481635ead46695d7f3784383b4cbfef0ecf02756fb450dc",
   "harnessDigest": "17422704e931f853f4b8d996cac8ae1c20e286c80a1fb9eb9ae495eb47338867",
   "models": [
     {
@@ -19,7 +19,7 @@
   "publishTranscripts": false,
   "subset": false,
   "repetitions": 1,
-  "seed": "b0cbadb4-6657-4db8-a9fa-f86c99e7ce1d",
+  "seed": "43db847f-b851-40c1-99cc-f6e5b868a6ab",
   "order": "alternate",
   "scenarioHashes": {
     "tiny-code-change": {
@@ -71,8 +71,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:03.558Z",
-          "completedAt": "2026-11-09T12:35:06.240Z",
+          "startedAt": "2026-11-09T14:30:31.037Z",
+          "completedAt": "2026-11-09T14:30:33.191Z",
           "state": "completed"
         }
       ],
@@ -82,7 +82,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2664,
+      "durationMs": 2136,
       "transcript": ""
     },
     {
@@ -96,8 +96,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:06.246Z",
-          "completedAt": "2026-11-09T12:35:11.445Z",
+          "startedAt": "2026-11-09T14:30:33.195Z",
+          "completedAt": "2026-11-09T14:30:36.687Z",
           "state": "completed"
         }
       ],
@@ -107,7 +107,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 5185,
+      "durationMs": 3475,
       "transcript": ""
     },
     {
@@ -121,8 +121,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:11.453Z",
-          "completedAt": "2026-11-09T12:35:12.938Z",
+          "startedAt": "2026-11-09T14:30:36.696Z",
+          "completedAt": "2026-11-09T14:30:38.495Z",
           "state": "completed"
         }
       ],
@@ -132,7 +132,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1472,
+      "durationMs": 1785,
       "transcript": ""
     },
     {
@@ -146,8 +146,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:12.942Z",
-          "completedAt": "2026-11-09T12:35:15.682Z",
+          "startedAt": "2026-11-09T14:30:38.499Z",
+          "completedAt": "2026-11-09T14:30:41.851Z",
           "state": "completed"
         }
       ],
@@ -157,7 +157,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2727,
+      "durationMs": 3335,
       "transcript": ""
     },
     {
@@ -171,8 +171,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:15.692Z",
-          "completedAt": "2026-11-09T12:35:17.893Z",
+          "startedAt": "2026-11-09T14:30:41.862Z",
+          "completedAt": "2026-11-09T14:30:44.427Z",
           "state": "completed"
         }
       ],
@@ -182,7 +182,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2180,
+      "durationMs": 2543,
       "transcript": ""
     },
     {
@@ -196,68 +196,68 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-09T12:35:17.898Z",
-          "completedAt": "2026-11-09T12:35:21.269Z",
+          "startedAt": "2026-11-09T14:30:44.432Z",
+          "completedAt": "2026-11-09T14:30:48.399Z",
           "state": "completed"
         }
       ],
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3940,
+      "transcript": ""
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-09T14:30:48.409Z",
+          "completedAt": "2026-11-09T14:30:50.563Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2133,
+      "transcript": ""
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-09T14:30:50.567Z",
+          "completedAt": "2026-11-09T14:30:53.944Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
       "durationMs": 3351,
-      "transcript": ""
-    },
-    {
-      "scenario": "medium-verify-only",
-      "variant": "bare",
-      "model": "fake-agent",
-      "modelRole": null,
-      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
-      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-09T12:35:21.278Z",
-          "completedAt": "2026-11-09T12:35:23.218Z",
-          "state": "completed"
-        }
-      ],
-      "verified": true,
-      "hiddenVerified": null,
-      "verifyExitCodes": [0],
-      "repetition": 0,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 1921,
-      "transcript": ""
-    },
-    {
-      "scenario": "medium-verify-only",
-      "variant": "anvil",
-      "model": "fake-agent",
-      "modelRole": null,
-      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
-      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-09T12:35:23.222Z",
-          "completedAt": "2026-11-09T12:35:26.320Z",
-          "state": "completed"
-        }
-      ],
-      "verified": true,
-      "hiddenVerified": null,
-      "verifyExitCodes": [0],
-      "repetition": 0,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 3079,
       "transcript": ""
     }
   ]

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -96,6 +96,8 @@ describe('setup approval grants', () => {
     assert.equal(record.grant?.planDigest, plan.digest)
     assert.equal(record.executed, false)
     assert.equal(record.executionSupported, false)
+    // Without a current repository state, freshness cannot be checked, so it is never active.
+    assert.equal(inspectSetupApproval(ID, null, { env, now: new Date(T0.getTime() + 2000) }).status, 'unknown')
   })
 
   test('a changed source, a new HEAD or a different repository makes a grant stale', () => {
@@ -144,19 +146,34 @@ describe('setup approval grants', () => {
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'revoked')
 
     saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID2 }), { env })
-    assert.equal(consumeSetupApproval(ID2, repository(repo), { env, now: at }).status, 'consumed')
+    const reserved = consumeSetupApproval(ID2, repository(repo), { env, now: at })
+    assert.equal(reserved.reserved, true)
+    assert.equal(reserved.record.status, 'consumed')
     assert.equal(revokeSetupApproval(ID2, { env }).status, 'consumed')
     assert.equal(inspectSetupApproval(ID2, repository(repo), { env, now: at }).status, 'consumed')
+    // A grant that was revoked before an attempt cannot be reserved.
+    const afterRevoke = consumeSetupApproval(ID, repository(repo), { env, now: at })
+    assert.equal(afterRevoke.reserved, false)
+    assert.equal(afterRevoke.record.status, 'revoked')
   })
 
-  test('the single attempt is reserved only from an active grant', () => {
+  test('the single attempt is reserved only once, and only from an active grant', () => {
     const { repo, env } = fixture()
     const plan = planFor(repo)
     saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: 1_000, id: ID }), { env })
     const late = new Date(T0.getTime() + 5_000)
-    assert.equal(consumeSetupApproval(ID, repository(repo), { env, now: late }).status, 'expired')
-    // A refused reservation leaves no attempt marker behind.
+    const expired = consumeSetupApproval(ID, repository(repo), { env, now: late })
+    assert.equal(expired.reserved, false)
+    assert.equal(expired.record.status, 'expired')
+    // A refused reservation leaves no attempt record behind.
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: late }).status, 'expired')
+
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID2 }), { env })
+    const at = new Date(T0.getTime() + 1000)
+    assert.equal(consumeSetupApproval(ID2, repository(repo), { env, now: at }).reserved, true)
+    const again = consumeSetupApproval(ID2, repository(repo), { env, now: at })
+    assert.equal(again.reserved, false)
+    assert.equal(again.record.status, 'consumed')
   })
 
   test('malformed ids throw and unknown ids are invalid, never active', () => {
@@ -172,26 +189,55 @@ describe('setup approval grants', () => {
     const { repo, env, store } = fixture()
     const plan = planFor(repo)
     const at = new Date(T0.getTime() + 1000)
-    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const valid = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    saveSetupApprovalGrant(valid, { env })
     const grantFile = join(store, ID, 'grant.json')
 
     // A recomputed (forged) plan digest no longer matches the current plan.
-    writeFileSync(
-      grantFile,
-      JSON.stringify({ ...buildSetupApprovalGrant(plan, { now: T0, id: ID }), planDigest: 'f'.repeat(64) }),
-    )
+    writeFileSync(grantFile, JSON.stringify({ ...valid, planDigest: 'f'.repeat(64) }))
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'stale')
 
-    // A malformed shape and an id that does not match its directory are invalid.
+    // A duplicated binding that disagrees with the plan is stale even when the digest is kept.
+    writeFileSync(grantFile, JSON.stringify({ ...valid, source: { ...valid.source, bytes: valid.source.bytes + 1 } }))
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'stale')
+
+    // An unknown field, a future issue time, a malformed shape and an id that does not match
+    // its directory are all invalid rather than accepted.
+    writeFileSync(grantFile, JSON.stringify({ ...valid, unexpected: true }))
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'invalid')
+    const future = new Date(T0.getTime() + 86_400_000)
+    writeFileSync(
+      grantFile,
+      JSON.stringify({
+        ...valid,
+        issuedAt: future.toISOString(),
+        expiresAt: new Date(future.getTime() + TTL).toISOString(),
+      }),
+    )
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'invalid')
     writeFileSync(grantFile, JSON.stringify({ ...plan, maxAttempts: 2 }))
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'invalid')
-    writeFileSync(grantFile, JSON.stringify({ ...buildSetupApprovalGrant(plan, { now: T0, id: ID }), id: ID2 }))
+    writeFileSync(grantFile, JSON.stringify({ ...valid, id: ID2 }))
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'invalid')
     writeFileSync(grantFile, 'not json')
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'invalid')
   })
 
-  test('a link in the store never produces an active grant', (t) => {
+  test('a store inside the repository it approves is never read as authority', () => {
+    const repo = scratch('anvil-approval-repo-')
+    const plan = planFor(repo)
+    const at = new Date(T0.getTime() + 1000)
+    const insideStore = join(repo, '.approvals')
+    mkdirSync(join(insideStore, ID), { recursive: true })
+    writeFileSync(
+      join(insideStore, ID, 'grant.json'),
+      JSON.stringify(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })),
+    )
+    const env: NodeJS.ProcessEnv = { ...process.env, ANVIL_APPROVAL_HOME: insideStore }
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
+  })
+
+  test('an uninspectable store and a link inside it are never active', (t) => {
     const repo = scratch('anvil-approval-repo-')
     const plan = planFor(repo)
     const realStore = scratch('anvil-approval-store-')
@@ -238,7 +284,7 @@ describe('setup approval grants', () => {
     )
   })
 
-  test('saving refuses a store inside the repository it approves', () => {
+  test('saving refuses a store inside the repository before creating anything', () => {
     const repo = scratch('anvil-approval-repo-')
     const plan = planFor(repo)
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
@@ -246,6 +292,21 @@ describe('setup approval grants', () => {
       () => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: join(repo, '.approvals') } }),
       AnvilError,
     )
+    // Containment is checked before the store is created, so a refusal leaves no directory.
+    assert.equal(existsSync(join(repo, '.approvals')), false)
+  })
+
+  test('a store writable by group or other is refused on POSIX', (t) => {
+    if (process.platform === 'win32') {
+      t.skip('POSIX ownership and permission bits do not apply on Windows')
+      return
+    }
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    chmodSync(store, 0o777)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    assert.throws(() => saveSetupApprovalGrant(grant, { env }), AnvilError)
+    assert.equal(inspectSetupApproval(ID, null, { env }).status, 'unknown')
   })
 
   test('saving writes only to the store, never into the repository', () => {
@@ -277,6 +338,10 @@ describe('setup approval grants', () => {
     assert.equal(gradeSetupApprovalGrant(grant, plan).ok, true)
     assert.equal(gradeSetupApprovalGrant({ ...grant, adapterFingerprint: 'a'.repeat(64) }, plan).status, 'stale')
     assert.equal(gradeSetupApprovalGrant({ ...grant, planDigest: 'b'.repeat(64) }, plan).status, 'stale')
+    assert.equal(
+      gradeSetupApprovalGrant({ ...grant, source: { ...grant.source, bytes: grant.source.bytes + 1 } }, plan).status,
+      'stale',
+    )
   })
 
   test('the default lifetime is the documented ten minutes', () => {

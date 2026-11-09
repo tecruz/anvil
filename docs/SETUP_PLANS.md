@@ -183,17 +183,18 @@ application attempt of one exact plan**, and it lives outside the repository bec
 repository anvil does not own must not be able to mint its own authority.
 
 ```bash
-anvil setup approve --plan ../execution-plan.json --confirm <plan-digest>
+anvil setup approve --plan ../execution-plan.json
 anvil setup approval --grant <id>
 anvil setup revoke --grant <id>
 ```
 
 `anvil setup approve` rebuilds the plan from the saved adapter inputs, requires the result to
-be `current`, and refuses anything but a `local-skill` execution plan. The confirmation is
-the **full plan digest**, not a boolean flag: a bare `--yes` would launder a glance into
-approval, while the digest forces the reviewer to name exactly what is being approved. A
-missing `--confirm` is a usage error (**2**); a digest that does not match the current plan is
-a refusal (**5**).
+be `current`, and refuses anything but a `local-skill` execution plan. It then shows the plan
+and **challenges the reviewer to type its full digest on stdin**; a machine-readable digest
+passed as a flag is not consent, and there is no `--yes`. The plan is revalidated after the
+confirmation, so a repository that moved while the reviewer read is caught. An empty
+confirmation is a usage error (**2**); a digest that does not match the current plan is a
+refusal (**5**).
 
 The grant records the plan digest, adapter fingerprint, physical repository root and clean
 HEAD, source path/hash/size, destination, an operations digest, the issue and expiry times,
@@ -217,9 +218,15 @@ Grants are stored under a dedicated user-owned directory
 (`~/.anvil/approvals/setup/v1/<id>/grant.json`) and **not** under the configuration home:
 `ANVIL_CONFIG_HOME` may point inside a repository, and a repository must not be able to
 choose where its own authority lives. `ANVIL_APPROVAL_HOME` is an explicit, process-level
-override; a config file cannot set it. Persisting refuses a store that is a symlink, not a
-directory, or sits inside the repository the grant approves, and the grant record itself is
-written with no-replace semantics.
+override; a config file cannot set it.
+
+The store is authority, so it is checked on every read and write: it must be a real directory
+(not a symlink or junction) owned by the current user and not writable by group or other, and
+it must lie outside the repository the grant approves. A refusal leaves nothing created. The
+grant record is written with no-replace semantics and read without following links or
+multiply-linked files. These checks are fail-closed: an uninspectable store is `unknown`, and
+a record with an unknown field, a future issue time, or a duplicated binding that disagrees
+with the plan is `invalid` or `stale`, never `active`.
 
 `anvil setup approval --grant <id>` reports one status:
 
@@ -231,16 +238,19 @@ written with no-replace semantics.
 | `consumed` | An application attempt has already been reserved |
 | `stale` | Current inputs differ from the approved ones |
 | `invalid` | Malformed or inconsistent record |
-| `unknown` | The record or store cannot be inspected reliably |
+| `unknown` | The record, store, or current repository state cannot be inspected reliably |
 
 `anvil setup revoke --grant <id>` is terminal and idempotent; revoking a revoked grant
 reports `revoked`, but a `consumed` grant already started its attempt and cannot be revoked.
 `approval` succeeds (**0**) only when the status is `active`; every other status exits **5**
 with the record on an `ok: false` envelope.
 
-`consumeSetupApproval` reserves the single attempt atomically. Application code must call it
-after full revalidation and **before** its first repository mutation, so a crash or failure
-burns the attempt and cannot be retried without fresh approval. There is no automatic retry.
+`consumeSetupApproval` reserves the single attempt and returns whether this call won it
+(`reserved: true`) or the attempt was already gone. Application code must call it after full
+revalidation and **before** its first repository mutation, so a crash or failure burns the
+attempt and cannot be retried without fresh approval. Revocation and reservation share one
+no-replace state record, so they cannot both win and the terminal outcome is deterministic.
+There is no automatic retry.
 
 ## Boundary for application
 

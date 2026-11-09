@@ -9,10 +9,12 @@
  * This slice issues, inspects, reserves and revokes grants. It does not apply them: there is
  * no writer, journal or verifier here, and nothing in this module mutates the repository.
  *
- * Authority model: the protected user-owned store is the authority, not the digest. A file
- * dropped into a repository cannot authorize anything, and a grant names the exact plan,
- * repository, source bytes, destination and adapter behaviour it was approved against. This
- * does not defend against another process running with the same user's privileges.
+ * Authority model: the protected user-owned store is the authority, not the digest. A store
+ * that another user can write, that lives inside the repository it approves, or that a
+ * symlink can redirect is not authority, so every read and write checks the store's
+ * ownership, permissions and containment, and reads never follow links. The terminal states
+ * (revoked, consumed) are decided by a single no-replace record, so two transitions cannot
+ * both win. This does not defend against another process running as the same user.
  */
 import { randomUUID } from 'node:crypto'
 import {
@@ -52,10 +54,34 @@ export const SETUP_APPROVAL_PERMISSION = 'apply-local-skill-once'
 export const SETUP_APPROVAL_TTL_MS = 10 * 60 * 1000
 
 const GRANT_FILE = 'grant.json'
-const REVOKED_FILE = 'revoked.json'
-const ATTEMPT_FILE = 'attempt.json'
+/** One file decides the terminal state, so consume and revoke cannot both win. */
+const TRANSITION_FILE = 'transition.json'
 const MAX_RECORD_BYTES = 64 * 1024
 const GRANT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** Group/other write bits: the store must not be writable by anyone but its owner. */
+const STORE_FORBIDDEN_BITS = 0o022
+/** A grant cannot be issued in the future; a little slack absorbs a clock adjustment. */
+const ISSUED_AT_SKEW_MS = 5_000
+
+const GRANT_KEYS = [
+  'adapter',
+  'adapterFingerprint',
+  'expiresAt',
+  'id',
+  'issuedAt',
+  'kind',
+  'maxAttempts',
+  'operationsDigest',
+  'permission',
+  'planDigest',
+  'repository',
+  'schemaVersion',
+  'skill',
+  'source',
+] as const
+const REPOSITORY_KEYS = ['head', 'root'] as const
+const SOURCE_KEYS = ['bytes', 'path', 'sha256'] as const
+const SKILL_KEYS = ['destination', 'name'] as const
 
 /**
  * One approval: the plan, repository, source, destination and adapter behaviour it authorizes,
@@ -95,6 +121,12 @@ export interface SetupApprovalRecord {
   executionSupported: false
   reason: string
   grant: SetupApprovalGrant | null
+}
+
+/** The result of reserving an attempt: `reserved` is true only for the call that won it. */
+export interface SetupApprovalConsumption {
+  record: SetupApprovalRecord
+  reserved: boolean
 }
 
 export interface SetupApprovalStoreOptions {
@@ -173,8 +205,9 @@ export function buildSetupApprovalGrant(
 }
 
 /**
- * Compare a grant with a freshly rebuilt plan. The explicit field checks give precise reasons;
- * the plan digest check is the backstop that catches anything they miss.
+ * Compare a grant with a freshly rebuilt plan. Every field the grant duplicates is checked,
+ * so a record whose digest was left in place but whose other fields were edited is caught;
+ * the plan digest check is the backstop.
  */
 export function gradeSetupApprovalGrant(grant: SetupApprovalGrant, plan: SetupExecutionPlan): SetupApprovalVerdict {
   const stale = (reason: string): SetupApprovalVerdict => ({ ok: false, status: 'stale', reason })
@@ -188,6 +221,7 @@ export function gradeSetupApprovalGrant(grant: SetupApprovalGrant, plan: SetupEx
   if (grant.source.path !== plan.source.path || grant.source.sha256 !== plan.source.sha256) {
     return stale('The source file changed since this grant was issued.')
   }
+  if (grant.source.bytes !== plan.source.bytes) return stale('The source size changed since this grant was issued.')
   if (grant.skill.name !== plan.skill.name || grant.skill.destination !== plan.skill.destination) {
     return stale('The destination changed since this grant was issued.')
   }
@@ -215,12 +249,20 @@ function isIsoDate(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value))
 }
 
+/** True only for a plain object carrying exactly these keys; unknown keys are rejected. */
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value)
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+}
+
 /**
- * Parse an untrusted grant record. Every field is checked, and the id must match the
- * directory it was read from, so a record swapped between directories is rejected.
+ * Parse an untrusted grant record. Every field is checked, the key set is exact (an unknown
+ * field is a rejection, not an oversight) and the id must match the directory it was read
+ * from, so a record swapped between directories is refused. A record issued in the future is
+ * malformed, not a long-lived grant.
  */
-function parseSetupApprovalGrant(value: unknown, expectedId: string): SetupApprovalGrant | null {
-  if (!isPlainObject(value)) return null
+function parseSetupApprovalGrant(value: unknown, expectedId: string, nowMs: number): SetupApprovalGrant | null {
+  if (!isPlainObject(value) || !hasExactKeys(value, GRANT_KEYS)) return null
   if (value.schemaVersion !== 1 || value.kind !== SETUP_APPROVAL_GRANT_KIND) return null
   if (value.id !== expectedId || typeof value.id !== 'string') return null
   if (value.permission !== SETUP_APPROVAL_PERMISSION) return null
@@ -229,10 +271,12 @@ function parseSetupApprovalGrant(value: unknown, expectedId: string): SetupAppro
   if (!isHex64(value.planDigest) || !isHex64(value.adapterFingerprint) || !isHex64(value.operationsDigest)) return null
   if (!isIsoDate(value.issuedAt) || !isIsoDate(value.expiresAt)) return null
   if (Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) return null
+  if (Date.parse(value.issuedAt) > nowMs + ISSUED_AT_SKEW_MS) return null
 
   const repository = value.repository
   if (
     !isPlainObject(repository) ||
+    !hasExactKeys(repository, REPOSITORY_KEYS) ||
     typeof repository.root !== 'string' ||
     repository.root === '' ||
     typeof repository.head !== 'string' ||
@@ -241,12 +285,20 @@ function parseSetupApprovalGrant(value: unknown, expectedId: string): SetupAppro
     return null
   }
   const source = value.source
-  if (!isPlainObject(source) || typeof source.path !== 'string' || !isSafeSetupExecutionPath(source.path)) return null
+  if (
+    !isPlainObject(source) ||
+    !hasExactKeys(source, SOURCE_KEYS) ||
+    typeof source.path !== 'string' ||
+    !isSafeSetupExecutionPath(source.path)
+  ) {
+    return null
+  }
   if (!isHex64(source.sha256) || typeof source.bytes !== 'number' || !Number.isInteger(source.bytes)) return null
   if (source.bytes < 0 || source.bytes > MAX_SOURCE_BYTES) return null
   const skill = value.skill
   if (
     !isPlainObject(skill) ||
+    !hasExactKeys(skill, SKILL_KEYS) ||
     typeof skill.name !== 'string' ||
     skill.name.length > MAX_SKILL_NAME_LENGTH ||
     !SKILL_NAME_PATTERN.test(skill.name)
@@ -320,9 +372,75 @@ function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' 
   }
 }
 
+/**
+ * Why the store is not safe to treat as authority, or null when it is.
+ *
+ * Ownership and permissions are checked on POSIX only: a Windows `lstat` does not report a
+ * meaningful owner or mode, and the ACL is what governs access there. A store another user
+ * can write is not authority, so the check is fail-closed on every read and write.
+ */
+function storeProtectionProblem(storeDir: string): string | null {
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(storeDir)
+  } catch {
+    return 'The approval store cannot be inspected.'
+  }
+  if (stat.isSymbolicLink()) return 'The approval store is a symbolic link or junction.'
+  if (!stat.isDirectory()) return 'The approval store is not a directory.'
+  if (process.platform === 'win32') return null
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && stat.uid !== uid) return 'The approval store is not owned by the current user.'
+  if ((stat.mode & STORE_FORBIDDEN_BITS) !== 0) return 'The approval store is writable by group or other users.'
+  return null
+}
+
+/**
+ * Resolve a path even when its tail does not exist yet, by resolving the deepest existing
+ * ancestor and re-appending the missing components. System aliases such as macOS's
+ * `/var` -> `/private/var` are followed; a caller path through a link is judged by where it
+ * actually lands.
+ */
+function resolveThroughExisting(path: string): string {
+  let current = resolve(path)
+  const suffix: string[] = []
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return suffix.length === 0 ? real : join(real, ...suffix)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      suffix.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+/** True when `target` is `root` itself or lies beneath it. */
+function isInsideOrEqual(root: string, target: string): boolean {
+  const rel = relative(root, target)
+  return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))
+}
+
+/** Refuse to keep authority for a repository inside that repository, before anything is created. */
+function assertStoreOutsideRepository(storeDir: string, repositoryRoot: string): void {
+  let repo: string
+  try {
+    repo = realpathSync.native(repositoryRoot)
+  } catch (cause) {
+    throw new AnvilError(ErrorCode.PreflightFailed, 'The repository root cannot be resolved', { cause })
+  }
+  if (isInsideOrEqual(repo, resolveThroughExisting(storeDir))) {
+    throw new AnvilError(ErrorCode.PreflightFailed, 'The approval store must live outside the repository it approves', {
+      hint: 'Set ANVIL_APPROVAL_HOME to a directory outside the repository, or use the default under your home.',
+    })
+  }
+}
+
 type LocatedStore = { dir: string } | 'unsafe' | null
 
-/** Locate the store without creating it. `'unsafe'` means it exists but is a link or not a directory. */
+/** Locate the store without creating it. `'unsafe'` means it exists but is not usable authority. */
 function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
   const dir = approvalStoreDir(env)
   let stat: ReturnType<typeof lstatSync>
@@ -332,50 +450,26 @@ function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
     return null
   }
   if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unsafe'
-  return { dir }
+  return storeProtectionProblem(dir) === null ? { dir } : 'unsafe'
 }
 
 function ensureStoreRoot(env: NodeJS.ProcessEnv | undefined): string {
   const dir = approvalStoreDir(env)
   try {
-    mkdirSync(dir, { recursive: true })
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
   } catch (cause) {
     throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the approval store at ${dir}`, {
       hint: 'Set ANVIL_APPROVAL_HOME to a writable directory outside the repository, or use the default under your home.',
       cause,
     })
   }
-  const stat = lstatSync(dir)
-  if (stat.isSymbolicLink() || !stat.isDirectory()) {
-    throw new AnvilError(
-      ErrorCode.PreflightFailed,
-      `Refusing an approval store that is a symlink or not a directory: ${dir}`,
-      {
-        hint: 'The approval store must be a real directory owned by your user.',
-      },
-    )
+  const problem = storeProtectionProblem(dir)
+  if (problem !== null) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${problem}`, {
+      hint: 'The approval store must be a real directory owned by your user, not writable by group or other.',
+    })
   }
   return dir
-}
-
-/** Refuse to keep authority for a repository inside that repository. */
-function assertStoreOutsideRepository(storeDir: string, repositoryRoot: string): void {
-  let store: string
-  let repo: string
-  try {
-    store = realpathSync.native(storeDir)
-    repo = realpathSync.native(repositoryRoot)
-  } catch (cause) {
-    throw new AnvilError(ErrorCode.PreflightFailed, 'The approval store or repository root cannot be resolved', {
-      cause,
-    })
-  }
-  const rel = relative(repo, store)
-  if (rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))) {
-    throw new AnvilError(ErrorCode.PreflightFailed, 'The approval store must live outside the repository it approves', {
-      hint: 'Set ANVIL_APPROVAL_HOME to a directory outside the repository, or use the default under your home.',
-    })
-  }
 }
 
 function assertGrantId(id: string): void {
@@ -390,7 +484,7 @@ export type ReadSetupApprovalGrantResult =
   | { ok: true; grant: SetupApprovalGrant; dir: string }
   | { ok: false; status: 'invalid' | 'unknown'; reason: string }
 
-/** Read one grant record, refusing links and multiply-linked files. */
+/** Read one grant record, refusing links, multiply-linked files and an unprotected store. */
 export function readSetupApprovalGrant(
   id: string,
   options: SetupApprovalStoreOptions = {},
@@ -399,7 +493,7 @@ export function readSetupApprovalGrant(
   const located = locateStore(options.env)
   if (located === null) return { ok: false, status: 'invalid', reason: 'No such approval grant.' }
   if (located === 'unsafe') {
-    return { ok: false, status: 'unknown', reason: 'The approval store is a symlink or not a directory.' }
+    return { ok: false, status: 'unknown', reason: 'The approval store is not a private, user-owned directory.' }
   }
   const dir = join(located.dir, id)
   let stat: ReturnType<typeof lstatSync>
@@ -420,9 +514,17 @@ export function readSetupApprovalGrant(
   } catch {
     return { ok: false, status: 'invalid', reason: 'The approval grant record is not valid JSON.' }
   }
-  const grant = parseSetupApprovalGrant(parsed, id)
+  const nowMs = (options.now ?? new Date()).getTime()
+  const grant = parseSetupApprovalGrant(parsed, id, nowMs)
   if (grant === null) {
     return { ok: false, status: 'invalid', reason: 'The approval grant record is malformed or does not match its id.' }
+  }
+  // A store the approved repository could itself write is not authority; refuse it rather
+  // than read a grant a repository may have planted.
+  try {
+    assertStoreOutsideRepository(located.dir, grant.repository.root)
+  } catch {
+    return { ok: false, status: 'unknown', reason: 'The approval store is inside the repository it approves.' }
   }
   return { ok: true, grant, dir }
 }
@@ -433,8 +535,10 @@ export function saveSetupApprovalGrant(
   options: SetupApprovalStoreOptions = {},
 ): SetupApprovalGrant {
   assertGrantId(grant.id)
+  // Containment is checked before anything is created, so a rejected store cannot leave a
+  // directory behind inside the repository.
+  assertStoreOutsideRepository(approvalStoreDir(options.env), grant.repository.root)
   const storeDir = ensureStoreRoot(options.env)
-  assertStoreOutsideRepository(storeDir, grant.repository.root)
   const dir = join(storeDir, grant.id)
   try {
     mkdirSync(dir)
@@ -463,16 +567,33 @@ export function saveSetupApprovalGrant(
   return grant
 }
 
-/** Present, absent, or uninspectable (a link or non-regular file). */
-function markerState(dir: string, file: string): 'present' | 'absent' | 'unknown' {
+type TransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
+
+/** Read the single terminal-state record. Absent, a valid kind, or uninspectable. */
+function readTransition(dir: string): TransitionState {
+  const path = join(dir, TRANSITION_FILE)
   let stat: ReturnType<typeof lstatSync>
   try {
-    stat = lstatSync(join(dir, file))
+    stat = lstatSync(path)
   } catch (cause) {
-    return (cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unknown'
+    return (cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unknown'
   }
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) return 'unknown'
-  return 'present'
+  const raw = readRegularFile(path, MAX_RECORD_BYTES)
+  if (raw === null) return 'unknown'
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (isPlainObject(parsed) && (parsed.kind === 'revoked' || parsed.kind === 'consumed') && isIsoDate(parsed.at)) {
+      return parsed.kind
+    }
+  } catch {
+    // Fall through to unknown.
+  }
+  return 'unknown'
+}
+
+function writeTransition(dir: string, kind: 'revoked' | 'consumed', now: Date): 'written' | 'exists' {
+  return writeExclusiveJson(join(dir, TRANSITION_FILE), { schemaVersion: 1, kind, at: now.toISOString() })
 }
 
 function approvalRecord(
@@ -494,8 +615,9 @@ function approvalRecord(
 }
 
 /**
- * Inspect a grant against current inputs. Pass the current repository state to check
- * staleness; pass `null` to inspect only the stored record and its terminal markers.
+ * Inspect a grant against current inputs. Pass the current repository state to confirm
+ * freshness; with `null`, a grant that is not already terminal is `unknown`, because the
+ * inputs that decide `active` cannot be checked.
  *
  * Terminal states are reported first: a revoked or already-used grant never becomes active,
  * and an expired grant is reported without touching the repository.
@@ -509,14 +631,11 @@ export function inspectSetupApproval(
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const revoked = markerState(dir, REVOKED_FILE)
-  if (revoked === 'unknown') return approvalRecord(id, 'unknown', 'The revocation record cannot be inspected.', grant)
-  if (revoked === 'present') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
-
-  const attempt = markerState(dir, ATTEMPT_FILE)
-  if (attempt === 'unknown')
-    return approvalRecord(id, 'unknown', 'The application-attempt record cannot be inspected.', grant)
-  if (attempt === 'present') {
+  const transition = readTransition(dir)
+  if (transition === 'unknown')
+    return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
+  if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
+  if (transition === 'consumed') {
     return approvalRecord(
       id,
       'consumed',
@@ -531,40 +650,42 @@ export function inspectSetupApproval(
   if (expiresAt <= now.getTime())
     return approvalRecord(id, 'expired', `The grant expired at ${grant.expiresAt}.`, grant)
 
-  if (current !== null) {
-    if (current.head === null || current.worktree !== 'clean') {
-      return approvalRecord(id, 'unknown', 'A clean repository commit is needed to check a grant.', grant)
-    }
-    let plan: SetupExecutionPlan
-    try {
-      plan = buildSetupExecutionPlan({ repository: current, sourcePath: grant.source.path, name: grant.skill.name })
-    } catch (cause) {
-      if (cause instanceof SetupExecutionError) {
-        return approvalRecord(id, cause.validationStatus === 'unknown' ? 'unknown' : 'stale', cause.message, grant)
-      }
-      if (cause instanceof AnvilError) return approvalRecord(id, 'invalid', cause.message, grant)
-      throw cause
-    }
-    const verdict = gradeSetupApprovalGrant(grant, plan)
-    if (!verdict.ok) return approvalRecord(id, verdict.status, verdict.reason, grant)
+  if (current === null) {
+    return approvalRecord(id, 'unknown', 'The current repository state is required to confirm a grant.', grant)
   }
+  if (current.head === null || current.worktree !== 'clean') {
+    return approvalRecord(id, 'unknown', 'A clean repository commit is needed to check a grant.', grant)
+  }
+  let plan: SetupExecutionPlan
+  try {
+    plan = buildSetupExecutionPlan({ repository: current, sourcePath: grant.source.path, name: grant.skill.name })
+  } catch (cause) {
+    if (cause instanceof SetupExecutionError) {
+      return approvalRecord(id, cause.validationStatus === 'unknown' ? 'unknown' : 'stale', cause.message, grant)
+    }
+    if (cause instanceof AnvilError) return approvalRecord(id, 'invalid', cause.message, grant)
+    throw cause
+  }
+  const verdict = gradeSetupApprovalGrant(grant, plan)
+  if (!verdict.ok) return approvalRecord(id, verdict.status, verdict.reason, grant)
 
   return approvalRecord(id, 'active', 'The grant is active: it authorizes one application of this plan.', grant)
 }
 
 /**
  * Revoke a grant. Terminal and idempotent: revoking a revoked grant reports `revoked`, but a
- * consumed grant already started its attempt and cannot be revoked.
+ * consumed grant already started its attempt and cannot be revoked. The terminal state is a
+ * single no-replace record, so a revoke racing a consume cannot both win.
  */
 export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptions = {}): SetupApprovalRecord {
   const read = readSetupApprovalGrant(id, options)
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const attempt = markerState(dir, ATTEMPT_FILE)
-  if (attempt === 'unknown')
-    return approvalRecord(id, 'unknown', 'The application-attempt record cannot be inspected.', grant)
-  if (attempt === 'present') {
+  const transition = readTransition(dir)
+  if (transition === 'unknown')
+    return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
+  if (transition === 'consumed') {
     return approvalRecord(
       id,
       'consumed',
@@ -572,56 +693,89 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
       grant,
     )
   }
-  const revoked = markerState(dir, REVOKED_FILE)
-  if (revoked === 'unknown') return approvalRecord(id, 'unknown', 'The revocation record cannot be inspected.', grant)
-  if (revoked === 'present') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
+  if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
 
   const now = options.now ?? new Date()
   let written: 'written' | 'exists'
   try {
-    written = writeExclusiveJson(join(dir, REVOKED_FILE), { schemaVersion: 1, revokedAt: now.toISOString() })
+    written = writeTransition(dir, 'revoked', now)
   } catch (cause) {
     throw new AnvilError(ErrorCode.PreflightFailed, 'Could not record the revocation.', { cause })
   }
-  if (written === 'exists') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
-  return approvalRecord(id, 'revoked', 'The grant was revoked. It can no longer authorize an application.', grant)
+  if (written === 'written') {
+    return approvalRecord(id, 'revoked', 'The grant was revoked. It can no longer authorize an application.', grant)
+  }
+  // Another transition won the race; report whichever terminal state it wrote.
+  const after = readTransition(dir)
+  if (after === 'consumed') {
+    return approvalRecord(
+      id,
+      'consumed',
+      'An application attempt has already started, so the grant cannot be revoked.',
+      grant,
+    )
+  }
+  if (after === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
+  return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
 }
 
 /**
  * Reserve the single application attempt. Application code must call this after full
  * revalidation and *before* its first repository mutation, so a crash or failure burns the
- * attempt and cannot be retried without fresh approval. The record is written atomically, so
- * two concurrent callers cannot both reserve it.
+ * attempt and cannot be retried without fresh approval. The state is written as a single
+ * no-replace record, so two concurrent callers cannot both reserve it, `reserved` is true
+ * only for the call that won the attempt.
  */
 export function consumeSetupApproval(
   id: string,
   current: SetupRepositoryState | null,
   options: SetupApprovalStoreOptions = {},
-): SetupApprovalRecord {
+): SetupApprovalConsumption {
   const read = readSetupApprovalGrant(id, options)
-  if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
+  if (!read.ok) return { record: approvalRecord(id, read.status, read.reason, null), reserved: false }
   const { grant, dir } = read
 
-  const attempt = markerState(dir, ATTEMPT_FILE)
-  if (attempt === 'unknown')
-    return approvalRecord(id, 'unknown', 'The application-attempt record cannot be inspected.', grant)
-  if (attempt === 'present') return approvalRecord(id, 'consumed', 'This grant has already been used.', grant)
+  const transition = readTransition(dir)
+  if (transition === 'unknown') {
+    return {
+      record: approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant),
+      reserved: false,
+    }
+  }
+  if (transition === 'consumed') {
+    return { record: approvalRecord(id, 'consumed', 'This grant has already been used.', grant), reserved: false }
+  }
+  if (transition === 'revoked') {
+    return { record: approvalRecord(id, 'revoked', 'The grant was revoked.', grant), reserved: false }
+  }
 
   const inspection = inspectSetupApproval(id, current, options)
-  if (inspection.status !== 'active') return inspection
+  if (inspection.status !== 'active') return { record: inspection, reserved: false }
 
   const now = options.now ?? new Date()
   let written: 'written' | 'exists'
   try {
-    written = writeExclusiveJson(join(dir, ATTEMPT_FILE), { schemaVersion: 1, startedAt: now.toISOString() })
+    written = writeTransition(dir, 'consumed', now)
   } catch (cause) {
     throw new AnvilError(ErrorCode.PreflightFailed, 'Could not reserve the application attempt.', { cause })
   }
-  if (written === 'exists') return approvalRecord(id, 'consumed', 'This grant has already been used.', grant)
-  return approvalRecord(
-    id,
-    'consumed',
-    'The single application attempt is reserved. No automatic retry is allowed.',
-    grant,
-  )
+  if (written === 'exists') {
+    const after = readTransition(dir)
+    if (after === 'revoked') {
+      return {
+        record: approvalRecord(id, 'revoked', 'The grant was revoked before the attempt could be reserved.', grant),
+        reserved: false,
+      }
+    }
+    return { record: approvalRecord(id, 'consumed', 'This grant has already been used.', grant), reserved: false }
+  }
+  return {
+    record: approvalRecord(
+      id,
+      'consumed',
+      'The single application attempt is reserved. No automatic retry is allowed.',
+      grant,
+    ),
+    reserved: true,
+  }
 }
