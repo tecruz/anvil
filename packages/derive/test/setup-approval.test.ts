@@ -345,6 +345,31 @@ describe('setup approval grants', () => {
     assert.equal(statSync(store).mode & 0o777, 0o777)
   })
 
+  test('an unwritable store location is a preflight failure, not an internal error', (t) => {
+    if (process.platform === 'win32') {
+      t.skip('POSIX permission bits only')
+      return
+    }
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      t.skip('root bypasses directory permissions')
+      return
+    }
+    const locked = scratch('anvil-approval-locked-')
+    const store = join(locked, 'store')
+    chmodSync(locked, 0o500)
+    try {
+      const repo = scratch('anvil-approval-repo-')
+      const plan = planFor(repo)
+      const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+      assert.throws(
+        () => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }),
+        (error: unknown) => error instanceof AnvilError && error.code === 'PREFLIGHT_FAILED',
+      )
+    } finally {
+      chmodSync(locked, 0o700)
+    }
+  })
+
   test('a record another user could write is not authority on POSIX', (t) => {
     if (process.platform === 'win32') {
       t.skip('POSIX ownership and permission bits do not apply on Windows')

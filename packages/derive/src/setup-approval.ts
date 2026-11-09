@@ -684,7 +684,10 @@ function createMissingDirectories(dir: string): string[] {
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') {
         removeCreatedDirectories(created)
-        throw cause
+        throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the approval store at ${dir}`, {
+          hint: 'Set ANVIL_APPROVAL_HOME to a writable directory outside the repository, or use the default under your home.',
+          cause,
+        })
       }
     }
   }
