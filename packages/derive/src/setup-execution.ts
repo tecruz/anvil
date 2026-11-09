@@ -25,6 +25,16 @@ export const LOCAL_SKILL_ADAPTER = 'local-skill/v1'
 export const MAX_SOURCE_BYTES = 128 * 1024
 
 /**
+ * The skill name becomes one destination path component (`.agents/skills/<name>`), and a
+ * single filesystem component is limited to 255 units on the platforms this targets (NTFS
+ * 255 UTF-16 units, ext4/APFS 255 bytes). The name pattern is ASCII, so characters and
+ * bytes agree. Without this bound, a name longer than the component limit can still be
+ * planned and validated as `current` while `.agents` is absent, because the destination
+ * check only ever sees `ENOENT`.
+ */
+export const MAX_SKILL_NAME_LENGTH = 255
+
+/**
  * The adapter's behaviour fingerprint. Bump the descriptor whenever this module changes
  * what an approved plan would write, so an old approval cannot survive a code change.
  */
@@ -163,6 +173,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function missing(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code
   return code === 'ENOENT' || code === 'ENOTDIR'
+}
+
+/** A skill name that both matches the pattern and fits one filesystem path component. */
+function isValidSkillName(name: string): boolean {
+  return name.length <= MAX_SKILL_NAME_LENGTH && SKILL_NAME_PATTERN.test(name)
 }
 
 /**
@@ -396,6 +411,11 @@ export function buildSetupExecutionPlan(options: {
   name: string
 }): SetupExecutionPlan {
   const { repository, sourcePath, name } = options
+  if (name.length > MAX_SKILL_NAME_LENGTH) {
+    throw new AnvilError(ErrorCode.ConfigInvalid, `The skill name is longer than ${MAX_SKILL_NAME_LENGTH} characters`, {
+      hint: 'A skill name becomes one filesystem directory name, which has a length limit.',
+    })
+  }
   if (!SKILL_NAME_PATTERN.test(name)) {
     throw new AnvilError(ErrorCode.ConfigInvalid, `The skill name must match ${SKILL_NAME_PATTERN.source}`, {
       hint: 'Use lowercase letters, digits and single hyphens, for example "release-notes".',
@@ -526,7 +546,7 @@ export function extractSetupExecutionRequest(saved: unknown): SetupExecutionRequ
   }
   const skill = saved.skill
   const source = saved.source
-  if (!isPlainObject(skill) || typeof skill.name !== 'string' || !SKILL_NAME_PATTERN.test(skill.name)) {
+  if (!isPlainObject(skill) || typeof skill.name !== 'string' || !isValidSkillName(skill.name)) {
     throw new AnvilError(ErrorCode.ConfigInvalid, 'The saved plan has an invalid skill name.')
   }
   const destination = `.agents/skills/${skill.name}/SKILL.md`

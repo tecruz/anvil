@@ -79,6 +79,7 @@ export {
   isSetupExecutionPlan,
   LOCAL_SKILL_ADAPTER,
   LOCAL_SKILL_ADAPTER_FINGERPRINT,
+  MAX_SKILL_NAME_LENGTH,
   MAX_SOURCE_BYTES,
   SETUP_EXECUTION_PLAN_KIND,
   type SetupExecutionDirectoryOperation,

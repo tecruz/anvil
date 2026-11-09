@@ -237,11 +237,12 @@ anvil setup validate --plan ../execution-plan.json --json
 ```
 
 The source must be a repository-relative regular UTF-8 file of at most 128 KiB. Its
-frontmatter name must equal `--name`, and the destination `.agents/skills/<name>/SKILL.md`
-must not exist. The plan shows the exact source content, destination, operations, effects and
-verification scope. It refuses absolute paths, traversal, `.git` paths, symbolic links,
-junctions, non-regular files and existing destinations. It never downloads, runs a script or
-overwrites anything.
+frontmatter name must equal `--name` (at most 255 characters), and the destination
+`.agents/skills/<name>/SKILL.md` must not exist. The plan shows the exact source content,
+destination, operations, effects and verification scope; the human preview escapes terminal
+control characters so the file cannot drive your terminal. It refuses absolute paths,
+traversal, `.git` paths, symbolic links, junctions, non-regular files and existing
+destinations. It never downloads, runs a script or overwrites anything.
 
 Save the JSON envelope's **data object**, outside the worktree or in an ignored file. The
 validator compares its digest, physical repository root, clean HEAD and inputs with a freshly

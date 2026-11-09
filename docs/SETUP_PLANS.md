@@ -127,7 +127,8 @@ anvil setup plan --adapter local-skill --source docs/skills/release-notes.md --n
 
 The source must be a repository-relative, regular UTF-8 file of at most 128 KiB. The
 destination is always `.agents/skills/<name>/SKILL.md`, and `<name>` must match
-`^[a-z0-9]+(-[a-z0-9]+)*$` and the name in the skill's frontmatter. The destination skill
+`^[a-z0-9]+(-[a-z0-9]+)*$` and the name in the skill's frontmatter, and be at most 255
+characters so it fits one filesystem path component. The destination skill
 directory must be absent. Existing `.agents`, `.agents/skills` and unrelated skills may
 remain; they are never overwritten, merged or deleted.
 
@@ -159,8 +160,11 @@ The normal CLI envelope carries a `SetupExecutionPlan` in its `data` field:
 The file operation records `overwrite: false` and `publish: "temp-file-no-replace"`. The
 directory operations distinguish an existing real directory (`absent-or-real-directory`)
 from the skill directory that must be absent. A plan includes the source content so the
-reviewer sees the bytes that would be installed, not a summary of them. The source hash pins
-those bytes; it does not establish authorship, trustworthiness, quality or effectiveness.
+reviewer sees the bytes that would be installed, not a summary of them. The human preview
+escapes terminal control characters (screen erasure, cursor moves, bell) so the file cannot
+drive the reviewer's terminal; the JSON payload keeps the exact bytes and hash. The source
+hash pins those bytes; it does not establish authorship, trustworthiness, quality or
+effectiveness.
 
 Validation treats the saved plan as untrusted JSON. It extracts only the adapter name, skill
 name and source path, validates them, rebuilds the plan from current files and repository

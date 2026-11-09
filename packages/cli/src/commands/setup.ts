@@ -334,7 +334,25 @@ function fenceFor(content: string): string {
   return '`'.repeat(Math.max(3, longest + 1))
 }
 
+/**
+ * Make a skill's bytes safe to print.
+ *
+ * A skill file is data from a repository the user may not own, so terminal control
+ * sequences in it (erase-screen, cursor moves, OSC title changes) must not be allowed to
+ * drive the reviewer's terminal; a fence protects the editor, not the terminal. Newlines
+ * and tabs are layout and stay; every other C0 control, DEL and the C1 range is shown as a
+ * visible escape. The JSON payload and the recorded hash keep the exact bytes -- only this
+ * human preview is transformed.
+ */
+function escapeTerminalControls(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (control) => {
+    return `\\u${(control.codePointAt(0) ?? 0).toString(16).padStart(4, '0')}`
+  })
+}
+
 function renderExecutionPlan(plan: SetupExecutionPlan): string {
+  const content = escapeTerminalControls(plan.source.content)
+  const fence = fenceFor(content)
   const lines = [
     `Execution plan: ${plan.digest}`,
     `adapter: ${plan.adapter} (fingerprint ${plan.adapterFingerprint})`,
@@ -362,9 +380,9 @@ function renderExecutionPlan(plan: SetupExecutionPlan): string {
     `  ${plan.verification.proves}`,
     '',
     'Skill content:',
-    `${fenceFor(plan.source.content)}markdown`,
-    plan.source.content,
-    fenceFor(plan.source.content),
+    `${fence}markdown`,
+    content,
+    fence,
     '',
     ...plan.warnings.map((warning) => `Warning: ${warning}`),
   )

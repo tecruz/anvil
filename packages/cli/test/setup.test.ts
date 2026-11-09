@@ -624,6 +624,22 @@ describe('anvil setup', () => {
     assert.equal((envelope.data as unknown as { executed: boolean }).executed, false)
   })
 
+  test('the content preview neutralises terminal control sequences but keeps the exact bytes', () => {
+    const root = repo()
+    const content = skillContent('my-skill', 'visible\u001b[2J\u001b[H\u0007overwrite')
+    writeFileSync(join(root, 'skill.md'), content)
+    commit(root)
+    const plan = executionPlan(root)
+    // The recorded plan and its digest keep the exact source bytes; only the human preview
+    // is transformed.
+    assert.equal(plan.source.content, content)
+    const text = run(root, ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', 'my-skill'])
+    assert.equal(text.code, 0, text.stdout + text.stderr)
+    assert.ok(!text.stdout.includes('\u001b'), 'raw escape leaked into the preview')
+    assert.ok(!text.stdout.includes('\u0007'), 'raw bell leaked into the preview')
+    assert.ok(text.stdout.includes('visible\\u001b[2J\\u001b[H\\u0007overwrite'))
+  })
+
   test('execution-plan validation refuses changed sources, tampering, dirty state and missing sources', () => {
     const root = repo()
     writeFileSync(join(root, 'skill.md'), skillContent())
@@ -685,7 +701,7 @@ describe('anvil setup', () => {
     const root = repo()
     writeFileSync(join(root, 'skill.md'), skillContent())
     commit(root)
-    for (const name of ['Uppercase', 'under_score', 'double--hyphen', '../escape']) {
+    for (const name of ['Uppercase', 'under_score', 'double--hyphen', '../escape', 'a'.repeat(256)]) {
       assert.equal(run(root, ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', name]).code, 3)
     }
     for (const source of ['../outside.md', '/tmp/skill.md', 'C:\\skill.md', '.git/config']) {

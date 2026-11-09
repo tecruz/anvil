@@ -4,12 +4,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, w
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { AnvilError } from '@anvil/core'
+import { AnvilError, ErrorCode } from '@anvil/core'
 import {
   buildSetupExecutionPlan,
   extractSetupExecutionRequest,
   isSafeSetupExecutionPath,
   LOCAL_SKILL_ADAPTER,
+  MAX_SKILL_NAME_LENGTH,
   MAX_SOURCE_BYTES,
   SetupExecutionError,
   type SetupRepositoryState,
@@ -340,6 +341,27 @@ describe('setup execution plans', () => {
     }
   })
 
+  test('a skill name longer than one filesystem component is refused before any destination check', () => {
+    const root = scratch()
+    const longest = 'a'.repeat(MAX_SKILL_NAME_LENGTH)
+    write(root, 'skill.md', skill(longest))
+    // The longest name that still fits one component is accepted even while `.agents` is
+    // absent, proving the bound is a name rule and not an artifact of the destination probe.
+    const accepted = buildSetupExecutionPlan({ repository: repository(root), sourcePath: 'skill.md', name: longest })
+    assert.equal(accepted.skill.name, longest)
+    assert.equal(accepted.skill.destination, `.agents/skills/${longest}/SKILL.md`)
+
+    // The frontmatter name matches the request, so only the length rule can refuse this; a
+    // pattern or metadata-mismatch refusal would not prove the bound is enforced.
+    const oversized = 'a'.repeat(MAX_SKILL_NAME_LENGTH + 1)
+    write(root, 'skill.md', skill(oversized))
+    assert.throws(
+      () => plan(root, 'skill.md', oversized),
+      (error: unknown) =>
+        error instanceof AnvilError && error.code === ErrorCode.ConfigInvalid && /longer than/.test(error.message),
+    )
+  })
+
   test('an existing destination or an unsafe destination parent is never overwritten or followed', (t) => {
     const root = scratch()
     write(root, 'skill.md', skill())
@@ -437,6 +459,13 @@ describe('setup execution plans', () => {
       { ...saved, digest: undefined },
       { ...saved, skill: undefined },
       { ...saved, skill: { name: 'Uppercase', destination: '.agents/skills/Uppercase/SKILL.md' } },
+      {
+        ...saved,
+        skill: {
+          name: 'a'.repeat(MAX_SKILL_NAME_LENGTH + 1),
+          destination: `.agents/skills/${'a'.repeat(MAX_SKILL_NAME_LENGTH + 1)}/SKILL.md`,
+        },
+      },
       { ...saved, skill: { name: 'my-skill', destination: '.agents/skills/other/SKILL.md' } },
       { ...saved, source: { path: '../outside.md' } },
       { ...saved, source: { path: '.git/config' } },
