@@ -35,11 +35,12 @@ binds.**
   by the current user and name no other principal in their access control lists; Node cannot
   read a Windows ACL, so a system PowerShell reports the owner and the entry SIDs (never the
   localized display names), and an ACL that cannot be read is refused. The path must not pass
-  through a link or junction (a system alias directly under the filesystem root, such as
-  macOS's `/var`, is followed). A store reached through a link is rejected before anything is
-  created or touched. A store anvil creates is made private; an existing store must already be
-  private and is refused rather than repaired, because changing the permissions of a directory
-  anvil did not create is not authority.
+  through a link or junction except the known macOS root aliases `/var`, `/tmp` and `/etc`; any
+  other link, including an arbitrary root-level one, is refused. A store reached through a link
+  is rejected before anything is created or touched, and a store anvil creates is removed again
+  if initialization then fails. A store anvil creates is made private; an existing store must
+  already be private and is refused rather than repaired, because changing the permissions of a
+  directory anvil did not create is not authority.
 - A grant binds the plan digest, adapter fingerprint, physical repository root and clean HEAD,
   source path/hash/size, destination, and a digest of the ordered operations including their
   preconditions. It names no approval identity: terminal confirmation is not identity.

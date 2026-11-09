@@ -23,6 +23,7 @@ import {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  isTrustedRootAlias,
   LOCAL_SKILL_ADAPTER,
   prepareSetupApprovalStore,
   readSetupApprovalGrant,
@@ -436,6 +437,43 @@ describe('setup approval grants', () => {
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
     assert.throws(() => saveSetupApprovalGrant(grant, { env }), AnvilError)
     assert.equal(aclDump(store), before)
+  })
+
+  test('only known OS aliases are trusted at the filesystem root', () => {
+    // The macOS root aliases are followed; an arbitrary root-level link is not.
+    assert.equal(isTrustedRootAlias('/var'), true)
+    assert.equal(isTrustedRootAlias('/tmp'), true)
+    assert.equal(isTrustedRootAlias('/etc'), true)
+    assert.equal(isTrustedRootAlias('/home'), false)
+    assert.equal(isTrustedRootAlias('C:\\redirect'), false)
+    assert.equal(isTrustedRootAlias('C:\\Windows'), false)
+  })
+
+  test('a failed store initialization removes the directory it created', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows hardening only')
+      return
+    }
+    const parent = scratch('anvil-approval-parent-')
+    const store = join(parent, 'store')
+    const repo = scratch('anvil-approval-repo-')
+    const plan = planFor(repo)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    // Without the system root, ACL hardening cannot run, so initialization fails after creating
+    // the store. It must remove what it created rather than strand it.
+    const systemRoot = process.env.SystemRoot
+    const windir = process.env.windir
+    process.env.SystemRoot = ''
+    process.env.windir = ''
+    try {
+      assert.throws(() => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }), AnvilError)
+    } finally {
+      if (systemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = systemRoot
+      if (windir === undefined) delete process.env.windir
+      else process.env.windir = windir
+    }
+    assert.equal(existsSync(store), false)
   })
 
   test('a store reached through an intermediate junction is refused', (t) => {

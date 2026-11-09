@@ -78,6 +78,7 @@ export {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  isTrustedRootAlias,
   prepareSetupApprovalStore,
   type ReadSetupApprovalGrantResult,
   readSetupApprovalGrant,

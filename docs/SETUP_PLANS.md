@@ -229,11 +229,11 @@ must be owned by the current user with no group or other write bit (the store is
 and records `0600`, regardless of umask); on Windows the same three levels must be owned by the
 current user and grant access to the current user only, and a foreign owner, a foreign access
 control entry, or an ACL that cannot be read is refused. The path must not pass through a link
-or junction either, except for a system alias directly under the filesystem root (for example
-macOS's `/var`). A refusal leaves nothing created, and a store reached through a link is
-rejected before anything is created or touched, so a rejected approval never modifies anything.
-A store anvil creates is made private; a store that already exists must already be private and
-is refused rather than repaired, because changing the permissions of a directory anvil did not
+or junction either, except for the known macOS root aliases `/var`, `/tmp` and `/etc`. A refusal
+leaves nothing created: a store reached through a link is rejected before anything is created
+or touched, and a store anvil creates is removed again if initialization then fails. A store
+anvil creates is made private; a store that already exists must already be private and is
+refused rather than repaired, because changing the permissions of a directory anvil did not
 create is not authority. The grant record is written with
 no-replace semantics and read without following links or multiply-linked files. These checks
 are fail-closed: an uninspectable store is `unknown`, and a record with an unknown field, a
