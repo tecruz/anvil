@@ -26,6 +26,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0015](0015-framework-evidence-is-the-framework.md) | A framework is matched by its own evidence, not its build system | accepted |
 | [0016](0016-mobile-platforms-are-their-own-stacks.md) | Mobile platforms are their own stacks, and Apple's two are two playbooks | accepted |
 | [0017](0017-plan-enriches-by-default.md) | `plan` and `brief` enrich by default; the cache bounds the cost | accepted |
+| [0018](0018-approved-local-skill-installation.md) | Approved local skill installation starts with one create-only adapter | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

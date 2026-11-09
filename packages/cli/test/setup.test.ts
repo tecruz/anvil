@@ -17,7 +17,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { buildSetupPlan, type SetupPlan, type SetupPlanValidation, validateSetupPlan } from '@anvil/derive'
+import {
+  buildSetupPlan,
+  type SetupExecutionPlan,
+  type SetupPlan,
+  type SetupPlanValidation,
+  validateSetupPlan,
+} from '@anvil/derive'
 import { git as gitExec, normalizeGitPath } from '@anvil/git'
 import { repositoryState, worktreeFromStatus } from '../src/commands/setup.ts'
 
@@ -79,10 +85,21 @@ function proposal(root: string): SetupPlan {
   assert.equal(result.code, 0, result.stdout)
   return (JSON.parse(result.stdout) as { data: SetupPlan }).data
 }
+function executionPlan(root: string, source = 'skill.md', name = 'my-skill'): SetupExecutionPlan {
+  const result = run(root, ['plan', '--adapter', 'local-skill', '--source', source, '--name', name, '--json'])
+  assert.equal(result.code, 0, result.stdout + result.stderr)
+  return (JSON.parse(result.stdout) as { data: SetupExecutionPlan }).data
+}
 function save(plan: SetupPlan): string {
+  return saveData(plan)
+}
+function saveData(data: unknown): string {
   const path = join(scratch(), 'plan.json')
-  writeFileSync(path, JSON.stringify(plan))
+  writeFileSync(path, JSON.stringify(data))
   return path
+}
+function skillContent(name = 'my-skill', body = 'Do the thing.\n'): string {
+  return `---\nname: ${name}\ndescription: A test skill for ${name}.\n---\n\n# ${name}\n\n${body}`
 }
 
 describe('anvil setup', () => {
@@ -561,5 +578,157 @@ describe('anvil setup', () => {
     const state = await repositoryState(root, runner)
     assert.equal(state.worktree, 'unknown')
     assert.equal(indexRead, false)
+  })
+
+  test('a local-skill execution plan is inspection-only and validates unchanged inputs', () => {
+    const root = repo()
+    const content = skillContent('my-skill', 'Do the thing.\n\n```js\nconsole.log(1)\n```\n')
+    writeFileSync(join(root, 'skill.md'), content)
+    commit(root)
+    const before = git(root, 'status', '--porcelain')
+    const plan = executionPlan(root)
+    assert.equal(plan.kind, 'setup-execution-plan')
+    assert.equal(plan.adapter, 'local-skill/v1')
+    assert.equal(plan.status, 'proposed')
+    assert.equal(plan.executed, false)
+    assert.equal(plan.approval, 'not-granted')
+    assert.equal(plan.executionSupported, false)
+    assert.equal(plan.source.path, 'skill.md')
+    assert.equal(plan.source.content, content)
+    assert.equal(plan.skill.destination, '.agents/skills/my-skill/SKILL.md')
+    assert.equal(plan.operations.at(-1)?.kind, 'write-file')
+    assert.equal(plan.effects.overwrite, false)
+    assert.equal(plan.effects.network, false)
+    assert.equal(plan.effects.credentials, false)
+    // Planning reads and validates; it never creates the destination or dirtifies the repo.
+    assert.equal(existsSync(join(root, '.agents')), false)
+    assert.equal(git(root, 'status', '--porcelain'), before)
+
+    const text = run(root, ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', 'my-skill'])
+    assert.equal(text.code, 0, text.stdout + text.stderr)
+    assert.match(text.stdout, /Execution plan:/)
+    assert.match(text.stdout, /Not approved/)
+    assert.match(text.stdout, /no approval or apply command/)
+    assert.match(text.stdout, /Do the thing/)
+    // The preview fence is longer than any run of backticks in the skill body.
+    assert.match(text.stdout, /````markdown/)
+    assert.match(text.stdout, /filesystem only; no processes, network or credentials/)
+    assert.equal(existsSync(join(root, '.agents')), false)
+
+    const validation = run(root, ['validate', '--plan', saveData(plan), '--json'])
+    assert.equal(validation.code, 0, validation.stdout)
+    const envelope = JSON.parse(validation.stdout) as { ok: boolean; data: SetupExecutionPlan }
+    assert.equal(envelope.ok, true)
+    assert.equal((envelope.data as unknown as { status: string }).status, 'current')
+    assert.equal((envelope.data as unknown as { approval: string }).approval, 'not-granted')
+    assert.equal((envelope.data as unknown as { executed: boolean }).executed, false)
+  })
+
+  test('the content preview neutralises terminal control sequences but keeps the exact bytes', () => {
+    const root = repo()
+    const content = skillContent('my-skill', 'visible\u001b[2J\u001b[H\u0007overwrite')
+    writeFileSync(join(root, 'skill.md'), content)
+    commit(root)
+    const plan = executionPlan(root)
+    // The recorded plan and its digest keep the exact source bytes; only the human preview
+    // is transformed.
+    assert.equal(plan.source.content, content)
+    const text = run(root, ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', 'my-skill'])
+    assert.equal(text.code, 0, text.stdout + text.stderr)
+    assert.ok(!text.stdout.includes('\u001b'), 'raw escape leaked into the preview')
+    assert.ok(!text.stdout.includes('\u0007'), 'raw bell leaked into the preview')
+    assert.ok(text.stdout.includes('visible\\u001b[2J\\u001b[H\\u0007overwrite'))
+  })
+
+  test('execution-plan validation refuses changed sources, tampering, dirty state and missing sources', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const saved = saveData(plan)
+
+    writeFileSync(join(root, 'skill.md'), skillContent('my-skill', 'A changed body.\n'))
+    const stale = run(root, ['validate', '--plan', saved, '--json'])
+    assert.equal(stale.code, 5)
+    assert.equal((JSON.parse(stale.stdout) as { data: { status: string } }).data.status, 'stale')
+
+    const tampered = structuredClone(plan)
+    tampered.source.content = 'not the source'
+    const invalid = run(root, ['validate', '--plan', saveData(tampered), '--json'])
+    assert.equal(invalid.code, 5)
+    assert.equal((JSON.parse(invalid.stdout) as { data: { status: string } }).data.status, 'invalid')
+
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    // Restoring the committed bytes makes the worktree clean again.
+    assert.equal(git(root, 'status', '--porcelain'), '')
+    writeFileSync(join(root, 'untracked.txt'), 'new work')
+    const dirtyPlan = executionPlan(root)
+    assert.equal(dirtyPlan.repository.worktree, 'dirty')
+    const dirty = run(root, ['validate', '--plan', saveData(dirtyPlan), '--json'])
+    assert.equal(dirty.code, 5)
+    assert.equal((JSON.parse(dirty.stdout) as { data: { status: string } }).data.status, 'unknown')
+
+    rmSync(join(root, 'skill.md'))
+    const missing = run(root, ['validate', '--plan', saved, '--json'])
+    assert.equal(missing.code, 5)
+    assert.equal((JSON.parse(missing.stdout) as { data: { status: string } }).data.status, 'stale')
+    assert.match((JSON.parse(missing.stdout) as { data: { reason: string } }).data.reason, /does not exist/)
+  })
+
+  test('adapter flags are strict and never mix with legacy plan or validate modes', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const saved = saveData(executionPlan(root))
+    for (const args of [
+      ['plan', '--adapter', 'local-skill', '--name', 'my-skill'],
+      ['plan', '--adapter', 'local-skill', '--source', 'skill.md'],
+      ['plan', '--source', 'skill.md', '--name', 'my-skill'],
+      ['plan', '--adapter', 'other', '--source', 'skill.md', '--name', 'my-skill'],
+      ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', 'my-skill', '--plan', saved],
+      ['validate', '--plan', saved, '--adapter', 'local-skill'],
+      ['validate', '--plan', saved, '--source', 'skill.md'],
+      ['validate', '--plan', saved, '--name', 'my-skill'],
+      ['apply', '--plan', saved],
+      ['approve', '--plan', saved],
+    ]) {
+      const result = run(root, [...args, '--json'])
+      assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)
+    }
+  })
+
+  test('invalid names and paths are refused without touching the destination', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    for (const name of ['Uppercase', 'under_score', 'double--hyphen', '../escape', 'a'.repeat(256)]) {
+      assert.equal(run(root, ['plan', '--adapter', 'local-skill', '--source', 'skill.md', '--name', name]).code, 3)
+    }
+    for (const source of ['../outside.md', '/tmp/skill.md', 'C:\\skill.md', '.git/config']) {
+      assert.equal(run(root, ['plan', '--adapter', 'local-skill', '--source', source, '--name', 'my-skill']).code, 3)
+    }
+    assert.equal(existsSync(join(root, '.agents')), false)
+  })
+
+  test('an existing destination is refused and its content is preserved', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    const existing = join(root, '.agents', 'skills', 'my-skill', 'SKILL.md')
+    mkdirSync(join(root, '.agents', 'skills', 'my-skill'), { recursive: true })
+    writeFileSync(existing, 'EXISTING CONTENT MUST SURVIVE')
+    commit(root)
+    const result = run(root, [
+      'plan',
+      '--adapter',
+      'local-skill',
+      '--source',
+      'skill.md',
+      '--name',
+      'my-skill',
+      '--json',
+    ])
+    assert.equal(result.code, 5, result.stdout)
+    assert.equal(readFileSync(existing, 'utf8'), 'EXISTING CONTENT MUST SURVIVE')
+    assert.equal(git(root, 'status', '--porcelain'), '')
   })
 })

@@ -35,10 +35,12 @@ and reports what an AI needs and whether it is present (`verified`, `blocked`, `
 It is non-executing unless `--check` is passed, and it proposes setup actions rather than
 running them.
 
-`anvil setup plan` derives an inspect-only, content-addressed proposal from owner-declared
-install commands. `anvil setup validate` compares a saved proposal with current declarations
-and a clean repository commit. Both remain read-only and neither grants approval or executes
-setup. See [the setup proposal contract](SETUP_PLANS.md) for the schema and limits.
+`anvil setup plan` derives inspect-only, content-addressed plans. The original proposal
+covers owner-declared install commands; `--adapter local-skill` plans one create-only copy of
+a repository-local `SKILL.md` into `.agents/skills/<name>/SKILL.md`. `anvil setup validate`
+compares either saved plan with current inputs and a clean repository commit. All of it
+remains read-only: neither format grants approval or executes. See
+[the setup plan contracts](SETUP_PLANS.md) for the schemas and limits.
 
 The CLI never calls a model. It gathers verified facts, and hands them over. That split
 is what lets the same behaviour work in Claude Code, in Cursor, in an opencode plugin and

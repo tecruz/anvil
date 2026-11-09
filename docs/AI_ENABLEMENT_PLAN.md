@@ -1,7 +1,8 @@
 # Plan: broader AI enablement
 
 Status: **In progress. Readiness declarations and diagnostics, approved reference pointers,
-and inspect-only setup proposals are implemented. Execution and richer context remain proposed.**
+inspect-only setup proposals, and an inspect-only `local-skill` execution-plan contract are
+implemented. Approval/application and richer context remain proposed.**
 Prepared: 2026-11-04.
 
 ## Implemented so far: `anvil ready`
@@ -74,12 +75,21 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   declarations and repository state; `anvil setup validate --plan <file>` refuses changed,
   dirty, unknown or tampered proposals. Permissions, file effects and immutable resource
   pins are explicitly unknown. Validation never grants approval or executes anything;
-  see [the proposal contract](SETUP_PLANS.md). Execution adapters and approval records
-  remain proposed, not implemented.
+  see [the plan contracts](SETUP_PLANS.md).
+- **Inspect-only local-skill execution plan** (workstream 3, first adapter) —
+  `anvil setup plan --adapter local-skill --source <repo-relative-file> --name <name>`
+  describes one create-only copy to `.agents/skills/<name>/SKILL.md`, with exact source
+  content/hash/size, ordered directory and file operations, filesystem-only effects, an
+  adapter fingerprint and a narrow verification scope. It refuses downloads, scripts,
+  global installs, overwrites, existing destinations, traversal, links and non-regular or
+  invalid UTF-8 sources. Validation rebuilds from the saved adapter inputs and refuses stale,
+  tampered or unknown state. There is still no approve or apply command; see
+  [the plan contracts](SETUP_PLANS.md) and
+  [ADR-0018](adr/0018-approved-local-skill-installation.md).
 
-Still proposed: automatic install/configure with verification, richer company-context
-sources (staleness and contradiction checks beyond path existence), and real-agent
-evaluation evidence.
+Still proposed: approval grants and application with independent verification, automatic
+tool installation, richer company-context sources (staleness and contradiction checks beyond
+path existence), and real-agent evaluation evidence.
 
 ## Goal
 

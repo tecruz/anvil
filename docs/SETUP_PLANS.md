@@ -1,8 +1,12 @@
-# Setup proposal contract
+# Setup plan contracts
 
 `anvil setup plan` and `anvil setup validate --plan <file>` implement only the **inspect**
 part of the integration lifecycle. There is no approve, install, apply or execute command.
-Generating, saving or validating a proposal never authorizes execution.
+Generating, saving or validating a plan never authorizes execution.
+
+Two plan formats exist today. The original `SetupPlan` describes owner-declared install
+commands and stays inspect-only. The `SetupExecutionPlan` describes one create-only
+`local-skill/v1` adapter and is also inspect-only. Neither format can grant approval.
 
 ## Supported inputs
 
@@ -111,11 +115,80 @@ files, credentials, system configuration, installed binaries, network resources 
 machine's environment. An unchanged plan is not an approval record, proof of safety,
 successful setup, or an operating-system sandbox.
 
-## Boundary for a later execution adapter
+## Execution-plan contract: `local-skill/v1` (inspection only)
 
-Before execution exists, a separately reviewed design must define explicit approval tied to
-this exact proposal and relevant current state, immutable resource resolution, known
-permissions, reviewable file changes and overwrite preconditions, bounded execution,
-credential handling and independent verification. It must revalidate at execution time.
-The digest alone is never authority, and a failed or partial integration must not be
-reported as completed. Unknown effects in this first slice are not permission to execute.
+The first bounded execution adapter plans the installation of one agent skill already in the
+repository:
+
+```bash
+anvil setup plan --adapter local-skill --source docs/skills/release-notes.md --name release-notes
+anvil setup plan --adapter local-skill --source docs/skills/release-notes.md --name release-notes --json
+```
+
+The source must be a repository-relative, regular UTF-8 file of at most 128 KiB. The
+destination is always `.agents/skills/<name>/SKILL.md`, and `<name>` must match
+`^[a-z0-9]+(-[a-z0-9]+)*$` and the name in the skill's frontmatter, and be at most 255
+characters so it fits one filesystem path component. The destination skill
+directory must be absent. Existing `.agents`, `.agents/skills` and unrelated skills may
+remain; they are never overwritten, merged or deleted.
+
+The adapter performs no downloads, package-manager calls, scripts, subprocesses, service
+starts or global installation. It refuses absolute paths, parent traversal, backslashes,
+control characters, `.git` paths, symbolic links, junctions and non-regular sources.
+Containment is decided before the source is read, and an unreadable or unresolvable path is
+`unknown`, never an assumed absence.
+
+The normal CLI envelope carries a `SetupExecutionPlan` in its `data` field:
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion`, `kind` | `1`, `"setup-execution-plan"` |
+| `status` | Always `"proposed"` |
+| `executed`, `executionSupported` | Both `false` in this slice |
+| `approval` | Always `"not-granted"` |
+| `adapter`, `adapterFingerprint` | `"local-skill/v1"` and a hash of its behaviour descriptor |
+| `repository` | Physical root, HEAD commit or `null`, and Git worktree state |
+| `inputsDigest` | SHA-256 of the adapter, fingerprint, name and source path |
+| `skill` | Validated skill name and exact destination path |
+| `source` | Repository-relative path, exact SHA-256, byte length and decoded content |
+| `operations` | Ordered directory and file operations, each with its precondition |
+| `effects` | Filesystem-only writes; no processes, network, credentials, deletion or overwrite |
+| `verification` | The narrow check a later verifier may run and what it cannot prove |
+| `warnings` | Explicit limits and missing knowledge |
+| `digest` | SHA-256 of the canonical payload excluding `digest` itself |
+
+The file operation records `overwrite: false` and `publish: "temp-file-no-replace"`. The
+directory operations distinguish an existing real directory (`absent-or-real-directory`)
+from the skill directory that must be absent. A plan includes the source content so the
+reviewer sees the bytes that would be installed, not a summary of them. The human preview
+escapes terminal control characters (screen erasure, cursor moves, bell) so the file cannot
+drive the reviewer's terminal; the JSON payload keeps the exact bytes and hash. The source
+hash pins those bytes; it does not establish authorship, trustworthiness, quality or
+effectiveness.
+
+Validation treats the saved plan as untrusted JSON. It extracts only the adapter name, skill
+name and source path, validates them, rebuilds the plan from current files and repository
+state, and compares the entire payload. A changed source, a newly existing destination, a
+different repository root or HEAD, or a changed adapter fingerprint is `stale`. A malformed,
+tampered or forged payload is `invalid`. Unreadable or unresolvable current inputs are
+`unknown`. Dirty, missing-HEAD and incomplete repository state cannot validate as `current`.
+The result always retains `approval: "not-granted"` and `executed: false`.
+
+## Boundary for approval and application
+
+The execution-plan contract is review and validation only. Before anything is written, a
+separately reviewed change must implement:
+
+- external approval grants bound to the full plan digest, repository identity, source hash,
+  destination preconditions and adapter fingerprint;
+- a short expiry, a single application attempt and an interactive confirmation;
+- a repository-scoped lock and complete revalidation immediately before mutation;
+- a create-only writer using a temporary file and no-replace publish semantics;
+- a journal with honest `partial`, `failed` and `interrupted` outcomes and no automatic retry;
+- independent verification of the installed bytes and metadata, with only the narrow claim
+  recorded above.
+
+The digest alone is never authority. Opaque install commands in the original proposal remain
+proposal-only and are not made executable by this adapter. A failed or partial integration
+must not be reported as completed, and path checks are not an operating-system sandbox
+against another process changing the filesystem concurrently.
