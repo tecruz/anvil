@@ -248,17 +248,36 @@ Save the JSON envelope's **data object**, outside the worktree or in an ignored 
 validator compares its digest, physical repository root, clean HEAD and inputs with a freshly
 generated plan. It refuses stale or tampered plans, changed source bytes, a destination that
 appeared since planning, and dirty or unknown repository state. Validation is not approval:
-every result remains `approval: "not-granted"` and `executed: false`.
+the plan itself always reports `approval: "not-granted"`.
 
-There is no execution, approval or `--check` mode here. Neither command runs an install,
-version probe, repository script or service connection, or writes a staging bundle. Git
-metadata is read with fsmonitor and optional index writes disabled. Existing configuration
-and existing skill content are untouched, and environment values are never expanded into
-command text. Literal secrets must not be embedded in declarations, since those commands are
-displayed verbatim.
+### Approving one local-skill plan
 
-See [the setup plan contracts](SETUP_PLANS.md) for both payloads, validation exit codes,
-repository-state limits and requirements for approval and application.
+Approval is a separate, single-use grant, stored outside the repository:
+
+```bash
+anvil setup approve --plan ../execution-plan.json --confirm <plan-digest>
+anvil setup approval --grant <id>
+anvil setup revoke --grant <id>
+```
+
+`approve` rebuilds the plan and requires it to be current, then requires `--confirm` to be the
+**full plan digest** — the deliberate act is naming exactly what is approved, not typing
+`yes`. A grant authorizes one application attempt, for that plan, that repository, that source
+hash and that adapter behaviour, and expires after ten minutes. Grants live under
+`~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the location, and the store is
+refused if it is a symlink or sits inside the repository. `approval` prints `active`,
+`expired`, `revoked`, `consumed`, `stale`, `invalid` or `unknown`, and exits non-zero for
+anything but `active`. `revoke` is terminal.
+
+There is no apply, install or execute command here. None of these run an install, version
+probe, repository script or service connection, or write a staging bundle, and approving a
+plan never writes into the repository. Git metadata is read with fsmonitor and optional index
+writes disabled. Existing configuration and existing skill content are untouched, and
+environment values are never expanded into command text. Literal secrets must not be embedded
+in declarations, since those commands are displayed verbatim.
+
+See [the setup plan contracts](SETUP_PLANS.md) for both payloads, the approval grant,
+validation exit codes, repository-state limits and requirements for application.
 
 ## Checking readiness: `anvil ready`
 
@@ -347,7 +366,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
-| `anvil setup` | `plan`, `validate` — inspect-only owner-command proposals and one create-only `local-skill` execution plan. Never approves or applies. |
+| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke` — inspect-only owner-command proposals, one create-only `local-skill` execution plan, and its single-use approval grant. Never applies. |
 | `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |

@@ -73,6 +73,28 @@ export {
   validateSetupPlan,
 } from './setup.ts'
 export {
+  approvalStoreDir,
+  buildSetupApprovalGrant,
+  consumeSetupApproval,
+  gradeSetupApprovalGrant,
+  inspectSetupApproval,
+  type ReadSetupApprovalGrantResult,
+  readSetupApprovalGrant,
+  revokeSetupApproval,
+  SETUP_APPROVAL_GRANT_KIND,
+  SETUP_APPROVAL_KIND,
+  SETUP_APPROVAL_PERMISSION,
+  SETUP_APPROVAL_TTL_MS,
+  type SetupApprovalGrant,
+  type SetupApprovalGrantOptions,
+  type SetupApprovalRecord,
+  type SetupApprovalStatus,
+  type SetupApprovalStoreOptions,
+  type SetupApprovalVerdict,
+  saveSetupApprovalGrant,
+  setupApprovalOperationsDigest,
+} from './setup-approval.ts'
+export {
   buildSetupExecutionPlan,
   extractSetupExecutionRequest,
   isSafeSetupExecutionPath,

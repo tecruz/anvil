@@ -101,6 +101,12 @@ function saveData(data: unknown): string {
 function skillContent(name = 'my-skill', body = 'Do the thing.\n'): string {
   return `---\nname: ${name}\ndescription: A test skill for ${name}.\n---\n\n# ${name}\n\n${body}`
 }
+/** A throwaway approval store outside the repository, so grants never touch the real home. */
+function approvalEnv(): Record<string, string> {
+  const store = mkdtempSync(join(tmpdir(), 'anvil-approvals-'))
+  roots.push(store)
+  return { ANVIL_APPROVAL_HOME: store }
+}
 
 describe('anvil setup', () => {
   test('plan never executes owner commands, expands secrets, copies references or writes staging', () => {
@@ -730,5 +736,84 @@ describe('anvil setup', () => {
     assert.equal(result.code, 5, result.stdout)
     assert.equal(readFileSync(existing, 'utf8'), 'EXISTING CONTENT MUST SURVIVE')
     assert.equal(git(root, 'status', '--porcelain'), '')
+  })
+
+  test('an approval grant is issued, inspected and revoked without touching the repository', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const saved = saveData(plan)
+    const env = approvalEnv()
+    const before = git(root, 'status', '--porcelain')
+
+    // Confirmation is the full plan digest, not a boolean flag.
+    assert.equal(run(root, ['approve', '--plan', saved], env).code, 2)
+    assert.equal(run(root, ['approve', '--plan', saved, '--confirm', 'deadbeef'], env).code, 5)
+
+    const approved = run(root, ['approve', '--plan', saved, '--confirm', plan.digest, '--json'], env)
+    assert.equal(approved.code, 0, approved.stdout + approved.stderr)
+    const record = JSON.parse(approved.stdout) as {
+      data: { id: string; status: string; grant: { planDigest: string } }
+    }
+    assert.equal(record.data.status, 'active')
+    assert.equal(record.data.grant.planDigest, plan.digest)
+    const grantId = record.data.id
+
+    // Approving writes to the store only: nothing lands in the repository.
+    assert.equal(existsSync(join(root, '.agents')), false)
+    assert.equal(git(root, 'status', '--porcelain'), before)
+
+    const shown = run(root, ['approval', '--grant', grantId, '--json'], env)
+    assert.equal(shown.code, 0, shown.stdout)
+    assert.equal((JSON.parse(shown.stdout) as { data: { status: string } }).data.status, 'active')
+
+    const revoked = run(root, ['revoke', '--grant', grantId, '--json'], env)
+    assert.equal(revoked.code, 0, revoked.stdout)
+    assert.equal((JSON.parse(revoked.stdout) as { data: { status: string } }).data.status, 'revoked')
+
+    const after = run(root, ['approval', '--grant', grantId, '--json'], env)
+    assert.equal(after.code, 5)
+    assert.equal((JSON.parse(after.stdout) as { data: { status: string } }).data.status, 'revoked')
+  })
+
+  test('approval refuses a stale plan and a non-execution proposal', () => {
+    const root = repo({ commands: [{ kind: 'install', cmd: 'npm ci' }] })
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const saved = saveData(plan)
+    const env = approvalEnv()
+
+    // An owner-command proposal is not a local-skill execution plan.
+    const ownerPlan = proposal(root)
+    assert.equal(
+      run(root, ['approve', '--plan', save(ownerPlan), '--confirm', ownerPlan.digest, '--json'], env).code,
+      5,
+    )
+
+    // A stale plan (new HEAD, changed source) cannot be approved even with its own digest.
+    writeFileSync(join(root, 'skill.md'), skillContent('my-skill', 'A changed body.\n'))
+    commit(root)
+    assert.equal(run(root, ['approve', '--plan', saved, '--confirm', plan.digest, '--json'], env).code, 5)
+  })
+
+  test('approval flags are strict and never mix with plan or validate modes', () => {
+    const root = repo()
+    const env = approvalEnv()
+    for (const args of [
+      ['approve', '--confirm', 'x'],
+      ['approve', '--plan', 'plan.json'],
+      ['approval'],
+      ['revoke'],
+      ['approval', '--grant', 'x', '--plan', 'plan.json'],
+      ['approve', '--plan', 'plan.json', '--confirm', 'x', '--grant', 'x'],
+      ['validate', '--plan', 'plan.json', '--confirm', 'x'],
+      ['plan', '--confirm', 'x'],
+      ['apply', '--plan', 'plan.json'],
+    ]) {
+      const result = run(root, [...args, '--json'], env)
+      assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)
+    }
   })
 })
