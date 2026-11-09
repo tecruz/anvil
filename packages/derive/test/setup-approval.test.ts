@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -339,6 +340,8 @@ describe('setup approval grants', () => {
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
     assert.throws(() => saveSetupApprovalGrant(grant, { env }), AnvilError)
     assert.equal(inspectSetupApproval(ID, null, { env }).status, 'unknown')
+    // A refusal must not repair an existing store's permissions.
+    assert.equal(statSync(store).mode & 0o777, 0o777)
   })
 
   test('a record another user could write is not authority on POSIX', (t) => {
@@ -416,6 +419,46 @@ describe('setup approval grants', () => {
     const before = aclDump(target)
     assert.throws(() => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }), AnvilError)
     assert.equal(aclDump(target), before)
+  })
+
+  test('an existing unsafe Windows store is refused, not repaired', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows access control lists only')
+      return
+    }
+    const repo = scratch('anvil-approval-repo-')
+    const store = scratch('anvil-approval-store-')
+    const plan = planFor(repo)
+    const env: NodeJS.ProcessEnv = { ...process.env, ANVIL_APPROVAL_HOME: store }
+    // An existing store another user could write must be refused, not hardened into one.
+    icacls(store, '/grant', '*S-1-1-0:(OI)(CI)F')
+    const before = aclDump(store)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    assert.throws(() => saveSetupApprovalGrant(grant, { env }), AnvilError)
+    assert.equal(aclDump(store), before)
+  })
+
+  test('a store reached through an intermediate junction is refused', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows junctions only')
+      return
+    }
+    const target = scratch('anvil-approval-target-')
+    const linkParent = scratch('anvil-approval-link-')
+    const redirect = join(linkParent, 'redirect')
+    try {
+      symlinkSync(target, redirect, 'junction')
+    } catch {
+      t.skip('junctions are unavailable here')
+      return
+    }
+    const store = join(redirect, 'store')
+    const repo = scratch('anvil-approval-repo-')
+    const plan = planFor(repo)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    assert.throws(() => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }), AnvilError)
+    // Nothing may be created or hardened through the junction.
+    assert.equal(existsSync(join(target, 'store')), false)
   })
 
   test('a terminal record survives the removal of its checkout', () => {

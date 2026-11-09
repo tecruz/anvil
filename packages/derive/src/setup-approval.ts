@@ -32,7 +32,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir, userInfo } from 'node:os'
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 import { digestJson } from './canonical.ts'
 import type { SetupRepositoryState } from './setup.ts'
@@ -401,6 +401,36 @@ function structureProblem(path: string, kind: 'directory' | 'file'): string | nu
 }
 
 /**
+ * Why the store path passes through a symbolic link or junction anvil does not accept, or null.
+ *
+ * The final component is checked separately. This walks the ancestors: a link whose parent is
+ * the filesystem root is a system alias (macOS's `/var` -> `/private/var`, for example) and is
+ * followed, but a link inside a user-controlled directory could redirect the store anywhere, so
+ * it is refused. The walk stops at the first component that does not exist, because nothing
+ * below it can exist either.
+ */
+function ancestorLinkProblem(path: string): string | null {
+  const root = parse(path).root
+  let current = root
+  for (const segment of relative(root, path).split(sep)) {
+    if (segment === '') continue
+    current = join(current, segment)
+    let stat: ReturnType<typeof lstatSync>
+    try {
+      stat = lstatSync(current)
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code === 'ENOENT'
+        ? null
+        : `The approval store path cannot be inspected at ${current}.`
+    }
+    if (stat.isSymbolicLink() && dirname(current) !== root) {
+      return `The approval store passes through a link or junction at ${current}.`
+    }
+  }
+  return null
+}
+
+/**
  * POSIX ownership and mode for one record: it must belong to this user and must not be
  * writable by group or other. On Windows these bits are meaningless and the ACL check below
  * governs instead, so this returns null there.
@@ -620,38 +650,60 @@ function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
     return null
   }
   if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unsafe'
+  if (ancestorLinkProblem(dir) !== null) return 'unsafe'
   return protectionProblem(dir, 'directory') === null ? { dir } : 'unsafe'
 }
 
 /**
- * Create the store if needed and make it private. On Windows the inherited access control
- * list is replaced with one entry for the current user; if that cannot be done the store is
- * refused, because an unprotected store is not authority.
+ * Prepare the store and return it.
+ *
+ * Everything is validated before anything is created or modified, so a refusal never leaves a
+ * directory behind and never changes a permission. Only a directory this call created is made
+ * private; a store that already exists must already be private and is refused rather than
+ * repaired, because changing the access control list of a directory anvil did not create is not
+ * authority. On Windows, replacing the inherited entries of a store anvil did create is what
+ * makes it private.
  */
 function ensureStoreRoot(env: NodeJS.ProcessEnv | undefined): string {
   const dir = approvalStoreDir(env)
-  try {
-    mkdirSync(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
-  } catch (cause) {
-    throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the approval store at ${dir}`, {
-      hint: 'Set ANVIL_APPROVAL_HOME to a writable directory outside the repository, or use the default under your home.',
-      cause,
+  const link = ancestorLinkProblem(dir)
+  if (link !== null) {
+    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${link}`, {
+      hint: 'The approval store must be reached without passing through a link or junction.',
     })
   }
+
+  let created = false
+  try {
+    mkdirSync(dirname(dir), { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
+    // Only a directory this call actually creates is anvil's to make private. `EEXIST` means it
+    // was already there, and an existing store must already be safe.
+    mkdirSync(dir, { mode: PRIVATE_DIRECTORY_MODE })
+    created = true
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the approval store at ${dir}`, {
+        hint: 'Set ANVIL_APPROVAL_HOME to a writable directory outside the repository, or use the default under your home.',
+        cause,
+      })
+    }
+  }
+
   // Reject a store that is not a real directory before touching its access control list: a
-  // refused store must never be modified. `mkdirSync` follows a link, so this is where a
-  // store reached through a symbolic link or junction is caught.
+  // refused store must never be modified.
   const structure = structureProblem(dir, 'directory')
   if (structure !== null) {
     throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${structure}`, {
       hint: 'The approval store must be a real directory, not a link or a file.',
     })
   }
-  const hardening = process.platform === 'win32' ? hardenWindowsStore(dir) : null
-  if (hardening !== null) {
-    throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${hardening}`, {
-      hint: 'The approval store must be a private directory for your user. Choose a location you own.',
-    })
+  if (created) {
+    const hardening = process.platform === 'win32' ? hardenWindowsStore(dir) : null
+    if (hardening !== null) {
+      throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the approval store at ${dir}: ${hardening}`, {
+        hint: 'The approval store must be a private directory for your user. Choose a location you own.',
+      })
+    }
   }
   const problem = protectionProblem(dir, 'directory')
   if (problem !== null) {
