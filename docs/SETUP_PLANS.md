@@ -1,12 +1,14 @@
 # Setup plan contracts
 
 `anvil setup plan` and `anvil setup validate --plan <file>` implement only the **inspect**
-part of the integration lifecycle. There is no approve, install, apply or execute command.
-Generating, saving or validating a plan never authorizes execution.
+part of the integration lifecycle; `anvil setup approve`, `approval` and `revoke` manage
+approval grants. There is no apply, install or execute command, and generating, saving or
+validating a plan never authorizes execution.
 
 Two plan formats exist today. The original `SetupPlan` describes owner-declared install
 commands and stays inspect-only. The `SetupExecutionPlan` describes one create-only
-`local-skill/v1` adapter and is also inspect-only. Neither format can grant approval.
+`local-skill/v1` adapter and can be approved — but approval is a separate, single-use grant
+outside the repository, never a field on the plan itself.
 
 ## Supported inputs
 
@@ -174,21 +176,108 @@ tampered or forged payload is `invalid`. Unreadable or unresolvable current inpu
 `unknown`. Dirty, missing-HEAD and incomplete repository state cannot validate as `current`.
 The result always retains `approval: "not-granted"` and `executed: false`.
 
-## Boundary for approval and application
+## Approval grants (`local-skill/v1`)
 
-The execution-plan contract is review and validation only. Before anything is written, a
+Approval is separate authority, not a property of a plan. A grant authorizes **one
+application attempt of one exact plan**, and it lives outside the repository because a
+repository anvil does not own must not be able to mint its own authority.
+
+```bash
+anvil setup approve --plan ../execution-plan.json
+anvil setup approval --grant <id>
+anvil setup revoke --grant <id>
+```
+
+`anvil setup approve` rebuilds the plan from the saved adapter inputs, requires the result to
+be `current`, and refuses anything but a `local-skill` execution plan. It then **shows the
+plan** (on stderr in `--json` mode, so stdout stays one document) and reads the **full plan
+digest typed on an interactive terminal**; a digest passed as a flag is not consent, and piped
+or otherwise non-interactive input is refused. The plan is revalidated after the confirmation,
+so a repository that moved while the reviewer read is caught, and again before the record is
+read back, so a repository that moved during publication cannot be reported as approved. A
+non-interactive confirmation is a usage error (**2**), as is an empty one; a digest that does
+not match the current plan, or a plan that moved, is a refusal (**5**).
+
+The grant records the plan digest, adapter fingerprint, physical repository root and clean
+HEAD, source path/hash/size, destination, an operations digest, the issue and expiry times,
+and `maxAttempts: 1`. It contains no timestamp of its own beyond those, no environment value
+and no remote URL.
+
+| Field | Meaning |
+| --- | --- |
+| `schemaVersion`, `kind` | `1`, `"setup-approval-grant"` |
+| `id` | The grant id, a UUID |
+| `permission` | Always `"apply-local-skill-once"` |
+| `planDigest`, `adapter`, `adapterFingerprint` | The exact plan and adapter behaviour approved |
+| `repository` | Physical root and the clean HEAD the grant was approved against |
+| `source` | Repository-relative path, exact SHA-256 and byte length |
+| `skill` | The approved name and destination |
+| `operationsDigest` | SHA-256 of the ordered operations, including their preconditions |
+| `issuedAt`, `expiresAt` | A short lifetime (ten minutes by default) |
+| `maxAttempts` | Always `1` |
+
+Grants are stored under a dedicated user-owned directory
+(`~/.anvil/approvals/setup/v1/<id>/grant.json`) and **not** under the configuration home:
+`ANVIL_CONFIG_HOME` may point inside a repository, and a repository must not be able to
+choose where its own authority lives. `ANVIL_APPROVAL_HOME` is an explicit, process-level
+override; a config file cannot set it.
+
+The store is authority, so it is checked on every read and write. It must be a real directory
+(not a symlink or junction) that lies outside the repository the grant approves and that is
+private to the current user: on POSIX the store, the grant directory and every record file
+must be owned by the current user with no group or other write bit (the store is created `0700`
+and records `0600`, regardless of umask); on Windows the same three levels must be owned by the
+current user and grant access to the current user only, and a foreign owner, a foreign access
+control entry, or an ACL that cannot be read is refused. The path must not pass through a link
+or junction either, except for the known macOS root aliases `/var`, `/tmp` and `/etc`. A refusal
+leaves nothing created: a store reached through a link is rejected before anything is created
+or touched, and a store anvil creates is removed again if initialization then fails. A store
+anvil creates is made private; a store that already exists must already be private and is
+refused rather than repaired, because changing the permissions of a directory anvil did not
+create is not authority. The grant record is written with
+no-replace semantics and read without following links or multiply-linked files. These checks
+are fail-closed: an uninspectable store is `unknown`, and a record with an unknown field, a
+future issue time, or a duplicated binding that disagrees with the plan is `invalid` or
+`stale`, never `active`. A terminal record stays inspectable, and revocable, after the checkout
+it names is removed.
+
+`anvil setup approval --grant <id>` reports one status:
+
+| Status | Meaning |
+| --- | --- |
+| `active` | Valid, current, unexpired, unused and not revoked |
+| `expired` | The expiry has passed |
+| `revoked` | Explicitly withdrawn |
+| `consumed` | An application attempt has already been reserved |
+| `stale` | Current inputs differ from the approved ones |
+| `invalid` | Malformed or inconsistent record |
+| `unknown` | The record, store, or current repository state cannot be inspected reliably |
+
+`anvil setup revoke --grant <id>` is terminal and idempotent; revoking a revoked grant
+reports `revoked`, but a `consumed` grant already started its attempt and cannot be revoked.
+`approval` succeeds (**0**) only when the status is `active`; every other status exits **5**
+with the record on an `ok: false` envelope.
+
+`consumeSetupApproval` reserves the single attempt and returns whether this call won it
+(`reserved: true`) or the attempt was already gone. Application code must call it after full
+revalidation and **before** its first repository mutation, so a crash or failure burns the
+attempt and cannot be retried without fresh approval. Revocation and reservation share one
+no-replace state record, so they cannot both win and the terminal outcome is deterministic.
+There is no automatic retry.
+
+## Boundary for application
+
+The approval contract authorizes, but nothing here applies. Before anything is written, a
 separately reviewed change must implement:
 
-- external approval grants bound to the full plan digest, repository identity, source hash,
-  destination preconditions and adapter fingerprint;
-- a short expiry, a single application attempt and an interactive confirmation;
 - a repository-scoped lock and complete revalidation immediately before mutation;
+- consumption of the grant's single attempt before the first write;
 - a create-only writer using a temporary file and no-replace publish semantics;
 - a journal with honest `partial`, `failed` and `interrupted` outcomes and no automatic retry;
 - independent verification of the installed bytes and metadata, with only the narrow claim
   recorded above.
 
 The digest alone is never authority. Opaque install commands in the original proposal remain
-proposal-only and are not made executable by this adapter. A failed or partial integration
-must not be reported as completed, and path checks are not an operating-system sandbox
-against another process changing the filesystem concurrently.
+proposal-only and cannot be approved. A failed or partial integration must not be reported as
+completed, and path checks are not an operating-system sandbox against another process
+changing the filesystem concurrently.

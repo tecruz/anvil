@@ -1,8 +1,8 @@
 # Plan: broader AI enablement
 
 Status: **In progress. Readiness declarations and diagnostics, approved reference pointers,
-inspect-only setup proposals, and an inspect-only `local-skill` execution-plan contract are
-implemented. Approval/application and richer context remain proposed.**
+inspect-only setup proposals, a `local-skill` execution-plan contract, and single-use approval
+grants for it are implemented. Application and richer context remain proposed.**
 Prepared: 2026-11-04.
 
 ## Implemented so far: `anvil ready`
@@ -83,13 +83,26 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
   adapter fingerprint and a narrow verification scope. It refuses downloads, scripts,
   global installs, overwrites, existing destinations, traversal, links and non-regular or
   invalid UTF-8 sources. Validation rebuilds from the saved adapter inputs and refuses stale,
-  tampered or unknown state. There is still no approve or apply command; see
+  tampered or unknown state. There is still no apply command; see
   [the plan contracts](SETUP_PLANS.md) and
   [ADR-0018](adr/0018-approved-local-skill-installation.md).
+- **Single-use approval grants** (workstream 3, first authority slice) — `anvil setup approve
+  --plan <file>` records a separate, single-use grant outside the repository, bound to the plan
+  digest, adapter fingerprint, repository root and clean HEAD, source hash, destination and
+  ordered operations. It shows the plan and asks the reviewer to type the full plan digest at
+  an interactive terminal; a digest passed as a flag is not consent, piped input is refused,
+  and the plan is revalidated after confirmation and before the record is read back.
+  `anvil setup approval --grant <id>` reports `active`, `expired`, `revoked`, `consumed`,
+  `stale`, `invalid` or `unknown`, and `anvil setup revoke --grant <id>` withdraws it. The
+  store must be a real, private, user-owned directory outside the repository (on Windows,
+  owned by you with no other principal in its ACL). Grants expire after ten
+  minutes and carry one application attempt. There is still no apply command, and approving
+  never writes to the repository; see [the plan contracts](SETUP_PLANS.md) and
+  [ADR-0019](adr/0019-approval-authority-is-a-user-owned-store.md).
 
-Still proposed: approval grants and application with independent verification, automatic
-tool installation, richer company-context sources (staleness and contradiction checks beyond
-path existence), and real-agent evaluation evidence.
+Still proposed: application with independent verification, automatic tool installation,
+richer company-context sources (staleness and contradiction checks beyond path existence),
+and real-agent evaluation evidence.
 
 ## Goal
 
@@ -198,8 +211,10 @@ Discover -> inspect -> approve -> install/configure -> verify
 ### Acceptance
 
 - [ ] Discovering a resource never authorizes installing or executing it.
-- [ ] Approval applies to the reviewed resource and actions, not arbitrary future
-  discovery results.
+- [x] Approval applies to the reviewed resource and actions, not arbitrary future
+  discovery results. A grant binds the full plan digest, repository identity, source hash,
+  destination and adapter fingerprint, and is single-use. _Partial: implemented for the
+  `local-skill` adapter; discovery-resource approval is not._
 - [ ] Existing configuration is preserved or changed through a reviewable diff.
 - [ ] A failed installation or verification is not reported as a completed integration.
 

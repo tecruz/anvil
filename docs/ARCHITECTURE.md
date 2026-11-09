@@ -38,9 +38,10 @@ running them.
 `anvil setup plan` derives inspect-only, content-addressed plans. The original proposal
 covers owner-declared install commands; `--adapter local-skill` plans one create-only copy of
 a repository-local `SKILL.md` into `.agents/skills/<name>/SKILL.md`. `anvil setup validate`
-compares either saved plan with current inputs and a clean repository commit. All of it
-remains read-only: neither format grants approval or executes. See
-[the setup plan contracts](SETUP_PLANS.md) for the schemas and limits.
+compares either saved plan with current inputs and a clean repository commit. `anvil setup
+approve` records a separate, single-use approval grant outside the repository, and `approval`
+and `revoke` inspect and withdraw it. Approving never writes to the repository, and nothing
+applies a plan. See [the setup plan contracts](SETUP_PLANS.md) for the schemas and limits.
 
 The CLI never calls a model. It gathers verified facts, and hands them over. That split
 is what lets the same behaviour work in Claude Code, in Cursor, in an opencode plugin and
@@ -131,6 +132,7 @@ Three rules hold across the system:
 | `<worktree>/.anvil/session.json` | the agent session id, written by the plugin | per session |
 | `~/.anvil/config.json` | the global configuration | your machine |
 | `~/.anvil/playbooks/` | your installed playbooks | your machine |
+| `~/.anvil/approvals/setup/v1/` | single-use approval grants for local-skill plans, deliberately outside the repository | until expiry, revocation or use |
 | `~/.anvil/cache/discovery/` | the discovery cache | your machine |
 | `<repoParent>/<repoName>-worktrees/` | the worktrees, deliberately outside the repository | until released |
 
