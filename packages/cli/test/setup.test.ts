@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import {
   copyFileSync,
   existsSync,
@@ -32,7 +32,9 @@ import { approveSetupPlan, repositoryState, SetupApprovalRefusal, worktreeFromSt
 
 const CLI = join(import.meta.dirname, '..', 'src', 'main.ts')
 const roots: string[] = []
+const holders: ChildProcess[] = []
 after(() => {
+  for (const holder of holders) if (holder.exitCode === null) holder.kill('SIGKILL')
   for (const root of roots) rmSync(root, { recursive: true, force: true })
 })
 function scratch(): string {
@@ -84,6 +86,164 @@ function run(cwd: string, args: string[], extraEnv: Record<string, string> = {},
     return { code: failure.status, stdout: failure.stdout, stderr: failure.stderr }
   }
 }
+/**
+ * Run one real CLI process without blocking the test, so two invocations overlap.
+ *
+ * The synchronous `run` helper is enough for a single command; contention needs both
+ * processes alive at the same time, each doing its own preflight and lock wait.
+ */
+function runConcurrently(cwd: string, args: string[], extraEnv: Record<string, string> = {}) {
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, 'setup', ...args], {
+      cwd,
+      env: { ...process.env, NO_COLOR: '1', ANVIL_CONFIG_HOME: join(cwd, '.config-home'), ...extraEnv },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.once('error', reject)
+    child.once('close', (code) => resolve({ code, stdout, stderr }))
+  })
+}
+
+/**
+ * A process that takes the real repository lock and then stops at a chosen point.
+ *
+ * `started` runs the real application path up to its first mutation, which is after the
+ * attempt is consumed and its `started` journal is published. `reserved` only consumes the
+ * grant, leaving no journal. `window` consumes the grant and keeps its record multiply-linked
+ * until the test says otherwise. The first two hold the lock until the test kills them, so the
+ * next apply sees a record left by a dead process rather than a synthetic one; `window` holds
+ * the lock until the next apply has queued behind it.
+ */
+const HOLDER_SCRIPT = `
+import { linkSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { applySetupPlan, consumeSetupApproval } from ${JSON.stringify(new URL('../../derive/src/index.ts', import.meta.url).href)}
+import { withRepoLock } from ${JSON.stringify(new URL('../../git/src/index.ts', import.meta.url).href)}
+
+const repo = process.env.ANVIL_TEST_REPO
+const grant = process.env.ANVIL_TEST_GRANT
+const state = () => ({ root: repo, head: process.env.ANVIL_TEST_HEAD, worktree: 'clean' })
+const send = (message) => { if (process.send) process.send(message) }
+const hold = () => new Promise((resolve) => setTimeout(resolve, 600000))
+
+await withRepoLock({ cwd: repo, name: 'setup-apply' }, async () => {
+  const mode = process.env.ANVIL_TEST_MODE
+  if (mode === 'reserved') {
+    const consumption = consumeSetupApproval(grant, state(), { env: process.env })
+    if (!consumption.reserved) throw new Error('the holder failed to reserve the attempt')
+    send('reserved')
+    await hold()
+    return
+  }
+  if (mode === 'window') {
+    const consumption = consumeSetupApproval(grant, state(), { env: process.env })
+    if (!consumption.reserved) throw new Error('the holder failed to reserve the attempt')
+    // A hard link is how the record is published. While it exists the record is
+    // multiply-linked, which is exactly what a concurrent reader refuses to trust.
+    const dir = join(process.env.ANVIL_APPROVAL_HOME, grant)
+    linkSync(join(dir, 'transition.json'), join(dir, 'transition.link.tmp'))
+    send('window')
+    // Hold the window open until the test has watched another process queue on the
+    // repository lock, so that reader is guaranteed to observe the multiply-linked record.
+    await new Promise((resolve) => process.once('message', resolve))
+    rmSync(join(dir, 'transition.link.tmp'))
+    return
+  }
+  await applySetupPlan({
+    saved: JSON.parse(process.env.ANVIL_TEST_PLAN),
+    repository: state(),
+    grantId: grant,
+    lock: async (work) => work(),
+    refresh: async () => state(),
+    env: process.env,
+    hooks: {
+      beforeWrite: () => {
+        send('started')
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000)
+      },
+    },
+  })
+  await hold()
+})
+`
+
+interface Holder {
+  child: ChildProcess
+  /** Resolves once the holder reports it reached the requested point. */
+  ready(message: string): Promise<void>
+  /** Ends a held publication window and lets the holder release the lock. */
+  release(): void
+  /** Resolves with how the process ended; never rejects, so a spawn error cannot leak. */
+  exited: Promise<{ code: number | null; spawnError: Error | null }>
+}
+
+function startHolder(env: Record<string, string>): Holder {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', HOLDER_SCRIPT], {
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  })
+  holders.push(child)
+  let stderr = ''
+  child.stderr?.setEncoding('utf8')
+  child.stderr?.on('data', (chunk: string) => {
+    stderr += chunk
+  })
+  const exited = new Promise<{ code: number | null; spawnError: Error | null }>((resolve) => {
+    child.once('error', (spawnError) => resolve({ code: null, spawnError }))
+    child.once('exit', (code) => resolve({ code, spawnError: null }))
+  })
+  const ready = (message: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const onMessage = (value: unknown) => {
+        if (value !== message) return
+        child.off('message', onMessage)
+        resolve()
+      }
+      child.on('message', onMessage)
+      child.once('error', (spawnError) => {
+        child.off('message', onMessage)
+        reject(spawnError)
+      })
+      child.once('exit', (code) => {
+        child.off('message', onMessage)
+        reject(new Error(`the holder exited ${String(code)} before "${message}": ${stderr}`))
+      })
+    })
+  const release = () => {
+    if (child.connected) child.send('release')
+  }
+  return { child, ready, release, exited }
+}
+
+/** Wait until `count` processes have records in the `setup-apply` repository lock. */
+async function waitForContention(root: string, count: number): Promise<void> {
+  const directory = join(root, '.git', 'anvil-locks', 'setup-apply.lock')
+  const deadline = Date.now() + 120_000
+  for (;;) {
+    let records: string[] = []
+    try {
+      records = readdirSync(directory)
+    } catch {
+      // The lock directory appears when the first holder registers; absence means no contention.
+    }
+    if (records.length >= count) return
+    if (Date.now() >= deadline) {
+      throw new Error(`expected ${count} lock records in ${directory}, saw ${records.length}`)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
 function proposal(root: string): SetupPlan {
   const result = run(root, ['plan', '--json'])
   assert.equal(result.code, 0, result.stdout)
@@ -964,5 +1124,186 @@ describe('anvil setup', () => {
     assert.equal(stale.code, 5, stale.stdout)
     assert.equal((JSON.parse(stale.stdout) as { ok: boolean }).ok, false)
     assert.equal(existsSync(join(root, '.agents')), false)
+  })
+
+  test('two real apply processes contend for the repository lock and write exactly once', {
+    timeout: 180_000,
+  }, async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '33333333-4444-4555-8666-777777777777' })
+    saveSetupApprovalGrant(grant, { env })
+    const saved = saveData(plan)
+
+    // Both processes start together and each runs its own preflight before contending for
+    // the same grant and the same `setup-apply` repository lock. One writes; the other must
+    // wait for the lock and settle the recorded attempt instead of refusing.
+    const results = await Promise.all([
+      runConcurrently(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env),
+      runConcurrently(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env),
+    ])
+    const records = results.map((result) => {
+      assert.equal(result.code, 0, result.stdout + result.stderr)
+      return (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
+    })
+    assert.deepEqual(
+      records.map((record) => record.status),
+      ['applied', 'applied'],
+      'a contended grant is applied, never refused',
+    )
+    assert.equal(records.filter((record) => record.executed).length, 1, 'only one process may write')
+    assert.equal(
+      records.filter((record) => record.alreadyApplied).length,
+      1,
+      'the loser reports the recorded attempt without writing',
+    )
+    assert.equal(readFileSync(join(root, '.agents', 'skills', 'my-skill', 'SKILL.md'), 'utf8'), skillContent())
+    assert.deepEqual(
+      readdirSync(join(root, '.git', 'anvil-locks', 'setup-apply.lock')),
+      [],
+      'both processes released the repository lock',
+    )
+  })
+
+  test('a process killed while holding the lock after its journal started is reported as interrupted', {
+    timeout: 180_000,
+  }, async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '44444444-5555-4666-8777-888888888888' })
+    saveSetupApprovalGrant(grant, { env })
+    const saved = saveData(plan)
+
+    const holder = startHolder({
+      ANVIL_TEST_MODE: 'started',
+      ANVIL_TEST_REPO: root,
+      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      ANVIL_TEST_GRANT: grant.id,
+      ANVIL_TEST_PLAN: JSON.stringify(plan),
+      ...env,
+    })
+    await holder.ready('started')
+    // The holder consumed the attempt, published its `started` journal and is holding the
+    // repository lock. Killing it is the crash this test is about: nothing recorded an
+    // outcome, and the lock record now belongs to a dead process.
+    holder.child.kill('SIGKILL')
+    const outcome = await holder.exited
+    assert.equal(outcome.spawnError, null)
+    assert.notEqual(outcome.code, 0, 'the holder must not exit successfully')
+
+    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    assert.equal(result.code, 5, result.stdout + result.stderr)
+    const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
+    assert.equal(record.status, 'interrupted')
+    assert.equal(record.executed, false)
+    assert.match(record.reason, /never recorded an outcome/)
+    assert.equal(existsSync(join(root, '.agents')), false, 'a killed attempt wrote nothing')
+    assert.deepEqual(
+      readdirSync(join(root, '.git', 'anvil-locks', 'setup-apply.lock')),
+      [],
+      'the dead lock record is reaped instead of blocking the next apply',
+    )
+  })
+
+  test('a process killed between reserving the attempt and its journal is reported as interrupted', {
+    timeout: 180_000,
+  }, async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '55555555-6666-4777-8888-999999999999' })
+    saveSetupApprovalGrant(grant, { env })
+    const saved = saveData(plan)
+
+    const holder = startHolder({
+      ANVIL_TEST_MODE: 'reserved',
+      ANVIL_TEST_REPO: root,
+      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      ANVIL_TEST_GRANT: grant.id,
+      ANVIL_TEST_PLAN: JSON.stringify(plan),
+      ...env,
+    })
+    await holder.ready('reserved')
+    // The single attempt is now reserved, but the writer died before publishing a journal.
+    holder.child.kill('SIGKILL')
+    const outcome = await holder.exited
+    assert.equal(outcome.spawnError, null)
+    assert.notEqual(outcome.code, 0, 'the holder must not exit successfully')
+
+    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    assert.equal(result.code, 5, result.stdout + result.stderr)
+    const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
+    assert.equal(record.status, 'interrupted')
+    assert.equal(record.executed, false)
+    assert.match(record.reason, /no application journal exists/)
+    assert.equal(existsSync(join(root, '.agents')), false, 'a reserved-but-journal-less attempt wrote nothing')
+    assert.deepEqual(
+      readdirSync(join(root, '.git', 'anvil-locks', 'setup-apply.lock')),
+      [],
+      'the dead lock record is reaped instead of blocking the next apply',
+    )
+  })
+
+  test('a real reservation caught in its publication window is settled under the lock, not refused', {
+    timeout: 180_000,
+  }, async () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '66666666-7777-4888-8999-aaaaaaaaaaaa' })
+    saveSetupApprovalGrant(grant, { env })
+    const saved = saveData(plan)
+
+    const holder = startHolder({
+      ANVIL_TEST_MODE: 'window',
+      ANVIL_TEST_REPO: root,
+      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      ANVIL_TEST_GRANT: grant.id,
+      ANVIL_TEST_PLAN: JSON.stringify(plan),
+      ...env,
+    })
+    await holder.ready('window')
+
+    // The consumed record exists but is multiply-linked right now, so a concurrent reader
+    // cannot trust it. The apply below starts while that publication window is still open.
+    const applied = runConcurrently(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    let contention: Error | null = null
+    try {
+      // One waiter record joins the holder's record only after the reader has taken the settle
+      // path and reached the repository lock, so the window is observed, not merely raced.
+      await waitForContention(root, 2)
+    } catch (cause) {
+      contention = cause as Error
+    } finally {
+      // Closing the window lets the holder release the lock; the waiter then re-reads the record.
+      holder.release()
+    }
+    const result = await applied
+    assert.equal(contention, null, `${contention?.message}\n${result.stdout}${result.stderr}`)
+    assert.equal(result.code, 5, result.stdout + result.stderr)
+    const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
+    assert.equal(record.status, 'interrupted')
+    assert.equal(record.executed, false)
+    assert.match(record.reason, /no application journal exists/)
+    assert.doesNotMatch(record.reason, /cannot be inspected/, 'the window is waited out, not called corrupt')
+    assert.equal(existsSync(join(root, '.agents')), false, 'the settled attempt wrote nothing')
+    const outcome = await holder.exited
+    assert.equal(outcome.spawnError, null)
+    assert.equal(outcome.code, 0, 'the holder released the lock without applying')
+    assert.deepEqual(
+      readdirSync(join(root, '.git', 'anvil-locks', 'setup-apply.lock')),
+      [],
+      'both processes released the repository lock',
+    )
   })
 })
