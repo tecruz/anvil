@@ -288,10 +288,13 @@ for and then settled from its terminal record, while a `started` journal still p
 the reader holds the lock belongs to a dead writer and is reported as `interrupted`. A
 consumed reservation with no journal yet is handled the same way: the reader waits for the
 lock, re-reads the grant and the journal, and reports `interrupted` only if no journal
-appeared. Authority is always re-read while the lock is held, never reused from before the
-wait. A saved plan that reads as stale only because a concurrent writer already created the
-destination is settled the same way: the journal and reservation are re-read, and an
-existing attempt is reported instead of a misleading "destination already exists" refusal.
+appeared. A reservation record that is unreadable only because it is caught in its own
+hard-link publication window is also waited out; if it is still unreadable once the reader
+holds the lock, it is corrupt and the command refuses. Authority is always re-read while the
+lock is held, never reused from before the wait. A saved plan that reads as stale only
+because a concurrent writer already created the destination is settled the same way: the
+journal and reservation are re-read, and an existing attempt is reported instead of a
+misleading "destination already exists" refusal.
 
 Application is create-only:
 

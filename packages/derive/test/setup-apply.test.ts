@@ -414,7 +414,7 @@ describe('setup application', () => {
     assert.equal(consumption.reserved, true)
     assert.equal(writeGrantRecordOnce(dir, SETUP_APPLICATION_JOURNAL_FILE, startedJournal(fixtureLocal)), 'written')
     // Hard-link publication briefly gives the journal a second name; the protected reader
-    // refuses a multiply-linked file, so this is the state a concurrent reader can observe.
+    // refuses a multiply-linked file, so this is the state a concurrent caller can observe.
     linkSync(join(dir, SETUP_APPLICATION_JOURNAL_FILE), join(dir, 'application.link.tmp'))
 
     let locks = 0
@@ -448,6 +448,78 @@ describe('setup application', () => {
     assert.equal(record.executed, false)
     assert.equal(record.alreadyApplied, true)
     assert.equal(record.verified, true)
+  })
+
+  test('a reservation caught in its hard-link publication window is settled, not refused', async () => {
+    const fixtureLocal = fixture()
+    const dir = journalDir(fixtureLocal)
+    const consumption = consumeSetupApproval(fixtureLocal.grant.id, repository(fixtureLocal.repo), {
+      env: fixtureLocal.env,
+      now: T1,
+    })
+    assert.equal(consumption.reserved, true)
+    // `writeTransition` publishes `transition.json` through a hard link. While the temporary
+    // name exists the record has two links, so the protected reader reports it as unknown.
+    linkSync(join(dir, 'transition.json'), join(dir, 'transition.link.tmp'))
+
+    let locks = 0
+    const record = await apply(fixtureLocal, {
+      lock: async (work) => {
+        locks += 1
+        // The writer unlinks its temporary name, installs the artifact and publishes a
+        // terminal journal before releasing the lock this caller is waiting for.
+        rmSync(join(dir, 'transition.link.tmp'))
+        const skillDirectory = join(fixtureLocal.repo, '.agents', 'skills', 'my-skill')
+        mkdirSync(skillDirectory, { recursive: true })
+        writeFileSync(join(skillDirectory, 'SKILL.md'), fixtureLocal.plan.source.content)
+        const verification = verifyInstalledLocalSkill({
+          root: fixtureLocal.repo,
+          destination: fixtureLocal.plan.skill.destination,
+          sha256: fixtureLocal.plan.source.sha256,
+          bytes: fixtureLocal.plan.source.bytes,
+        })
+        const journal = startedJournal(fixtureLocal)
+        replaceGrantRecord(dir, SETUP_APPLICATION_JOURNAL_FILE, {
+          ...journal,
+          status: 'succeeded',
+          operations: journal.operations.map((operation) => ({ ...operation, status: 'done' })),
+          verification,
+          reason: 'The reviewed bytes were installed and independently verified.',
+        })
+        return work()
+      },
+    })
+    assert.equal(locks, 1, 'an unreadable reservation must be re-read under the lock')
+    assert.equal(record.status, 'applied')
+    assert.equal(record.executed, false)
+    assert.equal(record.alreadyApplied, true)
+    assert.equal(record.verified, true)
+  })
+
+  test('a corrupt reservation record is refused once the lock rules out a live writer', async () => {
+    const fixtureLocal = fixture()
+    const dir = journalDir(fixtureLocal)
+    const consumption = consumeSetupApproval(fixtureLocal.grant.id, repository(fixtureLocal.repo), {
+      env: fixtureLocal.env,
+      now: T1,
+    })
+    assert.equal(consumption.reserved, true)
+    linkSync(join(dir, 'transition.json'), join(dir, 'transition.link.tmp'))
+
+    let locks = 0
+    const record = await apply(fixtureLocal, {
+      lock: async (work) => {
+        locks += 1
+        return work()
+      },
+      hooks: {
+        publish: () => assert.fail('a corrupt reservation must not write'),
+      },
+    })
+    assert.equal(locks, 1, 'an unreadable reservation must be checked under the lock')
+    assert.equal(record.status, 'refused')
+    assert.match(record.reason, /grant state record cannot be inspected/)
+    assert.equal(record.executed, false)
   })
 
   test('a started journal without an outcome is reported as interrupted, never retried', async () => {

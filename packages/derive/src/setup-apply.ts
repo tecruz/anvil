@@ -35,6 +35,7 @@ import {
   inspectSetupApproval,
   readGrantRecord,
   readSetupApprovalGrant,
+  readSetupApprovalTransition,
   replaceGrantRecord,
   type SetupApprovalGrant,
   type SetupApprovalStoreOptions,
@@ -798,21 +799,33 @@ function settleExistingAttempt(
 /**
  * Re-read authority and the journal while holding the repository lock.
  *
- * A `started` journal, or a reservation whose journal has not been published yet, is waited
- * out under the lock. The grant and store are read again here rather than reused from before
- * the wait, so authority that disappeared while this caller waited cannot settle the outcome.
+ * A `started` journal, an unreadable journal, a reservation whose journal has not been
+ * published yet, and a reservation record caught in its own publication window are all
+ * waited out under the lock. The grant and store are read again here rather than reused from
+ * before the wait, so authority that disappeared while this caller waited cannot settle the
+ * outcome.
  */
 const MISSING_RESERVED_JOURNAL_REASON =
   'The single application attempt was already reserved, but no application journal exists. Treat the outcome as unknown; no retry is allowed without fresh approval.'
 const MISSING_UNREADABLE_JOURNAL_REASON =
   'The application journal was unreadable and is now absent. Treat the outcome as unknown; no retry is allowed without fresh approval.'
 
+interface SettleOptions {
+  /** Reported when the attempt was reserved but its journal is missing. */
+  missingReason?: string
+  /**
+   * Reported when, under the lock, no reservation won the grant. A caller that waited
+   * because of an ambiguous read passes its original refusal here.
+   */
+  noAttemptReason?: string
+}
+
 async function settleUnderLock(
   flow: SetupApplyFlow,
   storeOptions: SetupApprovalStoreOptions,
   plan: SetupExecutionPlan | null,
   grant: SetupApprovalGrant,
-  missingReason = MISSING_RESERVED_JOURNAL_REASON,
+  options: SettleOptions = {},
 ): Promise<SetupApplicationRecord> {
   return flow.lock(async () => {
     const lockedRead = readSetupApprovalGrant(flow.grantId, storeOptions)
@@ -820,32 +833,39 @@ async function settleUnderLock(
     const binding = savedPlanBinding(flow.saved, flow.repository, lockedRead.grant)
     if (!binding.ok) return refusal(binding.reason, plan, lockedRead.grant)
     const after = readSetupApplicationJournal(lockedRead.dir)
-    if (after.state === 'absent') {
-      return applicationRecord({
-        status: 'interrupted',
-        executed: false,
-        reason: missingReason,
-        plan,
-        grant: lockedRead.grant,
-      })
+    if (after.state !== 'absent') return settleExistingAttempt(after, lockedRead.grant, flow)
+    const transition = readSetupApprovalTransition(lockedRead.dir)
+    // A live writer holds the repository lock for the whole consume-and-journal sequence, so
+    // a record still unreadable once this caller holds the lock is corrupt, not in flight.
+    if (transition === 'unknown') {
+      return refusal('The grant state record cannot be inspected.', plan, lockedRead.grant)
     }
-    return settleExistingAttempt(after, lockedRead.grant, flow)
+    if (transition === 'revoked') return refusal('The grant was revoked.', plan, lockedRead.grant)
+    if (transition === 'none' && options.noAttemptReason !== undefined) {
+      // No application won this grant: the caller's original refusal is the accurate report.
+      return refusal(options.noAttemptReason, plan, lockedRead.grant)
+    }
+    return applicationRecord({
+      status: 'interrupted',
+      executed: false,
+      reason: options.missingReason ?? MISSING_RESERVED_JOURNAL_REASON,
+      plan,
+      grant: lockedRead.grant,
+    })
   })
 }
 
 /**
- * True when another call may own this grant: a journal exists, or the single attempt has
- * been reserved but its journal is not published yet. Used only to decide whether a failed
- * preflight needs to wait for the lock before it is reported as a refusal.
+ * True when this grant may already own an application attempt: a journal exists, or the
+ * terminal-state record was consumed or is briefly unreadable. A reservation is published
+ * with a hard link, so its record can be multiply-linked for a moment; that is a possible
+ * attempt, not a reason to refuse. Used only to decide whether a failed preflight must wait
+ * for the repository lock before it is reported as a refusal.
  */
-function hasApplicationAttempt(
-  flow: SetupApplyFlow,
-  storeOptions: SetupApprovalStoreOptions,
-  nowOption: SetupApprovalStoreOptions,
-  dir: string,
-): boolean {
+function hasApplicationAttempt(dir: string): boolean {
   if (readSetupApplicationJournal(dir).state !== 'absent') return true
-  return inspectSetupApproval(flow.grantId, flow.repository, { ...storeOptions, ...nowOption }).status === 'consumed'
+  const transition = readSetupApprovalTransition(dir)
+  return transition === 'consumed' || transition === 'unknown'
 }
 
 /**
@@ -877,7 +897,7 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
     // A journal is briefly unreadable while a live writer publishes or replaces it: the
     // protected reader refuses a multiply-linked file, and hard-link publication has a
     // two-link window. Wait for the repository lock and re-read before calling it unknown.
-    return settleUnderLock(flow, storeOptions, null, grant, MISSING_UNREADABLE_JOURNAL_REASON)
+    return settleUnderLock(flow, storeOptions, null, grant, { missingReason: MISSING_UNREADABLE_JOURNAL_REASON })
   }
   if (existing.state === 'present' && existing.journal.status === 'started') {
     // A live writer holds the repository lock while its journal is `started`. Wait for it,
@@ -897,8 +917,8 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
     // destination and its journal before releasing the lock. Re-read the journal and the
     // reservation before turning that race into a refusal, and settle a real attempt under
     // the lock instead of reporting "already exists" while its writer is still finishing.
-    if (hasApplicationAttempt(flow, storeOptions, nowOption, dir)) {
-      return settleUnderLock(flow, storeOptions, first.plan, grant)
+    if (hasApplicationAttempt(dir)) {
+      return settleUnderLock(flow, storeOptions, first.plan, grant, { noAttemptReason: first.validation.reason })
     }
     return refusal(first.validation.reason, first.plan, grant)
   }
@@ -918,8 +938,8 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
     // A concurrent writer can consume and publish between the preflight resolution and this
     // inspection, leaving the grant not-yet-consumed at the transition read but the
     // destination present when the plan is rebuilt. Re-check the attempt before refusing.
-    if (hasApplicationAttempt(flow, storeOptions, nowOption, dir)) {
-      return settleUnderLock(flow, storeOptions, firstPlan, grant)
+    if (hasApplicationAttempt(dir)) {
+      return settleUnderLock(flow, storeOptions, firstPlan, grant, { noAttemptReason: inspection.reason })
     }
     return refusal(inspection.reason, firstPlan, grant)
   }

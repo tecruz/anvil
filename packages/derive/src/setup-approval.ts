@@ -863,10 +863,16 @@ export function saveSetupApprovalGrant(
   return grant
 }
 
-type TransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
+export type SetupApprovalTransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
 
-/** Read the single terminal-state record. Absent, a valid kind, or uninspectable. */
-function readTransition(dir: string): TransitionState {
+/**
+ * Read the single terminal-state record. Absent, a valid kind, or uninspectable.
+ *
+ * A caller that holds the repository lock can read this to distinguish a reservation that
+ * won the grant from one that never did; an `unknown` record is corruption once the writer
+ * that would have published it can no longer be in flight.
+ */
+export function readSetupApprovalTransition(dir: string): SetupApprovalTransitionState {
   const path = join(dir, TRANSITION_FILE)
   let stat: ReturnType<typeof lstatSync>
   try {
@@ -1002,7 +1008,7 @@ export function inspectSetupApproval(
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown')
     return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
   if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
@@ -1053,7 +1059,7 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown')
     return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
   if (transition === 'consumed') {
@@ -1077,7 +1083,7 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
     return approvalRecord(id, 'revoked', 'The grant was revoked. It can no longer authorize an application.', grant)
   }
   // Another transition won the race; report whichever terminal state it wrote.
-  const after = readTransition(dir)
+  const after = readSetupApprovalTransition(dir)
   if (after === 'consumed') {
     return approvalRecord(
       id,
@@ -1106,7 +1112,7 @@ export function consumeSetupApproval(
   if (!read.ok) return { record: approvalRecord(id, read.status, read.reason, null), reserved: false }
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown') {
     return {
       record: approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant),
@@ -1131,7 +1137,7 @@ export function consumeSetupApproval(
     throw new AnvilError(ErrorCode.PreflightFailed, 'Could not reserve the application attempt.', { cause })
   }
   if (written === 'exists') {
-    const after = readTransition(dir)
+    const after = readSetupApprovalTransition(dir)
     if (after === 'revoked') {
       return {
         record: approvalRecord(id, 'revoked', 'The grant was revoked before the attempt could be reserved.', grant),
