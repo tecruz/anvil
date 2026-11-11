@@ -125,7 +125,7 @@ function runConcurrently(cwd: string, args: string[], extraEnv: Record<string, s
  * the lock until the next apply has queued behind it.
  */
 const HOLDER_SCRIPT = `
-import { linkSync, rmSync } from 'node:fs'
+import { linkSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { applySetupPlan, consumeSetupApproval } from ${JSON.stringify(new URL('../../derive/src/index.ts', import.meta.url).href)}
 import { withRepoLock } from ${JSON.stringify(new URL('../../git/src/index.ts', import.meta.url).href)}
@@ -159,7 +159,7 @@ await withRepoLock({ cwd: repo, name: 'setup-apply' }, async () => {
     rmSync(join(dir, 'transition.link.tmp'))
     return
   }
-  await applySetupPlan({
+  const record = await applySetupPlan({
     saved: JSON.parse(process.env.ANVIL_TEST_PLAN),
     repository: state(),
     grantId: grant,
@@ -168,11 +168,14 @@ await withRepoLock({ cwd: repo, name: 'setup-apply' }, async () => {
     env: process.env,
     hooks: {
       beforeWrite: () => {
-        send('started')
+        // A synchronous marker, not an IPC message: the hook blocks the event loop right
+        // after this, so a queued send might never flush on a loaded runner.
+        writeFileSync(process.env.ANVIL_TEST_MARKER, 'started')
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600000)
       },
     },
   })
+  if (record.status !== 'applied') throw new Error(\`the holder did not apply: \${record.status}: \${record.reason}\`)
   await hold()
 })
 `
@@ -240,6 +243,15 @@ async function waitForContention(root: string, count: number): Promise<void> {
     if (Date.now() >= deadline) {
       throw new Error(`expected ${count} lock records in ${directory}, saw ${records.length}`)
     }
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+
+/** Wait until a holder has synchronously written its marker file. */
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 120_000
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
@@ -1180,15 +1192,21 @@ describe('anvil setup', () => {
     saveSetupApprovalGrant(grant, { env })
     const saved = saveData(plan)
 
+    const { ANVIL_APPROVAL_HOME: store } = env
+    assert.ok(store)
+    const marker = join(store, 'holder-started')
     const holder = startHolder({
       ANVIL_TEST_MODE: 'started',
-      ANVIL_TEST_REPO: root,
-      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      // The plan records the realpath-normalized root; the holder must use that same spelling
+      // or its revalidation refuses the plan as belonging to another repository.
+      ANVIL_TEST_REPO: grant.repository.root,
+      ANVIL_TEST_HEAD: grant.repository.head,
       ANVIL_TEST_GRANT: grant.id,
       ANVIL_TEST_PLAN: JSON.stringify(plan),
+      ANVIL_TEST_MARKER: marker,
       ...env,
     })
-    await holder.ready('started')
+    await waitForFile(marker)
     // The holder consumed the attempt, published its `started` journal and is holding the
     // repository lock. Killing it is the crash this test is about: nothing recorded an
     // outcome, and the lock record now belongs to a dead process.
@@ -1225,8 +1243,8 @@ describe('anvil setup', () => {
 
     const holder = startHolder({
       ANVIL_TEST_MODE: 'reserved',
-      ANVIL_TEST_REPO: root,
-      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      ANVIL_TEST_REPO: grant.repository.root,
+      ANVIL_TEST_HEAD: grant.repository.head,
       ANVIL_TEST_GRANT: grant.id,
       ANVIL_TEST_PLAN: JSON.stringify(plan),
       ...env,
@@ -1266,8 +1284,8 @@ describe('anvil setup', () => {
 
     const holder = startHolder({
       ANVIL_TEST_MODE: 'window',
-      ANVIL_TEST_REPO: root,
-      ANVIL_TEST_HEAD: git(root, 'rev-parse', 'HEAD').trim(),
+      ANVIL_TEST_REPO: grant.repository.root,
+      ANVIL_TEST_HEAD: grant.repository.head,
       ANVIL_TEST_GRANT: grant.id,
       ANVIL_TEST_PLAN: JSON.stringify(plan),
       ...env,
