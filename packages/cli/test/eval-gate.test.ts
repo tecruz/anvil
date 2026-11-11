@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -18,6 +18,7 @@ import {
   type EvalVerifierScenario,
   hashDirectory,
   hashScenario,
+  hashScenarioSource,
   latestAttemptState,
   parseBaseline,
   parseLatest,
@@ -1152,5 +1153,101 @@ describe('run record compatibility for resume', () => {
     const gate = checkRunRecordCompatibility(null, config())
     assert.equal(gate.ok, false)
     assert.match(gate.message, /no run record exists to resume/)
+  })
+})
+
+describe('skill comparison scenarios', () => {
+  function skillScenario(over: Partial<EvalScenario> = {}): EvalScenario {
+    return scenario({
+      id: 'skill-guidance',
+      repo: 'eval/repos/skill-guidance',
+      baselineContext: 'anvil',
+      skill: { source: 'eval/skills/skill-guidance/SKILL.md', name: 'release-notes' },
+      ...over,
+    })
+  }
+
+  test('the checked-in matrix is valid and carries the skill scenario', () => {
+    const raw = JSON.parse(readFileSync(new URL('../../../eval/scenarios.json', import.meta.url), 'utf8')) as {
+      scenarios: EvalScenario[]
+    }
+    assert.equal(validateScenarioMatrix(raw.scenarios), null)
+    const chosen = raw.scenarios.find((entry) => entry.id === 'skill-guidance')
+    assert.ok(chosen !== undefined, 'skill-guidance must be part of the matrix')
+    assert.equal(chosen.baselineContext, 'anvil')
+    assert.deepEqual(chosen.skill, { source: 'eval/skills/skill-guidance/SKILL.md', name: 'release-notes' })
+  })
+
+  test('a skill requires the same derived context on both variants', () => {
+    const missing = skillScenario()
+    delete missing.baselineContext
+    assert.match(validateScenarioMatrix([...matrix(), missing]) ?? '', /baselineContext "anvil"/)
+  })
+
+  test('a skill name must be the lowercase hyphenated shape the adapter installs', () => {
+    const invalid = skillScenario({ skill: { source: 'eval/skills/skill-guidance/SKILL.md', name: 'Release Notes' } })
+    assert.match(validateScenarioMatrix([...matrix(), invalid]) ?? '', /skill name/)
+  })
+
+  test('a skill source cannot leave the repository', () => {
+    for (const source of [
+      '../outside.md',
+      '/etc/SKILL.md',
+      'C:/skill.md',
+      'eval\\skills\\SKILL.md',
+      'eval//skill.md',
+    ]) {
+      const invalid = skillScenario({ skill: { source, name: 'release-notes' } })
+      assert.match(validateScenarioMatrix([...matrix(), invalid]) ?? '', /repository-relative/, source)
+    }
+  })
+
+  test('the skill source is part of the fixture hash', () => {
+    const root = temp('anvil-eval-skill-hash-')
+    mkdirSync(join(root, 'repo'), { recursive: true })
+    writeFileSync(join(root, 'repo', 'package.json'), '{}')
+    writeFileSync(join(root, 'first.md'), 'first')
+    writeFileSync(join(root, 'second.md'), 'second')
+    const first = skillScenario({ repo: 'repo', skill: { source: 'first.md', name: 'release-notes' } })
+    const second = skillScenario({ repo: 'repo', skill: { source: 'second.md', name: 'release-notes' } })
+    assert.notEqual(hashScenarioSource(root, first), hashScenarioSource(root, second))
+    assert.notEqual(hashScenario(first), hashScenario(second))
+  })
+
+  test('the installed name changes the plan hash but not the fixture hash', () => {
+    const root = temp('anvil-eval-skill-name-')
+    mkdirSync(join(root, 'repo'), { recursive: true })
+    writeFileSync(join(root, 'repo', 'package.json'), '{}')
+    writeFileSync(join(root, 'skill.md'), 'skill')
+    const first = skillScenario({ repo: 'repo', skill: { source: 'skill.md', name: 'release-notes' } })
+    const second = skillScenario({ repo: 'repo', skill: { source: 'skill.md', name: 'changelog' } })
+    assert.equal(hashScenarioSource(root, first), hashScenarioSource(root, second))
+    assert.notEqual(hashScenario(first), hashScenario(second))
+  })
+
+  test('skill verdicts survive a summary round trip, and an unknown verdict is refused', () => {
+    const run = latest([skillScenario()])
+    run.results[0]!.skillInstall = 'verified'
+    run.results[0]!.skillAccess = 'observed'
+    const parsed = parseLatest(JSON.parse(JSON.stringify(run)))
+    assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
+    assert.equal(parsed.results[0]!.skillInstall, 'verified')
+    assert.equal(parsed.results[0]!.skillAccess, 'observed')
+
+    const invalid = parseLatest({
+      ...run,
+      results: [{ ...run.results[0], skillInstall: 'installed' }],
+    })
+    assert.match(invalid as string, /skillInstall is invalid/)
+  })
+
+  test('skill verdicts survive a run record round trip, so resume does not lose them', () => {
+    const record = runRecord()
+    record.results[0]!.skillInstall = 'failed'
+    record.results[0]!.skillAccess = 'not-installed'
+    const parsed = parseRunRecord(JSON.parse(JSON.stringify(record)))
+    assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
+    assert.equal(parsed.results[0]!.skillInstall, 'failed')
+    assert.equal(parsed.results[0]!.skillAccess, 'not-installed')
   })
 })

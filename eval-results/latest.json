@@ -1,10 +1,10 @@
 {
   "schemaVersion": 3,
-  "generatedAt": "2026-11-11T13:48:49.018Z",
-  "implementation": "d704fbc4c39cae298015c8ef3d91b43e623a4fe155528a25b9f872a20b0be238",
-  "runId": "f51c1c33-9cd8-451c-baf0-a6b093a2593a",
+  "generatedAt": "2026-11-11T23:30:44.371Z",
+  "implementation": "c90bfff560a9778c21f2e4540206bc4059cb07c2c720aa0498621a9b4884e907",
+  "runId": "d7a4f34d-3f04-47aa-8c48-beb57735a200",
   "repetitions": 1,
-  "seed": "746bab66-5e6c-44d3-9ebc-5aac82fbe471",
+  "seed": "bddc44b1-76ae-4b30-ba96-d2b2ef0d0e16",
   "order": "alternate",
   "results": [
     {
@@ -22,7 +22,8 @@
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "tiny-code-change",
@@ -39,7 +40,8 @@
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "tiny-verify-only",
@@ -56,7 +58,8 @@
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "tiny-verify-only",
@@ -73,7 +76,8 @@
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "medium-code-change",
@@ -90,7 +94,8 @@
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "medium-code-change",
@@ -107,7 +112,8 @@
       "verified": true,
       "hiddenVerified": true,
       "verifyExitCodes": [0, 0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "medium-verify-only",
@@ -124,7 +130,8 @@
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     },
     {
       "scenario": "medium-verify-only",
@@ -141,7 +148,8 @@
       "verified": true,
       "hiddenVerified": null,
       "verifyExitCodes": [0],
-      "repetition": 0
+      "repetition": 0,
+      "skillInstall": "not-requested"
     }
   ]
 }

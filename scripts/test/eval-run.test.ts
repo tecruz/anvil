@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { isCheckCommand, parseOpenCodeRunEvents, run } from '../eval.ts'
+import { isCheckCommand, observeSkillAccess, parseOpenCodeRunEvents, run } from '../eval.ts'
 
 const temps: string[] = []
 after(() => {
@@ -57,6 +57,7 @@ describe('eval harness process environment', () => {
     assert.deepEqual(parseOpenCodeRunEvents(output), {
       text: 'node',
       executions: [{ command: 'node run-check.js', exitCode: 1 }],
+      reads: [],
     })
   })
 
@@ -90,6 +91,29 @@ describe('eval harness process environment', () => {
     })
 
     assert.deepEqual(parseOpenCodeRunEvents(output).executions, [{ command: 'node run-check.js', exitCode: null }])
+  })
+
+  test('a completed read reports the file it opened, and an unfinished one does not', () => {
+    const output = [
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', input: { filePath: '.agents/skills/release-notes/SKILL.md' } },
+        },
+      }),
+      JSON.stringify({
+        type: 'tool_use',
+        part: {
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'running', input: { filePath: 'README.md' } },
+        },
+      }),
+    ].join('\n')
+
+    assert.deepEqual(parseOpenCodeRunEvents(output).reads, [{ path: '.agents/skills/release-notes/SKILL.md' }])
   })
 
   test('the check command is matched on its arguments, not on its spelling', () => {
@@ -167,5 +191,50 @@ describe('eval harness process environment', () => {
     // the harness (the parent / repo checkout).
     assert.equal(reported.pwd, scenario, 'PWD must point at the subprocess cwd')
     assert.notEqual(reported.pwd, inherited, 'PWD must not be the inherited directory')
+  })
+})
+
+describe('skill access observation', () => {
+  const skill = { source: 'eval/skills/skill-guidance/SKILL.md', name: 'release-notes' }
+
+  test('a read of the installed skill is observed', () => {
+    assert.equal(
+      observeSkillAccess(skill, {
+        executions: [],
+        reads: [{ path: '.agents/skills/release-notes/SKILL.md' }],
+      }),
+      'observed',
+    )
+  })
+
+  test('a Windows path and a shell command naming the skill are both observed', () => {
+    assert.equal(
+      observeSkillAccess(skill, {
+        executions: [],
+        reads: [{ path: 'C:\\repo\\.agents\\skills\\release-notes\\SKILL.md' }],
+      }),
+      'observed',
+    )
+    assert.equal(
+      observeSkillAccess(skill, {
+        executions: [{ command: 'cat .agents/skills/release-notes/SKILL.md' }],
+        reads: [],
+      }),
+      'observed',
+    )
+  })
+
+  test('a read of another skill is not observation of this one', () => {
+    assert.equal(
+      observeSkillAccess(skill, {
+        executions: [{ command: 'node --test' }],
+        reads: [{ path: '.agents/skills/verify-change/SKILL.md' }],
+      }),
+      'not-observed',
+    )
+  })
+
+  test('no tool events at all stays unknown, because absence is not proof of non-use', () => {
+    assert.equal(observeSkillAccess(skill, { executions: [], reads: [] }), 'unknown')
   })
 })

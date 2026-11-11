@@ -210,6 +210,27 @@ the agent actually ran the required checks and reported their outcomes. Keep tas
 separate from whether the repository's checks passed; do not require a deliberately broken
 fixture to become green. A no-op or incorrect-success report must fail grading.
 
+### Installed-skill comparison
+
+`skill-guidance` asks whether an installed, approved skill changes the work. Both variants
+receive the same `anvil init` artifacts (`baselineContext: "anvil"`); only the anvil variant
+also receives the skill, installed through `anvil setup apply`. The harness approves the
+exact plan itself because the run is unattended; consumption, the repository lock, the
+no-replace publish, the journal and the independent verifier still run for real. The source
+is staged, committed, installed, then removed and the artifact committed, so the variant
+without the skill cannot read the skill text from the worktree.
+
+Each result keeps three facts apart:
+
+- `skillInstall` — whether installation reported `verified`.
+- `skillAccess` — `observed` (a completed read, or a shell command naming the skill path),
+  `not-observed`, or `unknown`. Not observed is not evidence of non-use.
+- `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
+
+The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke
+cost. A positive, negative or absent difference is a measurement, and three repetitions are
+exploratory rather than proof.
+
 ### Budget and pilot
 
 - Keep the weekly default at the existing smoke workload until a pilot justifies changing it.
@@ -242,9 +263,10 @@ fixture to become green. A no-op or incorrect-success report must fail grading.
 Phase 2A (evidence schema v3 with repetitions/seed/order) was merged into PR #8 with
 schema v3, CLI flags `--repetitions`, `--seed`, `--order`, and 97 gate tests passing.
 
-Phase 2B (extended 6-scenario corpus) is now complete:
-  - 6 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
-    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change
+Phase 2B (extended scenario corpus) is now complete:
+  - 7 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
+    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change,
+    and skill-guidance (the installed-skill comparison)
   - `validateScenarioMatrix()` evolved to allow extra scenarios beyond the required 4 cells
   - Solution fixtures created for all 6 scenarios
   - Hidden verify test fixtures added for 5 scenarios requiring post-agent grading

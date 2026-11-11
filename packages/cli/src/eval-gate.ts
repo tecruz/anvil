@@ -27,7 +27,9 @@ export type EvalScenarioKind = 'code-change' | 'verify-only'
 export type EvalModelRole = 'small' | 'frontier'
 
 /** Version 1 remains readable; version 2 adds verifier declarations; version 3 adds
- *  repetition/counterbalancing for paired comparisons. */
+ *  repetition/counterbalancing for paired comparisons. Version 3 summaries and run records
+ *  may also carry the optional skill-install/access facts; they are additive, so evidence
+ *  written before they existed stays valid. */
 export const EVAL_SCHEMA_VERSION = 3
 export type EvalSchemaVersion = 1 | 2 | 3
 
@@ -43,6 +45,39 @@ export interface EvalSolutionFile {
   from: string
   to: string
 }
+
+/**
+ * A skill the harness installs through the approved, create-only application path.
+ *
+ * The source lives outside the fixture repository, so neither variant can read it from the
+ * worktree. The harness copies it in, commits it, approves the plan, applies it, and then
+ * removes the source and commits the artifact, leaving the installed skill as the only
+ * difference between the variants.
+ */
+export interface EvalSkillSpec {
+  /** Path to the skill source, relative to the repository the harness runs from. */
+  source: string
+  /** Installed skill name; becomes `.agents/skills/<name>/SKILL.md`. */
+  name: string
+}
+
+/**
+ * Whether the scenario's skill was installed, and whether it verified.
+ *
+ * `not-requested` is a scenario without a skill; `not-installed` is the variant that does
+ * not receive one. Only a verified installation proceeds to the agent.
+ */
+export type EvalSkillInstall = 'not-requested' | 'not-installed' | 'verified' | 'failed'
+
+/**
+ * Whether the agent was seen touching the installed skill.
+ *
+ * `observed` means a completed read of the skill file, or a completed shell command naming
+ * it. `not-observed` means neither was seen, which is **not** proof the agent did not use
+ * it: a command whose event never completed, or a tool the harness does not parse, is
+ * invisible here. `unknown` means the run produced no tool events at all.
+ */
+export type EvalSkillAccess = 'not-installed' | 'observed' | 'not-observed' | 'unknown'
 
 export interface EvalScenario {
   id: string
@@ -82,6 +117,19 @@ export interface EvalScenario {
   captureExecution?: boolean
   /** How long the agent gets. */
   timeoutMinutes?: number
+  /**
+   * Derived context both variants receive before the agent starts.
+   *
+   * `anvil` applies `anvil init` artifacts to both variants, so a scenario with a skill
+   * compares the skill itself rather than the init artifacts. The default, `none`, keeps the
+   * original comparison (artifacts in the anvil variant only).
+   */
+  baselineContext?: 'none' | 'anvil'
+  /**
+   * A skill installed in the anvil variant only, after `baselineContext`. Requires
+   * `baselineContext: 'anvil'` so the paired difference stays the skill.
+   */
+  skill?: EvalSkillSpec
   /** What a passing run must produce. */
   expect: { verified?: boolean; hiddenVerified?: boolean }
 }
@@ -130,6 +178,10 @@ export interface EvalResultSummary {
   hiddenVerified: boolean | null
   verifyExitCodes: number[]
   error?: string
+  /** Whether the scenario's skill was installed and independently verified. */
+  skillInstall?: EvalSkillInstall
+  /** Whether the agent was seen touching the installed skill; never proof of use. */
+  skillAccess?: EvalSkillAccess
   /** Which repetition of the scenario this result belongs to, starting at 0. */
   repetition: number | null
 }
@@ -200,6 +252,10 @@ export interface EvalRunRecordResult {
   transcript: string
   /** Any agent error from the last completed attempt. */
   error?: string
+  /** Whether the scenario's skill was installed and independently verified. */
+  skillInstall?: EvalSkillInstall
+  /** Whether the agent was seen touching the installed skill; never proof of use. */
+  skillAccess?: EvalSkillAccess
   /** Which repetition of the scenario this result belongs to, starting at 0. */
   repetition: number | null
 }
@@ -388,6 +444,8 @@ export function hashScenario(scenario: EvalScenario): string {
     ...(scenario.solutionRun === undefined ? {} : { solutionRun: scenario.solutionRun }),
     ...(scenario.captureExecution === undefined ? {} : { captureExecution: scenario.captureExecution }),
     timeoutMinutes: scenario.timeoutMinutes ?? null,
+    ...(scenario.baselineContext === undefined ? {} : { baselineContext: scenario.baselineContext }),
+    ...(scenario.skill === undefined ? {} : { skill: { source: scenario.skill.source, name: scenario.skill.name } }),
     expect: scenario.expect,
   })
 }
@@ -414,6 +472,7 @@ export function hashScenarioSource(repoRoot: string, scenario: EvalScenario): st
   const solutions =
     scenario.solution === undefined ? [] : Array.isArray(scenario.solution) ? scenario.solution : [scenario.solution]
   for (const file of solutions) hashPath(file.from)
+  if (scenario.skill !== undefined) hashPath(scenario.skill.source)
   return hash.digest('hex')
 }
 
@@ -445,6 +504,27 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
     if (scenario.kind !== 'code-change' && scenario.kind !== 'verify-only') {
       return `${scenario.id}: kind must be code-change or verify-only`
     }
+    if (
+      scenario.baselineContext !== undefined &&
+      scenario.baselineContext !== 'none' &&
+      scenario.baselineContext !== 'anvil'
+    ) {
+      return `${scenario.id}: baselineContext must be none or anvil`
+    }
+    if (scenario.skill !== undefined) {
+      const skill = scenario.skill as { source?: unknown; name?: unknown }
+      if (typeof skill.source !== 'string' || !isRepoRelativePath(skill.source)) {
+        return `${scenario.id}: skill source must be a repository-relative path`
+      }
+      if (typeof skill.name !== 'string' || !SCENARIO_SKILL_NAME.test(skill.name)) {
+        return `${scenario.id}: skill name must be a lowercase hyphenated name`
+      }
+      // Without the same derived context on both sides, a difference in task success could
+      // come from the init artifacts instead of the skill.
+      if (scenario.baselineContext !== 'anvil') {
+        return `${scenario.id}: a skill requires baselineContext "anvil", so the paired difference is the skill`
+      }
+    }
     const cell = `${scenario.size}:${scenario.kind}`
     // Record the first scenario per cell; later ones in the same cell are permitted.
     if (!seen.has(cell)) seen.set(cell, scenario.id)
@@ -459,6 +539,21 @@ export function validateScenarioMatrix(scenarios: readonly EvalScenario[]): stri
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** The same shape `local-skill/v1` accepts: lowercase, hyphen-separated, no empty segment. */
+const SCENARIO_SKILL_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
+/**
+ * A repository-relative path with no escape hatch.
+ *
+ * The harness reads the skill source from the repository it runs in and copies it into a
+ * throwaway worktree, so a `..` segment, a backslash, an empty segment or an absolute path
+ * is refused before it can point somewhere else.
+ */
+function isRepoRelativePath(path: string): boolean {
+  if (path === '' || path.includes('\\') || path.startsWith('/') || /^[A-Za-z]:/.test(path)) return false
+  return path.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..')
 }
 
 /** Read and parse a JSON file, or return null when it cannot be read. */
@@ -535,6 +630,20 @@ function parseCount(value: unknown): number | null {
   return value
 }
 
+const SKILL_INSTALL_VALUES: ReadonlySet<string> = new Set(['not-requested', 'not-installed', 'verified', 'failed'])
+const SKILL_ACCESS_VALUES: ReadonlySet<string> = new Set(['not-installed', 'observed', 'not-observed', 'unknown'])
+
+/**
+ * Parse an optional skill verdict.
+ *
+ * `undefined` means the record predates the field; `'invalid'` means the field is present
+ * and wrong. Folding the two together would let a typo become "no skill was involved".
+ */
+function parseSkillState<T extends string>(value: unknown, allowed: ReadonlySet<string>): T | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  return typeof value === 'string' && allowed.has(value) ? (value as T) : 'invalid'
+}
+
 /** Parse a fixture-fingerprint map, or explain why it is not one. */
 function parseFixtureHashes(value: unknown): EvalFixtureHashes | string {
   if (!isObject(value)) return 'run record has no scenarioHashes map'
@@ -605,6 +714,10 @@ export function parseLatest(value: unknown): EvalLatest | string {
     const verifyExitCodes = parseExitCodes(raw.verifyExitCodes)
     if (verifyExitCodes === null) return `${raw.scenario}: latest verifyExitCodes is invalid`
     if (raw.error !== undefined && typeof raw.error !== 'string') return `${raw.scenario}: latest error is invalid`
+    const skillInstall = parseSkillState<EvalSkillInstall>(raw.skillInstall, SKILL_INSTALL_VALUES)
+    if (skillInstall === 'invalid') return `${raw.scenario}: latest skillInstall is invalid`
+    const skillAccess = parseSkillState<EvalSkillAccess>(raw.skillAccess, SKILL_ACCESS_VALUES)
+    if (skillAccess === 'invalid') return `${raw.scenario}: latest skillAccess is invalid`
     results.push({
       scenario: raw.scenario,
       size: raw.size,
@@ -622,6 +735,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
       verifyExitCodes,
       repetition,
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+      ...(skillInstall === undefined ? {} : { skillInstall }),
+      ...(skillAccess === undefined ? {} : { skillAccess }),
     })
   }
   return {
@@ -699,6 +814,10 @@ export function parseRunRecordResult(
   if (value.error !== undefined && typeof value.error !== 'string') {
     return `run record result ${key} error is invalid`
   }
+  const skillInstall = parseSkillState<EvalSkillInstall>(value.skillInstall, SKILL_INSTALL_VALUES)
+  if (skillInstall === 'invalid') return `run record result ${key} skillInstall is invalid`
+  const skillAccess = parseSkillState<EvalSkillAccess>(value.skillAccess, SKILL_ACCESS_VALUES)
+  if (skillAccess === 'invalid') return `run record result ${key} skillAccess is invalid`
   return {
     scenario: value.scenario,
     variant: value.variant,
@@ -718,6 +837,8 @@ export function parseRunRecordResult(
     durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : 0,
     transcript: typeof value.transcript === 'string' ? value.transcript : '',
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
+    ...(skillInstall === undefined ? {} : { skillInstall }),
+    ...(skillAccess === undefined ? {} : { skillAccess }),
   }
 }
 
