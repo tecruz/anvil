@@ -142,6 +142,11 @@ export interface SetupApplyHooks {
   beforeWrite?(plan: SetupExecutionPlan): void
   /** Replace the create-only publish. */
   publish?(destination: string, bytes: Buffer): void
+  /**
+   * Runs inside the real create-only publisher, after the temporary file is written and
+   * after the destination is linked. A test can stop the process at either step.
+   */
+  duringPublish?(step: 'temp-written' | 'linked'): void
   /** Replace the independent verifier. */
   verify?(target: InstalledLocalSkill): SetupApplyVerification
 }
@@ -452,13 +457,19 @@ function createSkillDirectory(root: string, rel: string): void {
  * exclusive create is the fallback. Either way an existing destination is refused, never
  * overwritten.
  */
-function publishNoReplace(destination: string, bytes: Buffer): void {
+function publishNoReplace(
+  destination: string,
+  bytes: Buffer,
+  duringPublish?: (step: 'temp-written' | 'linked') => void,
+): void {
   const target = dirname(destination)
   const temp = join(target, `.SKILL.md.${randomUUID()}.tmp`)
   try {
     writeFileSync(temp, bytes, { flag: 'wx' })
+    duringPublish?.('temp-written')
     try {
       linkSync(temp, destination)
+      duringPublish?.('linked')
       return
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -468,6 +479,7 @@ function publishNoReplace(destination: string, bytes: Buffer): void {
       }
       try {
         writeFileSync(destination, bytes, { flag: 'wx' })
+        duringPublish?.('linked')
         return
       } catch (fallback) {
         if ((fallback as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -1077,7 +1089,9 @@ function runApplication(
 
     const destination = join(root, ...plan.skill.destination.split('/'))
     assertInsideRepository(root, dirname(destination))
-    const publish = flow.hooks?.publish ?? publishNoReplace
+    const publish =
+      flow.hooks?.publish ??
+      ((target: string, bytes: Buffer) => publishNoReplace(target, bytes, flow.hooks?.duringPublish))
     currentOperation = plan.operations.find((operation) => operation.kind === 'write-file')?.id ?? null
     publish(destination, approvedBytes(plan))
     mutated = true
