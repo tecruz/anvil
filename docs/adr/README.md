@@ -27,7 +27,8 @@ that supersedes it. The status line at the top is the source of truth.
 | [0016](0016-mobile-platforms-are-their-own-stacks.md) | Mobile platforms are their own stacks, and Apple's two are two playbooks | accepted |
 | [0017](0017-plan-enriches-by-default.md) | `plan` and `brief` enrich by default; the cache bounds the cost | accepted |
 | [0018](0018-approved-local-skill-installation.md) | Approved local skill installation starts with one create-only adapter | accepted |
-| [0019](0019-approval-authority-is-a-user-owned-store.md) | Approval authority is a user-owned store, not a plan digest | accepted |
+| [0019](0019-approval-authority-is-a-user-owned-store.md) | Approval authority is a user-owned store, not a plan digest | accepted, superseded on application support by [0020](0020-application-is-a-journaled-transition.md) |
+| [0020](0020-application-is-a-journaled-transition.md) | Application is a journaled, create-only transition after consumption | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

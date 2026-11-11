@@ -62,7 +62,7 @@ function rehash(value: object): Record<string, unknown> {
 }
 
 describe('setup execution plans', () => {
-  test('a valid local skill produces a deterministic, inspect-only plan and exact content', () => {
+  test('a valid local skill produces a deterministic plan and exact content', () => {
     const root = scratch()
     const content = skill()
     write(root, 'skills/source.md', content)
@@ -75,7 +75,7 @@ describe('setup execution plans', () => {
     assert.equal(first.status, 'proposed')
     assert.equal(first.executed, false)
     assert.equal(first.approval, 'not-granted')
-    assert.equal(first.executionSupported, false)
+    assert.equal(first.executionSupported, true)
     assert.equal(first.skill.name, 'my-skill')
     assert.equal(first.skill.destination, '.agents/skills/my-skill/SKILL.md')
     assert.equal(first.source.path, 'skills/source.md')
@@ -117,7 +117,7 @@ describe('setup execution plans', () => {
     })
     assert.equal(first.verification.id, 'local-skill-installed/v1')
     assert.match(first.verification.proves, /does not prove that an agent loaded/)
-    assert.match(first.warnings.join('\n'), /Inspection only/)
+    assert.match(first.warnings.join('\n'), /Planning only/)
     assert.match(first.warnings.join('\n'), /create-only|No downloads/)
     // Plan and validation never create the destination.
     assert.equal(validateSetupExecutionPlan(JSON.parse(JSON.stringify(first)), second).status, 'current')
@@ -187,7 +187,7 @@ describe('setup execution plans', () => {
       rehash({ ...saved, approved: true }),
       rehash({ ...saved, approval: 'granted' }),
       rehash({ ...saved, executed: true }),
-      rehash({ ...saved, executionSupported: true }),
+      rehash({ ...saved, executionSupported: false }),
     ]) {
       const validation = validateSetupExecutionPlan(forged, saved)
       assert.notEqual(validation.status, 'current')

@@ -18,10 +18,13 @@ import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import {
+  buildSetupApprovalGrant,
   buildSetupPlan,
+  type SetupApplicationRecord,
   type SetupExecutionPlan,
   type SetupPlan,
   type SetupPlanValidation,
+  saveSetupApprovalGrant,
   validateSetupPlan,
 } from '@anvil/derive'
 import { git as gitExec, normalizeGitPath } from '@anvil/git'
@@ -587,7 +590,7 @@ describe('anvil setup', () => {
     assert.equal(indexRead, false)
   })
 
-  test('a local-skill execution plan is inspection-only and validates unchanged inputs', () => {
+  test('a local-skill execution plan is a proposal and validates unchanged inputs', () => {
     const root = repo()
     const content = skillContent('my-skill', 'Do the thing.\n\n```js\nconsole.log(1)\n```\n')
     writeFileSync(join(root, 'skill.md'), content)
@@ -599,7 +602,7 @@ describe('anvil setup', () => {
     assert.equal(plan.status, 'proposed')
     assert.equal(plan.executed, false)
     assert.equal(plan.approval, 'not-granted')
-    assert.equal(plan.executionSupported, false)
+    assert.equal(plan.executionSupported, true)
     assert.equal(plan.source.path, 'skill.md')
     assert.equal(plan.source.content, content)
     assert.equal(plan.skill.destination, '.agents/skills/my-skill/SKILL.md')
@@ -615,7 +618,7 @@ describe('anvil setup', () => {
     assert.equal(text.code, 0, text.stdout + text.stderr)
     assert.match(text.stdout, /Execution plan:/)
     assert.match(text.stdout, /Not approved/)
-    assert.match(text.stdout, /no approval or apply command/)
+    assert.match(text.stdout, /Approval and application are separate commands/)
     assert.match(text.stdout, /Do the thing/)
     // The preview fence is longer than any run of backticks in the skill body.
     assert.match(text.stdout, /````markdown/)
@@ -894,5 +897,72 @@ describe('anvil setup', () => {
       const result = run(root, [...args, '--json'], env)
       assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)
     }
+  })
+
+  test('apply flags are strict: both the plan and the grant are required', () => {
+    const root = repo()
+    const env = approvalEnv()
+    for (const args of [
+      ['apply'],
+      ['apply', '--plan', 'plan.json'],
+      ['apply', '--grant', 'x'],
+      ['apply', '--plan', 'plan.json', '--grant', 'x', '--adapter', 'local-skill'],
+      ['apply', '--plan', 'plan.json', '--grant', 'x', '--source', 'skill.md'],
+      ['apply', '--plan', 'plan.json', '--grant', 'x', '--name', 'my-skill'],
+      ['apply', '--plan', 'plan.json', '--grant', 'x', '--confirm', 'yes'],
+    ]) {
+      const result = run(root, [...args, '--json'], env)
+      assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)
+    }
+  })
+
+  test('apply installs an approved plan once, then reports the recorded success without writing again', () => {
+    const root = repo()
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '11111111-2222-4333-8444-555555555555' })
+    saveSetupApprovalGrant(grant, { env })
+    const saved = saveData(plan)
+
+    const applied = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    assert.equal(applied.code, 0, applied.stdout + applied.stderr)
+    const record = (JSON.parse(applied.stdout) as { data: SetupApplicationRecord }).data
+    assert.equal(record.status, 'applied')
+    assert.equal(record.executed, true)
+    assert.equal(record.verified, true)
+    const installed = join(root, '.agents', 'skills', 'my-skill', 'SKILL.md')
+    assert.equal(readFileSync(installed, 'utf8'), skillContent())
+    assert.match(git(root, 'status', '--porcelain'), /\.agents\//)
+
+    const again = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    assert.equal(again.code, 0, again.stdout + again.stderr)
+    const second = (JSON.parse(again.stdout) as { data: SetupApplicationRecord }).data
+    assert.equal(second.status, 'applied')
+    assert.equal(second.executed, false)
+    assert.equal(second.alreadyApplied, true)
+    assert.equal(readFileSync(installed, 'utf8'), skillContent())
+  })
+
+  test('apply refuses an owner-command proposal and a stale plan without writing', () => {
+    const root = repo({ commands: [{ kind: 'install', cmd: 'npm ci' }] })
+    writeFileSync(join(root, 'skill.md'), skillContent())
+    commit(root)
+    const plan = executionPlan(root)
+    const env = approvalEnv()
+    const grant = buildSetupApprovalGrant(plan, { id: '22222222-3333-4444-8555-666666666666' })
+    saveSetupApprovalGrant(grant, { env })
+
+    const owner = run(root, ['apply', '--plan', save(proposal(root)), '--grant', grant.id, '--json'], env)
+    assert.equal(owner.code, 5, owner.stdout)
+    assert.equal(existsSync(join(root, '.agents')), false)
+
+    writeFileSync(join(root, 'skill.md'), skillContent('my-skill', 'Changed after approval.\n'))
+    commit(root)
+    const stale = run(root, ['apply', '--plan', saveData(plan), '--grant', grant.id, '--json'], env)
+    assert.equal(stale.code, 5, stale.stdout)
+    assert.equal((JSON.parse(stale.stdout) as { ok: boolean }).ok, false)
+    assert.equal(existsSync(join(root, '.agents')), false)
   })
 })

@@ -1,14 +1,14 @@
 # Setup plan contracts
 
-`anvil setup plan` and `anvil setup validate --plan <file>` implement only the **inspect**
-part of the integration lifecycle; `anvil setup approve`, `approval` and `revoke` manage
-approval grants. There is no apply, install or execute command, and generating, saving or
-validating a plan never authorizes execution.
+`anvil setup plan` and `anvil setup validate --plan <file>` implement the **inspect** part of
+the integration lifecycle; `anvil setup approve`, `approval` and `revoke` manage approval
+grants; and `anvil setup apply --plan <file> --grant <id>` performs one create-only
+application of the plan a grant authorizes. Generating, saving or validating a plan never
+authorizes execution, and approving never writes to the repository.
 
 Two plan formats exist today. The original `SetupPlan` describes owner-declared install
 commands and stays inspect-only. The `SetupExecutionPlan` describes one create-only
-`local-skill/v1` adapter and can be approved — but approval is a separate, single-use grant
-outside the repository, never a field on the plan itself.
+`local-skill/v1` adapter, can be approved, and can be applied once through its grant.
 
 ## Supported inputs
 
@@ -117,7 +117,7 @@ files, credentials, system configuration, installed binaries, network resources 
 machine's environment. An unchanged plan is not an approval record, proof of safety,
 successful setup, or an operating-system sandbox.
 
-## Execution-plan contract: `local-skill/v1` (inspection only)
+## Execution-plan contract: `local-skill/v1`
 
 The first bounded execution adapter plans the installation of one agent skill already in the
 repository:
@@ -146,7 +146,7 @@ The normal CLI envelope carries a `SetupExecutionPlan` in its `data` field:
 | --- | --- |
 | `schemaVersion`, `kind` | `1`, `"setup-execution-plan"` |
 | `status` | Always `"proposed"` |
-| `executed`, `executionSupported` | Both `false` in this slice |
+| `executed`, `executionSupported` | `executed` is false and `executionSupported` is true: the adapter can be applied, but this plan is not authority. Application requires a separate grant and `anvil setup apply`. |
 | `approval` | Always `"not-granted"` |
 | `adapter`, `adapterFingerprint` | `"local-skill/v1"` and a hash of its behaviour descriptor |
 | `repository` | Physical root, HEAD commit or `null`, and Git worktree state |
@@ -259,25 +259,106 @@ reports `revoked`, but a `consumed` grant already started its attempt and cannot
 with the record on an `ok: false` envelope.
 
 `consumeSetupApproval` reserves the single attempt and returns whether this call won it
-(`reserved: true`) or the attempt was already gone. Application code must call it after full
-revalidation and **before** its first repository mutation, so a crash or failure burns the
-attempt and cannot be retried without fresh approval. Revocation and reservation share one
+(`reserved: true`) or the attempt was already gone. Revocation and reservation share one
 no-replace state record, so they cannot both win and the terminal outcome is deterministic.
 There is no automatic retry.
 
-## Boundary for application
+## Application (`local-skill/v1`)
 
-The approval contract authorizes, but nothing here applies. Before anything is written, a
-separately reviewed change must implement:
+`anvil setup apply --plan <file> --grant <id>` applies the one current plan a grant
+authorizes:
 
-- a repository-scoped lock and complete revalidation immediately before mutation;
-- consumption of the grant's single attempt before the first write;
-- a create-only writer using a temporary file and no-replace publish semantics;
-- a journal with honest `partial`, `failed` and `interrupted` outcomes and no automatic retry;
-- independent verification of the installed bytes and metadata, with only the narrow claim
-  recorded above.
+```bash
+anvil setup apply --plan ../execution-plan.json --grant <id>
+anvil setup apply --plan ../execution-plan.json --grant <id> --json
+```
 
-The digest alone is never authority. Opaque install commands in the original proposal remain
-proposal-only and cannot be approved. A failed or partial integration must not be reported as
-completed, and path checks are not an operating-system sandbox against another process
-changing the filesystem concurrently.
+The command reads the saved plan's adapter inputs, rebuilds the plan, and requires the result
+to be `current`. It reads the grant and requires it to match that plan. It then acquires an
+`setup-apply` repository lock, re-reads the repository state, rebuilds and compares the plan
+again, and only then calls `consumeSetupApproval`. The attempt is reserved **before** the
+first directory or file is created, so a crash or a failed write burns the attempt. A
+refusal before reservation leaves the grant active and writes nothing.
+
+A recorded outcome is reported only when the saved plan is the exact plan the grant names
+(its canonical digest matches) and the command runs in the same physical repository. A
+different plan or checkout is refused rather than told that the installation succeeded
+there. A `started` journal is re-read under the repository lock: a live attempt is waited
+for and then settled from its terminal record, while a `started` journal still present once
+the reader holds the lock belongs to a dead writer and is reported as `interrupted`. A
+consumed reservation with no journal yet is handled the same way: the reader waits for the
+lock, re-reads the grant and the journal, and reports `interrupted` only if no journal
+appeared. Authority is always re-read while the lock is held, never reused from before the
+wait. A saved plan that reads as stale only because a concurrent writer already created the
+destination is settled the same way: the journal and reservation are re-read, and an
+existing attempt is reported instead of a misleading "destination already exists" refusal.
+
+Application is create-only:
+
+- `.agents` and `.agents/skills` must be real directories or absent; they are created only
+  when absent.
+- `.agents/skills/<name>` must be absent.
+- The file is written to a temporary file and linked into place without replacing anything,
+  with an exclusive create as the fallback on a filesystem without hard links.
+- An existing destination is never overwritten, merged, updated or deleted.
+
+### The journal
+
+Every reserved attempt writes `application.json` beside the grant, in the protected store,
+before the first mutation. It records the grant id, plan digest, adapter fingerprint,
+repository root and HEAD, source hash and size, the ordered operations with their observed
+status, the verification result and one of these states:
+
+| Journal state | Meaning |
+| --- | --- |
+| `started` | The attempt is in progress. It is reported as `interrupted` only when it is still `started` after the reader holds the repository lock. |
+| `succeeded` | The reviewed bytes were installed and independently verified. |
+| `failed` | Nothing was mutated; the attempt is over. |
+| `partial` | Something was mutated, or verification failed; the outcome is not a completed integration. |
+
+The journal is written with private permissions and read without following links or
+multiply-linked files. It belongs to one grant and one plan; a journal that disagrees with
+them is rejected as `interrupted`, never trusted as success.
+
+### Statuses and exit codes
+
+`setup apply` reports one status on its payload:
+
+| Status | Meaning |
+| --- | --- |
+| `applied` | The reviewed bytes are installed and the independent verifier passed |
+| `failed` | The attempt was reserved but no repository write completed |
+| `partial` | Something was written, or the installed bytes could not be verified |
+| `interrupted` | An earlier attempt was reserved and no live writer holds its lock, but it has no usable terminal outcome |
+| `refused` | The plan, grant or repository check prevented any attempt |
+
+Only `applied` exits **0**. A recorded `succeeded` journal that still verifies is reported as
+`applied` with `executed: false` and `alreadyApplied: true`, so repeating the command is safe
+and writes nothing. `failed`, `partial`, `interrupted` and `refused` exit **5** with the
+record on an `ok: false` envelope. Unreadable plan JSON exits **3**; invalid flags exit **2**,
+and so does a lock that cannot be acquired within the bounded wait.
+
+### Verification
+
+After publishing, a separate verifier reads the destination back from disk. It checks that
+the destination is inside the physical repository, that it is a regular file rather than a
+link, that its bytes and length match the approved source hash, and that the skill metadata
+is still valid. Only then is the outcome `applied`.
+
+That is the whole claim. It does **not** prove that an agent loaded, followed, trusted or
+successfully used the skill, and it does not prove authorship, quality or safety. A
+verification failure leaves the written bytes in place for inspection; it deletes nothing and
+reports `partial`.
+
+## Boundary and limits
+
+The journal is the record of what a reserved attempt did. It is not a transaction log: there
+is no rollback, no automatic retry, and no cleanup that deletes existing content. A failed or
+partial application requires inspection and, for another attempt, a fresh approval.
+
+The digest alone is never authority. Opaque owner-declared install commands remain
+proposal-only and cannot be approved or applied. A successful application does not make the
+filesystem safe: the repository lock serializes anvil processes, not arbitrary writers, and
+the path and no-replace checks reduce accidental overwrites without preventing another
+same-user process from changing paths concurrently. Approval is not an operating-system
+sandbox.

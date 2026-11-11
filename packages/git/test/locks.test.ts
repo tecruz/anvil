@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -37,6 +37,41 @@ test('a thrown callback releases only its own contender record', async () => {
   )
   assert.deepEqual(readdirSync(directory), [])
   assert.equal(await withRepoLock({ cwd: repo, name: 'claims' }, async () => 'retry'), 'retry')
+})
+
+test('a pre-existing linked lock directory is refused instead of followed', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'anvil-lock-link-'))
+  roots.push(repo)
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repo, stdio: 'pipe' })
+  const outside = mkdtempSync(join(tmpdir(), 'anvil-lock-outside-'))
+  roots.push(outside)
+  const link = join(repo, '.git', 'anvil-locks')
+  symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(
+    () => withRepoLock({ cwd: repo, name: 'claims', timeoutMs: 1000 }, async () => assert.fail('must not enter')),
+    (error: unknown) => {
+      assert.match(String(error), /linked claims lock directory/)
+      assert.match((error as { hint: string }).hint, /inside the repository/)
+      return true
+    },
+  )
+  assert.deepEqual(readdirSync(outside), [], 'no lock records may be written through a link')
+})
+
+test('a linked lock leaf is refused instead of followed', async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'anvil-lock-leaf-'))
+  roots.push(repo)
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repo, stdio: 'pipe' })
+  const outside = mkdtempSync(join(tmpdir(), 'anvil-lock-leaf-outside-'))
+  roots.push(outside)
+  mkdirSync(join(repo, '.git', 'anvil-locks'))
+  const link = join(repo, '.git', 'anvil-locks', 'claims.lock')
+  symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+  await assert.rejects(
+    () => withRepoLock({ cwd: repo, name: 'claims', timeoutMs: 1000 }, async () => assert.fail('must not enter')),
+    /linked claims lock directory/,
+  )
+  assert.deepEqual(readdirSync(outside), [], 'no lock records may be written through a leaf link')
 })
 
 test('legacy shared PID files fail closed with migration guidance', async () => {

@@ -571,9 +571,12 @@ export async function withRepoLock<T>(options: RepoLockOptions, fn: () => Promis
       hint: 'Run this from inside a git repository.',
     })
   }
-  const dir = join(normalizeGitPath(common.stdout), 'anvil-locks')
+  const commonDir = normalizeGitPath(common.stdout)
+  const dir = join(commonDir, 'anvil-locks')
   const lockPath = join(dir, `${options.name}.lock`)
-  return withDirectoryLock(lockPath, { timeoutMs, pollMs, name: options.name }, fn)
+  // The lock directory is created one component at a time from the common git dir, so a
+  // pre-existing link or junction cannot redirect lock records outside the repository.
+  return withDirectoryLock(lockPath, { root: commonDir, timeoutMs, pollMs, name: options.name }, fn)
 }
 
 /** Serialize `git fetch` across processes. */
