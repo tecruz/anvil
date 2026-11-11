@@ -111,9 +111,11 @@ function run(cwd: string, args: string[], extraEnv: Record<string, string> = {},
 /**
  * Run one real CLI process without blocking the test, so two invocations overlap.
  *
- * The synchronous `run` helper is enough for a single command; contention needs both
- * processes alive at the same time, each doing its own preflight and lock wait. The child is
- * registered for teardown and is killed if it somehow outlives the test.
+ * The synchronous `run` helper is enough for a single command that cannot wait on another
+ * process. Anything that may block behind a live lock — contending writers and the apply that
+ * settles a crashed attempt — goes through here instead: `execFileSync` cannot be interrupted,
+ * so a hung synchronous call would outlast the test timeout and keep the fixture busy. This
+ * child is registered for teardown and is killed if it outlives its own timeout.
  */
 function runConcurrently(
   t: TestContext,
@@ -1319,7 +1321,7 @@ describe('anvil setup', () => {
     assert.equal(outcome.spawnError, null)
     assert.notEqual(outcome.code, 0, 'the holder must not exit successfully')
 
-    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    const result = await runConcurrently(t, root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
     assert.equal(result.code, 5, result.stdout + result.stderr)
     const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
     assert.equal(record.status, 'interrupted')
@@ -1360,7 +1362,7 @@ describe('anvil setup', () => {
     assert.equal(outcome.spawnError, null)
     assert.notEqual(outcome.code, 0, 'the holder must not exit successfully')
 
-    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    const result = await runConcurrently(t, root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
     assert.equal(result.code, 5, result.stdout + result.stderr)
     const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
     assert.equal(record.status, 'interrupted')
@@ -1468,7 +1470,7 @@ describe('anvil setup', () => {
       'the kill landed inside publication, leaving its temporary file',
     )
 
-    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    const result = await runConcurrently(t, root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
     assert.equal(result.code, 5, result.stdout + result.stderr)
     const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
     assert.equal(record.status, 'interrupted')
@@ -1522,7 +1524,7 @@ describe('anvil setup', () => {
     assert.equal(readFileSync(installed, 'utf8'), skillContent())
     const publishedAt = statSync(installed).mtimeMs
 
-    const result = run(root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
+    const result = await runConcurrently(t, root, ['apply', '--plan', saved, '--grant', grant.id, '--json'], env)
     assert.equal(result.code, 5, result.stdout + result.stderr)
     const record = (JSON.parse(result.stdout) as { ok: boolean; data: SetupApplicationRecord }).data
     assert.equal(record.status, 'interrupted')
