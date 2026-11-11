@@ -28,6 +28,7 @@ import {
   openSync,
   readSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -121,9 +122,10 @@ export interface SetupApprovalRecord {
   kind: typeof SETUP_APPROVAL_KIND
   id: string
   status: SetupApprovalStatus
-  /** Even an active grant does not execute anything in this slice. */
+  /** Inspecting a grant executes nothing; the application journal records an attempt. */
   executed: false
-  executionSupported: false
+  /** The grant can be applied through `setup apply`; it is not itself execution. */
+  executionSupported: true
   reason: string
   grant: SetupApprovalGrant | null
 }
@@ -861,10 +863,16 @@ export function saveSetupApprovalGrant(
   return grant
 }
 
-type TransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
+export type SetupApprovalTransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
 
-/** Read the single terminal-state record. Absent, a valid kind, or uninspectable. */
-function readTransition(dir: string): TransitionState {
+/**
+ * Read the single terminal-state record. Absent, a valid kind, or uninspectable.
+ *
+ * A caller that holds the repository lock can read this to distinguish a reservation that
+ * won the grant from one that never did; an `unknown` record is corruption once the writer
+ * that would have published it can no longer be in flight.
+ */
+export function readSetupApprovalTransition(dir: string): SetupApprovalTransitionState {
   const path = join(dir, TRANSITION_FILE)
   let stat: ReturnType<typeof lstatSync>
   try {
@@ -892,6 +900,79 @@ function writeTransition(dir: string, kind: 'revoked' | 'consumed', now: Date): 
   return writeExclusiveJson(join(dir, TRANSITION_FILE), { schemaVersion: 1, kind, at: now.toISOString() })
 }
 
+/**
+ * A grant may own auxiliary records beside its immutable grant file. The application journal
+ * is one; it records what a reserved attempt actually did, so an interrupted or failed run
+ * cannot be confused with one that never started.
+ */
+export type GrantRecordRead =
+  | { state: 'absent' }
+  | { state: 'present'; value: unknown }
+  | { state: 'unknown'; reason: string }
+
+function checkedRecordName(name: string): void {
+  if (!/^[a-z][a-z0-9.-]*$/.test(name)) {
+    throw new AnvilError(ErrorCode.Internal, `Invalid grant record name: ${name}`)
+  }
+}
+
+/**
+ * Read an auxiliary record from a validated grant directory. A link, a multiply-linked file
+ * or a record another user could rewrite is `unknown`, never trusted JSON.
+ */
+export function readGrantRecord(dir: string, name: string, maxBytes = MAX_RECORD_BYTES): GrantRecordRead {
+  checkedRecordName(name)
+  const path = join(dir, name)
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'absent' }
+      : { state: 'unknown', reason: 'The grant record cannot be inspected.' }
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    return { state: 'unknown', reason: 'The grant record is a link or not a regular file.' }
+  }
+  if (protectionProblem(path, 'file') !== null) {
+    return { state: 'unknown', reason: 'The grant record is not private to the current user.' }
+  }
+  const raw = readRegularFile(path, maxBytes)
+  if (raw === null) return { state: 'unknown', reason: 'The grant record cannot be read.' }
+  try {
+    return { state: 'present', value: JSON.parse(raw) }
+  } catch {
+    return { state: 'unknown', reason: 'The grant record is not valid JSON.' }
+  }
+}
+
+/** Create an auxiliary record once. An existing record is never replaced. */
+export function writeGrantRecordOnce(dir: string, name: string, value: unknown): 'written' | 'exists' {
+  checkedRecordName(name)
+  return writeExclusiveJson(join(dir, name), value)
+}
+
+/** Atomically replace an auxiliary record this grant directory already owns. */
+export function replaceGrantRecord(dir: string, name: string, value: unknown): void {
+  checkedRecordName(name)
+  const path = join(dir, name)
+  const temp = join(dir, `.${name}.${randomUUID()}.tmp`)
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: PRIVATE_FILE_MODE,
+  })
+  try {
+    renameSync(temp, path)
+  } finally {
+    try {
+      rmSync(temp, { force: true })
+    } catch {
+      // The rename succeeded, or the temp file is inert.
+    }
+  }
+}
+
 function approvalRecord(
   id: string,
   status: SetupApprovalStatus,
@@ -904,7 +985,7 @@ function approvalRecord(
     id,
     status,
     executed: false,
-    executionSupported: false,
+    executionSupported: true,
     reason,
     grant,
   }
@@ -927,7 +1008,7 @@ export function inspectSetupApproval(
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown')
     return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
   if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
@@ -978,7 +1059,7 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown')
     return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
   if (transition === 'consumed') {
@@ -1002,7 +1083,7 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
     return approvalRecord(id, 'revoked', 'The grant was revoked. It can no longer authorize an application.', grant)
   }
   // Another transition won the race; report whichever terminal state it wrote.
-  const after = readTransition(dir)
+  const after = readSetupApprovalTransition(dir)
   if (after === 'consumed') {
     return approvalRecord(
       id,
@@ -1031,7 +1112,7 @@ export function consumeSetupApproval(
   if (!read.ok) return { record: approvalRecord(id, read.status, read.reason, null), reserved: false }
   const { grant, dir } = read
 
-  const transition = readTransition(dir)
+  const transition = readSetupApprovalTransition(dir)
   if (transition === 'unknown') {
     return {
       record: approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant),
@@ -1056,7 +1137,7 @@ export function consumeSetupApproval(
     throw new AnvilError(ErrorCode.PreflightFailed, 'Could not reserve the application attempt.', { cause })
   }
   if (written === 'exists') {
-    const after = readTransition(dir)
+    const after = readSetupApprovalTransition(dir)
     if (after === 'revoked') {
       return {
         record: approvalRecord(id, 'revoked', 'The grant was revoked before the attempt could be reserved.', grant),

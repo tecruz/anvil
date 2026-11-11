@@ -273,15 +273,49 @@ without passing through a link, and outside the repository, or it is refused. `a
 `unknown`, and exits non-zero for anything but `active`. `revoke` is terminal, and a revoked
 grant stays inspectable even after its repository is gone.
 
-There is no apply, install or execute command here. None of these run an install, version
-probe, repository script or service connection, or write a staging bundle, and approving a
-plan never writes into the repository. Git metadata is read with fsmonitor and optional index
-writes disabled. Existing configuration and existing skill content are untouched, and
-environment values are never expanded into command text. Literal secrets must not be embedded
-in declarations, since those commands are displayed verbatim.
+### Applying an approved plan
 
-See [the setup plan contracts](SETUP_PLANS.md) for both payloads, the approval grant,
-validation exit codes, repository-state limits and requirements for application.
+An active grant authorizes one application of the exact plan it names:
+
+```bash
+anvil setup apply --plan ../execution-plan.json --grant <id>
+anvil setup apply --plan ../execution-plan.json --grant <id> --json
+```
+
+`apply` rebuilds the plan, requires it to be current, holds a repository-scoped lock while it
+re-reads the repository state, and reserves the grant's single attempt before writing
+anything. It creates `.agents/skills/<name>/` only when absent and publishes `SKILL.md`
+through a temporary file without replacing an existing destination. It then reads the
+installed bytes back and checks the path, the regular-file status, the exact hash and length,
+and the skill metadata. Only a verified install is reported as `applied`.
+
+A journal beside the grant records the outcome as `started`, `succeeded`, `failed` or
+`partial`, along with the operations and the verification. It lives outside the repository,
+so the repository cannot edit its own record. A `started` journal is re-read under the
+repository lock: a live run is waited for, and only an attempt that is still `started` once
+the lock is held is reported as `interrupted`. A consumed grant whose journal has not been
+published yet gets the same wait and re-read, including a fresh read of the grant and store,
+before it is called interrupted. A failed or partial application is not
+retried and nothing is rolled back or deleted: inspect the destination and request a fresh
+approval for another attempt. Repeating `apply` for a recorded success re-verifies the
+installed bytes and reports `applied` with `executed: false`, writing nothing. The saved plan
+must be the exact plan the grant names and the checkout must be the same physical repository;
+a different plan or repository is refused rather than shown the earlier success.
+
+`apply` succeeds only with `applied`; every other status exits non-zero with the record on
+an `ok: false` envelope. Success means the reviewed bytes are present with valid metadata;
+it does not mean an agent loaded or followed the skill, and it is not an operating-system
+sandbox.
+
+Owner-declared install commands remain proposal-only: there is no execute command, and none
+of these commands run an install, version probe, repository script or service connection.
+Git metadata is read with fsmonitor and optional index writes disabled. Existing
+configuration and unrelated skill content are untouched, and environment values are never
+expanded into command text. Literal secrets must not be embedded in declarations, since those
+commands are displayed verbatim.
+
+See [the setup plan contracts](SETUP_PLANS.md) for both payloads, the approval grant, the
+application journal, statuses and exit codes.
 
 ## Checking readiness: `anvil ready`
 
@@ -370,7 +404,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
-| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke` — inspect-only owner-command proposals, one create-only `local-skill` execution plan, and its single-use approval grant. Never applies. |
+| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan, its single-use approval grant, and one journaled application. |
 | `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |

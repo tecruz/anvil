@@ -1,11 +1,10 @@
 /**
- * Inspect-only execution plans.
+ * Execution plans for one bounded adapter.
  *
- * This module defines one bounded adapter, `local-skill/v1`: copy a repository-local,
- * standalone `SKILL.md` to `.agents/skills/<name>/SKILL.md`, and never overwrite anything.
- * It produces a plan for review and validation only. There is deliberately no approval
- * store, writer, journal or verifier here; those are separate authority and a separate
- * change.
+ * This module defines `local-skill/v1`: copy a repository-local, standalone `SKILL.md` to
+ * `.agents/skills/<name>/SKILL.md`, and never overwrite anything. It produces a plan for
+ * review and validation only. Approval and application live elsewhere: a plan is never
+ * authority, and `setup-apply.ts` writes the reviewed bytes only after a grant is consumed.
  *
  * The digest is a change detector, not an authorization token. A source hash pins bytes;
  * it does not establish authorship, trustworthiness or that an agent will follow the skill.
@@ -112,7 +111,11 @@ export interface SetupExecutionPlan {
   status: 'proposed'
   executed: false
   approval: 'not-granted'
-  executionSupported: false
+  /**
+   * The adapter is executable through `anvil setup apply`, but this plan is not authority:
+   * a separate, single-use grant is required and `executed` stays false.
+   */
+  executionSupported: true
   adapter: typeof LOCAL_SKILL_ADAPTER
   adapterFingerprint: string
   repository: SetupRepositoryState
@@ -465,10 +468,10 @@ export function buildSetupExecutionPlan(options: {
   ]
 
   const warnings = [
-    'Inspection only: this slice has no approval or apply command, and building or validating a plan never executes it.',
+    'Planning only: building or validating a plan never approves or applies it. Approval and application are separate commands.',
     'The source hash pins the exact bytes, not authorship, trustworthiness, quality or whether an agent will follow the skill.',
     'Only a repository-local, standalone SKILL.md is supported. No downloads, scripts, commands, global installs or overwrites are supported.',
-    'A later verifier can only prove that the reviewed artifact was installed; it cannot prove that an agent loaded or followed it.',
+    'A verifier can only prove that the reviewed artifact was installed; it cannot prove that an agent loaded or followed it.',
     'Filesystem checks reduce accidental overwrites but are not an operating-system sandbox against concurrent path changes.',
   ]
   if (repository.head === null || repository.worktree !== 'clean') {
@@ -482,7 +485,7 @@ export function buildSetupExecutionPlan(options: {
     status: 'proposed' as const,
     executed: false as const,
     approval: 'not-granted' as const,
-    executionSupported: false as const,
+    executionSupported: true as const,
     adapter: LOCAL_SKILL_ADAPTER as typeof LOCAL_SKILL_ADAPTER,
     adapterFingerprint: LOCAL_SKILL_ADAPTER_FINGERPRINT,
     repository: { root: repository.root, head: repository.head, worktree: repository.worktree },
@@ -607,4 +610,46 @@ export function validateSetupExecutionPlan(saved: unknown, current: SetupExecuti
     'current',
     'The execution plan matches current inputs. This is not approval, installation or evidence that the skill is effective.',
   )
+}
+
+export interface SetupExecutionPlanResolution {
+  plan: SetupExecutionPlan | null
+  validation: SetupExecutionPlanValidation
+}
+
+/**
+ * Rebuild a plan from a saved plan's bounded inputs and compare it with current state.
+ *
+ * The saved plan supplies only the adapter inputs; it never supplies approval, a
+ * destination or a command. The rebuilt plan is returned so a caller can bind a grant to
+ * it, or compare it immediately before writing.
+ */
+export function resolveSetupExecutionPlan(
+  saved: unknown,
+  repository: SetupRepositoryState,
+): SetupExecutionPlanResolution {
+  const result = (status: SetupExecutionPlanValidation['status'], reason: string): SetupExecutionPlanValidation => ({
+    schemaVersion: 1,
+    status,
+    approval: 'not-granted',
+    executed: false,
+    reason,
+  })
+  let request: SetupExecutionRequest
+  try {
+    request = extractSetupExecutionRequest(saved)
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : 'Unsupported setup-execution-plan format.'
+    return { plan: null, validation: result('invalid', message) }
+  }
+  let current: SetupExecutionPlan
+  try {
+    current = buildSetupExecutionPlan({ repository, sourcePath: request.sourcePath, name: request.name })
+  } catch (cause) {
+    if (cause instanceof SetupExecutionError)
+      return { plan: null, validation: result(cause.validationStatus, cause.message) }
+    if (cause instanceof AnvilError) return { plan: null, validation: result('invalid', cause.message) }
+    throw cause
+  }
+  return { plan: current, validation: validateSetupExecutionPlan(saved, current) }
 }

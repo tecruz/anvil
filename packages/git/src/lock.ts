@@ -1,7 +1,73 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { lstatSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
+
+const LEGACY_HINT =
+  'If this is a legacy PID lock file, stop older anvil processes and remove that file before retrying.'
+
+/**
+ * Create `target` beneath `root` one component at a time, refusing to follow a link.
+ *
+ * `mkdirSync(..., { recursive: true })` follows a symbolic link or Windows junction that
+ * already occupies an intermediate component. A pre-existing `<git-common-dir>/anvil-locks`
+ * junction would therefore place lock records outside the repository, and cleanup would
+ * remove files there too. Every component anvil creates is inspected before use and a link is
+ * refused instead of followed. `root` itself is trusted: git reports it, and a repository may
+ * legitimately be reached through a link higher in its path.
+ */
+function createLockDirectory(root: string, target: string, name: string): void {
+  const rel = relative(root, target)
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new AnvilError(ErrorCode.Internal, `The ${name} lock directory must be inside the repository`, {
+      hint: 'Lock records are written beside the common git directory, never to a caller-supplied path.',
+    })
+  }
+  let current = root
+  for (const component of rel.split(sep)) {
+    current = join(current, component)
+    let stat: ReturnType<typeof lstatSync>
+    try {
+      stat = lstatSync(current)
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new AnvilError(ErrorCode.Usage, `Cannot open the ${name} lock directory: ${target}`, {
+          hint: LEGACY_HINT,
+          cause,
+        })
+      }
+      try {
+        mkdirSync(current)
+      } catch (createCause) {
+        if ((createCause as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw new AnvilError(ErrorCode.Usage, `Cannot open the ${name} lock directory: ${target}`, {
+            hint: LEGACY_HINT,
+            cause: createCause,
+          })
+        }
+        // A concurrent creator won the race; inspect what it made below.
+      }
+      try {
+        stat = lstatSync(current)
+      } catch (inspectCause) {
+        throw new AnvilError(ErrorCode.Usage, `Cannot open the ${name} lock directory: ${target}`, {
+          hint: LEGACY_HINT,
+          cause: inspectCause,
+        })
+      }
+    }
+    if (stat.isSymbolicLink()) {
+      throw new AnvilError(ErrorCode.Usage, `Refusing a linked ${name} lock directory: ${current}`, {
+        hint: 'Lock records must stay inside the repository. Remove the link or junction and retry.',
+      })
+    }
+    if (!stat.isDirectory()) {
+      throw new AnvilError(ErrorCode.Usage, `Cannot open the ${name} lock directory: ${current}`, {
+        hint: LEGACY_HINT,
+      })
+    }
+  }
+}
 
 function pidAlive(pid: number): boolean {
   try {
@@ -54,17 +120,10 @@ function contenders(directory: string): Contender[] {
  */
 export async function withDirectoryLock<T>(
   directory: string,
-  options: { timeoutMs: number; pollMs: number; name: string },
+  options: { root: string; timeoutMs: number; pollMs: number; name: string },
   fn: () => Promise<T>,
 ): Promise<T> {
-  try {
-    mkdirSync(directory, { recursive: true })
-  } catch (err) {
-    throw new AnvilError(ErrorCode.Usage, `Cannot open the ${options.name} lock directory: ${directory}`, {
-      hint: 'If this is a legacy PID lock file, stop older anvil processes and remove that file before retrying.',
-      cause: err,
-    })
-  }
+  createLockDirectory(options.root, directory, options.name)
   const deadline = Date.now() + options.timeoutMs
   const id = `${process.pid}-${randomUUID()}`
   const ownPath = join(directory, id)

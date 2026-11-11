@@ -1,26 +1,26 @@
-/** Read-only setup plans. No installer, approval writer, apply command or environment probes. */
+/** Setup plans, approval grants and the one create-only application path. */
 import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import {
+  applySetupPlan,
   buildSetupApprovalGrant,
   buildSetupExecutionPlan,
   buildSetupPlan,
-  extractSetupExecutionRequest,
   inspectSetupApproval,
   isSetupExecutionPlan,
+  resolveSetupExecutionPlan,
   revokeSetupApproval,
+  type SetupApplicationRecord,
   type SetupApprovalRecord,
-  SetupExecutionError,
   type SetupExecutionPlan,
   type SetupExecutionPlanValidation,
   type SetupPlan,
   type SetupRepositoryState,
   saveSetupApprovalGrant,
-  validateSetupExecutionPlan,
   validateSetupPlan,
 } from '@anvil/derive'
-import { git, normalizeGitPath, probePromisorRemote, type RunResult, readOnlyGitEnv } from '@anvil/git'
+import { git, normalizeGitPath, probePromisorRemote, type RunResult, readOnlyGitEnv, withRepoLock } from '@anvil/git'
 import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -188,25 +188,27 @@ function readPlan(path: string): unknown {
 
 export const setupCommand: Command = {
   name: 'setup',
-  summary: 'Generate, validate, approve or revoke a setup plan; never execute or apply it.',
+  summary: 'Generate, validate, approve, apply or revoke a setup plan; application is create-only and single-use.',
   usage:
-    'anvil setup <plan|validate|approve|approval|revoke> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter local-skill --source <file> --name <name>]',
+    'anvil setup <plan|validate|approve|approval|revoke|apply> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter local-skill --source <file> --name <name>]',
   details: [
     'plan       Describe owner-declared install commands, or plan one local-skill installation.',
     'validate   Compare saved plan JSON with fresh inputs; requires --plan <file>.',
     'approve    Grant one application of a current local-skill plan; requires --plan <file> and a typed confirmation.',
     'approval   Inspect a stored grant; requires --grant <id>.',
     'revoke     Withdraw a stored grant; requires --grant <id>.',
+    'apply      Apply an approved local-skill plan once; requires --plan <file> and --grant <id>.',
     '',
     'plan --adapter local-skill --source <repo-relative-file> --name <name>',
-    '           Build an inspect-only execution plan for one repository-local SKILL.md.',
+    '           Build an execution plan for one repository-local SKILL.md.',
     '',
-    'No setup commands, version probes, service connections or file writes are performed.',
-    'Only Git metadata commands run. Approval grants are stored outside the repository.',
-    'Opaque install commands remain proposal-only; only a local-skill execution plan can be approved.',
-    'A local-skill plan is create-only and refuses an existing destination.',
+    'No install commands, version probes, service connections or network fetches are performed.',
+    'Only Git metadata commands and the create-only writes of an approved local-skill plan run.',
+    'Approval grants are stored outside the repository.',
+    'Opaque owner-declared install commands remain proposal-only and cannot be approved or applied.',
+    'A local-skill plan is create-only; apply refuses an existing destination and never overwrites.',
     "Save the JSON envelope's data object outside the worktree (or in an ignored file).",
-    'There is no apply command: approving a plan never writes to the repository.',
+    'Application consumes the grant before its first write, journals the outcome and verifies the result.',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -229,11 +231,11 @@ export const setupCommand: Command = {
     const name = typeof args.values.name === 'string' ? args.values.name : undefined
     const usage = (message: string, hint: string) => new AnvilError(ErrorCode.Usage, message, { hint })
 
-    const subcommands = ['plan', 'validate', 'approve', 'approval', 'revoke']
+    const subcommands = ['plan', 'validate', 'approve', 'approval', 'revoke', 'apply']
     if (args.positionals.length !== 1 || !subcommands.includes(sub ?? '')) {
       throw usage(
-        'Use setup plan, validate, approve, approval or revoke',
-        'There is no setup execution or apply command.',
+        'Use setup plan, validate, approve, approval, revoke or apply',
+        'Owner-declared install commands remain proposal-only. Only a local-skill plan can be approved and applied.',
       )
     }
     if (sub === 'approval' || sub === 'revoke') {
@@ -269,6 +271,19 @@ export const setupCommand: Command = {
             'The name must match the skill name in its frontmatter.',
           )
         }
+      }
+    } else if (sub === 'apply') {
+      if (adapter !== undefined || source !== undefined || name !== undefined) {
+        throw usage(
+          'setup apply reads adapter inputs from the saved plan',
+          'Do not pass --adapter, --source or --name with apply.',
+        )
+      }
+      if (typeof planPath !== 'string' || planPath === '') {
+        throw usage('setup apply requires --plan <file>', 'Save the JSON data object produced by setup plan.')
+      }
+      if (typeof grantId !== 'string' || grantId === '') {
+        throw usage('setup apply requires --grant <id>', 'Apply only the grant you approved, exactly once.')
       }
     } else {
       if (adapter !== undefined || source !== undefined || name !== undefined) {
@@ -327,6 +342,30 @@ export const setupCommand: Command = {
 
     const saved = readPlan(resolve(ctx.cwd, planPath as string))
 
+    if (sub === 'apply') {
+      if (!isSetupExecutionPlan(saved)) {
+        throw new AnvilError(ErrorCode.PreflightFailed, 'Only a local-skill execution plan can be applied.', {
+          hint: 'Owner-command proposals remain inspect-only; use setup plan --adapter local-skill.',
+        })
+      }
+      const record = await applySetupPlan({
+        saved,
+        repository,
+        grantId: grantId as string,
+        lock: (work) => withRepoLock({ cwd: root, name: 'setup-apply' }, work),
+        refresh: refreshRepository,
+      })
+      if (record.status === 'applied') {
+        ctx.out(record, () => renderApplication(record))
+        return
+      }
+      const error = new AnvilError(ErrorCode.PreflightFailed, record.reason, {
+        hint: 'Nothing is reported as a completed integration. Inspect the destination and journal; a new attempt needs fresh approval.',
+      })
+      ctx.outFailure(record, error, () => renderApplicationFailure(record))
+      return error.exitCode
+    }
+
     if (sub === 'approve') {
       if (!isSetupExecutionPlan(saved)) {
         throw new AnvilError(ErrorCode.PreflightFailed, 'Only a local-skill execution plan can be approved.', {
@@ -352,7 +391,7 @@ export const setupCommand: Command = {
     }
 
     const validation = isSetupExecutionPlan(saved)
-      ? executionValidation(saved, repository)
+      ? resolveSetupExecutionPlan(saved, repository).validation
       : validateSetupPlan(
           saved,
           buildSetupPlan({
@@ -415,7 +454,7 @@ export class SetupApprovalRefusal extends AnvilError {
  */
 export async function approveSetupPlan(flow: SetupApprovalFlow): Promise<SetupApprovalRecord> {
   const storeOptions = flow.env === undefined ? {} : { env: flow.env }
-  const first = resolveExecutionPlan(flow.saved, flow.repository)
+  const first = resolveSetupExecutionPlan(flow.saved, flow.repository)
   if (first.validation.status !== 'current' || first.plan === null) {
     throw new SetupApprovalRefusal(
       first.validation,
@@ -430,7 +469,7 @@ export async function approveSetupPlan(flow: SetupApprovalFlow): Promise<SetupAp
   }
   // The repository may have moved while the reviewer read; revalidate after confirming.
   const revalidated = await flow.refresh()
-  const second = resolveExecutionPlan(flow.saved, revalidated)
+  const second = resolveSetupExecutionPlan(flow.saved, revalidated)
   if (second.validation.status !== 'current' || second.plan === null) {
     throw new SetupApprovalRefusal(
       second.validation,
@@ -534,48 +573,43 @@ function renderApproval(record: SetupApprovalRecord): string {
       `attempts: ${grant.maxAttempts}`,
     )
   }
-  lines.push('Not applied. Nothing was written to the repository; this slice has no apply command.')
+  lines.push('Not applied by this command. Use setup apply with the grant to install the approved plan.')
   return lines.join('\n')
 }
 
-/**
- * Rebuild an execution plan from a saved plan's bounded inputs and compare it with current
- * state. The saved plan supplies only the adapter inputs; it never supplies approval, a
- * destination or a command. The rebuilt plan is returned so a caller can bind a grant to it.
- */
-function resolveExecutionPlan(
-  saved: unknown,
-  repository: SetupRepositoryState,
-): { plan: SetupExecutionPlan | null; validation: SetupExecutionPlanValidation } {
-  const result = (status: SetupExecutionPlanValidation['status'], reason: string): SetupExecutionPlanValidation => ({
-    schemaVersion: 1,
-    status,
-    approval: 'not-granted',
-    executed: false,
-    reason,
-  })
-  let request: ReturnType<typeof extractSetupExecutionRequest>
-  try {
-    request = extractSetupExecutionRequest(saved)
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : 'Unsupported setup-execution-plan format.'
-    return { plan: null, validation: result('invalid', message) }
+function renderApplication(record: SetupApplicationRecord): string {
+  const lines = [
+    `Application: ${record.status}${record.alreadyApplied ? ' (already applied)' : ''}`,
+    `reason: ${record.reason}`,
+    `plan digest: ${record.planDigest ?? 'unknown'}`,
+    `destination: ${record.destination ?? 'unknown'}`,
+    `verified: ${record.verified}`,
+  ]
+  if (record.grant !== null) lines.push(`grant: ${record.grant.id}`)
+  if (record.verification !== null) {
+    lines.push('Verification:')
+    for (const check of record.verification.checks) {
+      lines.push(`  ${check.ok ? 'ok' : 'failed'}: ${check.name} — ${check.detail}`)
+    }
+    lines.push(`  ${record.verification.proves}`)
   }
-  let current: SetupExecutionPlan
-  try {
-    current = buildSetupExecutionPlan({ repository, sourcePath: request.sourcePath, name: request.name })
-  } catch (cause) {
-    if (cause instanceof SetupExecutionError)
-      return { plan: null, validation: result(cause.validationStatus, cause.message) }
-    if (cause instanceof AnvilError) return { plan: null, validation: result('invalid', cause.message) }
-    throw cause
+  if (record.journal !== null) {
+    lines.push(`journal: ${record.journal.status} (started ${record.journal.startedAt})`)
   }
-  return { plan: current, validation: validateSetupExecutionPlan(saved, current) }
+  if (record.executed) lines.push('The repository was modified by this command.')
+  return lines.join('\n')
 }
 
-/** Validate an execution plan against current inputs. */
-function executionValidation(saved: unknown, repository: SetupRepositoryState): SetupExecutionPlanValidation {
-  return resolveExecutionPlan(saved, repository).validation
+function renderApplicationFailure(record: SetupApplicationRecord): string {
+  const lines = [`Application ${record.status}: ${record.reason}`]
+  if (record.destination !== null) lines.push(`destination: ${record.destination}`)
+  if (record.verification !== null) {
+    for (const check of record.verification.checks) {
+      if (!check.ok) lines.push(`  failed: ${check.name} — ${check.detail}`)
+    }
+  }
+  lines.push('Nothing is reported as a completed integration. No automatic retry is allowed.')
+  return `${lines.join('\n')}\n`
 }
 
 function fenceFor(content: string): string {
@@ -610,7 +644,7 @@ function renderExecutionPlan(plan: SetupExecutionPlan): string {
     `HEAD: ${plan.repository.head ?? 'unknown'} (${plan.repository.worktree})`,
     `source: ${plan.source.path} (${plan.source.bytes} bytes, sha256 ${plan.source.sha256})`,
     `destination: ${plan.skill.destination}`,
-    'Not approved. Nothing executed. This slice has no approval or apply command.',
+    'Not approved. Nothing executed. Approval and application are separate commands.',
     '',
     'Operations:',
   ]
@@ -644,7 +678,7 @@ function renderPlan(plan: SetupPlan): string {
     `Setup proposal: ${plan.digest}`,
     `root: ${plan.repository.root}`,
     `HEAD: ${plan.repository.head ?? 'unknown'} (${plan.repository.worktree})`,
-    'Not approved. Nothing executed. No execution adapter is supported.',
+    'Not approved. Nothing executed. Owner-declared install commands cannot be approved or applied.',
   ]
   for (const action of plan.actions) {
     lines.push('', `${action.id} (${action.source})`, `  command: ${action.command}`, `  cwd: ${action.cwd || '.'}`)

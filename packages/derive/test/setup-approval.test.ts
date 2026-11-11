@@ -127,7 +127,7 @@ describe('setup approval grants', () => {
     assert.equal(record.status, 'active')
     assert.equal(record.grant?.planDigest, plan.digest)
     assert.equal(record.executed, false)
-    assert.equal(record.executionSupported, false)
+    assert.equal(record.executionSupported, true)
     // Without a current repository state, freshness cannot be checked, so it is never active.
     assert.equal(inspectSetupApproval(ID, null, { env, now: new Date(T0.getTime() + 2000) }).status, 'unknown')
   })

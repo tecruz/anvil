@@ -1,9 +1,18 @@
 # ADR-0019: Approval authority is a user-owned store, not a plan digest
 
-- Status: accepted
+- Status: accepted - the store, grant and single-attempt decisions stand; the claim that no
+  apply command exists, and that `executionSupported` stays `false`, is superseded by
+  [ADR-0020](0020-application-is-a-journaled-transition.md)
 - Date: 2026-11-09
 - Milestone: post-M6
 - Extends: [ADR-0018](0018-approved-local-skill-installation.md)
+
+> **Superseded in part.** This ADR added grants, inspection, revocation and reservation, and
+> said the slice applied nothing and every record kept `executionSupported: false`.
+> [ADR-0020](0020-application-is-a-journaled-transition.md) adds the application step: a grant
+> can now be applied through `setup apply`, so `executionSupported` is `true` on execution plans
+> and approval records while `executed` stays `false`. The approval authority, lifetime,
+> binding and single-attempt rules are unchanged.
 
 ## Context
 

@@ -116,9 +116,16 @@ owner pathname, so two stale observers cannot remove a live successor's lock.
 The wait is bounded (20 seconds by default). A contender whose PID no longer exists is
 removed by the next waiter; a live owner is never preempted. Each caller removes only its
 own unique record in `finally`, including after timeout or callback failure. The empty lock
-directory remains: deleting it could race a new registration. `locks.test.ts` includes a
-deterministically paused stale observer and another real process, plus recovery before
-ticket publication, callback failure, and safe refusal of the legacy format.
+directory remains: deleting it could race a new registration.
+
+Lock directories are created one component at a time from the common git dir, and an
+existing symbolic link or Windows junction on the way is refused rather than followed. A
+`mkdir` that follows a pre-existing `.git/anvil-locks` junction would place lock records—and
+the cleanup that removes them—outside the repository, before any revalidation runs.
+
+`locks.test.ts` includes a deterministically paused stale observer and another real process,
+plus recovery before ticket publication, callback failure, linked lock directories and safe
+refusal of the legacy format.
 
 **Migration:** old releases used a shared PID **file** at the same path. The new protocol
 fails closed with an actionable error if it encounters one. Stop older anvil processes,
