@@ -213,18 +213,29 @@ fixture to become green. A no-op or incorrect-success report must fail grading.
 ### Installed-skill comparison
 
 `skill-guidance` asks whether an installed, approved skill changes the work. Both variants
-receive the same `anvil init` artifacts (`baselineContext: "anvil"`); only the anvil variant
-also receives the skill, installed through `anvil setup apply`. The harness approves the
-exact plan itself because the run is unattended; consumption, the repository lock, the
-no-replace publish, the journal and the independent verifier still run for real. The source
-is staged, committed, installed, then removed and the artifact committed, so the variant
-without the skill cannot read the skill text from the worktree.
+receive the same `anvil init` artifacts and the same starting commit
+(`baselineContext: "anvil"`); only the anvil variant also receives the skill, installed
+through `anvil setup apply`. The harness approves the exact plan itself because the run is
+unattended; consumption, the repository lock, the no-replace publish, the journal and the
+independent verifier still run for real. The source is staged, committed, installed, then
+removed and the artifact committed, so the variant without the skill cannot read the skill
+text from the worktree or its reachable history.
+
+The required behaviour lives in the repository both variants can read; the skill carries the
+operating procedure. A comparison where only the treatment had the requirements would
+measure missing information, not skill-guided work.
 
 Each result keeps three facts apart:
 
-- `skillInstall` — whether installation reported `verified`.
-- `skillAccess` — `observed` (a completed read, or a shell command naming the skill path),
-  `not-observed`, or `unknown`. Not observed is not evidence of non-use.
+- `skillInstall` — whether installation reported `verified`. A skill scenario's anvil result
+  must record it; the bare result must record `not-installed`, and the gate refuses a
+  summary or run record that disagrees with that.
+- `skillAccess` — `observed` only when a completed read resolves to *this run's* installed
+  `SKILL.md`; a path from another checkout or a copy inside the repository is not the
+  artifact. A native `skill` load of the installed id stays `unknown`, because another
+  configured source can define the same id and take precedence. A shell command that merely
+  names the path is not evidence, `not-observed` is not proof of non-use, and a run with no
+  tool events is `unknown`. A scenario without a skill must not record an access verdict.
 - `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
 
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke
@@ -268,8 +279,8 @@ Phase 2B (extended scenario corpus) is now complete:
     cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change,
     and skill-guidance (the installed-skill comparison)
   - `validateScenarioMatrix()` evolved to allow extra scenarios beyond the required 4 cells
-  - Solution fixtures created for all 6 scenarios
-  - Hidden verify test fixtures added for 5 scenarios requiring post-agent grading
+  - Solution fixtures created for all 7 scenarios
+  - Hidden verify test fixtures added for all 7 scenarios
   - Each scenario includes `notes` documenting how derived context could help
   - All lint/typecheck clean; 1021 test suite pass, 0 fail
 

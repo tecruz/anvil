@@ -38,6 +38,8 @@ export interface EvalVerifierScenario {
   id: string
   verify: readonly string[] | null
   hiddenVerify?: readonly string[] | null
+  /** The skill this scenario installs in the anvil variant, when it declares one. */
+  skill?: EvalSkillSpec
 }
 
 /** One file a canned answer writes into the fixture. */
@@ -70,12 +72,13 @@ export interface EvalSkillSpec {
 export type EvalSkillInstall = 'not-requested' | 'not-installed' | 'verified' | 'failed'
 
 /**
- * Whether the agent was seen touching the installed skill.
+ * Whether the agent was seen using the skill this run installed.
  *
- * `observed` means a completed read of the skill file, or a completed shell command naming
- * it. `not-observed` means neither was seen, which is **not** proof the agent did not use
- * it: a command whose event never completed, or a tool the harness does not parse, is
- * invisible here. `unknown` means the run produced no tool events at all.
+ * `observed` requires a completed read of the exact installed `SKILL.md`. A native `skill`
+ * load of the installed id is ambiguous -- another configured source can define the same id
+ * and take precedence -- so a load on its own stays `unknown`. A shell command that merely
+ * names the path is not evidence. `not-observed` is not proof of non-use, and `unknown` also
+ * covers a run that produced no tool events.
  */
 export type EvalSkillAccess = 'not-installed' | 'observed' | 'not-observed' | 'unknown'
 
@@ -149,6 +152,8 @@ export interface EvalBaselineScenario {
   verify: string[] | null
   /** Commands that grade the work after hidden files are in place. */
   hiddenVerify: string[] | null
+  /** The skill this scenario installs in the anvil variant, when it declares one. */
+  skill?: EvalSkillSpec
   expect: { verified?: boolean; hiddenVerified?: boolean }
 }
 
@@ -593,6 +598,8 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
       return `${raw.id}: baseline hiddenVerify is invalid`
     }
     if (value.schemaVersion === 2 && hiddenVerify === null) return `${raw.id}: baseline hiddenVerify is invalid`
+    const skill = parseSkillSpec(raw.skill)
+    if (skill === 'invalid') return `${raw.id}: baseline skill is invalid`
     scenarios.push({
       id: raw.id,
       size: raw.size,
@@ -601,6 +608,7 @@ export function parseBaseline(value: unknown): EvalBaseline | string {
       sourceHash: raw.sourceHash,
       verify,
       hiddenVerify,
+      ...(skill === undefined ? {} : { skill }),
       expect: {
         ...(raw.expect.verified === undefined ? {} : { verified: raw.expect.verified === true }),
         ...(raw.expect.hiddenVerified === undefined || raw.expect.hiddenVerified === null
@@ -642,6 +650,15 @@ const SKILL_ACCESS_VALUES: ReadonlySet<string> = new Set(['not-installed', 'obse
 function parseSkillState<T extends string>(value: unknown, allowed: ReadonlySet<string>): T | undefined | 'invalid' {
   if (value === undefined) return undefined
   return typeof value === 'string' && allowed.has(value) ? (value as T) : 'invalid'
+}
+
+/** Parse an optional scenario skill declaration, or explain why it is unusable. */
+function parseSkillSpec(value: unknown): EvalSkillSpec | undefined | 'invalid' {
+  if (value === undefined) return undefined
+  if (!isObject(value)) return 'invalid'
+  if (typeof value.source !== 'string' || value.source === '') return 'invalid'
+  if (typeof value.name !== 'string' || value.name === '') return 'invalid'
+  return { source: value.source, name: value.name }
 }
 
 /** Parse a fixture-fingerprint map, or explain why it is not one. */
@@ -1041,6 +1058,64 @@ function verifierEvidenceProblem(
 }
 
 /**
+ * Check that a result's skill facts agree with the scenario that defines them.
+ *
+ * These facts are the whole point of a skill comparison, so they cannot be optional
+ * decoration: a summary that reports access without a verified install, or an anvil result
+ * that never claims the install, is contradictory evidence even when the task verdicts line
+ * up. A scenario without a skill must not grow a skill verdict either.
+ */
+function skillEvidenceProblem(
+  result: {
+    variant?: unknown
+    skillInstall?: EvalSkillInstall
+    skillAccess?: EvalSkillAccess
+    error?: string
+  },
+  scenario: EvalVerifierScenario | undefined,
+): string | null {
+  if (result.skillInstall === 'failed' && result.error === undefined) {
+    return 'records a failed skill installation without an error'
+  }
+  if (result.skillAccess === 'observed' && result.skillInstall !== 'verified') {
+    return 'reports skill access without a verified installation'
+  }
+  // A matrix the gate cannot see cannot prove either direction; the baseline is written
+  // with the skill declaration, so the fallback path still has it.
+  if (scenario === undefined) return null
+  if (scenario.skill === undefined) {
+    if (result.skillInstall !== undefined && result.skillInstall !== 'not-requested') {
+      return 'records skill installation for a scenario that declares no skill'
+    }
+    // Access is a fact about a specific installed artifact. A scenario without a skill has
+    // none, so any access verdict is fabricated even when it names "nothing was observed".
+    if (result.skillAccess !== undefined) {
+      return 'records skill access for a scenario that declares no skill'
+    }
+    return null
+  }
+  if (result.variant === 'anvil') {
+    if (result.skillInstall !== 'verified') {
+      return `records skillInstall=${result.skillInstall ?? 'missing'} for the variant that installs the skill`
+    }
+    if (
+      result.skillAccess !== 'observed' &&
+      result.skillAccess !== 'not-observed' &&
+      result.skillAccess !== 'unknown'
+    ) {
+      return `records skillAccess=${result.skillAccess ?? 'missing'} for the variant that installs the skill`
+    }
+    return null
+  }
+  if (result.variant === 'bare') {
+    return result.skillInstall === 'not-installed' && result.skillAccess === 'not-installed'
+      ? null
+      : `records skillInstall=${result.skillInstall ?? 'missing'} for the variant that receives no skill`
+  }
+  return null
+}
+
+/**
  * Reconcile checkpoints written before a run-record write succeeded.
  *
  * A checkpoint whose latest attempt completed, whose key belongs to this run, and whose
@@ -1098,6 +1173,11 @@ export function reconcileRunRecord(
       const evidence = verifierEvidenceProblem(result, scenarioById.get(result.scenario))
       if (evidence !== null) {
         rejected.push(`${key}: completed checkpoint ${evidence}`)
+        continue
+      }
+      const skill = skillEvidenceProblem(result, scenarioById.get(result.scenario))
+      if (skill !== null) {
+        rejected.push(`${key}: completed checkpoint ${skill}`)
         continue
       }
     }
@@ -1325,6 +1405,13 @@ export function checkRunRecord(
         message: `run ${record.runId} recorded ${key} but it ${evidence}; the run record is contradictory`,
       }
     }
+    const skill = skillEvidenceProblem(result, scenarioById.get(result.scenario))
+    if (skill !== null) {
+      return {
+        ok: false,
+        message: `run ${record.runId} recorded ${key} but it ${skill}; the run record is contradictory`,
+      }
+    }
   }
   return {
     ok: true,
@@ -1534,6 +1621,13 @@ export function checkRunRecordCompatibility(
           message: `run ${record.runId} recorded ${result.scenario} but it ${evidence}; cannot resume`,
         }
       }
+      const skill = skillEvidenceProblem(result, scenarioById.get(result.scenario))
+      if (skill !== null) {
+        return {
+          ok: false,
+          message: `run ${record.runId} recorded ${result.scenario} but it ${skill}; cannot resume`,
+        }
+      }
     }
   }
   return {
@@ -1682,6 +1776,12 @@ export function checkEvalGate(
             )}`,
           )
         }
+        if (summaryResult.skillInstall !== recordResult.skillInstall) {
+          failures.push(`${key}: summary skillInstall disagrees with run record`)
+        }
+        if (summaryResult.skillAccess !== recordResult.skillAccess) {
+          failures.push(`${key}: summary skillAccess disagrees with run record`)
+        }
       }
       const summaryResultKeys = new Set(latest.results.map(resultKey))
       if (summaryResultKeys.size !== latest.results.length) {
@@ -1694,6 +1794,8 @@ export function checkEvalGate(
   for (const result of latest.results) {
     const evidence = verifierEvidenceProblem(result, verifierById.get(result.scenario))
     if (evidence !== null) failures.push(`${resultKey(result)}: summary ${evidence}`)
+    const skill = skillEvidenceProblem(result, verifierById.get(result.scenario))
+    if (skill !== null) failures.push(`${resultKey(result)}: summary ${skill}`)
   }
 
   if (currentImplementation !== undefined) {

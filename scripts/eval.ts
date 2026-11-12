@@ -32,9 +32,19 @@
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
@@ -202,6 +212,11 @@ const EXIT_STATUS_PATHS: readonly (readonly string[])[] = [['metadata', 'exit'],
 /** One file the agent's read tool opened, as OpenCode reported it. */
 export interface AgentRead {
   path: string
+}
+
+/** One skill the agent loaded through OpenCode's native `skill` tool, by id. */
+export interface AgentSkillLoad {
+  id: string
 }
 
 /** One shell command the agent's tool ran, with the status that command produced. */
@@ -505,40 +520,12 @@ async function main(): Promise<void> {
     writeRunRecord(runRecord)
   }
 
-  const results: ScenarioResult[] = []
+  const results: ScenarioResult[] = completedResultsFromRecord(runRecord, selectedScenarios)
   const completedKeys = new Set(
     runRecord.results
       .filter((r) => latestAttemptState(r) === 'completed')
       .map((r) => `${r.scenario}/${r.variant}/${r.model}/${r.repetition}`),
   )
-  for (const prior of runRecord.results) {
-    if (latestAttemptState(prior) !== 'completed') continue
-    const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
-    results.push(
-      sanitizeResult({
-        scenario: prior.scenario,
-        size: scenario?.size ?? 'tiny',
-        kind: scenario?.kind ?? 'code-change',
-        variant: prior.variant,
-        model: prior.model,
-        modelRole: prior.modelRole as EvalModelRole | null,
-        opencodeVersion: runRecord.opencodeVersion,
-        scenarioHash: prior.scenarioHash,
-        sourceHash: prior.sourceHash,
-        verifyCount: prior.verifyCount,
-        hiddenVerifyCount: prior.hiddenVerifyCount,
-        verified: prior.verified,
-        hiddenVerified: prior.hiddenVerified,
-        verifyExitCodes: [...prior.verifyExitCodes],
-        repetition: prior.repetition,
-        costUsd: prior.costUsd,
-        tokens: prior.tokens,
-        durationMs: prior.durationMs,
-        transcript: prior.transcript,
-        ...(prior.error === undefined ? {} : { error: prior.error }),
-      }),
-    )
-  }
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
@@ -759,6 +746,11 @@ async function runScenario(
         result.error = contextError
         return result
       }
+      // A skill comparison gives both variants the same starting commit. Leaving the
+      // artifacts untracked in one variant would show its agent different evidence about
+      // what already exists. An ordinary scenario keeps its previous behavior, where only
+      // the anvil variant receives the derived context at all.
+      if (baselineContext === 'anvil') commitWorktree(workdir, 'eval: derived context')
     }
 
     if (scenario.skill === undefined) {
@@ -767,9 +759,6 @@ async function runScenario(
       result.skillInstall = 'not-installed'
       result.skillAccess = 'not-installed'
     } else {
-      // The plan must be built from a clean commit, and init dirtied the tree. Commit what
-      // the harness itself just wrote, so the plan measures the skill, not the apply order.
-      if (baselineContext === 'anvil') commitWorktree(workdir, 'eval: derived context')
       const installed = await installScenarioSkill(scenario.skill, workdir)
       result.skillInstall = installed.ok ? 'verified' : 'failed'
       if (!installed.ok) {
@@ -787,6 +776,7 @@ async function runScenario(
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
     let agentExecutions: AgentExecution[] = []
     let agentReads: AgentRead[] = []
+    let agentSkills: AgentSkillLoad[] = []
 
     if (fake) {
       // A canned answer can include actions, not only files. Running them here is what
@@ -849,6 +839,7 @@ async function runScenario(
       const agentEvents = parseOpenCodeRunEvents(agent.stdout)
       agentExecutions = agentEvents.executions
       agentReads = agentEvents.reads
+      agentSkills = agentEvents.skills
       result.transcript = publishTranscripts
         ? limitTranscript(redactTranscript(`${agentEvents.text}\n${agent.stderr}`.trim()))
         : ''
@@ -861,10 +852,18 @@ async function runScenario(
 
     if (scenario.skill !== undefined && variant === 'anvil' && result.skillInstall === 'verified') {
       // `unknown` when the run produced no tool events at all (a fake agent, or an agent that
-      // died before acting). Absence of a read is not proof the skill was not used.
+      // died before acting). Absence of supported evidence is not proof the skill was not used.
       result.skillAccess = fake
         ? 'unknown'
-        : observeSkillAccess(scenario.skill, { executions: agentExecutions, reads: agentReads })
+        : observeSkillAccess(
+            scenario.skill,
+            {
+              executions: agentExecutions,
+              reads: agentReads,
+              skills: agentSkills,
+            },
+            workdir,
+          )
     }
 
     // For verify-only scenarios with execution capture, the harness records the
@@ -1001,8 +1000,8 @@ function readExitStatus(metadata: unknown): number | null {
 }
 
 /**
- * Extract text, completed shell executions and completed reads from OpenCode's
- * `run --format json` stream.
+ * Extract text, completed shell executions, completed reads and native skill loads from
+ * OpenCode's `run --format json` stream.
  *
  * Only the tool's own events count. The prose an agent writes is not evidence of
  * anything, and neither is a report the agent left in the worktree: this reads what
@@ -1012,10 +1011,12 @@ export function parseOpenCodeRunEvents(output: string): {
   text: string
   executions: AgentExecution[]
   reads: AgentRead[]
+  skills: AgentSkillLoad[]
 } {
   const text: string[] = []
   const executions: AgentExecution[] = []
   const reads: AgentRead[] = []
+  const skills: AgentSkillLoad[] = []
   for (const line of output.split(/\r?\n/)) {
     if (line.trim() === '') continue
     let event: unknown
@@ -1055,16 +1056,23 @@ export function parseOpenCodeRunEvents(output: string): {
       }
       continue
     }
-    // A completed read is the only direct evidence that an agent opened a file. The
-    // input field is `filePath` in OpenCode's read tool; `path` is accepted as well so a
-    // rename cannot silently turn observation into "nothing happened".
+    // A completed read is direct evidence that an agent opened a file. The input field is
+    // `filePath` in OpenCode's read tool; `path` is accepted as well so a rename cannot
+    // silently turn observation into "nothing happened".
     if (tool === 'read') {
       const field = input as { filePath?: unknown; path?: unknown }
       const path = typeof field.filePath === 'string' ? field.filePath : field.path
       if (typeof path === 'string' && path !== '') reads.push({ path })
+      continue
+    }
+    // OpenCode loads an installed skill by id through its `skill` tool. That is the
+    // supported way a skill's body reaches the conversation, so it is recorded as a load.
+    if (tool === 'skill') {
+      const id = (input as { id?: unknown }).id
+      if (typeof id === 'string' && id !== '') skills.push({ id })
     }
   }
-  return { text: text.join('\n'), executions, reads }
+  return { text: text.join('\n'), executions, reads, skills }
 }
 
 /**
@@ -1329,22 +1337,62 @@ export async function installScenarioSkill(
 }
 
 /**
- * Whether the agent was seen touching the installed skill.
+ * Whether the agent was seen using the skill this run installed.
  *
- * A completed `read` of the skill path, or a completed shell command naming it, is
- * observation, not proof of use. Nothing observed is also not proof of non-use: an
- * uncompleted event, or a tool the harness does not parse, is invisible here.
+ * Evidence has to be attributable to *this* worktree's artifact:
+ *
+ * - `observed` requires a completed `read` of the exact installed `SKILL.md`, after
+ *   resolving the reported path against the scenario root. A path from another checkout or a
+ *   copy inside the repository is not this run's artifact.
+ * - A completed OpenCode `skill` load of the installed id is **ambiguous**: another
+ *   configured source (`~/.claude/skills`, `.opencode/skills`, a `skills` config entry) can
+ *   define the same id and take precedence, and the stream does not say which one was
+ *   resolved. A load on its own therefore stays `unknown`.
+ * - A shell command that merely names the path is not evidence.
+ *
+ * `not-observed` is not proof of non-use, and a run with no tool events stays `unknown`.
  */
 export function observeSkillAccess(
   skill: EvalSkillSpec,
-  events: { executions: readonly { command: string }[]; reads: readonly { path: string }[] },
+  events: {
+    executions: readonly { command: string }[]
+    reads: readonly { path: string }[]
+    skills: readonly { id: string }[]
+  },
+  root: string,
 ): EvalSkillAccess {
-  if (events.executions.length === 0 && events.reads.length === 0) return 'unknown'
-  const directory = `.agents/skills/${skill.name}`
-  const normalize = (value: string): string => value.replace(/\\/g, '/')
-  if (events.reads.some((entry) => normalize(entry.path).includes(directory))) return 'observed'
-  if (events.executions.some((entry) => normalize(entry.command).includes(directory))) return 'observed'
+  if (events.executions.length === 0 && events.reads.length === 0 && events.skills.length === 0) return 'unknown'
+  const installed = installedSkillFile(root, skill.name)
+  if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) return 'observed'
+  // The id is the only thing a load reports, and the id can be shadowed by another source.
+  if (events.skills.some((entry) => entry.id === skill.name)) return 'unknown'
   return 'not-observed'
+}
+
+/** The canonical path of the skill this run installed, resolving the temp root's links. */
+function installedSkillFile(root: string, name: string): string {
+  const file = resolve(root, '.agents', 'skills', name, 'SKILL.md')
+  try {
+    return realpathSync.native(file)
+  } catch {
+    return file
+  }
+}
+
+/** Resolve a reported path and decide whether it is exactly the installed file. */
+function isInstalledSkillPath(path: string, root: string, installed: string): boolean {
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(root, path)
+  if (samePath(absolute, installed)) return true
+  try {
+    return samePath(realpathSync.native(absolute), installed)
+  } catch {
+    return false
+  }
+}
+
+/** Compare paths the way the host filesystem does. */
+function samePath(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
 function errorText(err: unknown): string {
@@ -1557,6 +1605,7 @@ function writeBaseline(scenarios: readonly EvalScenario[]): void {
       sourceHash: hashScenarioSource(repoRoot, scenario),
       verify: scenario.verify,
       hiddenVerify: scenario.hiddenVerify ?? [],
+      ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
       expect: scenario.expect,
     })),
   }
@@ -1617,6 +1666,51 @@ function hashHarness(): string {
     hash.update('\0')
   }
   return hash.digest('hex')
+}
+
+/**
+ * Rebuild the console results from a completed run record.
+ *
+ * Every recorded fact is copied, including the skill verdicts. Resume reuses completed work
+ * instead of rerunning it, so a field dropped here disappears from the resumed report even
+ * though the run record still holds it.
+ */
+export function completedResultsFromRecord(
+  runRecord: EvalRunRecord,
+  scenarios: readonly EvalScenario[],
+): ScenarioResult[] {
+  const results: ScenarioResult[] = []
+  for (const prior of runRecord.results) {
+    if (latestAttemptState(prior) !== 'completed') continue
+    const scenario = scenarios.find((entry) => entry.id === prior.scenario)
+    results.push(
+      sanitizeResult({
+        scenario: prior.scenario,
+        size: scenario?.size ?? 'tiny',
+        kind: scenario?.kind ?? 'code-change',
+        variant: prior.variant,
+        model: prior.model,
+        modelRole: prior.modelRole as EvalModelRole | null,
+        opencodeVersion: runRecord.opencodeVersion,
+        scenarioHash: prior.scenarioHash,
+        sourceHash: prior.sourceHash,
+        verifyCount: prior.verifyCount,
+        hiddenVerifyCount: prior.hiddenVerifyCount,
+        verified: prior.verified,
+        hiddenVerified: prior.hiddenVerified,
+        verifyExitCodes: [...prior.verifyExitCodes],
+        repetition: prior.repetition,
+        costUsd: prior.costUsd,
+        tokens: prior.tokens,
+        durationMs: prior.durationMs,
+        transcript: prior.transcript,
+        ...(prior.error === undefined ? {} : { error: prior.error }),
+        ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
+        ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
+      }),
+    )
+  }
+  return results
 }
 
 /** Build the persisted shape of one result from the sanitized run output. */
@@ -1810,6 +1904,7 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     sourceHash: hashScenarioSource(repoRoot, scenario),
     verify: scenario.verify,
     hiddenVerify: scenario.hiddenVerify ?? [],
+    ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
     expect: scenario.expect,
   }))
   const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord, hashHarness())

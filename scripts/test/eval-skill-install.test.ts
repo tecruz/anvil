@@ -47,7 +47,7 @@ describe('installing a scenario skill through the approved apply path', () => {
     const installed = join(workdir, '.agents', 'skills', 'release-notes', 'SKILL.md')
     const content = readFileSync(installed, 'utf8')
     assert.match(content, /^---\nname: release-notes\n/m)
-    assert.match(content, /\(pre-release\)/)
+    assert.match(content, /release-line contract in `README\.md`/)
     assert.equal(
       existsSync(join(workdir, '.anvil-eval-skill-source.md')),
       false,
@@ -92,16 +92,19 @@ describe('installing a scenario skill through the approved apply path', () => {
     assert.equal(existsSync(join(workdir, '.agents')), false)
   })
 
-  test('the conventions live in the skill, not in the fixture', () => {
-    // Guards the fixture itself: if the repository documented the same rules, the comparison
-    // would measure reading, not the installed skill.
-    const skillText = readFileSync(join(source, 'eval/skills/skill-guidance/SKILL.md'), 'utf8')
-    assert.match(skillText, /TypeError/)
-    assert.match(skillText, /pre-release/)
-
-    const visible = readFileSync(join(source, 'eval/repos/skill-guidance/test/release.test.js'), 'utf8')
-    assert.doesNotMatch(visible, /pre-release|TypeError/)
+  test('both variants see the contract, and the skill carries the procedure', () => {
+    // Fairness guard: the required behaviour must be visible to both variants, or the
+    // comparison measures missing information instead of skill-guided work.
     const readme = readFileSync(join(source, 'eval/repos/skill-guidance/README.md'), 'utf8')
-    assert.doesNotMatch(readme, /TypeError|v<version>|\(pre-release\)/)
+    assert.match(readme, /v<version>/)
+    assert.match(readme, /\(pre-release\)/)
+    assert.match(readme, /TypeError/)
+
+    // The skill must not be an answer sheet: it describes the procedure, and the exact
+    // contract stays in the repository both variants can read.
+    const skillText = readFileSync(join(source, 'eval/skills/skill-guidance/SKILL.md'), 'utf8')
+    assert.match(skillText, /README\.md/)
+    assert.match(skillText, /npm test/)
+    assert.doesNotMatch(skillText, /v<version>|\(pre-release\)/)
   })
 })

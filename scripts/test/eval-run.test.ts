@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
-import { isCheckCommand, observeSkillAccess, parseOpenCodeRunEvents, run } from '../eval.ts'
+import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
+import { completedResultsFromRecord, isCheckCommand, observeSkillAccess, parseOpenCodeRunEvents, run } from '../eval.ts'
 
 const temps: string[] = []
 after(() => {
@@ -58,6 +59,7 @@ describe('eval harness process environment', () => {
       text: 'node',
       executions: [{ command: 'node run-check.js', exitCode: 1 }],
       reads: [],
+      skills: [],
     })
   })
 
@@ -114,6 +116,21 @@ describe('eval harness process environment', () => {
     ].join('\n')
 
     assert.deepEqual(parseOpenCodeRunEvents(output).reads, [{ path: '.agents/skills/release-notes/SKILL.md' }])
+  })
+
+  test('a completed native skill load reports the id, and an unfinished one does not', () => {
+    const output = [
+      JSON.stringify({
+        type: 'tool_use',
+        part: { type: 'tool', tool: 'skill', state: { status: 'completed', input: { id: 'release-notes' } } },
+      }),
+      JSON.stringify({
+        type: 'tool_use',
+        part: { type: 'tool', tool: 'skill', state: { status: 'running', input: { id: 'other-skill' } } },
+      }),
+    ].join('\n')
+
+    assert.deepEqual(parseOpenCodeRunEvents(output).skills, [{ id: 'release-notes' }])
   })
 
   test('the check command is matched on its arguments, not on its spelling', () => {
@@ -196,45 +213,150 @@ describe('eval harness process environment', () => {
 
 describe('skill access observation', () => {
   const skill = { source: 'eval/skills/skill-guidance/SKILL.md', name: 'release-notes' }
+  const root = process.platform === 'win32' ? 'C:\\repo' : '/repo'
+  const none = { executions: [], reads: [], skills: [] }
 
-  test('a read of the installed skill is observed', () => {
-    assert.equal(
-      observeSkillAccess(skill, {
-        executions: [],
-        reads: [{ path: '.agents/skills/release-notes/SKILL.md' }],
-      }),
-      'observed',
-    )
+  test('a read of the installed file is observed, however the path is written', () => {
+    for (const path of [
+      '.agents/skills/release-notes/SKILL.md',
+      process.platform === 'win32'
+        ? 'C:\\repo\\.agents\\skills\\release-notes\\SKILL.md'
+        : '/repo/.agents/skills/release-notes/SKILL.md',
+    ]) {
+      assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path }] }, root), 'observed', path)
+    }
   })
 
-  test('a Windows path and a shell command naming the skill are both observed', () => {
-    assert.equal(
-      observeSkillAccess(skill, {
-        executions: [],
-        reads: [{ path: 'C:\\repo\\.agents\\skills\\release-notes\\SKILL.md' }],
-      }),
-      'observed',
-    )
-    assert.equal(
-      observeSkillAccess(skill, {
-        executions: [{ command: 'cat .agents/skills/release-notes/SKILL.md' }],
-        reads: [],
-      }),
-      'observed',
-    )
+  test('a read from another checkout is not this run’s artifact', () => {
+    const path =
+      process.platform === 'win32'
+        ? 'C:/different-repository/.agents/skills/release-notes/SKILL.md'
+        : '/different-repository/.agents/skills/release-notes/SKILL.md'
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path }] }, root), 'not-observed')
   })
 
-  test('a read of another skill is not observation of this one', () => {
+  test('a copy inside the repository is a different file', () => {
     assert.equal(
-      observeSkillAccess(skill, {
-        executions: [{ command: 'node --test' }],
-        reads: [{ path: '.agents/skills/verify-change/SKILL.md' }],
-      }),
+      observeSkillAccess(skill, { ...none, reads: [{ path: 'copy/.agents/skills/release-notes/SKILL.md' }] }, root),
       'not-observed',
     )
   })
 
+  test('a sibling skill with a longer name is not this artifact', () => {
+    assert.equal(
+      observeSkillAccess(
+        skill,
+        {
+          ...none,
+          reads: [{ path: '.agents/skills/release-notes-other/SKILL.md' }],
+          skills: [{ id: 'release-notes-other' }],
+        },
+        root,
+      ),
+      'not-observed',
+    )
+  })
+
+  test('a shell command that merely names the path is not access evidence', () => {
+    for (const command of [
+      'cat .agents/skills/release-notes/SKILL.md',
+      'echo .agents/skills/release-notes/SKILL.md',
+      'rm .agents/skills/release-notes/SKILL.md',
+    ]) {
+      assert.equal(observeSkillAccess(skill, { ...none, executions: [{ command }] }, root), 'not-observed', command)
+    }
+  })
+
+  test('a native load alone stays unknown, because another source can shadow the id', () => {
+    assert.equal(observeSkillAccess(skill, { ...none, skills: [{ id: 'release-notes' }] }, root), 'unknown')
+  })
+
+  test('a native load with a read of the installed file is observed', () => {
+    assert.equal(
+      observeSkillAccess(
+        skill,
+        {
+          ...none,
+          reads: [{ path: '.agents/skills/release-notes/SKILL.md' }],
+          skills: [{ id: 'release-notes' }],
+        },
+        root,
+      ),
+      'observed',
+    )
+  })
+
   test('no tool events at all stays unknown, because absence is not proof of non-use', () => {
-    assert.equal(observeSkillAccess(skill, { executions: [], reads: [] }), 'unknown')
+    assert.equal(observeSkillAccess(skill, none, root), 'unknown')
+  })
+})
+
+describe('resumed results keep every recorded fact', () => {
+  const record: EvalRunRecord = {
+    schemaVersion: 3,
+    runId: 'run-1',
+    startedAt: '2026-11-11T00:00:00.000Z',
+    completedAt: '2026-11-11T00:01:00.000Z',
+    completionState: 'completed',
+    commitSha: null,
+    implementation: 'impl-hash',
+    bundleDigest: null,
+    harnessDigest: 'harness-hash',
+    models: [{ id: 'fake-agent', role: 'small' }],
+    opencodeVersion: null,
+    nodeVersion: null,
+    publishTranscripts: false,
+    subset: false,
+    repetitions: 1,
+    seed: 'seed',
+    order: 'alternate',
+    scenarioHashes: { 'skill-guidance': { scenarioHash: 'scenario-hash', sourceHash: 'source-hash' } },
+    runKeys: ['skill-guidance/anvil/fake-agent/0'],
+    executionOrder: ['skill-guidance/anvil/fake-agent/0'],
+    results: [
+      {
+        scenario: 'skill-guidance',
+        variant: 'anvil',
+        model: 'fake-agent',
+        modelRole: null,
+        scenarioHash: 'scenario-hash',
+        sourceHash: 'source-hash',
+        verifyCount: 1,
+        hiddenVerifyCount: 1,
+        attempts: [
+          { startedAt: '2026-11-11T00:00:00.000Z', completedAt: '2026-11-11T00:00:30.000Z', state: 'completed' },
+        ],
+        verified: true,
+        hiddenVerified: true,
+        verifyExitCodes: [0, 0],
+        repetition: 0,
+        costUsd: null,
+        tokens: null,
+        durationMs: 30_000,
+        transcript: '',
+        skillInstall: 'verified',
+        skillAccess: 'observed',
+      },
+    ],
+  }
+  const scenarios = [
+    {
+      id: 'skill-guidance',
+      size: 'tiny',
+      kind: 'code-change',
+      repo: 'eval/repos/skill-guidance',
+      task: 'Implement releaseLine.',
+      verify: ['npm test'],
+      hiddenVerify: ['node --test test/hidden-release.test.js'],
+      expect: { verified: true },
+    },
+  ] as EvalScenario[]
+
+  test('a resumed report keeps skillInstall and skillAccess', () => {
+    const [result] = completedResultsFromRecord(record, scenarios)
+    assert.equal(result?.skillInstall, 'verified')
+    assert.equal(result?.skillAccess, 'observed')
+    assert.equal(result?.verified, true)
+    assert.equal(result?.hiddenVerified, true)
   })
 })

@@ -85,6 +85,7 @@ function baseline(
       sourceHash: hashes[s.id]?.sourceHash ?? 'source-hash',
       verify: s.verify,
       hiddenVerify: s.hiddenVerify ?? [],
+      ...(s.skill === undefined ? {} : { skill: s.skill }),
       expect: s.expect,
     })),
   }
@@ -559,6 +560,8 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       durationMs: 0,
       transcript: '',
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
+      ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
       attempts: [
         {
           startedAt: '2026-10-27T00:02:00.000Z',
@@ -1249,5 +1252,102 @@ describe('skill comparison scenarios', () => {
     assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
     assert.equal(parsed.results[0]!.skillInstall, 'failed')
     assert.equal(parsed.results[0]!.skillAccess, 'not-installed')
+  })
+
+  function skillScenarios(): EvalScenario[] {
+    return [skillScenario()]
+  }
+
+  /** A summary whose skill facts agree with its scenario: installed and unknown on anvil. */
+  function skillRun(): EvalLatest {
+    const run = latest(skillScenarios())
+    for (const result of run.results) {
+      if (result.variant === 'anvil') {
+        result.skillInstall = 'verified'
+        result.skillAccess = 'unknown'
+      } else {
+        result.skillInstall = 'not-installed'
+        result.skillAccess = 'not-installed'
+      }
+    }
+    return run
+  }
+
+  test('a consistent skill run passes, and the baseline keeps the declaration', () => {
+    const scenarios = skillScenarios()
+    const expected = baseline(scenarios)
+    const gate = checkEvalGate(expected, skillRun(), expected.scenarios)
+    assert.equal(gate.ok, true, gate.message)
+
+    const parsed = parseBaseline(JSON.parse(JSON.stringify(expected)))
+    assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
+    assert.deepEqual(parsed.scenarios[0]!.skill, {
+      source: 'eval/skills/skill-guidance/SKILL.md',
+      name: 'release-notes',
+    })
+  })
+
+  test('an anvil result that does not record a verified install is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillInstall = 'not-installed'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillInstall=not-installed for the variant that installs the skill/)
+  })
+
+  test('a bare result that claims an install is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const bare = run.results.find((result) => result.variant === 'bare')!
+    bare.skillInstall = 'verified'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillInstall=verified for the variant that receives no skill/)
+  })
+
+  test('a summary that disagrees with its run record about skill facts is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    const anvil = summary.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccess = 'observed'
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccess disagrees with run record/)
+  })
+
+  test('access without a verified installation is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillInstall = 'not-installed'
+    anvil.skillAccess = 'observed'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /access without a verified installation/)
+  })
+
+  test('a failed installation without an error is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillInstall = 'failed'
+    anvil.skillAccess = 'unknown'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /failed skill installation without an error/)
+  })
+
+  test('a scenario without a skill cannot record an access verdict', () => {
+    const scenarios = matrix()
+    const run = latest(scenarios)
+    run.results[0]!.skillInstall = 'not-requested'
+    run.results[0]!.skillAccess = 'not-observed'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skill access for a scenario that declares no skill/)
   })
 })
