@@ -8,7 +8,7 @@
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
 #
 # Secrets:
-#   NPM_TOKEN — an npm auth token with publish access to @anvil/cli. Scoped to this
+#   NPM_TOKEN — an npm auth token with publish access to `anvil`. Scoped to this
 #     workflow only; ordinary PR jobs never see it.
 
 name: Release
@@ -41,9 +41,10 @@ jobs:
         run: npm run check
 
       # Pack the tarball from the root — that is the manifest npm packs, and the
-      # allowlisted files are what a user receives.
+      # allowlisted files are what a user receives. `--pack-destination` requires the
+      # directory to exist, so create it instead of assuming it survives `npm ci`.
       - name: pack the distribution tarball
-        run: npm pack --pack-destination dist
+        run: mkdir -p dist && npm pack --pack-destination dist
 
       # Verify the tarball contains only the allowlisted files.
       - name: verify tarball contents
@@ -52,11 +53,12 @@ jobs:
           echo "packed: $tarball"
           tar tzf "$tarball"
 
-      # Record the tarball checksum and the source commit for provenance.
+      # Record the tarball checksum and the source commit for provenance. The path is
+      # absolute because `npm publish` treats a bare relative path as a package spec.
       - name: record checksum and provenance
         id: provenance
         run: |
-          tarball=$(ls dist/*.tgz)
+          tarball=$(realpath dist/*.tgz)
           checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
           source_sha=$(git rev-parse HEAD)
           version=${GITHUB_REF_NAME#v}
@@ -71,7 +73,6 @@ jobs:
       - name: smoke-test the installed tarball
         run: |
           consumer=$(mktemp -d)
-          echo "consumer=$consumer" >> "$GITHUB_OUTPUT"
           echo '{"name":"consumer","private":true,"scripts":{"test":"node -e \"process.exit(0)\""}}' > "$consumer/package.json"
           npm install --no-save "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
 
@@ -85,8 +86,38 @@ jobs:
           # 2. JSON envelope survives bundling.
           "$bin" doctor --json
 
-      # Publish the exact bytes that were tested, with provenance.
-      - name: publish to npm
+      # Publishing cannot be undone, so every identity this release claims must agree
+      # first: the tag, the root manifest (the package npm receives), and the packed
+      # artifact that was just smoke-tested.
+      - name: verify the release identity
+        env:
+          TAG_VERSION: ${{ steps.provenance.outputs.version }}
+        run: |
+          tarball="${{ steps.provenance.outputs.tarball }}"
+          tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" node -e '
+            const fs = require("node:fs")
+            const packed = JSON.parse(fs.readFileSync(0, "utf8"))
+            const manifest = require("./package.json")
+            const tag = process.env.TAG_VERSION
+            if (packed.name !== manifest.name) {
+              throw new Error(`tarball is ${packed.name}, the root manifest is ${manifest.name}`)
+            }
+            if (packed.version !== manifest.version) {
+              throw new Error(`tarball is ${packed.version}, the root manifest is ${manifest.version}`)
+            }
+            if (tag !== manifest.version) {
+              throw new Error(`tag is v${tag}, the root manifest is ${manifest.version}`)
+            }
+            console.log(`release identity: ${packed.name}@${packed.version} from tag v${tag}`)
+          '
+          # The allowlist must actually carry the command the smoke test ran.
+          bin_path=$(node -p "require('./package.json').bin.anvil")
+          tar tzf "$tarball" | grep -qx "package/${bin_path#./}"
+
+      # Publish the exact bytes that were tested. `npm publish` with no argument would
+      # repack the working tree and re-run `prepare`, so the registry could receive a
+      # different build than the one the smoke test approved.
+      - name: publish the tested tarball to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: npm publish "${{ steps.provenance.outputs.tarball }}" --provenance --access public
