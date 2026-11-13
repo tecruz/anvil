@@ -7,8 +7,12 @@
 # The bundle is never rebuilt after testing: if the build changes, the tag moves and a
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
 #
+# The published package is the scoped workspace `@anvil/cli` (ADR-0012), because the
+# unscoped `anvil` name belongs to an unrelated package on npm. The repository root stays
+# the git-install unit (ADR-0007); it is not the registry target.
+#
 # Secrets:
-#   NPM_TOKEN — an npm auth token with publish access to `anvil`. Scoped to this
+#   NPM_TOKEN — an npm auth token with publish access to `@anvil/cli`. Scoped to this
 #     workflow only; ordinary PR jobs never see it.
 
 name: Release
@@ -40,11 +44,17 @@ jobs:
       - name: check (lint, typecheck, test, build)
         run: npm run check
 
-      # Pack the tarball from the root — that is the manifest npm packs, and the
-      # allowlisted files are what a user receives. `--pack-destination` requires the
-      # directory to exist, so create it instead of assuming it survives `npm ci`.
+      # Pack the scoped workspace that is the registry target (ADR-0012), not the root:
+      # the root is the git-install unit and its unscoped name is unavailable on npm.
+      # npm always includes README and LICENSE found beside the manifest, and this
+      # workspace carries neither, so stage the root copies first. `--pack-destination`
+      # requires the directory to exist, so create it instead of assuming it survives
+      # `npm ci`.
       - name: pack the distribution tarball
-        run: mkdir -p dist && npm pack --pack-destination dist
+        run: |
+          mkdir -p dist
+          cp LICENSE README.md packages/cli/
+          npm pack --workspace @anvil/cli --pack-destination dist
 
       # Verify the tarball contains only the allowlisted files.
       - name: verify tarball contents
@@ -68,7 +78,7 @@ jobs:
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
       # Install the tarball into an isolated consumer project and smoke-test the
-      # installed binary: version, help, JSON, doctor. This is the artifact that is
+      # installed binary: version and JSON doctor. This is the artifact that is
       # published, tested exactly as it will be received.
       - name: smoke-test the installed tarball
         run: |
@@ -87,8 +97,8 @@ jobs:
           "$bin" doctor --json
 
       # Publishing cannot be undone, so every identity this release claims must agree
-      # first: the tag, the root manifest (the package npm receives), and the packed
-      # artifact that was just smoke-tested.
+      # first: the tag, the workspace manifest (the package npm receives), and the
+      # packed artifact that was just smoke-tested.
       - name: verify the release identity
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
@@ -97,21 +107,24 @@ jobs:
           tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" node -e '
             const fs = require("node:fs")
             const packed = JSON.parse(fs.readFileSync(0, "utf8"))
-            const manifest = require("./package.json")
+            const manifest = require("./packages/cli/package.json")
             const tag = process.env.TAG_VERSION
             if (packed.name !== manifest.name) {
-              throw new Error(`tarball is ${packed.name}, the root manifest is ${manifest.name}`)
+              throw new Error(`tarball is ${packed.name}, the workspace manifest is ${manifest.name}`)
+            }
+            if (packed.name !== "@anvil/cli") {
+              throw new Error(`this workflow publishes @anvil/cli, not ${packed.name}`)
             }
             if (packed.version !== manifest.version) {
-              throw new Error(`tarball is ${packed.version}, the root manifest is ${manifest.version}`)
+              throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)
             }
             if (tag !== manifest.version) {
-              throw new Error(`tag is v${tag}, the root manifest is ${manifest.version}`)
+              throw new Error(`tag is v${tag}, the workspace manifest is ${manifest.version}`)
             }
             console.log(`release identity: ${packed.name}@${packed.version} from tag v${tag}`)
           '
           # The allowlist must actually carry the command the smoke test ran.
-          bin_path=$(node -p "require('./package.json').bin.anvil")
+          bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
           tar tzf "$tarball" | grep -qx "package/${bin_path#./}"
 
       # Publish the exact bytes that were tested. `npm publish` with no argument would

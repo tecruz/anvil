@@ -11,10 +11,11 @@ The decision is accepted, but the registry channel is **unreleased**. Acceptance
 intended design, not an available npm package. GitHub installation remains the supported
 channel until a scoped release has been published and verified.
 
-The existing release workflow still packs and publishes the repository root (`anvil`), not
-the scoped `packages/cli` workspace. Before advertising registry installation, it must pack,
-test, and publish the scoped artifact, and installation of the published `@anvil/cli` package
-must be verified from the registry.
+The release workflow packs, smoke-tests and publishes the scoped `packages/cli` workspace
+(`@anvil/cli`) from a version tag, and refuses to publish when the tag, the workspace manifest
+and the packed tarball disagree. The unscoped `anvil` name belongs to an unrelated package, so
+the repository root stays the git-install unit only. The channel remains unadvertised until a
+release has been published and installation of `@anvil/cli` from the registry verified.
 
 ## Context
 
