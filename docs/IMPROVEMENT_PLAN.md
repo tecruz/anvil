@@ -239,11 +239,13 @@ Each result keeps three facts apart:
   it re-reads only a regular file — never a final symlink or a FIFO, and never more than 1 MiB
   — and requires every captured value to match. A file that was removed, redirected, replaced,
   or even rewritten with identical bytes makes the verdict `unknown`: the write moves the
-  change time, which an agent cannot set back, so a modify → read → restore sequence cannot be
-  attributed. A native `skill` load of the installed id stays `unknown`, because another
-  configured source can define the same id and take precedence. A shell command that merely
-  names the path is not evidence, `not-observed` is not proof of non-use, and a run with no
-  tool events is `unknown`. A scenario without a skill must not record an access verdict.
+  change time, which on POSIX an agent cannot set back, so a modify → read → restore sequence
+  cannot be attributed. Windows file times can be written back, so there the same sequence can
+  still compare equal; treat the verdict as strong evidence, not proof. A native `skill` load
+  of the installed id stays `unknown`, because another configured source can define the same
+  id and take precedence. A shell command that merely names the path is not evidence,
+  `not-observed` is not proof of non-use, and a run with no tool events is `unknown`. A
+  scenario without a skill must not record an access verdict.
 - `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
 
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke

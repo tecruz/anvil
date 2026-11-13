@@ -1367,7 +1367,9 @@ export async function installScenarioSkill(
  *   `unknown`. Comparing only a pathname would miss a same-path replacement, resolving a
  *   reported read now would follow an alias the agent could have pointed at the artifact
  *   after reading a different copy, and comparing only the bytes would miss an agent that
- *   reads a replacement and then restores the original content before exiting.
+ *   reads a replacement and then restores the original content before exiting. The identity
+ *   comparison is strong evidence, not proof: on Windows file times can be written back, so
+ *   a modify → read → restore sequence is not detectable there.
  * - A completed OpenCode `skill` load of the installed id is **ambiguous**: another
  *   configured source (`~/.claude/skills`, `.opencode/skills`, a `skills` config entry) can
  *   define the same id and take precedence, and the stream does not say which one was
@@ -1479,8 +1481,10 @@ function readRegularFile(path: string): { bytes: Buffer; stat: BigIntStats } | n
  * Whether the file is still the same artifact, not merely a file with the same bytes.
  *
  * Endpoint bytes alone cannot see a replacement that was read and then restored, so the
- * inode identity and change time are part of the comparison. An agent cannot set `ctime`
- * back; any write in between therefore leaves the verdict `unknown`.
+ * inode identity and change time are part of the comparison. On POSIX an agent cannot set
+ * `ctime` back, so any write in between leaves the verdict `unknown`. On Windows both write
+ * and change times can be restored through `SetFileInformationByHandle`, so a write that is
+ * undone before the agent exits can still compare equal.
  */
 function sameInstalledIdentity(left: InstalledSkillArtifact, right: InstalledSkillArtifact): boolean {
   return (
