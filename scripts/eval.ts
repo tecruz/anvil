@@ -185,6 +185,9 @@ const SMOKE_SCENARIO_IDS: ReadonlySet<string> = new Set([
   'medium-verify-only',
 ])
 
+/** The scheduled eval workflow's job ceiling. A worst case above it needs bounded batches. */
+const SCHEDULED_EVAL_CEILING_MINUTES = 60
+
 /** Where the task is written inside the prepared repository. */
 const TASK_FILE = '.anvil-eval-task.md'
 
@@ -373,6 +376,20 @@ async function main(): Promise<void> {
       console.log(`  models    ${models.map((m) => `${m.id} (${m.role})`).join(', ')}`)
       if (fakeAgent) console.log('  agent     fake (a canned answer, no model is called)')
     }
+    const planned = plannedRuns(selectedScenarios, models, repetitions, order, new Set())
+    console.log('')
+    for (const line of formatPreflight(
+      buildPreflight({
+        scenarios: selectedScenarios,
+        models,
+        repetitions,
+        declaredInvocations: selectedScenarios.length * models.length * repetitions * VARIANTS.length,
+        planned: planned.map((entry) => entry.scenario),
+        fakeAgent,
+      }),
+    )) {
+      console.log(line)
+    }
     process.exit(0)
   }
 
@@ -532,6 +549,21 @@ async function main(): Promise<void> {
       .filter((r) => latestAttemptState(r) === 'completed')
       .map((r) => `${r.scenario}/${r.variant}/${r.model}/${r.repetition}`),
   )
+  // Print the spend before the first agent starts. Resume is included: only the keys that
+  // remain are counted, so the ceiling matches what this invocation can actually cost.
+  const planned = plannedRuns(selectedScenarios, models, repetitions, order, completedKeys)
+  for (const line of formatPreflight(
+    buildPreflight({
+      scenarios: selectedScenarios,
+      models,
+      repetitions,
+      declaredInvocations: declaredKeys.length,
+      planned: planned.map((entry) => entry.scenario),
+      fakeAgent,
+    }),
+  )) {
+    console.log(line)
+  }
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
@@ -1744,6 +1776,28 @@ function counterbalanceOrder(repetition: number, order: string): ('bare' | 'anvi
   return repetition % 2 === 0 ? ['bare', 'anvil'] : ['anvil', 'bare']
 }
 
+/** The runs a fresh or resumed selection will actually start, in execution order. */
+function plannedRuns(
+  scenarios: readonly EvalScenario[],
+  models: readonly EvalModel[],
+  repetitions: number,
+  order: string,
+  completed: ReadonlySet<string>,
+): { key: string; scenario: EvalScenario; model: EvalModel }[] {
+  const planned: { key: string; scenario: EvalScenario; model: EvalModel }[] = []
+  for (const model of models) {
+    for (const scenario of scenarios) {
+      for (let repetition = 0; repetition < repetitions; repetition += 1) {
+        for (const variant of counterbalanceOrder(repetition, order)) {
+          const key = `${scenario.id}/${variant}/${model.id}/${repetition}`
+          if (!completed.has(key)) planned.push({ key, scenario, model })
+        }
+      }
+    }
+  }
+  return planned
+}
+
 /** HEAD of the repository the harness runs against, or null when git is unavailable. */
 function readCommitSha(): string | null {
   try {
@@ -1907,6 +1961,390 @@ function formatJson(value: unknown, level = 0): string {
   return JSON.stringify(value) ?? 'null'
 }
 
+/**
+ * Whether a result achieved the scenario's task.
+ *
+ * A green verifier is not the whole task: a code-change scenario also declares a hidden
+ * verifier, and a plausible local fix that fails it did not do the work. An agent error
+ * vetoes success even when the fixture happens to verify afterwards, because the run did
+ * not demonstrate that the agent produced it.
+ */
+export function taskSucceeded(result: ScenarioResult): boolean {
+  if (result.error !== undefined) return false
+  if (!result.verified) return false
+  return (result.hiddenVerifyCount ?? 0) === 0 || result.hiddenVerified === true
+}
+
+/** Counts shared by one scenario/model group and by the whole run. */
+export interface PairedCounts {
+  /** Repetitions where both variants produced a result. */
+  pairs: number
+  /** Repetitions where one variant has no result at all. */
+  incomplete: number
+  bothSucceeded: number
+  onlyAnvil: number
+  onlyBare: number
+  neither: number
+  /** Agent errors, including timeouts, counted per variant. */
+  failures: { bare: number; anvil: number }
+  /** Mean duration over pairs where both variants succeeded. */
+  successfulDurationMs: { bare: number | null; anvil: number | null; pairs: number }
+  /** Mean ledger cost over both-successful pairs where both prices are known. */
+  successfulCostUsd: { bare: number | null; anvil: number | null; pairs: number; unpriced: number }
+}
+
+/** Skill facts for the anvil variant of a paired comparison. */
+export interface PairedSkillCounts {
+  installed: number
+  installFailed: number
+  installUnrecorded: number
+  access: { observed: number; notObserved: number; unknown: number }
+}
+
+export interface PairedGroupSummary extends PairedCounts {
+  scenario: string
+  model: string | null
+  /** Present only for a scenario that installs a skill. */
+  skill: PairedSkillCounts | null
+}
+
+export interface PairedSummary {
+  groups: PairedGroupSummary[]
+  totals: PairedCounts
+}
+
+interface PairAccumulator {
+  pairs: number
+  incomplete: number
+  bothSucceeded: number
+  onlyAnvil: number
+  onlyBare: number
+  neither: number
+  failures: { bare: number; anvil: number }
+  durationBare: number
+  durationAnvil: number
+  durationPairs: number
+  costBare: number
+  costAnvil: number
+  costPairs: number
+  costUnpriced: number
+}
+
+function emptyAccumulator(): PairAccumulator {
+  return {
+    pairs: 0,
+    incomplete: 0,
+    bothSucceeded: 0,
+    onlyAnvil: 0,
+    onlyBare: 0,
+    neither: 0,
+    failures: { bare: 0, anvil: 0 },
+    durationBare: 0,
+    durationAnvil: 0,
+    durationPairs: 0,
+    costBare: 0,
+    costAnvil: 0,
+    costPairs: 0,
+    costUnpriced: 0,
+  }
+}
+
+/**
+ * Classify one repetition.
+ *
+ * Time and cost are averaged only over pairs where both variants succeeded: a cheap
+ * failure is not an efficiency gain, and a run that timed out did not save anything.
+ */
+function classifyPair(accumulator: PairAccumulator, bare: ScenarioResult, anvil: ScenarioResult): void {
+  accumulator.pairs += 1
+  const bareSucceeded = taskSucceeded(bare)
+  const anvilSucceeded = taskSucceeded(anvil)
+  if (bareSucceeded && anvilSucceeded) {
+    accumulator.bothSucceeded += 1
+    accumulator.durationBare += bare.durationMs
+    accumulator.durationAnvil += anvil.durationMs
+    accumulator.durationPairs += 1
+    if (bare.costUsd !== null && anvil.costUsd !== null) {
+      accumulator.costBare += bare.costUsd
+      accumulator.costAnvil += anvil.costUsd
+      accumulator.costPairs += 1
+    } else {
+      accumulator.costUnpriced += 1
+    }
+  } else if (anvilSucceeded) {
+    accumulator.onlyAnvil += 1
+  } else if (bareSucceeded) {
+    accumulator.onlyBare += 1
+  } else {
+    accumulator.neither += 1
+  }
+}
+
+function finishAccumulator(accumulator: PairAccumulator): PairedCounts {
+  const durationPairs = accumulator.durationPairs
+  const costPairs = accumulator.costPairs
+  return {
+    pairs: accumulator.pairs,
+    incomplete: accumulator.incomplete,
+    bothSucceeded: accumulator.bothSucceeded,
+    onlyAnvil: accumulator.onlyAnvil,
+    onlyBare: accumulator.onlyBare,
+    neither: accumulator.neither,
+    failures: { ...accumulator.failures },
+    successfulDurationMs: {
+      bare: durationPairs === 0 ? null : accumulator.durationBare / durationPairs,
+      anvil: durationPairs === 0 ? null : accumulator.durationAnvil / durationPairs,
+      pairs: durationPairs,
+    },
+    successfulCostUsd: {
+      bare: costPairs === 0 ? null : accumulator.costBare / costPairs,
+      anvil: costPairs === 0 ? null : accumulator.costAnvil / costPairs,
+      pairs: costPairs,
+      unpriced: accumulator.costUnpriced,
+    },
+  }
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/**
+ * Pair each repetition's bare and anvil results.
+ *
+ * A missing counterpart is reported as incomplete rather than compared against an
+ * imagined result: a reminder that a run was cut short is more useful than a zero.
+ */
+export function summarizePairs(results: readonly ScenarioResult[]): PairedSummary {
+  interface Pair {
+    scenario: string
+    model: string | null
+    bare?: ScenarioResult
+    anvil?: ScenarioResult
+  }
+  // One entry per repetition: averaging across repetitions happens only after each pair has
+  // been classified, so a failure in repetition 2 cannot erase repetition 1.
+  const pairs = new Map<string, Pair>()
+  for (const result of results) {
+    const key = `${result.scenario}\u0000${result.model ?? ''}\u0000${result.repetition ?? ''}`
+    let pair = pairs.get(key)
+    if (pair === undefined) {
+      pair = { scenario: result.scenario, model: result.model }
+      pairs.set(key, pair)
+    }
+    pair[result.variant] = result
+  }
+
+  interface Group {
+    scenario: string
+    model: string | null
+    accumulator: PairAccumulator
+    skill: PairedSkillCounts | null
+  }
+  const groups = new Map<string, Group>()
+  const totals = emptyAccumulator()
+  for (const pair of pairs.values()) {
+    const key = `${pair.scenario}\u0000${pair.model ?? ''}`
+    let group = groups.get(key)
+    if (group === undefined) {
+      group = { scenario: pair.scenario, model: pair.model, accumulator: emptyAccumulator(), skill: null }
+      groups.set(key, group)
+    }
+    for (const result of [pair.bare, pair.anvil]) {
+      if (result?.error === undefined) continue
+      group.accumulator.failures[result.variant] += 1
+      totals.failures[result.variant] += 1
+    }
+    for (const result of [pair.bare, pair.anvil]) {
+      if (result?.skillInstall === undefined || result.skillInstall === 'not-requested') continue
+      group.skill ??= {
+        installed: 0,
+        installFailed: 0,
+        installUnrecorded: 0,
+        access: { observed: 0, notObserved: 0, unknown: 0 },
+      }
+    }
+    if (pair.anvil?.skillInstall !== undefined && pair.anvil.skillInstall !== 'not-requested') {
+      const skill = group.skill
+      if (skill !== null) {
+        if (pair.anvil.skillInstall === 'verified') {
+          skill.installed += 1
+          if (pair.anvil.skillAccess === 'observed') skill.access.observed += 1
+          else if (pair.anvil.skillAccess === 'not-observed') skill.access.notObserved += 1
+          else skill.access.unknown += 1
+        } else if (pair.anvil.skillInstall === 'failed') {
+          skill.installFailed += 1
+        } else {
+          skill.installUnrecorded += 1
+        }
+      }
+    }
+    if (pair.bare === undefined || pair.anvil === undefined) {
+      group.accumulator.incomplete += 1
+      totals.incomplete += 1
+    } else {
+      classifyPair(group.accumulator, pair.bare, pair.anvil)
+      classifyPair(totals, pair.bare, pair.anvil)
+    }
+  }
+
+  const summaries: PairedGroupSummary[] = []
+  for (const group of groups.values()) {
+    summaries.push({
+      scenario: group.scenario,
+      model: group.model,
+      skill: group.skill,
+      ...finishAccumulator(group.accumulator),
+    })
+  }
+  summaries.sort((a, b) => compareText(a.scenario, b.scenario) || compareText(a.model ?? '', b.model ?? ''))
+  return { groups: summaries, totals: finishAccumulator(totals) }
+}
+
+function formatSeconds(ms: number | null): string {
+  return ms === null ? 'unknown' : `${Math.round(ms / 1000)}s`
+}
+
+function formatCost(usd: number | null): string {
+  return usd === null ? 'unknown' : `$${usd.toFixed(2)}`
+}
+
+function plural(count: number, singular: string): string {
+  return count === 1 ? singular : `${singular}s`
+}
+
+/**
+ * Render the paired comparison as console lines.
+ *
+ * The wording is deliberately modest: a handful of repetitions is a measurement, not a
+ * significance test, and a cost the ledger did not report stays unknown.
+ */
+export function formatPairedSummary(summary: PairedSummary): string[] {
+  const lines = ['', 'Paired comparison (bare vs anvil)', '---------------------------------']
+  if (summary.groups.length === 0) {
+    lines.push('No results to pair.')
+    return lines
+  }
+  for (const group of summary.groups) {
+    lines.push(group.model === null ? group.scenario : `${group.scenario} [${group.model}]`)
+    lines.push(`  repetitions      ${group.pairs} complete, ${group.incomplete} incomplete`)
+    lines.push(
+      `  task success     both ${group.bothSucceeded}, anvil only ${group.onlyAnvil}, bare only ${group.onlyBare}, neither ${group.neither}`,
+    )
+    lines.push(`  agent failures   bare ${group.failures.bare}, anvil ${group.failures.anvil}`)
+    if (group.successfulDurationMs.pairs === 0) {
+      lines.push('  successful time  no pair succeeded in both variants')
+    } else {
+      lines.push(
+        `  successful time  bare ${formatSeconds(group.successfulDurationMs.bare)}, anvil ${formatSeconds(
+          group.successfulDurationMs.anvil,
+        )} (n=${group.successfulDurationMs.pairs})`,
+      )
+    }
+    if (group.successfulCostUsd.pairs === 0) {
+      lines.push(
+        `  successful cost  unknown (${group.successfulCostUsd.unpriced} successful ${plural(
+          group.successfulCostUsd.unpriced,
+          'pair',
+        )} without a ledger price)`,
+      )
+    } else {
+      lines.push(
+        `  successful cost  bare ${formatCost(group.successfulCostUsd.bare)}, anvil ${formatCost(
+          group.successfulCostUsd.anvil,
+        )} (n=${group.successfulCostUsd.pairs}, ${group.successfulCostUsd.unpriced} unpriced)`,
+      )
+    }
+    if (group.skill !== null) {
+      lines.push(
+        `  skill            installed ${group.skill.installed}, failed ${group.skill.installFailed}, unrecorded ${group.skill.installUnrecorded}; access observed ${group.skill.access.observed}, not-observed ${group.skill.access.notObserved}, unknown ${group.skill.access.unknown}`,
+      )
+    }
+  }
+  const totals = summary.totals
+  lines.push('')
+  lines.push(
+    `All repetitions: ${totals.pairs} complete, ${totals.incomplete} incomplete; both ${totals.bothSucceeded}, anvil only ${totals.onlyAnvil}, bare only ${totals.onlyBare}, neither ${totals.neither}.`,
+  )
+  if (totals.pairs > 0 && totals.pairs < 5) {
+    const verb = totals.pairs === 1 ? 'does' : 'do'
+    lines.push(
+      `${totals.pairs} ${plural(totals.pairs, 'pair')} ${verb} not support a significance claim; treat this as an exploratory measurement.`,
+    )
+  }
+  lines.push(
+    'Task success means the verifier passed and any declared hidden verifier passed; failures are excluded from the successful time and cost means.',
+  )
+  return lines
+}
+
+/** What a run will spend before it starts, so the spend is chosen rather than discovered. */
+export interface EvalPreflight {
+  scenarioIds: string[]
+  modelIds: string[]
+  repetitions: number
+  declaredInvocations: number
+  plannedInvocations: number
+  /** Sum of the per-run agent timeouts for the runs that will actually start. */
+  agentTimeCeilingMinutes: number
+  fakeAgent: boolean
+}
+
+export function buildPreflight(input: {
+  scenarios: readonly Pick<EvalScenario, 'id' | 'timeoutMinutes'>[]
+  models: readonly Pick<EvalModel, 'id'>[]
+  repetitions: number
+  declaredInvocations: number
+  planned: readonly Pick<EvalScenario, 'timeoutMinutes'>[]
+  fakeAgent: boolean
+}): EvalPreflight {
+  return {
+    scenarioIds: input.scenarios.map((scenario) => scenario.id),
+    modelIds: input.models.map((model) => model.id),
+    repetitions: input.repetitions,
+    declaredInvocations: input.declaredInvocations,
+    plannedInvocations: input.planned.length,
+    agentTimeCeilingMinutes: input.fakeAgent
+      ? 0
+      : input.planned.reduce((sum, scenario) => sum + (scenario.timeoutMinutes ?? 10), 0),
+    fakeAgent: input.fakeAgent,
+  }
+}
+
+function listIds(ids: readonly string[]): string {
+  if (ids.length <= 4) return ids.join(', ')
+  return `${ids.slice(0, 4).join(', ')}, +${ids.length - 4} more`
+}
+
+export function formatPreflight(preflight: EvalPreflight): string[] {
+  const resumed = preflight.plannedInvocations < preflight.declaredInvocations
+  const lines = [
+    'Preflight',
+    '---------',
+    `  scenarios          ${preflight.scenarioIds.length} (${listIds(preflight.scenarioIds)})`,
+    `  models             ${preflight.modelIds.length} (${listIds(preflight.modelIds)})`,
+    `  repetitions        ${preflight.repetitions}`,
+    '  variants           2 (bare, anvil)',
+    `  agent runs         ${preflight.plannedInvocations} of ${preflight.declaredInvocations}${
+      resumed ? ' (remaining after resume)' : ''
+    }`,
+  ]
+  if (preflight.fakeAgent) {
+    lines.push('  agent              fake (a canned answer; no model is called and no tokens are spent)')
+  } else {
+    lines.push(
+      `  time bound         ${preflight.agentTimeCeilingMinutes} min if every planned run hits its own timeout`,
+    )
+  }
+  lines.push('  cost               unknown until the host usage ledger reports it; never estimated here')
+  if (!preflight.fakeAgent && preflight.agentTimeCeilingMinutes >= SCHEDULED_EVAL_CEILING_MINUTES) {
+    lines.push(
+      `                     reaches the scheduled workflow's ${SCHEDULED_EVAL_CEILING_MINUTES}-minute ceiling before setup; split the run into bounded batches`,
+    )
+  }
+  return lines
+}
+
 function printSummary(results: ScenarioResult[]): void {
   console.log('')
   console.log('scenario              model                             variant  verified  hidden  cost      time')
@@ -1929,8 +2367,8 @@ function printSummary(results: ScenarioResult[]): void {
       console.log(`  skill: install=${r.skillInstall} access=${r.skillAccess ?? 'unknown'}`)
     }
   }
+  for (const line of formatPairedSummary(summarizePairs(results))) console.log(line)
   console.log('')
-  console.log('The comparison that matters is the same row twice: `bare` against `anvil`.')
   console.log('Skill access is observation, not proof that the skill was used.')
   console.log('Run `npm run eval:check` to compare this run with the baseline.')
 }

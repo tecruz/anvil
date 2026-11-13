@@ -142,7 +142,8 @@ conflating harness correctness with agent effectiveness.
 - lint + typecheck clean
 - 97 gate tests pass
 
-**Remaining:** Phase 2B (extended 6-scenario corpus) — pending after Phase 2A review.
+**Remaining:** an approved real-agent pilot. The extended corpus and the installed-skill
+comparison are implemented; what is missing is the spend approval and the run itself.
 
 ### Phase 2B — Extended scenario corpus (planned)
 
@@ -251,6 +252,24 @@ Each result keeps three facts apart:
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke
 cost. A positive, negative or absent difference is a measurement, and three repetitions are
 exploratory rather than proof.
+
+The first pilot should measure the skill alone, because that is the newest and least-proven
+part of the loop. Preview it with:
+
+```bash
+npm run eval -- --dry-run --suite extended --scenario skill-guidance --repetitions 3
+```
+
+Then run the same selection with `ANVIL_EVAL=1` and a model role once the spend is approved.
+A `--scenario` selection is a subset run: it keeps its run record and checkpoints but
+deliberately never replaces the promoted `latest.json` evidence.
+
+Both the preview and the real run print a preflight with the number of agent invocations, the
+worst case if every run hits its own timeout, and an explicit reminder that cost stays unknown
+until the host ledger reports it. The console report pairs each repetition's bare and anvil
+results: task success is reported separately from agent failures, duration and ledger cost are
+averaged only over pairs where both variants succeeded, and a small number of pairs is labelled
+exploratory rather than presented as a significance result.
 
 ### Budget and pilot
 
