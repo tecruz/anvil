@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 
 import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
-import { completedResultsFromRecord, isCheckCommand, observeSkillAccess, parseOpenCodeRunEvents, run } from '../eval.ts'
+import {
+  captureInstalledSkill,
+  completedResultsFromRecord,
+  type InstalledSkillArtifact,
+  isCheckCommand,
+  observeSkillAccess,
+  parseOpenCodeRunEvents,
+  run,
+} from '../eval.ts'
 
 const temps: string[] = []
 after(() => {
@@ -213,36 +221,63 @@ describe('eval harness process environment', () => {
 
 describe('skill access observation', () => {
   const skill = { source: 'eval/skills/skill-guidance/SKILL.md', name: 'release-notes' }
-  const root = process.platform === 'win32' ? 'C:\\repo' : '/repo'
   const none = { executions: [], reads: [], skills: [] }
 
+  /** A worktree with the skill installed, as a verified install leaves it. */
+  function installedRoot(): string {
+    const root = temp('anvil-eval-skill-access-')
+    const directory = join(root, '.agents', 'skills', skill.name)
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(join(directory, 'SKILL.md'), '# release notes\n', 'utf8')
+    return root
+  }
+
+  /** The identity the harness captures before the agent runs. */
+  function capture(root: string): InstalledSkillArtifact {
+    const installed = captureInstalledSkill(root, skill.name)
+    assert.notEqual(installed, null, 'the fixture must contain the installed skill')
+    return installed as InstalledSkillArtifact
+  }
+
+  function installedPath(root: string): string {
+    return join(root, '.agents', 'skills', skill.name, 'SKILL.md')
+  }
+
   test('a read of the installed file is observed, however the path is written', () => {
-    for (const path of [
-      '.agents/skills/release-notes/SKILL.md',
-      process.platform === 'win32'
-        ? 'C:\\repo\\.agents\\skills\\release-notes\\SKILL.md'
-        : '/repo/.agents/skills/release-notes/SKILL.md',
-    ]) {
-      assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path }] }, root), 'observed', path)
+    const root = installedRoot()
+    const installed = capture(root)
+    for (const path of ['.agents/skills/release-notes/SKILL.md', installedPath(root)]) {
+      assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path }] }, root, installed), 'observed', path)
     }
   })
 
   test('a read from another checkout is not this run’s artifact', () => {
-    const path =
-      process.platform === 'win32'
-        ? 'C:/different-repository/.agents/skills/release-notes/SKILL.md'
-        : '/different-repository/.agents/skills/release-notes/SKILL.md'
-    assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path }] }, root), 'not-observed')
+    const root = installedRoot()
+    const other = installedRoot()
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(other) }] }, root, capture(root)),
+      'not-observed',
+    )
   })
 
   test('a copy inside the repository is a different file', () => {
+    const root = installedRoot()
+    const copy = join(root, 'copy', '.agents', 'skills', skill.name)
+    mkdirSync(copy, { recursive: true })
+    writeFileSync(join(copy, 'SKILL.md'), '# release notes\n', 'utf8')
     assert.equal(
-      observeSkillAccess(skill, { ...none, reads: [{ path: 'copy/.agents/skills/release-notes/SKILL.md' }] }, root),
+      observeSkillAccess(
+        skill,
+        { ...none, reads: [{ path: 'copy/.agents/skills/release-notes/SKILL.md' }] },
+        root,
+        capture(root),
+      ),
       'not-observed',
     )
   })
 
   test('a sibling skill with a longer name is not this artifact', () => {
+    const root = installedRoot()
     assert.equal(
       observeSkillAccess(
         skill,
@@ -252,26 +287,38 @@ describe('skill access observation', () => {
           skills: [{ id: 'release-notes-other' }],
         },
         root,
+        capture(root),
       ),
       'not-observed',
     )
   })
 
   test('a shell command that merely names the path is not access evidence', () => {
+    const root = installedRoot()
+    const installed = capture(root)
     for (const command of [
       'cat .agents/skills/release-notes/SKILL.md',
       'echo .agents/skills/release-notes/SKILL.md',
       'rm .agents/skills/release-notes/SKILL.md',
     ]) {
-      assert.equal(observeSkillAccess(skill, { ...none, executions: [{ command }] }, root), 'not-observed', command)
+      assert.equal(
+        observeSkillAccess(skill, { ...none, executions: [{ command }] }, root, installed),
+        'not-observed',
+        command,
+      )
     }
   })
 
   test('a native load alone stays unknown, because another source can shadow the id', () => {
-    assert.equal(observeSkillAccess(skill, { ...none, skills: [{ id: 'release-notes' }] }, root), 'unknown')
+    const root = installedRoot()
+    assert.equal(
+      observeSkillAccess(skill, { ...none, skills: [{ id: 'release-notes' }] }, root, capture(root)),
+      'unknown',
+    )
   })
 
   test('a native load with a read of the installed file is observed', () => {
+    const root = installedRoot()
     assert.equal(
       observeSkillAccess(
         skill,
@@ -281,13 +328,101 @@ describe('skill access observation', () => {
           skills: [{ id: 'release-notes' }],
         },
         root,
+        capture(root),
       ),
       'observed',
     )
   })
 
   test('no tool events at all stays unknown, because absence is not proof of non-use', () => {
-    assert.equal(observeSkillAccess(skill, none, root), 'unknown')
+    const root = installedRoot()
+    assert.equal(observeSkillAccess(skill, none, root, capture(root)), 'unknown')
+  })
+
+  test('a redirected installed path cannot attribute a read, not even of that path', () => {
+    // The attack: read a copy elsewhere in the repository, then point the installed path at
+    // it. Comparing paths after the agent finishes would describe the replacement.
+    const root = installedRoot()
+    const installed = capture(root)
+    const other = installedRoot()
+    rmSync(join(root, '.agents', 'skills', skill.name), { recursive: true, force: true })
+    symlinkSync(
+      join(other, '.agents', 'skills', skill.name),
+      join(root, '.agents', 'skills', skill.name),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(other) }] }, root, installed),
+      'unknown',
+    )
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
+      'unknown',
+    )
+  })
+
+  test('a read alias redirected after the read is not this run’s artifact', () => {
+    // The attack: read a copy, then replace that copy's directory with a junction to the
+    // unchanged installed skill. Resolving the reported read now would point it at the
+    // artifact and call the earlier read access.
+    const root = installedRoot()
+    const installed = capture(root)
+    const copy = join(root, 'copy', '.agents', 'skills', skill.name)
+    mkdirSync(copy, { recursive: true })
+    writeFileSync(join(copy, 'SKILL.md'), '# release notes\n', 'utf8')
+    const read = { path: 'copy/.agents/skills/release-notes/SKILL.md' }
+
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [read] }, root, installed), 'not-observed')
+
+    rmSync(copy, { recursive: true, force: true })
+    symlinkSync(join(root, '.agents', 'skills', skill.name), copy, process.platform === 'win32' ? 'junction' : 'dir')
+
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [read] }, root, installed), 'not-observed')
+    // The installed path itself still names the same file, so a read of it stays observed.
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
+      'observed',
+    )
+  })
+
+  test('a same-path replacement with different content is not the artifact', () => {
+    // A pathname snapshot would still match after the file is swapped. The digest captured
+    // before the agent is what says whether the bytes read were the artifact.
+    const root = installedRoot()
+    const installed = capture(root)
+    writeFileSync(installedPath(root), '# something else\n', 'utf8')
+
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
+      'unknown',
+    )
+  })
+
+  test('the same bytes at the same path are still the artifact', () => {
+    const root = installedRoot()
+    const installed = capture(root)
+    writeFileSync(installedPath(root), '# release notes\n', 'utf8')
+
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
+      'observed',
+    )
+  })
+
+  test('a removed installed artifact cannot be attributed', () => {
+    const root = installedRoot()
+    const installed = capture(root)
+    rmSync(join(root, '.agents'), { recursive: true, force: true })
+    assert.equal(
+      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
+      'unknown',
+    )
+  })
+
+  test('an uncaptured identity attributes nothing', () => {
+    const root = installedRoot()
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, null), 'unknown')
   })
 })
 

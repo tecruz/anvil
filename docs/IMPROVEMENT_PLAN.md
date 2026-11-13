@@ -230,9 +230,14 @@ Each result keeps three facts apart:
 - `skillInstall` — whether installation reported `verified`. A skill scenario's anvil result
   must record it; the bare result must record `not-installed`, and the gate refuses a
   summary or run record that disagrees with that.
-- `skillAccess` — `observed` only when a completed read resolves to *this run's* installed
-  `SKILL.md`; a path from another checkout or a copy inside the repository is not the
-  artifact. A native `skill` load of the installed id stays `unknown`, because another
+- `skillAccess` — `observed` only when a completed read names *this run's* installed
+  `SKILL.md`, compared lexically against the artifact's paths; a path from another checkout or
+  a copy inside the repository is not the artifact, and a reported path is never resolved
+  again after the agent runs, because an alias could have been pointed at the artifact after
+  the read. The artifact's canonical path and a digest of its bytes are captured before the
+  agent runs; a file that was removed, redirected, or replaced with different content at the
+  same path afterwards makes the verdict `unknown` rather than attributing a read to whatever
+  is there now. A native `skill` load of the installed id stays `unknown`, because another
   configured source can define the same id and take precedence. A shell command that merely
   names the path is not evidence, `not-observed` is not proof of non-use, and a run with no
   tool events is `unknown`. A scenario without a skill must not record an access verdict.

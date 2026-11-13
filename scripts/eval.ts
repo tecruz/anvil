@@ -768,6 +768,15 @@ async function runScenario(
       }
     }
 
+    // Capture the installed artifact's identity before the agent can touch the tree. A
+    // comparison made only after the agent finishes describes whatever the path points at
+    // then: an agent could read an unrelated copy and redirect `.agents/skills/<name>` at
+    // it, and the read would be attributed to this run's artifact.
+    const installedArtifact =
+      scenario.skill !== undefined && variant === 'anvil' && result.skillInstall === 'verified'
+        ? captureInstalledSkill(workdir, scenario.skill.name)
+        : null
+
     // The task goes in a file and the agent is told to read it, for the same reason the
     // crew does it: a task is prose, and prose contains characters that Windows cmd
     // would interpret -- backticks, ampersands, quotes. Refusing to run is the right
@@ -863,6 +872,7 @@ async function runScenario(
               skills: agentSkills,
             },
             workdir,
+            installedArtifact,
           )
     }
 
@@ -1341,9 +1351,15 @@ export async function installScenarioSkill(
  *
  * Evidence has to be attributable to *this* worktree's artifact:
  *
- * - `observed` requires a completed `read` of the exact installed `SKILL.md`, after
- *   resolving the reported path against the scenario root. A path from another checkout or a
- *   copy inside the repository is not this run's artifact.
+ * - `observed` requires a completed `read` of the exact installed `SKILL.md`, compared
+ *   lexically against the paths captured before the agent runs. A path from another
+ *   checkout or a copy inside the repository is not this run's artifact.
+ * - The artifact's identity is captured before the agent runs: its canonical path, the
+ *   path the install wrote, and a digest of its bytes (`installed`). If the file disappeared,
+ *   was redirected, or was replaced with different content at the same path afterwards,
+ *   nothing can be attributed and the verdict is `unknown`. Comparing only a pathname would
+ *   miss a same-path replacement, and resolving a reported read now would follow an alias
+ *   the agent could have pointed at the artifact after reading a different copy.
  * - A completed OpenCode `skill` load of the installed id is **ambiguous**: another
  *   configured source (`~/.claude/skills`, `.opencode/skills`, a `skills` config entry) can
  *   define the same id and take precedence, and the stream does not say which one was
@@ -1360,34 +1376,63 @@ export function observeSkillAccess(
     skills: readonly { id: string }[]
   },
   root: string,
+  installed: InstalledSkillArtifact | null,
 ): EvalSkillAccess {
   if (events.executions.length === 0 && events.reads.length === 0 && events.skills.length === 0) return 'unknown'
-  const installed = installedSkillFile(root, skill.name)
+  // Re-capture before attributing anything: this describes the artifact after the agent,
+  // which is exactly what a redirection or a same-path replacement changes.
+  const current = captureInstalledSkill(root, skill.name)
+  if (
+    installed === null ||
+    current === null ||
+    !samePath(current.path, installed.path) ||
+    current.digest !== installed.digest
+  ) {
+    return 'unknown'
+  }
   if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) return 'observed'
   // The id is the only thing a load reports, and the id can be shadowed by another source.
   if (events.skills.some((entry) => entry.id === skill.name)) return 'unknown'
   return 'not-observed'
 }
 
-/** The canonical path of the skill this run installed, resolving the temp root's links. */
-function installedSkillFile(root: string, name: string): string {
-  const file = resolve(root, '.agents', 'skills', name, 'SKILL.md')
+/** The installed artifact's identity, captured before the agent runs. */
+export interface InstalledSkillArtifact {
+  /** Canonical path of the installed `SKILL.md` at capture time. */
+  path: string
+  /** The path the install wrote, before resolving aliases in the scenario root. */
+  written: string
+  /** SHA-256 of the file's bytes at capture time. */
+  digest: string
+}
+
+/**
+ * The identity of the skill file this run installed, resolved before the agent runs.
+ *
+ * `null` means the harness could not resolve or read it, so no later read can be attributed
+ * to it.
+ */
+export function captureInstalledSkill(root: string, name: string): InstalledSkillArtifact | null {
+  const written = resolve(root, '.agents', 'skills', name, 'SKILL.md')
   try {
-    return realpathSync.native(file)
+    const path = realpathSync.native(written)
+    const digest = createHash('sha256').update(readFileSync(path)).digest('hex')
+    return { path, written, digest }
   } catch {
-    return file
+    return null
   }
 }
 
-/** Resolve a reported path and decide whether it is exactly the installed file. */
-function isInstalledSkillPath(path: string, root: string, installed: string): boolean {
+/**
+ * Resolve a reported path and decide whether it is exactly the installed file.
+ *
+ * The comparison is lexical on purpose. `realpath` here would describe whatever the path
+ * points at *after* the agent ran: an agent could read a copy, then point that copy's
+ * directory at the installed file, and the earlier read would be attributed to this run.
+ */
+function isInstalledSkillPath(path: string, root: string, installed: InstalledSkillArtifact): boolean {
   const absolute = isAbsolute(path) ? resolve(path) : resolve(root, path)
-  if (samePath(absolute, installed)) return true
-  try {
-    return samePath(realpathSync.native(absolute), installed)
-  } catch {
-    return false
-  }
+  return samePath(absolute, installed.path) || samePath(absolute, installed.written)
 }
 
 /** Compare paths the way the host filesystem does. */
