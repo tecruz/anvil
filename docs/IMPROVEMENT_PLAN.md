@@ -210,6 +210,48 @@ the agent actually ran the required checks and reported their outcomes. Keep tas
 separate from whether the repository's checks passed; do not require a deliberately broken
 fixture to become green. A no-op or incorrect-success report must fail grading.
 
+### Installed-skill comparison
+
+`skill-guidance` asks whether an installed, approved skill changes the work. Both variants
+receive the same `anvil init` artifacts and the same starting commit
+(`baselineContext: "anvil"`); only the anvil variant also receives the skill, installed
+through `anvil setup apply`. The harness approves the exact plan itself because the run is
+unattended; consumption, the repository lock, the no-replace publish, the journal and the
+independent verifier still run for real. The source is staged, committed, installed, then
+removed and the artifact committed, so the variant without the skill cannot read the skill
+text from the worktree or its reachable history.
+
+The required behaviour lives in the repository both variants can read; the skill carries the
+operating procedure. A comparison where only the treatment had the requirements would
+measure missing information, not skill-guided work.
+
+Each result keeps three facts apart:
+
+- `skillInstall` — whether installation reported `verified`. A skill scenario's anvil result
+  must record it; the bare result must record `not-installed`, and the gate refuses a
+  summary or run record that disagrees with that.
+- `skillAccess` — `observed` only when a completed read names *this run's* installed
+  `SKILL.md`, compared lexically against the artifact's paths; a path from another checkout or
+  a copy inside the repository is not the artifact, and a reported path is never resolved
+  again after the agent runs, because an alias could have been pointed at the artifact after
+  the read. Before the agent runs the harness captures the artifact's written and canonical
+  paths, a SHA-256 of its bytes, its size, and its inode identity and timestamps. After the run
+  it re-reads only a regular file — never a final symlink or a FIFO, and never more than 1 MiB
+  — and requires every captured value to match. A file that was removed, redirected, replaced,
+  or even rewritten with identical bytes makes the verdict `unknown`: the write moves the
+  change time, which on POSIX an agent cannot set back, so a modify → read → restore sequence
+  cannot be attributed. Windows file times can be written back, so there the same sequence can
+  still compare equal; treat the verdict as strong evidence, not proof. A native `skill` load
+  of the installed id stays `unknown`, because another configured source can define the same
+  id and take precedence. A shell command that merely names the path is not evidence,
+  `not-observed` is not proof of non-use, and a run with no tool events is `unknown`. A
+  scenario without a skill must not record an access verdict.
+- `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
+
+The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke
+cost. A positive, negative or absent difference is a measurement, and three repetitions are
+exploratory rather than proof.
+
 ### Budget and pilot
 
 - Keep the weekly default at the existing smoke workload until a pilot justifies changing it.
@@ -242,12 +284,13 @@ fixture to become green. A no-op or incorrect-success report must fail grading.
 Phase 2A (evidence schema v3 with repetitions/seed/order) was merged into PR #8 with
 schema v3, CLI flags `--repetitions`, `--seed`, `--order`, and 97 gate tests passing.
 
-Phase 2B (extended 6-scenario corpus) is now complete:
-  - 6 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
-    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change
+Phase 2B (extended scenario corpus) is now complete:
+  - 7 new scenarios added to `eval/scenarios.json`: nested-project, workspace-dependency,
+    cross-file-regression, misleading-docs, failing-verification, risk-sensitive-change,
+    and skill-guidance (the installed-skill comparison)
   - `validateScenarioMatrix()` evolved to allow extra scenarios beyond the required 4 cells
-  - Solution fixtures created for all 6 scenarios
-  - Hidden verify test fixtures added for 5 scenarios requiring post-agent grading
+  - Solution fixtures created for all 7 scenarios
+  - Hidden verify test fixtures added for all 7 scenarios
   - Each scenario includes `notes` documenting how derived context could help
   - All lint/typecheck clean; 1021 test suite pass, 0 fail
 

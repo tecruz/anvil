@@ -186,6 +186,31 @@
         "to": "src/index.js"
       },
       "expect": { "verified": true, "hiddenVerified": true }
+    },
+    {
+      "id": "skill-guidance",
+      "size": "tiny",
+      "kind": "code-change",
+      "repo": "eval/repos/skill-guidance",
+      "baselineContext": "anvil",
+      "skill": {
+        "source": "eval/skills/skill-guidance/SKILL.md",
+        "name": "release-notes"
+      },
+      "task": "Implement `releaseLine` in `src/release.js` so the visible test passes and this repository's release conventions are followed for pre-release versions and for an invalid version.",
+      "verify": ["npm test"],
+      "hidden": [
+        {
+          "from": "eval/hidden/skill-guidance-release.test.js",
+          "to": "test/hidden-release.test.js"
+        }
+      ],
+      "hiddenVerify": ["node --test test/hidden-release.test.js"],
+      "solution": {
+        "from": "eval/solutions/skill-guidance.js",
+        "to": "src/release.js"
+      },
+      "expect": { "verified": true, "hiddenVerified": true }
     }
   ]
 }

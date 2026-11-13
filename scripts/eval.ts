@@ -32,9 +32,25 @@
 
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  type BigIntStats,
+  closeSync,
+  constants,
+  cpSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
@@ -54,6 +70,8 @@ import {
   type EvalRunRecordAttempt,
   type EvalRunRecordResult,
   type EvalScenario,
+  type EvalSkillAccess,
+  type EvalSkillSpec,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
@@ -71,6 +89,11 @@ import {
 } from '../packages/cli/src/eval-gate.ts'
 import { tokenizeCommand } from '../packages/core/src/args.ts'
 import { probeCommandVersion, spawnArgv } from '../packages/core/src/exec.ts'
+import {
+  buildSetupApprovalGrant,
+  type SetupExecutionPlan,
+  saveSetupApprovalGrant,
+} from '../packages/derive/src/index.ts'
 import { buildProfile } from '../packages/profile/src/index.ts'
 import { readAgentSession } from '../packages/worktrees/src/index.ts'
 import { type CheckBroker, type CheckExecution, captureCheck, startCheckBroker } from './eval-check-broker.ts'
@@ -166,6 +189,14 @@ const SMOKE_SCENARIO_IDS: ReadonlySet<string> = new Set([
 const TASK_FILE = '.anvil-eval-task.md'
 
 /**
+ * Where a scenario's skill source is staged so a plan can be built from a clean commit.
+ *
+ * It exists only between staging and installation: after `setup apply` verifies, the source
+ * is removed and the committed artifact is all that remains.
+ */
+const STAGED_SKILL_SOURCE = '.anvil-eval-skill-source.md'
+
+/**
  * The tool names OpenCode has used for its shell tool.
  *
  * OpenCode 2 renamed `bash` to `shell`. The benchmark pins one version and a
@@ -183,6 +214,16 @@ const SHELL_TOOL_NAMES = new Set(['shell', 'bash'])
  * that is in neither place is reported as absent rather than guessed at.
  */
 const EXIT_STATUS_PATHS: readonly (readonly string[])[] = [['metadata', 'exit'], ['exit']]
+
+/** One file the agent's read tool opened, as OpenCode reported it. */
+export interface AgentRead {
+  path: string
+}
+
+/** One skill the agent loaded through OpenCode's native `skill` tool, by id. */
+export interface AgentSkillLoad {
+  id: string
+}
 
 /** One shell command the agent's tool ran, with the status that command produced. */
 export interface AgentExecution {
@@ -325,6 +366,9 @@ async function main(): Promise<void> {
       console.log(`  verify    ${scenario.verify.join('; ')}`)
       console.log(`  hidden    ${(scenario.hidden ?? []).map((h) => `${h.from} -> ${h.to}`).join('; ') || '(none)'}`)
       console.log(`  expect    ${JSON.stringify(scenario.expect)}`)
+      if (scenario.skill !== undefined) {
+        console.log(`  skill     ${scenario.skill.name} from ${scenario.skill.source} (anvil variant only)`)
+      }
       console.log(`  variants  ${VARIANTS.join(', ')}`)
       console.log(`  models    ${models.map((m) => `${m.id} (${m.role})`).join(', ')}`)
       if (fakeAgent) console.log('  agent     fake (a canned answer, no model is called)')
@@ -482,40 +526,12 @@ async function main(): Promise<void> {
     writeRunRecord(runRecord)
   }
 
-  const results: ScenarioResult[] = []
+  const results: ScenarioResult[] = completedResultsFromRecord(runRecord, selectedScenarios)
   const completedKeys = new Set(
     runRecord.results
       .filter((r) => latestAttemptState(r) === 'completed')
       .map((r) => `${r.scenario}/${r.variant}/${r.model}/${r.repetition}`),
   )
-  for (const prior of runRecord.results) {
-    if (latestAttemptState(prior) !== 'completed') continue
-    const scenario = selectedScenarios.find((s) => s.id === prior.scenario)
-    results.push(
-      sanitizeResult({
-        scenario: prior.scenario,
-        size: scenario?.size ?? 'tiny',
-        kind: scenario?.kind ?? 'code-change',
-        variant: prior.variant,
-        model: prior.model,
-        modelRole: prior.modelRole as EvalModelRole | null,
-        opencodeVersion: runRecord.opencodeVersion,
-        scenarioHash: prior.scenarioHash,
-        sourceHash: prior.sourceHash,
-        verifyCount: prior.verifyCount,
-        hiddenVerifyCount: prior.hiddenVerifyCount,
-        verified: prior.verified,
-        hiddenVerified: prior.hiddenVerified,
-        verifyExitCodes: [...prior.verifyExitCodes],
-        repetition: prior.repetition,
-        costUsd: prior.costUsd,
-        tokens: prior.tokens,
-        durationMs: prior.durationMs,
-        transcript: prior.transcript,
-        ...(prior.error === undefined ? {} : { error: prior.error }),
-      }),
-    )
-  }
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
@@ -724,21 +740,48 @@ async function runScenario(
   try {
     prepareRepo(scenario, workdir)
 
-    if (variant === 'anvil') {
+    // The derived context each variant receives. An ordinary scenario gives it to the anvil
+    // variant only; a skill scenario gives it to both, so the paired difference is the skill.
+    const baselineContext = scenario.baselineContext ?? 'none'
+    if (variant === 'anvil' || baselineContext === 'anvil') {
       // The whole point of the comparison: the artifacts anvil derives, applied for real.
       // Staging comes first, because `--apply` writes what `init` staged and refuses
       // without it.
-      const staged = await run('node', [anvilCli(), 'init'], workdir)
-      if (!staged.ok) {
-        result.error = `anvil init failed: ${staged.stderr.trim() || staged.stdout.trim()}`
+      const contextError = await applyDerivedContext(workdir)
+      if (contextError !== null) {
+        result.error = contextError
         return result
       }
-      const applied = await run('node', [anvilCli(), 'init', '--apply'], workdir)
-      if (!applied.ok) {
-        result.error = `anvil init --apply failed: ${applied.stderr.trim() || applied.stdout.trim()}`
+      // A skill comparison gives both variants the same starting commit. Leaving the
+      // artifacts untracked in one variant would show its agent different evidence about
+      // what already exists. An ordinary scenario keeps its previous behavior, where only
+      // the anvil variant receives the derived context at all.
+      if (baselineContext === 'anvil') commitWorktree(workdir, 'eval: derived context')
+    }
+
+    if (scenario.skill === undefined) {
+      result.skillInstall = 'not-requested'
+    } else if (variant !== 'anvil') {
+      result.skillInstall = 'not-installed'
+      result.skillAccess = 'not-installed'
+    } else {
+      const installed = await installScenarioSkill(scenario.skill, workdir)
+      result.skillInstall = installed.ok ? 'verified' : 'failed'
+      if (!installed.ok) {
+        result.skillAccess = 'not-installed'
+        result.error = `skill installation failed: ${installed.reason}`
         return result
       }
     }
+
+    // Capture the installed artifact's identity before the agent can touch the tree. A
+    // comparison made only after the agent finishes describes whatever the path points at
+    // then: an agent could read an unrelated copy and redirect `.agents/skills/<name>` at
+    // it, and the read would be attributed to this run's artifact.
+    const installedArtifact =
+      scenario.skill !== undefined && variant === 'anvil' && result.skillInstall === 'verified'
+        ? captureInstalledSkill(workdir, scenario.skill.name)
+        : null
 
     // The task goes in a file and the agent is told to read it, for the same reason the
     // crew does it: a task is prose, and prose contains characters that Windows cmd
@@ -747,6 +790,8 @@ async function runScenario(
     const taskFile = join(workdir, TASK_FILE)
     writeFileSync(taskFile, `${scenario.task}\n`, 'utf8')
     let agentExecutions: AgentExecution[] = []
+    let agentReads: AgentRead[] = []
+    let agentSkills: AgentSkillLoad[] = []
 
     if (fake) {
       // A canned answer can include actions, not only files. Running them here is what
@@ -808,6 +853,8 @@ async function runScenario(
       await checkBroker?.close()
       const agentEvents = parseOpenCodeRunEvents(agent.stdout)
       agentExecutions = agentEvents.executions
+      agentReads = agentEvents.reads
+      agentSkills = agentEvents.skills
       result.transcript = publishTranscripts
         ? limitTranscript(redactTranscript(`${agentEvents.text}\n${agent.stderr}`.trim()))
         : ''
@@ -816,6 +863,23 @@ async function runScenario(
       } else if (!agent.ok) {
         addError(result, `the agent exited with code ${agent.code ?? '?'}`)
       }
+    }
+
+    if (scenario.skill !== undefined && variant === 'anvil' && result.skillInstall === 'verified') {
+      // `unknown` when the run produced no tool events at all (a fake agent, or an agent that
+      // died before acting). Absence of supported evidence is not proof the skill was not used.
+      result.skillAccess = fake
+        ? 'unknown'
+        : observeSkillAccess(
+            scenario.skill,
+            {
+              executions: agentExecutions,
+              reads: agentReads,
+              skills: agentSkills,
+            },
+            workdir,
+            installedArtifact,
+          )
     }
 
     // For verify-only scenarios with execution capture, the harness records the
@@ -952,15 +1016,23 @@ function readExitStatus(metadata: unknown): number | null {
 }
 
 /**
- * Extract text and completed shell executions from OpenCode's `run --format json` stream.
+ * Extract text, completed shell executions, completed reads and native skill loads from
+ * OpenCode's `run --format json` stream.
  *
  * Only the tool's own events count. The prose an agent writes is not evidence of
  * anything, and neither is a report the agent left in the worktree: this reads what
  * OpenCode says it ran and what that run returned.
  */
-export function parseOpenCodeRunEvents(output: string): { text: string; executions: AgentExecution[] } {
+export function parseOpenCodeRunEvents(output: string): {
+  text: string
+  executions: AgentExecution[]
+  reads: AgentRead[]
+  skills: AgentSkillLoad[]
+} {
   const text: string[] = []
   const executions: AgentExecution[] = []
+  const reads: AgentRead[] = []
+  const skills: AgentSkillLoad[] = []
   for (const line of output.split(/\r?\n/)) {
     if (line.trim() === '') continue
     let event: unknown
@@ -988,15 +1060,35 @@ export function parseOpenCodeRunEvents(output: string): { text: string; executio
     // run with a failing status, not a failed run.
     if (record.type !== 'tool_use' && record.type !== 'tool') continue
     if (record.part?.type !== 'tool') continue
-    if (typeof record.part.tool !== 'string' || !SHELL_TOOL_NAMES.has(record.part.tool)) continue
+    const tool = record.part.tool
+    if (typeof tool !== 'string') continue
     if (record.part.state?.status !== 'completed') continue
     const input = record.part.state.input
     if (input === null || typeof input !== 'object') continue
-    const command = (input as { command?: unknown }).command
-    if (typeof command !== 'string') continue
-    executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+    if (SHELL_TOOL_NAMES.has(tool)) {
+      const command = (input as { command?: unknown }).command
+      if (typeof command === 'string') {
+        executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+      }
+      continue
+    }
+    // A completed read is direct evidence that an agent opened a file. The input field is
+    // `filePath` in OpenCode's read tool; `path` is accepted as well so a rename cannot
+    // silently turn observation into "nothing happened".
+    if (tool === 'read') {
+      const field = input as { filePath?: unknown; path?: unknown }
+      const path = typeof field.filePath === 'string' ? field.filePath : field.path
+      if (typeof path === 'string' && path !== '') reads.push({ path })
+      continue
+    }
+    // OpenCode loads an installed skill by id through its `skill` tool. That is the
+    // supported way a skill's body reaches the conversation, so it is recorded as a load.
+    if (tool === 'skill') {
+      const id = (input as { id?: unknown }).id
+      if (typeof id === 'string' && id !== '') skills.push({ id })
+    }
   }
-  return { text: text.join('\n'), executions }
+  return { text: text.join('\n'), executions, reads, skills }
 }
 
 /**
@@ -1148,6 +1240,283 @@ function anvilCli(): string {
 /** Build the CLI bundle before evaluating, so the code that runs is the code that is hashed. */
 function ensureCliBuilt(): void {
   execFileSync(process.execPath, ['scripts/build.mjs'], { cwd: repoRoot, stdio: 'inherit' })
+}
+
+/** Apply what `anvil init` derives, or explain why the variant could not be prepared. */
+async function applyDerivedContext(workdir: string): Promise<string | null> {
+  const staged = await run('node', [anvilCli(), 'init'], workdir)
+  if (!staged.ok) return `anvil init failed: ${staged.stderr.trim() || staged.stdout.trim()}`
+  const applied = await run('node', [anvilCli(), 'init', '--apply'], workdir)
+  if (!applied.ok) return `anvil init --apply failed: ${applied.stderr.trim() || applied.stdout.trim()}`
+  return null
+}
+
+/**
+ * Commit the harness's own setup so the next step sees a clean worktree.
+ *
+ * `setup plan` refuses anything but a clean commit, and the harness dirties the tree when it
+ * stages a skill source. This commit belongs to the harness, not to the agent: it happens
+ * before the agent is started and never rewrites an agent's work.
+ *
+ * `amend` replaces the staging commit instead of adding to it. Without it, the staged source
+ * would stay in the worktree's history, and an agent could recover the skill text from git
+ * rather than from the installed artifact the comparison is about.
+ */
+function commitWorktree(workdir: string, message: string, amend = false): void {
+  runSync('git', ['add', '-A'], workdir)
+  const commit = amend ? ['commit', '--amend', '-m', message] : ['commit', '-m', message]
+  runSync('git', ['-c', 'user.email=eval@anvil.local', '-c', 'user.name=anvil eval', ...commit], workdir)
+}
+
+/** The `data` object of a CLI JSON envelope, or null when the output is not one. */
+function readEnvelopeData<T>(result: RunResult): T | null {
+  try {
+    const parsed = JSON.parse(result.stdout) as { data?: unknown }
+    return parsed.data !== null && typeof parsed.data === 'object' ? (parsed.data as T) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Install one scenario skill through the approved, create-only application path.
+ *
+ * Approval is prepared by the harness rather than typed at a terminal: the run is
+ * unattended, and the grant is issued for the exact plan this function just read. Applying
+ * still goes through `anvil setup apply`, so consumption, the repository lock, the
+ * no-replace publish, the journal and the independent verifier all run for real. The
+ * production approval contract is unchanged; only the terminal confirmation is replaced.
+ *
+ * The source is staged and committed so the plan can be built from a clean commit, then
+ * removed and the artifact committed. Leaving it behind would hand the skill text to the
+ * variant that is supposed to work without it.
+ */
+export async function installScenarioSkill(
+  skill: EvalSkillSpec,
+  workdir: string,
+  cli: string = anvilCli(),
+): Promise<{ ok: boolean; reason: string }> {
+  const source = join(repoRoot, ...skill.source.split('/'))
+  const stagedPath = join(workdir, STAGED_SKILL_SOURCE)
+  try {
+    cpSync(source, stagedPath)
+  } catch (err) {
+    return { ok: false, reason: `the skill source could not be read: ${errorText(err)}` }
+  }
+  commitWorktree(workdir, 'eval: stage the skill source')
+
+  const planned = await run(
+    'node',
+    [cli, 'setup', 'plan', '--adapter', 'local-skill', '--source', STAGED_SKILL_SOURCE, '--name', skill.name, '--json'],
+    workdir,
+  )
+  const plan = readEnvelopeData<SetupExecutionPlan>(planned)
+  if (!planned.ok || plan === null) {
+    return { ok: false, reason: `setup plan failed: ${planned.stderr.trim() || planned.stdout.trim()}` }
+  }
+
+  const store = mkdtempSync(join(tmpdir(), 'anvil-eval-approvals-'))
+  const planDir = mkdtempSync(join(tmpdir(), 'anvil-eval-plan-'))
+  const env = { ANVIL_APPROVAL_HOME: store }
+  try {
+    const grant = buildSetupApprovalGrant(plan, { id: randomUUID() })
+    saveSetupApprovalGrant(grant, { env })
+    const planPath = join(planDir, 'plan.json')
+    writeFileSync(planPath, JSON.stringify(plan), 'utf8')
+    const applied = await run(
+      'node',
+      [cli, 'setup', 'apply', '--plan', planPath, '--grant', grant.id, '--json'],
+      workdir,
+      { env },
+    )
+    const record = readEnvelopeData<{ status?: unknown; verified?: unknown; reason?: unknown }>(applied)
+    if (record === null || record.status !== 'applied' || record.verified !== true) {
+      return {
+        ok: false,
+        reason: `setup apply did not report a verified install: ${
+          typeof record?.reason === 'string' ? record.reason : applied.stderr.trim() || applied.stdout.trim()
+        }`,
+      }
+    }
+  } catch (err) {
+    return { ok: false, reason: errorText(err) }
+  } finally {
+    rmSync(store, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    rmSync(planDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+
+  rmSync(stagedPath, { force: true })
+  // Amend, not a second commit: the staging commit would otherwise keep the skill source
+  // reachable through `git show`, which is not the artifact the comparison installs.
+  commitWorktree(workdir, 'eval: install the skill', true)
+  return { ok: true, reason: 'the installed skill verified against the approved source' }
+}
+
+/**
+ * Whether the agent was seen using the skill this run installed.
+ *
+ * Evidence has to be attributable to *this* worktree's artifact:
+ *
+ * - `observed` requires a completed `read` of the exact installed `SKILL.md`, compared
+ *   lexically against the paths captured before the agent runs. A path from another
+ *   checkout or a copy inside the repository is not this run's artifact.
+ * - The artifact's identity is captured before the agent runs: its canonical path, the
+ *   path the install wrote, a digest of its bytes, and the inode identity and timestamps
+ *   (`installed`). If the file disappeared, was redirected, or was replaced with different
+ *   content at the same path afterwards, nothing can be attributed and the verdict is
+ *   `unknown`. Comparing only a pathname would miss a same-path replacement, resolving a
+ *   reported read now would follow an alias the agent could have pointed at the artifact
+ *   after reading a different copy, and comparing only the bytes would miss an agent that
+ *   reads a replacement and then restores the original content before exiting. The identity
+ *   comparison is strong evidence, not proof: on Windows file times can be written back, so
+ *   a modify → read → restore sequence is not detectable there.
+ * - A completed OpenCode `skill` load of the installed id is **ambiguous**: another
+ *   configured source (`~/.claude/skills`, `.opencode/skills`, a `skills` config entry) can
+ *   define the same id and take precedence, and the stream does not say which one was
+ *   resolved. A load on its own therefore stays `unknown`.
+ * - A shell command that merely names the path is not evidence.
+ *
+ * `not-observed` is not proof of non-use, and a run with no tool events stays `unknown`.
+ */
+export function observeSkillAccess(
+  skill: EvalSkillSpec,
+  events: {
+    executions: readonly { command: string }[]
+    reads: readonly { path: string }[]
+    skills: readonly { id: string }[]
+  },
+  root: string,
+  installed: InstalledSkillArtifact | null,
+): EvalSkillAccess {
+  if (events.executions.length === 0 && events.reads.length === 0 && events.skills.length === 0) return 'unknown'
+  // Re-capture before attributing anything: this describes the artifact after the agent,
+  // which is exactly what a redirection or a same-path replacement changes.
+  const current = captureInstalledSkill(root, skill.name)
+  if (installed === null || current === null || !sameInstalledIdentity(current, installed)) return 'unknown'
+  if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) return 'observed'
+  // The id is the only thing a load reports, and the id can be shadowed by another source.
+  if (events.skills.some((entry) => entry.id === skill.name)) return 'unknown'
+  return 'not-observed'
+}
+
+/** The installed artifact's identity, captured before the agent runs. */
+export interface InstalledSkillArtifact {
+  /** Canonical path of the installed `SKILL.md` at capture time. */
+  path: string
+  /** The path the install wrote, before resolving aliases in the scenario root. */
+  written: string
+  /** SHA-256 of the file's bytes at capture time. */
+  digest: string
+  size: bigint
+  ino: bigint
+  dev: bigint
+  mtimeNs: bigint
+  ctimeNs: bigint
+}
+
+/** A skill file larger than this is not the artifact the installer verified. */
+const MAX_SKILL_BYTES = 1024 * 1024
+
+/**
+ * The identity of the skill file this run installed, resolved before the agent runs.
+ *
+ * `null` means the harness could not resolve or safely read it, so no later read can be
+ * attributed to it.
+ */
+export function captureInstalledSkill(root: string, name: string): InstalledSkillArtifact | null {
+  const written = resolve(root, '.agents', 'skills', name, 'SKILL.md')
+  let path: string
+  try {
+    path = realpathSync.native(written)
+  } catch {
+    return null
+  }
+  const file = readRegularFile(path)
+  if (file === null) return null
+  return {
+    path,
+    written,
+    digest: createHash('sha256').update(file.bytes).digest('hex'),
+    size: file.stat.size,
+    ino: file.stat.ino,
+    dev: file.stat.dev,
+    mtimeNs: file.stat.mtimeNs,
+    ctimeNs: file.stat.ctimeNs,
+  }
+}
+
+/**
+ * Read a regular file without following a final symlink or blocking on a special file.
+ *
+ * `O_NONBLOCK` matters: the agent can leave a FIFO at the installed path, and a plain
+ * read would wait for a writer that never comes, after the agent timeout has already
+ * fired. The read is bounded by the size `fstat` reported before it starts, so a
+ * lingering writer cannot turn verification into an unbounded allocation, and a change
+ * in size during the read rejects the file rather than attributing a partial artifact.
+ */
+function readRegularFile(path: string): { bytes: Buffer; stat: BigIntStats } | null {
+  let fd: number | null = null
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    const stat = fstatSync(fd, { bigint: true })
+    if (!stat.isFile() || stat.size > BigInt(MAX_SKILL_BYTES)) return null
+    const size = Number(stat.size)
+    const buffer = Buffer.alloc(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) return null
+    return { bytes: buffer.subarray(0, size), stat }
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        // A descriptor that cannot be closed cannot change the verdict.
+      }
+    }
+  }
+}
+
+/**
+ * Whether the file is still the same artifact, not merely a file with the same bytes.
+ *
+ * Endpoint bytes alone cannot see a replacement that was read and then restored, so the
+ * inode identity and change time are part of the comparison. On POSIX an agent cannot set
+ * `ctime` back, so any write in between leaves the verdict `unknown`. On Windows both write
+ * and change times can be restored through `SetFileInformationByHandle`, so a write that is
+ * undone before the agent exits can still compare equal.
+ */
+function sameInstalledIdentity(left: InstalledSkillArtifact, right: InstalledSkillArtifact): boolean {
+  return (
+    samePath(left.path, right.path) &&
+    left.digest === right.digest &&
+    left.size === right.size &&
+    left.ino === right.ino &&
+    left.dev === right.dev &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  )
+}
+
+/**
+ * Resolve a reported path and decide whether it is exactly the installed file.
+ *
+ * The comparison is lexical on purpose. `realpath` here would describe whatever the path
+ * points at *after* the agent ran: an agent could read a copy, then point that copy's
+ * directory at the installed file, and the earlier read would be attributed to this run.
+ */
+function isInstalledSkillPath(path: string, root: string, installed: InstalledSkillArtifact): boolean {
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(root, path)
+  return samePath(absolute, installed.path) || samePath(absolute, installed.written)
+}
+
+/** Compare paths the way the host filesystem does. */
+function samePath(left: string, right: string): boolean {
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1340,6 +1709,8 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     verifyExitCodes: result.verifyExitCodes,
     repetition: result.repetition ?? null,
     ...(result.error === undefined ? {} : { error: result.error }),
+    ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
+    ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
   }
 }
 
@@ -1354,6 +1725,7 @@ function writeBaseline(scenarios: readonly EvalScenario[]): void {
       sourceHash: hashScenarioSource(repoRoot, scenario),
       verify: scenario.verify,
       hiddenVerify: scenario.hiddenVerify ?? [],
+      ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
       expect: scenario.expect,
     })),
   }
@@ -1416,6 +1788,51 @@ function hashHarness(): string {
   return hash.digest('hex')
 }
 
+/**
+ * Rebuild the console results from a completed run record.
+ *
+ * Every recorded fact is copied, including the skill verdicts. Resume reuses completed work
+ * instead of rerunning it, so a field dropped here disappears from the resumed report even
+ * though the run record still holds it.
+ */
+export function completedResultsFromRecord(
+  runRecord: EvalRunRecord,
+  scenarios: readonly EvalScenario[],
+): ScenarioResult[] {
+  const results: ScenarioResult[] = []
+  for (const prior of runRecord.results) {
+    if (latestAttemptState(prior) !== 'completed') continue
+    const scenario = scenarios.find((entry) => entry.id === prior.scenario)
+    results.push(
+      sanitizeResult({
+        scenario: prior.scenario,
+        size: scenario?.size ?? 'tiny',
+        kind: scenario?.kind ?? 'code-change',
+        variant: prior.variant,
+        model: prior.model,
+        modelRole: prior.modelRole as EvalModelRole | null,
+        opencodeVersion: runRecord.opencodeVersion,
+        scenarioHash: prior.scenarioHash,
+        sourceHash: prior.sourceHash,
+        verifyCount: prior.verifyCount,
+        hiddenVerifyCount: prior.hiddenVerifyCount,
+        verified: prior.verified,
+        hiddenVerified: prior.hiddenVerified,
+        verifyExitCodes: [...prior.verifyExitCodes],
+        repetition: prior.repetition,
+        costUsd: prior.costUsd,
+        tokens: prior.tokens,
+        durationMs: prior.durationMs,
+        transcript: prior.transcript,
+        ...(prior.error === undefined ? {} : { error: prior.error }),
+        ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
+        ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
+      }),
+    )
+  }
+  return results
+}
+
 /** Build the persisted shape of one result from the sanitized run output. */
 function recordResultFrom(
   result: ScenarioResult,
@@ -1442,6 +1859,8 @@ function recordResultFrom(
     durationMs: result.durationMs,
     transcript: result.transcript,
     ...(result.error === undefined ? {} : { error: result.error }),
+    ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
+    ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
   }
 }
 
@@ -1506,9 +1925,13 @@ function printSummary(results: ScenarioResult[]): void {
       ].join('  '),
     )
     if (r.error !== undefined) console.log(`  error: ${r.error}`)
+    if (r.skillInstall !== undefined && r.skillInstall !== 'not-requested') {
+      console.log(`  skill: install=${r.skillInstall} access=${r.skillAccess ?? 'unknown'}`)
+    }
   }
   console.log('')
   console.log('The comparison that matters is the same row twice: `bare` against `anvil`.')
+  console.log('Skill access is observation, not proof that the skill was used.')
   console.log('Run `npm run eval:check` to compare this run with the baseline.')
 }
 
@@ -1521,6 +1944,9 @@ function printScenarios(scenarios: readonly EvalScenario[], models: readonly Eva
     console.log(`  task    ${scenario.task}`)
     console.log(`  verify  ${scenario.verify.join('; ')}`)
     console.log(`  expect  ${JSON.stringify(scenario.expect)}`)
+    if (scenario.skill !== undefined) {
+      console.log(`  skill   ${scenario.skill.name} from ${scenario.skill.source}`)
+    }
   }
   console.log('')
   console.log('Models')
@@ -1598,6 +2024,7 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     sourceHash: hashScenarioSource(repoRoot, scenario),
     verify: scenario.verify,
     hiddenVerify: scenario.hiddenVerify ?? [],
+    ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
     expect: scenario.expect,
   }))
   const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord, hashHarness())
