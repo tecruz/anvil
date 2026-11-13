@@ -33,11 +33,17 @@
 import { type ChildProcess, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  type BigIntStats,
+  closeSync,
+  constants,
   cpSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -1355,11 +1361,13 @@ export async function installScenarioSkill(
  *   lexically against the paths captured before the agent runs. A path from another
  *   checkout or a copy inside the repository is not this run's artifact.
  * - The artifact's identity is captured before the agent runs: its canonical path, the
- *   path the install wrote, and a digest of its bytes (`installed`). If the file disappeared,
- *   was redirected, or was replaced with different content at the same path afterwards,
- *   nothing can be attributed and the verdict is `unknown`. Comparing only a pathname would
- *   miss a same-path replacement, and resolving a reported read now would follow an alias
- *   the agent could have pointed at the artifact after reading a different copy.
+ *   path the install wrote, a digest of its bytes, and the inode identity and timestamps
+ *   (`installed`). If the file disappeared, was redirected, or was replaced with different
+ *   content at the same path afterwards, nothing can be attributed and the verdict is
+ *   `unknown`. Comparing only a pathname would miss a same-path replacement, resolving a
+ *   reported read now would follow an alias the agent could have pointed at the artifact
+ *   after reading a different copy, and comparing only the bytes would miss an agent that
+ *   reads a replacement and then restores the original content before exiting.
  * - A completed OpenCode `skill` load of the installed id is **ambiguous**: another
  *   configured source (`~/.claude/skills`, `.opencode/skills`, a `skills` config entry) can
  *   define the same id and take precedence, and the stream does not say which one was
@@ -1382,14 +1390,7 @@ export function observeSkillAccess(
   // Re-capture before attributing anything: this describes the artifact after the agent,
   // which is exactly what a redirection or a same-path replacement changes.
   const current = captureInstalledSkill(root, skill.name)
-  if (
-    installed === null ||
-    current === null ||
-    !samePath(current.path, installed.path) ||
-    current.digest !== installed.digest
-  ) {
-    return 'unknown'
-  }
+  if (installed === null || current === null || !sameInstalledIdentity(current, installed)) return 'unknown'
   if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) return 'observed'
   // The id is the only thing a load reports, and the id can be shadowed by another source.
   if (events.skills.some((entry) => entry.id === skill.name)) return 'unknown'
@@ -1404,23 +1405,93 @@ export interface InstalledSkillArtifact {
   written: string
   /** SHA-256 of the file's bytes at capture time. */
   digest: string
+  size: bigint
+  ino: bigint
+  dev: bigint
+  mtimeNs: bigint
+  ctimeNs: bigint
 }
+
+/** A skill file larger than this is not the artifact the installer verified. */
+const MAX_SKILL_BYTES = 1024 * 1024
 
 /**
  * The identity of the skill file this run installed, resolved before the agent runs.
  *
- * `null` means the harness could not resolve or read it, so no later read can be attributed
- * to it.
+ * `null` means the harness could not resolve or safely read it, so no later read can be
+ * attributed to it.
  */
 export function captureInstalledSkill(root: string, name: string): InstalledSkillArtifact | null {
   const written = resolve(root, '.agents', 'skills', name, 'SKILL.md')
+  let path: string
   try {
-    const path = realpathSync.native(written)
-    const digest = createHash('sha256').update(readFileSync(path)).digest('hex')
-    return { path, written, digest }
+    path = realpathSync.native(written)
   } catch {
     return null
   }
+  const file = readRegularFile(path)
+  if (file === null) return null
+  return {
+    path,
+    written,
+    digest: createHash('sha256').update(file.bytes).digest('hex'),
+    size: file.stat.size,
+    ino: file.stat.ino,
+    dev: file.stat.dev,
+    mtimeNs: file.stat.mtimeNs,
+    ctimeNs: file.stat.ctimeNs,
+  }
+}
+
+/**
+ * Read a regular file without following a final symlink or blocking on a special file.
+ *
+ * `O_NONBLOCK` matters: the agent can leave a FIFO at the installed path, and a plain
+ * read would wait for a writer that never comes, after the agent timeout has already
+ * fired. The read is bounded by the size `fstat` reported before it starts, so a
+ * lingering writer cannot turn verification into an unbounded allocation, and a change
+ * in size during the read rejects the file rather than attributing a partial artifact.
+ */
+function readRegularFile(path: string): { bytes: Buffer; stat: BigIntStats } | null {
+  let fd: number | null = null
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    const stat = fstatSync(fd, { bigint: true })
+    if (!stat.isFile() || stat.size > BigInt(MAX_SKILL_BYTES)) return null
+    const size = Number(stat.size)
+    const buffer = Buffer.alloc(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) return null
+    return { bytes: buffer.subarray(0, size), stat }
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        // A descriptor that cannot be closed cannot change the verdict.
+      }
+    }
+  }
+}
+
+/**
+ * Whether the file is still the same artifact, not merely a file with the same bytes.
+ *
+ * Endpoint bytes alone cannot see a replacement that was read and then restored, so the
+ * inode identity and change time are part of the comparison. An agent cannot set `ctime`
+ * back; any write in between therefore leaves the verdict `unknown`.
+ */
+function sameInstalledIdentity(left: InstalledSkillArtifact, right: InstalledSkillArtifact): boolean {
+  return (
+    samePath(left.path, right.path) &&
+    left.digest === right.digest &&
+    left.size === right.size &&
+    left.ino === right.ino &&
+    left.dev === right.dev &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  )
 }
 
 /**

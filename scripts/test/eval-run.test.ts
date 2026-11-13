@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -24,6 +25,23 @@ function temp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix))
   temps.push(dir)
   return dir
+}
+
+/**
+ * Rewrite a file until the host records a new `ctime`.
+ *
+ * Two back-to-back writes can land in the same file-clock tick, and a comparison that
+ * relies on `ctime` then has nothing to see. A real agent process always starts after
+ * that tick, so waiting one out models the run instead of the test's own speed. If the
+ * host never moves the clock, the caller skips rather than asserting on a platform limit.
+ */
+function rewriteAcrossClockTick(path: string, content: string, capturedCtime: bigint): boolean {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    writeFileSync(path, content, 'utf8')
+    if (statSync(path, { bigint: true }).ctimeNs !== capturedCtime) return true
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+  }
+  return false
 }
 
 describe('eval harness process environment', () => {
@@ -399,15 +417,60 @@ describe('skill access observation', () => {
     )
   })
 
-  test('the same bytes at the same path are still the artifact', () => {
+  test('a read after the original bytes are restored is not the artifact', (t) => {
+    // A comparison of endpoint bytes cannot see this: the agent overwrites the artifact,
+    // reads the replacement, then restores the original content before exiting. The
+    // identity captured before the run no longer describes what the read returned.
     const root = installedRoot()
     const installed = capture(root)
-    writeFileSync(installedPath(root), '# release notes\n', 'utf8')
+    const target = installedPath(root)
+    writeFileSync(target, '# something else\n', 'utf8')
+    // The agent read the replacement here.
+    if (!rewriteAcrossClockTick(target, '# release notes\n', installed.ctimeNs)) {
+      t.skip('the host file clock did not record a rewrite')
+      return
+    }
 
-    assert.equal(
-      observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
-      'observed',
-    )
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path: target }] }, root, installed), 'unknown')
+  })
+
+  test('rewriting the same bytes at the same path is not the same artifact', (t) => {
+    // Even identical bytes describe a new write. The artifact was verified before the run,
+    // and a file whose change time moved is no longer provably what the agent read.
+    const root = installedRoot()
+    const installed = capture(root)
+    const target = installedPath(root)
+    if (!rewriteAcrossClockTick(target, '# release notes\n', installed.ctimeNs)) {
+      t.skip('the host file clock did not record a rewrite')
+      return
+    }
+
+    assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path: target }] }, root, installed), 'unknown')
+  })
+
+  test('a FIFO at the installed path is rejected without blocking', {
+    skip: process.platform === 'win32' ? 'FIFOs are POSIX-only' : false,
+  }, (t) => {
+    // Reading a FIFO waits for a writer. Verification runs after the agent timeout, so a
+    // blocking read here would leave the whole harness stuck instead of recording a verdict.
+    const root = installedRoot()
+    const target = installedPath(root)
+    rmSync(target)
+    const made = spawnSync('mkfifo', [target])
+    if (made.error !== undefined || made.status !== 0) {
+      t.skip('mkfifo is unavailable')
+      return
+    }
+    const moduleUrl = new URL('../eval.ts', import.meta.url).href
+    const script = `import { captureInstalledSkill } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(captureInstalledSkill(${JSON.stringify(root)}, ${JSON.stringify(skill.name)})))`
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+
+    assert.equal(child.error, undefined, child.error?.message)
+    assert.equal(child.status, 0, child.stderr)
+    assert.equal(JSON.parse(child.stdout), null)
   })
 
   test('a removed installed artifact cannot be attributed', () => {
