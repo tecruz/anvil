@@ -51,13 +51,13 @@ describe('paired comparison', () => {
       onlyAnvil: 1,
       onlyBare: 0,
       neither: 0,
-      failures: { bare: 1, anvil: 0 },
+      runErrors: { bare: 1, anvil: 0 },
       successfulDurationMs: { bare: 10_000, anvil: 6_000, pairs: 1 },
       successfulCostUsd: { bare: 0.1, anvil: 0.06, pairs: 1, unpriced: 0 },
     })
   })
 
-  test('a failure is not a successful pair, even when its verifier passed', () => {
+  test('a run error is not a successful pair, even when its verifier passed', () => {
     const summary = summarizePairs([
       result({ variant: 'bare', verified: true, error: 'the agent exited with code 1' }),
       result({ variant: 'anvil', verified: true }),
@@ -65,8 +65,26 @@ describe('paired comparison', () => {
 
     assert.equal(summary.totals.onlyAnvil, 1)
     assert.equal(summary.totals.bothSucceeded, 0)
-    assert.equal(summary.totals.failures.bare, 1)
+    assert.equal(summary.totals.runErrors.bare, 1)
     assert.equal(summary.totals.successfulDurationMs.pairs, 0)
+  })
+
+  test('a setup failure is reported as a run error, not as an agent failure', () => {
+    const summary = summarizePairs([
+      result({ variant: 'bare' }),
+      result({
+        variant: 'anvil',
+        skillInstall: 'failed',
+        skillAccess: 'not-installed',
+        error: 'skill installation failed: missing source',
+      }),
+    ])
+
+    assert.equal(summary.totals.runErrors.anvil, 1)
+    const text = formatPairedSummary(summary).join('\n')
+    assert.match(text, /run errors\s+bare 0, anvil 1/)
+    assert.match(text, /harness setup failures, such as a failed skill installation/)
+    assert.doesNotMatch(text, /agent failures/)
   })
 
   test('a missing counterpart is incomplete rather than a zero', () => {
@@ -108,9 +126,21 @@ describe('paired comparison', () => {
     assert.match(formatPairedSummary(summary).join('\n'), /installed 2.*access observed 1.*unknown 1/)
   })
 
-  test('a small number of pairs is labelled exploratory, a larger one is not', () => {
+  test('each comparison is labelled exploratory on its own pair count', () => {
     const small = summarizePairs([result({ variant: 'bare' }), result({ variant: 'anvil' })])
     assert.match(formatPairedSummary(small).join('\n'), /1 pair does not support a significance claim/)
+
+    // Six scenarios with one repetition each are six one-pair measurements. Summing them
+    // into "six pairs" must not make the warning disappear.
+    const oneEach = summarizePairs(
+      Array.from({ length: 6 }, (_, index) => [
+        result({ variant: 'bare', scenario: `scenario-${index}` }),
+        result({ variant: 'anvil', scenario: `scenario-${index}` }),
+      ]).flat(),
+    )
+    assert.equal(oneEach.totals.pairs, 6)
+    const oneEachText = formatPairedSummary(oneEach).join('\n')
+    assert.equal((oneEachText.match(/does not support a significance claim/g) ?? []).length, 6)
 
     const large = summarizePairs(
       Array.from({ length: 5 }, (_, repetition) => [

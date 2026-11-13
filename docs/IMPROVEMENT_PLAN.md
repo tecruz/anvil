@@ -267,9 +267,10 @@ deliberately never replaces the promoted `latest.json` evidence.
 Both the preview and the real run print a preflight with the number of agent invocations, the
 worst case if every run hits its own timeout, and an explicit reminder that cost stays unknown
 until the host ledger reports it. The console report pairs each repetition's bare and anvil
-results: task success is reported separately from agent failures, duration and ledger cost are
-averaged only over pairs where both variants succeeded, and a small number of pairs is labelled
-exploratory rather than presented as a significance result.
+results: task success is reported separately from run errors (agent timeouts or exits, and
+harness setup failures such as a failed skill installation), duration and ledger cost are
+averaged only over pairs where both variants succeeded, and any scenario/model comparison with
+fewer than five pairs is labelled exploratory rather than presented as a significance result.
 
 ### Budget and pilot
 

@@ -1965,9 +1965,9 @@ function formatJson(value: unknown, level = 0): string {
  * Whether a result achieved the scenario's task.
  *
  * A green verifier is not the whole task: a code-change scenario also declares a hidden
- * verifier, and a plausible local fix that fails it did not do the work. An agent error
- * vetoes success even when the fixture happens to verify afterwards, because the run did
- * not demonstrate that the agent produced it.
+ * verifier, and a plausible local fix that fails it did not do the work. A recorded run
+ * error vetoes success even when the fixture happens to verify afterwards, because the run
+ * did not demonstrate that the agent produced it.
  */
 export function taskSucceeded(result: ScenarioResult): boolean {
   if (result.error !== undefined) return false
@@ -1985,8 +1985,8 @@ export interface PairedCounts {
   onlyAnvil: number
   onlyBare: number
   neither: number
-  /** Agent errors, including timeouts, counted per variant. */
-  failures: { bare: number; anvil: number }
+  /** Results that recorded an error: an agent timeout/exit, or harness setup, counted per variant. */
+  runErrors: { bare: number; anvil: number }
   /** Mean duration over pairs where both variants succeeded. */
   successfulDurationMs: { bare: number | null; anvil: number | null; pairs: number }
   /** Mean ledger cost over both-successful pairs where both prices are known. */
@@ -2020,7 +2020,7 @@ interface PairAccumulator {
   onlyAnvil: number
   onlyBare: number
   neither: number
-  failures: { bare: number; anvil: number }
+  runErrors: { bare: number; anvil: number }
   durationBare: number
   durationAnvil: number
   durationPairs: number
@@ -2038,7 +2038,7 @@ function emptyAccumulator(): PairAccumulator {
     onlyAnvil: 0,
     onlyBare: 0,
     neither: 0,
-    failures: { bare: 0, anvil: 0 },
+    runErrors: { bare: 0, anvil: 0 },
     durationBare: 0,
     durationAnvil: 0,
     durationPairs: 0,
@@ -2090,7 +2090,7 @@ function finishAccumulator(accumulator: PairAccumulator): PairedCounts {
     onlyAnvil: accumulator.onlyAnvil,
     onlyBare: accumulator.onlyBare,
     neither: accumulator.neither,
-    failures: { ...accumulator.failures },
+    runErrors: { ...accumulator.runErrors },
     successfulDurationMs: {
       bare: durationPairs === 0 ? null : accumulator.durationBare / durationPairs,
       anvil: durationPairs === 0 ? null : accumulator.durationAnvil / durationPairs,
@@ -2152,8 +2152,8 @@ export function summarizePairs(results: readonly ScenarioResult[]): PairedSummar
     }
     for (const result of [pair.bare, pair.anvil]) {
       if (result?.error === undefined) continue
-      group.accumulator.failures[result.variant] += 1
-      totals.failures[result.variant] += 1
+      group.accumulator.runErrors[result.variant] += 1
+      totals.runErrors[result.variant] += 1
     }
     for (const result of [pair.bare, pair.anvil]) {
       if (result?.skillInstall === undefined || result.skillInstall === 'not-requested') continue
@@ -2231,7 +2231,7 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
     lines.push(
       `  task success     both ${group.bothSucceeded}, anvil only ${group.onlyAnvil}, bare only ${group.onlyBare}, neither ${group.neither}`,
     )
-    lines.push(`  agent failures   bare ${group.failures.bare}, anvil ${group.failures.anvil}`)
+    lines.push(`  run errors       bare ${group.runErrors.bare}, anvil ${group.runErrors.anvil}`)
     if (group.successfulDurationMs.pairs === 0) {
       lines.push('  successful time  no pair succeeded in both variants')
     } else {
@@ -2260,20 +2260,25 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
         `  skill            installed ${group.skill.installed}, failed ${group.skill.installFailed}, unrecorded ${group.skill.installUnrecorded}; access observed ${group.skill.access.observed}, not-observed ${group.skill.access.notObserved}, unknown ${group.skill.access.unknown}`,
       )
     }
+    // The claim is about this comparison, not the run: six scenarios with one repetition each
+    // are six separate one-pair measurements, and a larger total must not silence that.
+    if (group.pairs > 0 && group.pairs < 5) {
+      const verb = group.pairs === 1 ? 'does' : 'do'
+      lines.push(
+        `  evidence         ${group.pairs} ${plural(group.pairs, 'pair')} ${verb} not support a significance claim; treat this as an exploratory measurement.`,
+      )
+    }
   }
   const totals = summary.totals
   lines.push('')
   lines.push(
     `All repetitions: ${totals.pairs} complete, ${totals.incomplete} incomplete; both ${totals.bothSucceeded}, anvil only ${totals.onlyAnvil}, bare only ${totals.onlyBare}, neither ${totals.neither}.`,
   )
-  if (totals.pairs > 0 && totals.pairs < 5) {
-    const verb = totals.pairs === 1 ? 'does' : 'do'
-    lines.push(
-      `${totals.pairs} ${plural(totals.pairs, 'pair')} ${verb} not support a significance claim; treat this as an exploratory measurement.`,
-    )
-  }
   lines.push(
-    'Task success means the verifier passed and any declared hidden verifier passed; failures are excluded from the successful time and cost means.',
+    'Task success means the verifier passed and any declared hidden verifier passed; only pairs where both variants succeeded contribute to the time and cost means.',
+  )
+  lines.push(
+    'Run errors are not attributed to the agent: they include agent timeouts or exits and harness setup failures, such as a failed skill installation.',
   )
   return lines
 }
