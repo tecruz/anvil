@@ -82,6 +82,23 @@ export type EvalSkillInstall = 'not-requested' | 'not-installed' | 'verified' | 
  */
 export type EvalSkillAccess = 'not-installed' | 'observed' | 'not-observed' | 'unknown'
 
+/**
+ * Why the skill-access verdict is what it is.
+ *
+ * `unknown` has more than one cause, and they say different things. A native `skill` load
+ * is unattributable by design; a run with no tool events proves nothing; an artifact that
+ * no longer matches its captured identity cannot be tied to any read. Without the reason,
+ * the verdict alone cannot answer "was the skill used, or was the evidence lost?", which is
+ * exactly the question a pilot report has to answer after the worktree is gone.
+ */
+export type EvalSkillAccessReason =
+  | 'not-installed'
+  | 'no-tool-events'
+  | 'artifact-not-attributable'
+  | 'native-load-unattributable'
+  | 'read-of-installed-artifact'
+  | 'no-read-of-installed-artifact'
+
 export interface EvalScenario {
   id: string
   size: EvalScenarioSize
@@ -187,6 +204,8 @@ export interface EvalResultSummary {
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
   skillAccess?: EvalSkillAccess
+  /** The evidence behind `skillAccess`, so an `unknown` can be told apart later. */
+  skillAccessReason?: EvalSkillAccessReason
   /** Which repetition of the scenario this result belongs to, starting at 0. */
   repetition: number | null
 }
@@ -261,6 +280,8 @@ export interface EvalRunRecordResult {
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
   skillAccess?: EvalSkillAccess
+  /** The evidence behind `skillAccess`, so an `unknown` can be told apart later. */
+  skillAccessReason?: EvalSkillAccessReason
   /** Which repetition of the scenario this result belongs to, starting at 0. */
   repetition: number | null
 }
@@ -640,6 +661,29 @@ function parseCount(value: unknown): number | null {
 
 const SKILL_INSTALL_VALUES: ReadonlySet<string> = new Set(['not-requested', 'not-installed', 'verified', 'failed'])
 const SKILL_ACCESS_VALUES: ReadonlySet<string> = new Set(['not-installed', 'observed', 'not-observed', 'unknown'])
+const SKILL_ACCESS_REASON_VALUES: ReadonlySet<string> = new Set([
+  'not-installed',
+  'no-tool-events',
+  'artifact-not-attributable',
+  'native-load-unattributable',
+  'read-of-installed-artifact',
+  'no-read-of-installed-artifact',
+])
+
+/**
+ * The verdict each reason can explain.
+ *
+ * The mapping is total, so an unknown reason string cannot be waved through: the parser
+ * rejects it before this table is consulted.
+ */
+const REASON_TO_ACCESS: Readonly<Record<EvalSkillAccessReason, EvalSkillAccess>> = {
+  'not-installed': 'not-installed',
+  'no-tool-events': 'unknown',
+  'artifact-not-attributable': 'unknown',
+  'native-load-unattributable': 'unknown',
+  'read-of-installed-artifact': 'observed',
+  'no-read-of-installed-artifact': 'not-observed',
+}
 
 /**
  * Parse an optional skill verdict.
@@ -735,6 +779,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
     if (skillInstall === 'invalid') return `${raw.scenario}: latest skillInstall is invalid`
     const skillAccess = parseSkillState<EvalSkillAccess>(raw.skillAccess, SKILL_ACCESS_VALUES)
     if (skillAccess === 'invalid') return `${raw.scenario}: latest skillAccess is invalid`
+    const skillAccessReason = parseSkillState<EvalSkillAccessReason>(raw.skillAccessReason, SKILL_ACCESS_REASON_VALUES)
+    if (skillAccessReason === 'invalid') return `${raw.scenario}: latest skillAccessReason is invalid`
     results.push({
       scenario: raw.scenario,
       size: raw.size,
@@ -754,6 +800,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
       ...(skillInstall === undefined ? {} : { skillInstall }),
       ...(skillAccess === undefined ? {} : { skillAccess }),
+      ...(skillAccessReason === undefined ? {} : { skillAccessReason }),
     })
   }
   return {
@@ -835,6 +882,8 @@ export function parseRunRecordResult(
   if (skillInstall === 'invalid') return `run record result ${key} skillInstall is invalid`
   const skillAccess = parseSkillState<EvalSkillAccess>(value.skillAccess, SKILL_ACCESS_VALUES)
   if (skillAccess === 'invalid') return `run record result ${key} skillAccess is invalid`
+  const skillAccessReason = parseSkillState<EvalSkillAccessReason>(value.skillAccessReason, SKILL_ACCESS_REASON_VALUES)
+  if (skillAccessReason === 'invalid') return `run record result ${key} skillAccessReason is invalid`
   return {
     scenario: value.scenario,
     variant: value.variant,
@@ -856,6 +905,7 @@ export function parseRunRecordResult(
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
     ...(skillInstall === undefined ? {} : { skillInstall }),
     ...(skillAccess === undefined ? {} : { skillAccess }),
+    ...(skillAccessReason === undefined ? {} : { skillAccessReason }),
   }
 }
 
@@ -1070,10 +1120,21 @@ function skillEvidenceProblem(
     variant?: unknown
     skillInstall?: EvalSkillInstall
     skillAccess?: EvalSkillAccess
+    skillAccessReason?: EvalSkillAccessReason
     error?: string
   },
   scenario: EvalVerifierScenario | undefined,
 ): string | null {
+  if (result.skillAccessReason !== undefined) {
+    if (result.skillAccess === undefined) {
+      return 'records a skill-access reason without a verdict'
+    }
+    const expected = REASON_TO_ACCESS[result.skillAccessReason]
+    // A reason that argues against its own verdict is contradictory evidence, not detail.
+    if (expected !== result.skillAccess) {
+      return `records skillAccessReason=${result.skillAccessReason} with skillAccess=${result.skillAccess}`
+    }
+  }
   if (result.skillInstall === 'failed' && result.error === undefined) {
     return 'records a failed skill installation without an error'
   }
@@ -1781,6 +1842,9 @@ export function checkEvalGate(
         }
         if (summaryResult.skillAccess !== recordResult.skillAccess) {
           failures.push(`${key}: summary skillAccess disagrees with run record`)
+        }
+        if (summaryResult.skillAccessReason !== recordResult.skillAccessReason) {
+          failures.push(`${key}: summary skillAccessReason disagrees with run record`)
         }
       }
       const summaryResultKeys = new Set(latest.results.map(resultKey))

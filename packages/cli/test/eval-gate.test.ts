@@ -562,6 +562,7 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       ...(result.error === undefined ? {} : { error: result.error }),
       ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
       ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
+      ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
       attempts: [
         {
           startedAt: '2026-10-27T00:02:00.000Z',
@@ -1262,26 +1263,36 @@ describe('skill comparison scenarios', () => {
     const run = latest([skillScenario()])
     run.results[0]!.skillInstall = 'verified'
     run.results[0]!.skillAccess = 'observed'
+    run.results[0]!.skillAccessReason = 'read-of-installed-artifact'
     const parsed = parseLatest(JSON.parse(JSON.stringify(run)))
     assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
     assert.equal(parsed.results[0]!.skillInstall, 'verified')
     assert.equal(parsed.results[0]!.skillAccess, 'observed')
+    assert.equal(parsed.results[0]!.skillAccessReason, 'read-of-installed-artifact')
 
     const invalid = parseLatest({
       ...run,
       results: [{ ...run.results[0], skillInstall: 'installed' }],
     })
     assert.match(invalid as string, /skillInstall is invalid/)
+
+    const badReason = parseLatest({
+      ...run,
+      results: [{ ...run.results[0], skillAccessReason: 'because' }],
+    })
+    assert.match(badReason as string, /skillAccessReason is invalid/)
   })
 
   test('skill verdicts survive a run record round trip, so resume does not lose them', () => {
     const record = runRecord()
     record.results[0]!.skillInstall = 'failed'
     record.results[0]!.skillAccess = 'not-installed'
+    record.results[0]!.skillAccessReason = 'not-installed'
     const parsed = parseRunRecord(JSON.parse(JSON.stringify(record)))
     assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
     assert.equal(parsed.results[0]!.skillInstall, 'failed')
     assert.equal(parsed.results[0]!.skillAccess, 'not-installed')
+    assert.equal(parsed.results[0]!.skillAccessReason, 'not-installed')
   })
 
   function skillScenarios(): EvalScenario[] {
@@ -1347,6 +1358,29 @@ describe('skill comparison scenarios', () => {
     const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /skillAccess disagrees with run record/)
+  })
+
+  test('a skill-access reason that argues against its verdict is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccessReason = 'read-of-installed-artifact'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason=read-of-installed-artifact with skillAccess=unknown/)
+  })
+
+  test('a summary that disagrees with its run record about the access reason is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccessReason = 'native-load-unattributable'
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    summary.results.find((result) => result.variant === 'anvil')!.skillAccessReason = 'no-tool-events'
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason disagrees with run record/)
   })
 
   test('access without a verified installation is refused', () => {

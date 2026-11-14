@@ -2,7 +2,8 @@
 
 Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconciled
 2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
-unknown cost and unknown skill-access evidence. Phase 4's installed-CLI matrix now passes on
+unknown cost, and skill-access evidence that was diagnosed from the retained sessions
+rather than rerun. Phase 4's installed-CLI matrix now passes on
 all six CI legs; publication is the remaining Phase 4 criterion. Open: the remaining
 Phase 0/1 acceptance demonstrations and publication (needs publishing approval and control
 of the scoped npm name).
@@ -167,8 +168,9 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 
 **Status:** harness and corpus implemented (Phase 2A in PR #8, Phase 2B in PR #14). The
 bounded, approved real-agent pilot completed on 2026-11-14: both variants passed in all
-three pairs, with no run errors. Cost and skill access remain unknown, so this does not
-establish a product benefit. The [pilot report](evidence/2026-11-14-skill-guidance.md)
+three pairs, with no run errors. Cost remains unknown, and the unknown skill-access verdicts
+were diagnosed from retained local sessions (see the pilot report) rather than rerun, so
+this does not establish a product benefit. The [pilot report](evidence/2026-11-14-skill-guidance.md)
 retains its separate real-agent record; the promoted hermetic summary still uses
 `fake-agent` and was not replaced.
 
@@ -186,9 +188,13 @@ conflating harness correctness with agent effectiveness.
 - lint + typecheck clean
 - 97 gate tests pass
 
-**Next decision after the pilot:** keep the scheduled smoke workload unchanged and
-investigate unknown skill-access observations without additional model calls. Paid models
-and a larger experiment require new approval; the six-invocation authorization is used.
+**Next decision after the pilot:** keep the scheduled smoke workload unchanged. The
+unknown skill-access observations were investigated from the pilot's retained OpenCode
+sessions without further model calls: two treatment runs loaded the skill by id and the
+third read the installed file, but none was attributable to the installed artifact, so the
+verdict stays `unknown`. The harness now records `skillAccessReason` beside the verdict so a
+later `unknown` can be told apart without the transcript. Paid models and a larger
+experiment require new approval; the six-invocation authorization is used.
 
 ### Phase 2B — Extended scenario corpus (planned)
 
@@ -298,6 +304,11 @@ Each result keeps three facts apart:
   id and take precedence. A shell command that merely names the path is not evidence,
   `not-observed` is not proof of non-use, and a run with no tool events is `unknown`. A
   scenario without a skill must not record an access verdict.
+- `skillAccessReason` — *why* the verdict was reached: `no-tool-events`,
+  `artifact-not-attributable`, `native-load-unattributable`, `read-of-installed-artifact`,
+  `no-read-of-installed-artifact` or `not-installed`. The gate refuses a reason that argues
+  against its verdict, and the field is persisted in checkpoints, the run record and the
+  summary so a later `unknown` can be investigated after the worktree is gone.
 - `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
 
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke

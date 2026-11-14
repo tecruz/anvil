@@ -9,6 +9,7 @@ import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-ga
 import {
   captureInstalledSkill,
   completedResultsFromRecord,
+  explainSkillAccess,
   type InstalledSkillArtifact,
   isCheckCommand,
   observeSkillAccess,
@@ -357,6 +358,31 @@ describe('skill access observation', () => {
     assert.equal(observeSkillAccess(skill, none, root, capture(root)), 'unknown')
   })
 
+  test('records why each verdict was reached, so an unknown can be investigated later', () => {
+    const root = installedRoot()
+    const installed = capture(root)
+    assert.deepEqual(explainSkillAccess(skill, none, root, installed), {
+      access: 'unknown',
+      reason: 'no-tool-events',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, skills: [{ id: 'release-notes' }] }, root, installed), {
+      access: 'unknown',
+      reason: 'native-load-unattributable',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, null), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'observed',
+      reason: 'read-of-installed-artifact',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: 'README.md' }] }, root, installed), {
+      access: 'not-observed',
+      reason: 'no-read-of-installed-artifact',
+    })
+  })
+
   test('a redirected installed path cannot attribute a read, not even of that path', () => {
     // The attack: read a copy elsewhere in the repository, then point the installed path at
     // it. Comparing paths after the agent finishes would describe the replacement.
@@ -534,6 +560,7 @@ describe('resumed results keep every recorded fact', () => {
         transcript: '',
         skillInstall: 'verified',
         skillAccess: 'observed',
+        skillAccessReason: 'read-of-installed-artifact',
       },
     ],
   }
@@ -550,10 +577,11 @@ describe('resumed results keep every recorded fact', () => {
     },
   ] as EvalScenario[]
 
-  test('a resumed report keeps skillInstall and skillAccess', () => {
+  test('a resumed report keeps skillInstall, skillAccess and the access reason', () => {
     const [result] = completedResultsFromRecord(record, scenarios)
     assert.equal(result?.skillInstall, 'verified')
     assert.equal(result?.skillAccess, 'observed')
+    assert.equal(result?.skillAccessReason, 'read-of-installed-artifact')
     assert.equal(result?.verified, true)
     assert.equal(result?.hiddenVerified, true)
   })

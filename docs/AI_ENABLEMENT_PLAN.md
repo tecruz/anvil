@@ -115,7 +115,7 @@ Still proposed: automatic tool installation, discovery-resource approval, richer
 company-context sources (staleness and contradiction checks beyond path existence), broader
 installation adapters, and broader real-agent effectiveness evidence. The first bounded
 [installed-skill pilot](evidence/2026-11-14-skill-guidance.md) completed three paired
-comparisons, but does not establish benefit, observed skill use, or cross-technology
+comparisons, but does not establish benefit, attributable skill use, or cross-technology
 coverage.
 
 ## Goal

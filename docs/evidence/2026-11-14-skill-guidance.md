@@ -69,9 +69,40 @@ attempt per selected key.
   they are not isolated model-inference timings.
 - Skill installation: independently verified in **3/3 treatment runs**.
 - Skill access: **unknown in all three treatment runs**. Successful installation and task
-  completion do not prove the agent read or followed the skill.
+  completion do not prove the agent read or followed the skill. The retained sessions show
+  why; see [the diagnosis](#diagnosis-of-the-unknown-access-verdicts).
 - Cost and token measurements: **unknown** (`null` in every result). Zero catalog prices
   and a zero-spend authorization must not be presented as a measured zero-dollar ledger result.
+
+## Diagnosis of the unknown access verdicts
+
+The scenario worktrees were discarded, but the pilot ran with separate OpenCode data,
+config, cache and state paths, and its data directory survived under
+`%TEMP%/opencode/anvil-skill-pilot-<hash>/data/opencode.db`. That database retains all six
+sessions and their tool parts, so what each agent did is still inspectable without another
+model call:
+
+| Repetition | Treatment agent's tool use | Recorded verdict |
+| --- | --- | --- |
+| 0 | `skill` load of `release-notes`; no read of the installed file | `unknown` |
+| 1 | completed `read` of this worktree's `.agents/skills/release-notes/SKILL.md` | `unknown` |
+| 2 | `skill` load of `release-notes`; no read of the installed file | `unknown` |
+
+Repetitions 0 and 2 are the documented rule working as intended: a native `skill` load
+reports only an id, another configured source can define the same id, and a load alone is
+therefore not attributable.
+
+Repetition 1 is the anomaly. The agent opened the exact installed artifact, and a hermetic
+reproduction of the same install → read → verdict path returns `observed`. The run record did
+not retain *why* its verdict was `unknown`, so that run cannot be reclassified after the
+fact: `unknown` conflated "no tool events were parsed", "the artifact no longer matched its
+captured identity" and "the id was loaded natively", which are different findings.
+
+The harness now records `skillAccessReason` beside `skillAccess` — `no-tool-events`,
+`artifact-not-attributable`, `native-load-unattributable`, `read-of-installed-artifact`,
+`no-read-of-installed-artifact` or `not-installed` — in checkpoints, the run record and the
+summary, and the gate refuses a reason that argues against its verdict. No new model calls
+were made. The original verdicts, cost and the no-benefit conclusion are unchanged.
 
 ## Interpretation and next decision
 
@@ -81,7 +112,8 @@ comparisons; it does **not** establish improved task success, lower cost, or a s
 meaningful performance difference. The treatment was slower on average in this sample.
 Unknown access evidence prevents attributing any observed behavior to reading the skill.
 
-Keep the scheduled smoke workload unchanged. Investigate the unknown skill-access
-observations using retained local agent metadata before seeking approval for another
-pilot. Do not spend on a broader experiment or change the scenario to obtain a favorable
+Keep the scheduled smoke workload unchanged. The retained-metadata investigation above is
+complete: two runs loaded the skill by id and the third read the installed file, but the
+harness recorded none of the three as an attributable read. That does not justify rerunning
+the pilot. Do not spend on a broader experiment or change the scenario to obtain a favorable
 result on the strength of this sample.
