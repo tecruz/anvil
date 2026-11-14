@@ -9,11 +9,21 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  globSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   affectedPackages,
@@ -22,6 +32,7 @@ import {
   porcelainPaths,
   readGraph,
   rootTestsFor,
+  testFilesFor,
   testFilesForSelection,
 } from '../test-changed.ts'
 
@@ -32,6 +43,49 @@ const SELECTOR_SUITE = join(ROOT, 'scripts', 'test', 'test-changed.test.ts')
 const EVAL_SUITE = join(ROOT, 'scripts', 'test', 'eval-run.test.ts')
 const EVAL_EVIDENCE_SUITE = join(ROOT, 'scripts', 'test', 'eval-execution-evidence.test.ts')
 const EVAL_RESUME_SUITE = join(ROOT, 'scripts', 'test', 'eval-resume.test.ts')
+
+/** What `node --test` excludes when it expands its glob patterns. */
+const NODE_TEST_EXCLUDE = (name: string): boolean => name === 'node_modules'
+
+/** The link kind that needs no elevation: a junction on Windows, a directory symlink elsewhere. */
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
+
+/**
+ * Whether this machine can create a symlink to a file.
+ *
+ * Windows only allows file symlinks with Developer Mode or elevation, and there is no
+ * junction equivalent for a file. Only the coverage that needs one is skipped without it.
+ */
+function canCreateFileSymlink(): boolean {
+  const probe = mkdtempSync(join(tmpdir(), 'anvil-file-link-probe-'))
+  temps.push(probe)
+  const target = join(probe, 'target')
+  writeFileSync(target, '')
+  try {
+    symlinkSync(target, join(probe, 'link'), 'file')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A path the `node --test` reporter named, relative to the fixture root.
+ *
+ * Reporter events name a file both relative to the cwd and absolute. The absolute form may be
+ * spelled through the logical root (Windows keeps the junction path) or the resolved one
+ * (macOS resolves `/var` to `/private/var`), so it is rebased against whichever contains it.
+ * Only the roots are resolved, never the file: resolving the file would collapse a file
+ * symlink into its target, the very distinction the selector test checks.
+ */
+function rootRelative(file: string, roots: readonly string[]): string {
+  if (!isAbsolute(file)) return file
+  for (const root of roots) {
+    const rebased = relative(root, file)
+    if (rebased !== '' && !isAbsolute(rebased) && rebased.split(/[\\/]/)[0] !== '..') return rebased
+  }
+  throw new Error(`reported file ${file} is under none of ${roots.join(', ')}`)
+}
 
 const temps: string[] = []
 after(() => {
@@ -132,6 +186,175 @@ describe('test:changed selection', () => {
     )
     const full = testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)
     for (const file of onDisk) assert.ok(full.includes(join(ROOT, 'scripts', 'test', file)), file)
+  })
+
+  test('a full selection runs every package suite npm test runs', () => {
+    // The oracle is `npm test`'s own package pattern, expanded the way `node --test` expands
+    // it (`fs.globSync`, `node_modules` excluded), not a second copy of the selector's
+    // traversal: a traversal compared against itself agrees on every mistake it makes.
+    // `node --test runs exactly the files the package selection picks` pins that this is
+    // what `node --test` really does.
+    const script = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts.test as string
+    const patterns = [...script.matchAll(/"([^"]+)"/g)]
+      .map((match) => match[1])
+      .filter((pattern): pattern is string => pattern?.startsWith('packages/') === true)
+    assert.ok(patterns.length > 0, `no package pattern in the test script: ${script}`)
+    const npmTest = globSync(patterns, { cwd: ROOT, exclude: NODE_TEST_EXCLUDE }).map((file) => join(ROOT, file))
+    assert.ok(npmTest.length > 0)
+    const full = testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)
+    const fullPackages = full.filter((file) => file.startsWith(join(ROOT, 'packages')))
+    assert.deepEqual([...fullPackages].sort(), [...npmTest].sort())
+  })
+
+  test('node --test runs exactly the files the package selection picks', () => {
+    // Empirical, not assumed: run the real `node --test` over `npm test`'s package pattern in
+    // a fixture with every shape the two could disagree on, and record the files it executed.
+    // Nested suites and fixtures run; hidden directories and files, `node_modules` at any
+    // depth, and suites reachable only through a directory symlink or a symlink cycle do not.
+    // A symlink to a test *file* is matched like any file.
+    const suite = "import { test } from 'node:test'\ntest('ok', () => {})\n"
+    const root = fixtureRoot({
+      'package.json': JSON.stringify({ workspaces: ['packages/*'] }),
+      'packages/shapes/package.json': JSON.stringify({ name: '@anvil/shapes' }),
+      'packages/shapes/test/top.test.ts': suite,
+      'packages/shapes/test/nested/deep.test.ts': suite,
+      'packages/shapes/test/fixtures/fixture.test.ts': suite,
+      'packages/shapes/test/.hidden/hidden.test.ts': suite,
+      'packages/shapes/test/.dotfile.test.ts': suite,
+      'packages/shapes/test/node_modules/dep/dep.test.ts': suite,
+      'packages/shapes/test/nested/node_modules/inner.test.ts': suite,
+      'packages/shapes/outside/linked.test.ts': suite,
+    })
+    const testDir = join(root, 'packages', 'shapes', 'test')
+    symlinkSync(join(root, 'packages', 'shapes', 'outside'), join(testDir, 'linked-dir'), directoryLinkType)
+    symlinkSync(testDir, join(testDir, 'nested', 'cycle'), directoryLinkType)
+    // Without file symlinks (Windows without Developer Mode) only the alias coverage is lost.
+    const fileSymlinks = canCreateFileSymlink()
+    if (fileSymlinks) symlinkSync(join(testDir, 'top.test.ts'), join(testDir, 'alias.test.ts'), 'file')
+    const reporter = join(root, 'files-reporter.mjs')
+    writeFileSync(
+      reporter,
+      [
+        'export default async function* (source) {',
+        '  const seen = new Set()',
+        '  for await (const event of source) {',
+        '    const file = event.data?.file',
+        '    if (typeof file === "string" && !seen.has(file)) {',
+        '      seen.add(file)',
+        "      yield file + '\\n'",
+        '    }',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    // The same fixture is also reached through a symlink to its root. On macOS `tmpdir()` is
+    // under `/var`, a symlink to `/private/var`, so every fixture root is reached that way
+    // there; the alias reproduces that on every platform.
+    const aliasParent = mkdtempSync(join(tmpdir(), 'anvil-selector-alias-'))
+    temps.push(aliasParent)
+    const aliasRoot = join(aliasParent, 'root')
+    symlinkSync(root, aliasRoot, directoryLinkType)
+
+    const expected = [
+      ...(fileSymlinks ? [join('packages', 'shapes', 'test', 'alias.test.ts')] : []),
+      join('packages', 'shapes', 'test', 'fixtures', 'fixture.test.ts'),
+      join('packages', 'shapes', 'test', 'nested', 'deep.test.ts'),
+      join('packages', 'shapes', 'test', 'top.test.ts'),
+    ]
+    // A suite run under `node --test` inherits the runner's child context; without clearing
+    // it the nested runner reports to this process instead of its own reporter.
+    const { NODE_TEST_CONTEXT: _context, ...env } = process.env
+    for (const cwd of [root, aliasRoot]) {
+      const ran = execFileSync(
+        process.execPath,
+        ['--test', `--test-reporter=${pathToFileURL(reporter).href}`, 'packages/*/test/**/*.test.ts'],
+        { cwd, encoding: 'utf8', env },
+      )
+        .split('\n')
+        .filter((line) => line !== '')
+      const roots = [cwd, realpathSync(cwd)]
+      const ranFiles = [...new Set(ran.map((file) => rootRelative(file, roots)))].sort()
+      assert.deepEqual(ranFiles, expected, cwd)
+
+      const cwdGraph = readGraph(cwd)
+      const shapes = cwdGraph.packages.find((pkg) => pkg.dirName === 'shapes')
+      assert.ok(shapes !== undefined)
+      assert.deepEqual(
+        testFilesFor([shapes], cwdGraph).map((file) => relative(cwd, file)),
+        expected,
+        cwd,
+      )
+    }
+  })
+
+  test('reporter paths are rebased against whichever root contains them', () => {
+    // Both spellings a runner can report for one file under a linked root: through the
+    // logical root (Windows junctions) and through the resolved one (macOS `/private/var`).
+    const logical = join(tmpdir(), 'logical-root')
+    const real = join(tmpdir(), 'resolved', 'real-root')
+    const file = join('packages', 'shapes', 'test', 'top.test.ts')
+    const roots = [logical, real]
+    assert.equal(rootRelative(join(logical, file), roots), file)
+    assert.equal(rootRelative(join(real, file), roots), file)
+    assert.equal(rootRelative(file, roots), file)
+    // A file symlink keeps its own name; only the root is rebased.
+    const alias = join('packages', 'shapes', 'test', 'alias.test.ts')
+    assert.equal(rootRelative(join(logical, alias), roots), alias)
+    // A sibling whose name merely starts with the root's is not inside it.
+    assert.throws(() => rootRelative(join(`${logical}-other`, file), roots), /under none of/)
+    assert.throws(() => rootRelative(join(tmpdir(), 'elsewhere', file), roots), /under none of/)
+  })
+
+  test('a POSIX test filename containing a backslash is kept verbatim', { skip: process.platform === 'win32' }, () => {
+    // On POSIX a backslash is an ordinary filename character. Rewriting it to `/` produced
+    // a path into a directory that does not exist.
+    const root = fixtureRoot({
+      'package.json': JSON.stringify({ workspaces: ['packages/*'] }),
+      'packages/odd/package.json': JSON.stringify({ name: '@anvil/odd' }),
+      'packages/odd/test/back\\slash.test.ts': 'export const odd = 1\n',
+    })
+    const fixtureGraph = readGraph(root)
+    const odd = fixtureGraph.packages.find((pkg) => pkg.dirName === 'odd')
+    assert.ok(odd !== undefined)
+    assert.deepEqual(testFilesFor([odd], fixtureGraph), [join(root, 'packages', 'odd', 'test', 'back\\slash.test.ts')])
+  })
+
+  test('package selection discovers nested suites and skips packages without tests', () => {
+    // `npm test` globs `packages/*/test/**/*.test.ts`, but a nonrecursive read of the test
+    // directory only found the suites directly under it. A nested suite was silently left
+    // out of a changed-files run that claimed to cover its package.
+    const root = fixtureRoot({
+      'package.json': JSON.stringify({ workspaces: ['packages/*'] }),
+      'packages/nested/package.json': JSON.stringify({ name: '@anvil/nested' }),
+      'packages/nested/test/z.test.ts': 'export const z = 1\n',
+      'packages/nested/test/subdir/a.test.ts': 'export const a = 1\n',
+      'packages/nested/test/helper.ts': 'export const helper = 1\n',
+      'packages/nested/test/unit.spec.ts': 'export const spec = 1\n',
+      'packages/nested/test/legacy.test.js': 'export const legacy = 1\n',
+      'packages/nested/test/backup.test.ts.bak': 'export const backup = 1\n',
+      'packages/untested/package.json': JSON.stringify({ name: '@anvil/untested' }),
+      'packages/empty/package.json': JSON.stringify({ name: '@anvil/empty' }),
+    })
+    mkdirSync(join(root, 'packages', 'empty', 'test'), { recursive: true })
+    const fixtureGraph = readGraph(root)
+    const nested = fixtureGraph.packages.find((pkg) => pkg.dirName === 'nested')
+    const untested = fixtureGraph.packages.find((pkg) => pkg.dirName === 'untested')
+    const empty = fixtureGraph.packages.find((pkg) => pkg.dirName === 'empty')
+    assert.ok(nested !== undefined && untested !== undefined && empty !== undefined)
+
+    const expected = [
+      join(root, 'packages', 'nested', 'test', 'subdir', 'a.test.ts'),
+      join(root, 'packages', 'nested', 'test', 'z.test.ts'),
+    ]
+    // The exact list also proves the helper, `.spec.ts`, `.test.js` and `.test.ts.bak` files
+    // are excluded, and that the nested suite sorts before the top-level one.
+    assert.deepEqual(testFilesFor([nested], fixtureGraph), expected)
+    assert.deepEqual(testFilesFor([untested], fixtureGraph), [])
+    assert.deepEqual(testFilesFor([empty], fixtureGraph), [])
+    assert.deepEqual(testFilesFor([nested], { ...fixtureGraph, dirOf: () => null }), [])
+    assert.deepEqual(testFilesForSelection([nested], [], fixtureGraph, root), expected)
   })
 
   test('a change to the handshake checker runs the suite that covers it', () => {
