@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { after, describe, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
 import {
@@ -441,6 +442,12 @@ describe('skill access observation', () => {
       observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
       'unknown',
     )
+    // The identity was captured, so this is not the `installed === null` path: the artifact
+    // changed after capture and the reason says exactly that.
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
   })
 
   test('a read after the original bytes are restored is not the artifact', (t) => {
@@ -507,11 +514,78 @@ describe('skill access observation', () => {
       observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
       'unknown',
     )
+    // `installed` is non-null; the re-capture is what fails, and the reason records that.
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
   })
 
   test('an uncaptured identity attributes nothing', () => {
     const root = installedRoot()
     assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, null), 'unknown')
+  })
+})
+
+describe('fake-agent skill-access wiring', () => {
+  test('records the reason beside every skill verdict without touching the real repository', {
+    timeout: 600_000,
+  }, () => {
+    const source = fileURLToPath(new URL('../../', import.meta.url))
+    const workspace = mkdtempSync(join(tmpdir(), 'anvil-eval-skill-wiring-'))
+    const root = join(workspace, 'repo')
+    const runtime = join(workspace, 'runtime')
+    mkdirSync(root)
+    mkdirSync(runtime)
+    try {
+      // Run the real harness in an isolated copy. The fake agent never calls a model, and
+      // every result -- checkpoints and run.json -- lands under the copy, never this repo.
+      const skip = new Set(['node_modules', 'dist', '.git'])
+      for (const path of [
+        'packages',
+        'eval',
+        'scripts/eval.ts',
+        'scripts/eval-check-broker.ts',
+        'scripts/build.mjs',
+        'package.json',
+        'package-lock.json',
+      ]) {
+        cpSync(join(source, path), join(root, path), {
+          recursive: true,
+          filter: (entry) => !skip.has(basename(entry)),
+        })
+      }
+      symlinkSync(
+        join(source, 'node_modules'),
+        join(root, 'node_modules'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      )
+      const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime }
+      delete env.ANVIL_EVAL
+      // The harness must run fixture test discovery, not inherit this parent's test context.
+      delete env.NODE_TEST_CONTEXT
+      const invocation = spawnSync(
+        process.execPath,
+        ['scripts/eval.ts', '--fake-agent', '--scenario', 'skill-guidance'],
+        { cwd: root, env, encoding: 'utf8', timeout: 540_000 },
+      )
+      assert.equal(invocation.error, undefined, invocation.error?.message)
+      assert.equal(invocation.status, 0, `${invocation.stdout}\n${invocation.stderr}`)
+
+      const record = JSON.parse(readFileSync(join(root, 'eval-results', 'run.json'), 'utf8')) as EvalRunRecord
+      assert.equal(record.results.length, 2)
+      const bare = record.results.find((result) => result.variant === 'bare')!
+      const anvil = record.results.find((result) => result.variant === 'anvil')!
+
+      assert.equal(bare.skillInstall, 'not-installed')
+      assert.equal(bare.skillAccess, 'not-installed')
+      assert.equal(bare.skillAccessReason, 'not-installed')
+      assert.equal(anvil.skillInstall, 'verified')
+      assert.equal(anvil.skillAccess, 'unknown')
+      assert.equal(anvil.skillAccessReason, 'no-tool-events')
+    } finally {
+      rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
   })
 })
 

@@ -190,11 +190,12 @@ conflating harness correctness with agent effectiveness.
 
 **Next decision after the pilot:** keep the scheduled smoke workload unchanged. The
 unknown skill-access observations were investigated from the pilot's retained OpenCode
-sessions without further model calls: two treatment runs loaded the skill by id and the
-third read the installed file, but none was attributable to the installed artifact, so the
-verdict stays `unknown`. The harness now records `skillAccessReason` beside the verdict so a
-later `unknown` can be told apart without the transcript. Paid models and a larger
-experiment require new approval; the six-invocation authorization is used.
+sessions without further model calls: repetitions 0 and 2 loaded the skill by id natively,
+which is unattributable by design, while repetition 1's read was recorded `unknown` and its
+cause is unresolved — the retained run record cannot say why. The harness now records
+`skillAccessReason` beside the verdict so a later `unknown` can be told apart without the
+transcript. Paid models and a larger experiment require new approval; the six-invocation
+authorization is used.
 
 ### Phase 2B — Extended scenario corpus (planned)
 
@@ -306,9 +307,12 @@ Each result keeps three facts apart:
   scenario without a skill must not record an access verdict.
 - `skillAccessReason` — *why* the verdict was reached: `no-tool-events`,
   `artifact-not-attributable`, `native-load-unattributable`, `read-of-installed-artifact`,
-  `no-read-of-installed-artifact` or `not-installed`. The gate refuses a reason that argues
-  against its verdict, and the field is persisted in checkpoints, the run record and the
-  summary so a later `unknown` can be investigated after the worktree is gone.
+  `no-read-of-installed-artifact` or `not-installed`. `artifact-not-attributable` covers a
+  failed pre-run identity capture, an artifact that cannot be re-captured after the run
+  (deleted, replaced by a non-regular file, or redirected), and a re-captured identity that
+  differs from the captured one. The gate refuses a reason that argues against its verdict,
+  and the field is persisted in checkpoints, the run record and the summary so a later
+  `unknown` can be investigated after the worktree is gone.
 - `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
 
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke

@@ -76,27 +76,52 @@ attempt per selected key.
 
 ## Diagnosis of the unknown access verdicts
 
-The scenario worktrees were discarded, but the pilot ran with separate OpenCode data,
-config, cache and state paths, and its data directory survived under
+The scenario worktrees were discarded. The observations in this section come from a local,
+uncommitted OpenCode database on the machine that ran the pilot,
 `%TEMP%/opencode/anvil-skill-pilot-<hash>/data/opencode.db`. That database retains all six
-sessions and their tool parts, so what each agent did is still inspectable without another
-model call:
+sessions and their tool parts, but it was **not retained or committed to this repository**.
+The table below therefore records local observations, not reproducible committed evidence:
 
-| Repetition | Treatment agent's tool use | Recorded verdict |
+| Repetition | Treatment agent's tool use (local observation) | Recorded verdict |
 | --- | --- | --- |
 | 0 | `skill` load of `release-notes`; no read of the installed file | `unknown` |
-| 1 | completed `read` of this worktree's `.agents/skills/release-notes/SKILL.md` | `unknown` |
+| 1 | completed `read` whose path names this worktree's `.agents/skills/release-notes/SKILL.md` | `unknown` |
 | 2 | `skill` load of `release-notes`; no read of the installed file | `unknown` |
+
+The committed pilot record,
+[`eval-results/pilots/2074b7a8-5753-4904-ad32-1dfaa72d4b62/run.json`](../../eval-results/pilots/2074b7a8-5753-4904-ad32-1dfaa72d4b62/run.json),
+does not carry these observations. For each treatment run it records only
+`skillInstall: verified` and `skillAccess: unknown`; there is no reason field and no list of
+tool events.
 
 Repetitions 0 and 2 are the documented rule working as intended: a native `skill` load
 reports only an id, another configured source can define the same id, and a load alone is
 therefore not attributable.
 
-Repetition 1 is the anomaly. The agent opened the exact installed artifact, and a hermetic
-reproduction of the same install → read → verdict path returns `observed`. The run record did
-not retain *why* its verdict was `unknown`, so that run cannot be reclassified after the
-fact: `unknown` conflated "no tool events were parsed", "the artifact no longer matched its
-captured identity" and "the id was loaded natively", which are different findings.
+Repetition 1 is the anomaly. Its session shows a completed read whose path names this
+worktree's installed `SKILL.md`; a path alone does not prove the artifact's identity was
+unchanged at that point. A hermetic reproduction of the same install → read → verdict path
+returns `observed`. The run record did not retain *why* its verdict was `unknown`, so that
+run cannot be reclassified after the fact.
+
+The recorded `unknown` narrows the possibilities. `explainSkillAccess` returns
+`no-tool-events` when the parsed stream has no executions, reads or skill loads at all; a
+read whose path did not match would have produced `not-observed`, not `unknown`. Because the
+local session shows a read and no skill load, repetition 1's `unknown` can only have come
+from `no-tool-events` (the harness parsed no tool events from that run's stream, even though
+the session database shows a read) or from `artifact-not-attributable` (the captured
+identity could not be tied to the read).
+
+`artifact-not-attributable` itself covers three distinct causes:
+
+1. The identity capture before the agent ran failed, so there was no `installed` identity to
+   compare against.
+2. The artifact could not be re-captured after the run because it was missing: deleted,
+   replaced by a non-regular file, or redirected so capture failed.
+3. The re-captured identity differs from the captured one: the path was redirected, or the
+   content, inode or timestamps changed.
+
+Without the reason, the verdict could not distinguish those findings.
 
 The harness now records `skillAccessReason` beside `skillAccess` — `no-tool-events`,
 `artifact-not-attributable`, `native-load-unattributable`, `read-of-installed-artifact`,
