@@ -2,9 +2,10 @@
 
 Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconciled
 2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
-unknown cost and unknown skill-access evidence. Open: the remaining Phase 0/1 acceptance
-demonstrations and Phase 4's full smoke-matrix verification and publication (needs
-publishing approval and control of the scoped npm name).
+unknown cost and unknown skill-access evidence. Phase 4's installed-CLI matrix now passes on
+all six CI legs; publication is the remaining Phase 4 criterion. Open: the remaining
+Phase 0/1 acceptance demonstrations and publication (needs publishing approval and control
+of the scoped npm name).
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -433,9 +434,9 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 
 **Outcome:** users install a tested artifact without fetching the source build toolchain.
 
-**Status:** in progress. Expanded installed-CLI smoke coverage passes locally; final CI
-matrix verification is still pending. Publishing separately requires approval and
-confirmed scope access, and the maintainer has explicitly put it on hold.
+**Status:** in progress. Expanded installed-CLI smoke coverage passes on all three OSes and
+both Node lanes; publication is the remaining criterion. Publishing separately requires
+approval and confirmed scope access, and the maintainer has explicitly put it on hold.
 
 Implemented: the release workflow (`.github/workflows/release.yml`), the tarball allowlist,
 the identity check that the tag, the workspace manifest and the packed tarball agree, an
@@ -444,9 +445,9 @@ suite that packs the same `@anvil/cli` target from a temporary copy. That suite 
 `npm run check` on every CI leg. Existing CI evidence covers tarball contents, installation
 without scripts, version/JSON and MCP on all three OSes and both Node lanes. The expanded
 registry test now also exercises help, doctor, staged generation/apply and preservation
-of existing consumer files through the installed binary. That expanded test passes
-locally on Windows/Node 24.13.0; all six final-head CI legs must pass before matrix
-acceptance is marked complete.
+of existing consumer files through the installed binary. That expanded test passed on all
+six `check` legs (3 OS x floor/LTS) in run 43625583728 at `93c6f12`, so matrix acceptance
+is recorded below.
 
 The release workflow now writes `SHA256SUMS` and draft release notes containing the
 source SHA, verifies the checksum after smoke testing, and retains those sidecars with
@@ -505,11 +506,11 @@ scope ownership. The workflow itself remains unproven end to end.
   `the staged artifact installs without scripts and exercises the installed CLI` in
   `packages/cli/test/package.test.ts`: `npm pack` of the staged workspace, then
   `npm install --ignore-scripts` into a consumer with no workspace links.
-- [ ] Installed CLI smoke tests pass on all three OSes and the supported Node matrix.
-  **Awaiting final-head CI.** The expanded registry test covers version/JSON, help,
-  doctor, staged generation/apply, preservation of existing files and MCP, and passes
-  locally. The CI matrix has all six `check` legs (3 OS x floor/LTS) since PR #30;
-  passing results for this expanded test are required before closing the criterion.
+- [x] Installed CLI smoke tests pass on all three OSes and the supported Node matrix.
+  Run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS, on both
+  the Node floor and current LTS. The expanded registry test covers version/JSON, help,
+  doctor, staged generation/apply, preservation of existing files and MCP. The six `check`
+  legs (3 OS x floor/LTS) have existed since PR #30.
 - [ ] Published bytes match the tested checksum; version and provenance identify the source.
   **Open, blocked on publication.** No comparison of the tested artifact with a published
   `@anvil/cli` release has been recorded.
@@ -528,7 +529,7 @@ for it exists. These are the commands behind the reconciled checklists.
 | A maintainer merges without a reviewer | PRs #30 and #31 report `mergedBy: tecruz`, `reviews: 0`, with `required_approving_review_count: 0` |
 | Duplicate run records are refused | `node --test --test-name-pattern="duplicate" packages/cli/test/eval-gate.test.ts`: 4 pass, 0 fail |
 | Full validation before the registry-smoke expansion | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
-| Expanded installed-registry smoke coverage, local Windows/Node 24.13.0 | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed, 0 failed. Full final-tree validation and CI remain pending. |
+| Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
