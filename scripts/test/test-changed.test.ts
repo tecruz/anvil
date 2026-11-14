@@ -47,6 +47,46 @@ const EVAL_RESUME_SUITE = join(ROOT, 'scripts', 'test', 'eval-resume.test.ts')
 /** What `node --test` excludes when it expands its glob patterns. */
 const NODE_TEST_EXCLUDE = (name: string): boolean => name === 'node_modules'
 
+/** The link kind that needs no elevation: a junction on Windows, a directory symlink elsewhere. */
+const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir'
+
+/**
+ * Whether this machine can create a symlink to a file.
+ *
+ * Windows only allows file symlinks with Developer Mode or elevation, and there is no
+ * junction equivalent for a file. Only the coverage that needs one is skipped without it.
+ */
+function canCreateFileSymlink(): boolean {
+  const probe = mkdtempSync(join(tmpdir(), 'anvil-file-link-probe-'))
+  temps.push(probe)
+  const target = join(probe, 'target')
+  writeFileSync(target, '')
+  try {
+    symlinkSync(target, join(probe, 'link'), 'file')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A path the `node --test` reporter named, relative to the fixture root.
+ *
+ * Reporter events name a file both relative to the cwd and absolute. The absolute form may be
+ * spelled through the logical root (Windows keeps the junction path) or the resolved one
+ * (macOS resolves `/var` to `/private/var`), so it is rebased against whichever contains it.
+ * Only the roots are resolved, never the file: resolving the file would collapse a file
+ * symlink into its target, the very distinction the selector test checks.
+ */
+function rootRelative(file: string, roots: readonly string[]): string {
+  if (!isAbsolute(file)) return file
+  for (const root of roots) {
+    const rebased = relative(root, file)
+    if (rebased !== '' && !isAbsolute(rebased) && rebased.split(/[\\/]/)[0] !== '..') return rebased
+  }
+  throw new Error(`reported file ${file} is under none of ${roots.join(', ')}`)
+}
+
 const temps: string[] = []
 after(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true })
@@ -186,9 +226,11 @@ describe('test:changed selection', () => {
       'packages/shapes/outside/linked.test.ts': suite,
     })
     const testDir = join(root, 'packages', 'shapes', 'test')
-    symlinkSync(join(root, 'packages', 'shapes', 'outside'), join(testDir, 'linked-dir'), 'dir')
-    symlinkSync(testDir, join(testDir, 'nested', 'cycle'), 'dir')
-    symlinkSync(join(testDir, 'top.test.ts'), join(testDir, 'alias.test.ts'), 'file')
+    symlinkSync(join(root, 'packages', 'shapes', 'outside'), join(testDir, 'linked-dir'), directoryLinkType)
+    symlinkSync(testDir, join(testDir, 'nested', 'cycle'), directoryLinkType)
+    // Without file symlinks (Windows without Developer Mode) only the alias coverage is lost.
+    const fileSymlinks = canCreateFileSymlink()
+    if (fileSymlinks) symlinkSync(join(testDir, 'top.test.ts'), join(testDir, 'alias.test.ts'), 'file')
     const reporter = join(root, 'files-reporter.mjs')
     writeFileSync(
       reporter,
@@ -213,10 +255,10 @@ describe('test:changed selection', () => {
     const aliasParent = mkdtempSync(join(tmpdir(), 'anvil-selector-alias-'))
     temps.push(aliasParent)
     const aliasRoot = join(aliasParent, 'root')
-    symlinkSync(root, aliasRoot, 'dir')
+    symlinkSync(root, aliasRoot, directoryLinkType)
 
     const expected = [
-      join('packages', 'shapes', 'test', 'alias.test.ts'),
+      ...(fileSymlinks ? [join('packages', 'shapes', 'test', 'alias.test.ts')] : []),
       join('packages', 'shapes', 'test', 'fixtures', 'fixture.test.ts'),
       join('packages', 'shapes', 'test', 'nested', 'deep.test.ts'),
       join('packages', 'shapes', 'test', 'top.test.ts'),
@@ -232,12 +274,8 @@ describe('test:changed selection', () => {
       )
         .split('\n')
         .filter((line) => line !== '')
-      // Events name a file both relative to the cwd and absolute, and the absolute form is
-      // built from the runner's resolved cwd, which has the root's symlinks resolved. Compare
-      // root-relative paths, resolving only the root: resolving each file would collapse
-      // `alias.test.ts` into `top.test.ts`, the very distinction this test checks.
-      const realRoot = realpathSync(cwd)
-      const ranFiles = [...new Set(ran.map((file) => (isAbsolute(file) ? relative(realRoot, file) : file)))].sort()
+      const roots = [cwd, realpathSync(cwd)]
+      const ranFiles = [...new Set(ran.map((file) => rootRelative(file, roots)))].sort()
       assert.deepEqual(ranFiles, expected, cwd)
 
       const cwdGraph = readGraph(cwd)
@@ -249,6 +287,24 @@ describe('test:changed selection', () => {
         cwd,
       )
     }
+  })
+
+  test('reporter paths are rebased against whichever root contains them', () => {
+    // Both spellings a runner can report for one file under a linked root: through the
+    // logical root (Windows junctions) and through the resolved one (macOS `/private/var`).
+    const logical = join(tmpdir(), 'logical-root')
+    const real = join(tmpdir(), 'resolved', 'real-root')
+    const file = join('packages', 'shapes', 'test', 'top.test.ts')
+    const roots = [logical, real]
+    assert.equal(rootRelative(join(logical, file), roots), file)
+    assert.equal(rootRelative(join(real, file), roots), file)
+    assert.equal(rootRelative(file, roots), file)
+    // A file symlink keeps its own name; only the root is rebased.
+    const alias = join('packages', 'shapes', 'test', 'alias.test.ts')
+    assert.equal(rootRelative(join(logical, alias), roots), alias)
+    // A sibling whose name merely starts with the root's is not inside it.
+    assert.throws(() => rootRelative(join(`${logical}-other`, file), roots), /under none of/)
+    assert.throws(() => rootRelative(join(tmpdir(), 'elsewhere', file), roots), /under none of/)
   })
 
   test('a POSIX test filename containing a backslash is kept verbatim', { skip: process.platform === 'win32' }, () => {
