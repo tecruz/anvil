@@ -56,12 +56,29 @@ jobs:
           cp LICENSE README.md packages/cli/
           npm pack --workspace @anvil/cli --pack-destination dist
 
-      # Verify the tarball contains only the allowlisted files.
+      # Enforce the allowlist, do not merely print it. A publish is irreversible, so an
+      # unexpected entry -- source, tests, a stray credential -- has to fail here rather
+      # than be read by a human who will not see it again.
       - name: verify tarball contents
         run: |
           tarball=$(ls dist/*.tgz)
           echo "packed: $tarball"
-          tar tzf "$tarball"
+          entries=$(tar tzf "$tarball")
+          echo "$entries"
+
+          unexpected=$(printf '%s\n' "$entries" | grep -v -E '^(package/|package/package\.json|package/README\.md|package/LICENSE|package/dist/cli\.js)$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::the tarball contains files outside the allowlist:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+          for required in package/dist/cli.js package/package.json package/README.md package/LICENSE; do
+            printf '%s\n' "$entries" | grep -qx "$required" || {
+              echo "::error::the tarball is missing $required"
+              exit 1
+            }
+          done
 
       # Record the tarball checksum and the source commit for provenance. The path is
       # absolute because `npm publish` treats a bare relative path as a package spec.
@@ -78,13 +95,17 @@ jobs:
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
       # Install the tarball into an isolated consumer project and smoke-test the
-      # installed binary: version and JSON doctor. This is the artifact that is
-      # published, tested exactly as it will be received.
+      # installed binary: version, JSON doctor, and the MCP handshake. This is the
+      # artifact that is published, tested exactly as it will be received.
+      #
+      # `--ignore-scripts` is part of the test, not an optimisation: the registry channel
+      # exists so that installing does not run a source build the way the git channel does.
+      # If the bundle needed an install step, this is where that would show up.
       - name: smoke-test the installed tarball
         run: |
           consumer=$(mktemp -d)
           echo '{"name":"consumer","private":true,"scripts":{"test":"node -e \"process.exit(0)\""}}' > "$consumer/package.json"
-          npm install --no-save "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
+          npm install --no-save --ignore-scripts "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
 
           bin="$consumer/node_modules/.bin/anvil"
           case "$(uname)" in
@@ -95,6 +116,18 @@ jobs:
           "$bin" version --json
           # 2. JSON envelope survives bundling.
           "$bin" doctor --json
+          # 3. The MCP transport is installed surface, not a checkout-only convenience.
+          #    Drive the real handshake so a bundle that dropped it fails before publishing.
+          #    The validator is `scripts/check-mcp-handshake.ts`, the same module the
+          #    packaging test imports: its regression cases therefore exercise this gate
+          #    rather than a lookalike. It parses the responses instead of grepping for an
+          #    id, because an `initialize` that returned a JSON-RPC error still contains one.
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            | "$bin" mcp > "$RUNNER_TEMP/mcp.jsonl"
+          node scripts/check-mcp-handshake.ts "$RUNNER_TEMP/mcp.jsonl"
 
       # Publishing cannot be undone, so every identity this release claims must agree
       # first: the tag, the workspace manifest (the package npm receives), and the
