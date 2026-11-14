@@ -2,8 +2,8 @@
 
 Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconciled
 2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
-unknown cost, and skill-access evidence that was diagnosed from the retained sessions
-rather than rerun. Phase 4's installed-CLI matrix now passes on
+unknown cost, and skill-access evidence that was diagnosed from local, uncommitted session
+observations rather than rerun. Phase 4's installed-CLI matrix now passes on
 all six CI legs; publication is the remaining Phase 4 criterion. Open: the remaining
 Phase 0/1 acceptance demonstrations and publication (needs publishing approval and control
 of the scoped npm name).
@@ -169,8 +169,10 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 **Status:** harness and corpus implemented (Phase 2A in PR #8, Phase 2B in PR #14). The
 bounded, approved real-agent pilot completed on 2026-11-14: both variants passed in all
 three pairs, with no run errors. Cost remains unknown, and the unknown skill-access verdicts
-were diagnosed from retained local sessions (see the pilot report) rather than rerun, so
-this does not establish a product benefit. The [pilot report](evidence/2026-11-14-skill-guidance.md)
+were diagnosed from local, uncommitted session observations (see the pilot report) rather
+than rerun: repetitions 0 and 2 loaded the skill natively by id, while repetition 1 read a
+path matching the installed `SKILL.md` and its cause is unresolved. The pilot does not
+establish a product benefit. The [pilot report](evidence/2026-11-14-skill-guidance.md)
 retains its separate real-agent record; the promoted hermetic summary still uses
 `fake-agent` and was not replaced.
 
@@ -189,13 +191,13 @@ conflating harness correctness with agent effectiveness.
 - 97 gate tests pass
 
 **Next decision after the pilot:** keep the scheduled smoke workload unchanged. The
-unknown skill-access observations were investigated from the pilot's retained OpenCode
-sessions without further model calls: repetitions 0 and 2 loaded the skill by id natively,
-which is unattributable by design, while repetition 1's read was recorded `unknown` and its
-cause is unresolved — the retained run record cannot say why. The harness now records
-`skillAccessReason` beside the verdict so a later `unknown` can be told apart without the
-transcript. Paid models and a larger experiment require new approval; the six-invocation
-authorization is used.
+unknown skill-access verdicts were investigated from local, uncommitted OpenCode session
+observations without further model calls: repetitions 0 and 2 loaded the skill by id
+natively, which is unattributable by design, while repetition 1 made a read whose path
+matched the installed `SKILL.md`, was recorded `unknown`, and its cause is unresolved — the
+retained run record cannot say why. The harness now records `skillAccessReason` beside the
+verdict so a later `unknown` can be told apart without the transcript. Paid models and a
+larger experiment require new approval; the six-invocation authorization is used.
 
 ### Phase 2B — Extended scenario corpus (planned)
 
@@ -309,10 +311,11 @@ Each result keeps three facts apart:
   `artifact-not-attributable`, `native-load-unattributable`, `read-of-installed-artifact`,
   `no-read-of-installed-artifact` or `not-installed`. `artifact-not-attributable` covers a
   failed pre-run identity capture, an artifact that cannot be re-captured after the run
-  (deleted, replaced by a non-regular file, or redirected), and a re-captured identity that
-  differs from the captured one. The gate refuses a reason that argues against its verdict,
-  and the field is persisted in checkpoints, the run record and the summary so a later
-  `unknown` can be investigated after the worktree is gone.
+  (deleted, replaced by a non-regular file, redirected so capture failed, larger than
+  `MAX_SKILL_BYTES` at 1 MiB, or changed size during the read), and a re-captured identity
+  that differs from the captured one. The gate refuses a reason that argues against its
+  verdict, and the field is persisted in checkpoints, the run record and the summary so a
+  later `unknown` can be investigated after the worktree is gone.
 - `verified` / `hiddenVerified` — whether the task's own acceptance checks passed.
 
 The scenario is in the extended suite: it is opt-in and does not expand the weekly smoke

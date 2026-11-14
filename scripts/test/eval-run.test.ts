@@ -560,10 +560,38 @@ describe('fake-agent skill-access wiring', () => {
         join(root, 'node_modules'),
         process.platform === 'win32' ? 'junction' : 'dir',
       )
-      const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime }
+      // The child has to be hermetic through its environment alone. The developer's global
+      // Git config may enable signing or hooks that the copied harness's commits do not
+      // expect, and the harness's temp dirs must land under this test's runtime dir.
+      const gitConfig = join(workspace, 'gitconfig')
+      const hooks = join(workspace, 'hooks')
+      writeFileSync(gitConfig, '')
+      mkdirSync(hooks)
+      const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime, TMPDIR: runtime }
       delete env.ANVIL_EVAL
       // The harness must run fixture test discovery, not inherit this parent's test context.
       delete env.NODE_TEST_CONTEXT
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key]
+      }
+      delete env.GIT_DIR
+      delete env.GIT_WORK_TREE
+      delete env.GIT_INDEX_FILE
+      env.GIT_CONFIG_GLOBAL = gitConfig
+      env.GIT_CONFIG_NOSYSTEM = '1'
+      env.GIT_CONFIG_COUNT = '3'
+      env.GIT_CONFIG_KEY_0 = 'commit.gpgsign'
+      env.GIT_CONFIG_VALUE_0 = 'false'
+      env.GIT_CONFIG_KEY_1 = 'core.hooksPath'
+      env.GIT_CONFIG_VALUE_1 = hooks
+      env.GIT_CONFIG_KEY_2 = 'tag.gpgsign'
+      env.GIT_CONFIG_VALUE_2 = 'false'
+      // The harness passes user.name/user.email with `git -c` on its own commits; this gives
+      // any commit the anvil CLI makes in the child an identity without a global config.
+      env.GIT_AUTHOR_NAME = 'anvil eval'
+      env.GIT_AUTHOR_EMAIL = 'eval@anvil.local'
+      env.GIT_COMMITTER_NAME = 'anvil eval'
+      env.GIT_COMMITTER_EMAIL = 'eval@anvil.local'
       const invocation = spawnSync(
         process.execPath,
         ['scripts/eval.ts', '--fake-agent', '--scenario', 'skill-guidance'],

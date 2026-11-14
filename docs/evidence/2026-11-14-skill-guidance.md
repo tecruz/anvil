@@ -69,8 +69,9 @@ attempt per selected key.
   they are not isolated model-inference timings.
 - Skill installation: independently verified in **3/3 treatment runs**.
 - Skill access: **unknown in all three treatment runs**. Successful installation and task
-  completion do not prove the agent read or followed the skill. The retained sessions show
-  why; see [the diagnosis](#diagnosis-of-the-unknown-access-verdicts).
+  completion do not prove the agent read or followed the skill. Local, uncommitted session
+  observations explain repetitions 0 and 2 but leave repetition 1 unresolved; see
+  [the diagnosis](#diagnosis-of-the-unknown-access-verdicts).
 - Cost and token measurements: **unknown** (`null` in every result). Zero catalog prices
   and a zero-spend authorization must not be presented as a measured zero-dollar ledger result.
 
@@ -116,8 +117,11 @@ identity could not be tied to the read).
 
 1. The identity capture before the agent ran failed, so there was no `installed` identity to
    compare against.
-2. The artifact could not be re-captured after the run because it was missing: deleted,
-   replaced by a non-regular file, or redirected so capture failed.
+2. The artifact could not be re-captured after the run: it was deleted, replaced by a
+   non-regular file, or redirected so capture failed (a `realpath` failure or a final
+   symlink rejected by `O_NOFOLLOW`), or `readRegularFile` refused it because it was
+   larger than `MAX_SKILL_BYTES` (1 MiB) or its size changed during the read (the read
+   returned a different byte count than `fstat` reported).
 3. The re-captured identity differs from the captured one: the path was redirected, or the
    content, inode or timestamps changed.
 
@@ -137,8 +141,9 @@ comparisons; it does **not** establish improved task success, lower cost, or a s
 meaningful performance difference. The treatment was slower on average in this sample.
 Unknown access evidence prevents attributing any observed behavior to reading the skill.
 
-Keep the scheduled smoke workload unchanged. The retained-metadata investigation above is
-complete: two runs loaded the skill by id and the third read the installed file, but the
-harness recorded none of the three as an attributable read. That does not justify rerunning
-the pilot. Do not spend on a broader experiment or change the scenario to obtain a favorable
-result on the strength of this sample.
+Keep the scheduled smoke workload unchanged. The investigation of local, uncommitted
+session observations above is complete: two runs loaded the skill by id natively and the
+third made a read whose path matched the installed `SKILL.md`, but the harness recorded none
+of the three as an attributable read. That does not justify rerunning the pilot. Do not spend
+on a broader experiment or change the scenario to obtain a favorable result on the strength
+of this sample.
