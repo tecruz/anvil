@@ -1,9 +1,10 @@
 # Implementation plan: reliability, evidence, and distribution
 
 Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconciled
-2026-11-14.** Open: the remaining Phase 0/1 acceptance demonstrations, the Phase 2
-real-agent pilot ($0-only approval recorded below; not yet run), and Phase 4's remaining installed-CLI coverage
-and publication (needs publishing approval and control of the scoped npm name).
+2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
+unknown cost and unknown skill-access evidence. Open: the remaining Phase 0/1 acceptance
+demonstrations and Phase 4's full smoke-matrix verification and publication (needs
+publishing approval and control of the scoped npm name).
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -164,9 +165,11 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 ## Phase 2 — Measure whether derived context actually helps
 
 **Status:** harness and corpus implemented (Phase 2A in PR #8, Phase 2B in PR #14). The
-**real-agent pilot has not run**, so no effectiveness claim is supported yet: the committed
-summary was produced by `fake-agent`, which measures the harness, not the product. Work
-below is in delivery order; small, independently reviewable PRs per `CONTRIBUTING.md`.
+bounded, approved real-agent pilot completed on 2026-11-14: both variants passed in all
+three pairs, with no run errors. Cost and skill access remain unknown, so this does not
+establish a product benefit. The [pilot report](evidence/2026-11-14-skill-guidance.md)
+retains its separate real-agent record; the promoted hermetic summary still uses
+`fake-agent` and was not replaced.
 
 **Outcome:** paired measurements show the benefit, cost, or absence of benefit without
 conflating harness correctness with agent effectiveness.
@@ -182,9 +185,9 @@ conflating harness correctness with agent effectiveness.
 - lint + typecheck clean
 - 97 gate tests pass
 
-**Remaining:** execution and analysis of the approved $0-only pilot. The extended corpus
-and the installed-skill comparison are implemented; the authorization below does not
-extend to paid models or a larger experiment.
+**Next decision after the pilot:** keep the scheduled smoke workload unchanged and
+investigate unknown skill-access observations without additional model calls. Paid models
+and a larger experiment require new approval; the six-invocation authorization is used.
 
 ### Phase 2B — Extended scenario corpus (planned)
 
@@ -348,16 +351,18 @@ fewer than five pairs is labelled exploratory rather than presented as a signifi
   `null`, the pair is counted as unpriced, and the printed report says `unknown` when
   either variant lacks a ledger price. The committed `latest.json` omits cost fields;
   it is not evidence of a measured or zero-dollar cost.
-- [ ] A spend-approved pilot produces paired results with honest limitations and a documented
-  next decision. **Open.** The maintainer approved the bounded $0-only pilot described
-  below, with no paid-model fallback. Provider access and the actual run remain to be
-  verified. A positive result is not a condition for honestly completing the pilot.
+- [x] A spend-approved pilot produces paired results with honest limitations and a documented
+  next decision. The [bounded $0-only pilot](evidence/2026-11-14-skill-guidance.md) completed
+  six real-agent invocations with no retries or errors: 3/3 pairs tied on task success,
+  mean duration 52.10s bare / 61.76s skill, cost unknown, skill access unknown. The report
+  explicitly makes no benefit or significance claim and records the next decision.
 
-## Phase 2A/B — implemented, pilot outstanding
+## Phase 2A/B — implemented, bounded pilot complete
 
 "Complete" here means the harness, the schema and the corpus. It does not mean Phase 2 is
-finished: the pilot in `### Budget and pilot` is what turns the machinery into evidence.
-The bounded $0-only pilot is approved, but has not run.
+finished in the sense of proving effectiveness. The bounded pilot provides exploratory
+real-agent evidence with limitations; the larger extended-corpus experiment remains
+unapproved and has not run.
 
 Phase 2A (evidence schema v3 with repetitions/seed/order) was merged into PR #8 with
 schema v3, CLI flags `--repetitions`, `--seed`, `--order`, and 97 gate tests passing.
@@ -428,17 +433,26 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 
 **Outcome:** users install a tested artifact without fetching the source build toolchain.
 
-**Status:** in progress. Remaining installed-CLI smoke coverage can be implemented without
-publication; publishing separately requires approval and confirmed scope access.
+**Status:** in progress. Expanded installed-CLI smoke coverage passes locally; final CI
+matrix verification is still pending. Publishing separately requires approval and
+confirmed scope access, and the maintainer has explicitly put it on hold.
 
 Implemented: the release workflow (`.github/workflows/release.yml`), the tarball allowlist,
 the identity check that the tag, the workspace manifest and the packed tarball agree, an
 install of the staged artifact with `--ignore-scripts`, the MCP handshake, and a packaging
 suite that packs the same `@anvil/cli` target from a temporary copy. That suite runs in
-`npm run check` on every CI leg, covering tarball contents, installation without scripts,
-version/JSON and MCP on all three OSes and both Node lanes. This is not yet the full
-installed-CLI smoke coverage specified below: help, doctor and staged generation/apply
-still need to be exercised through the installed registry package.
+`npm run check` on every CI leg. Existing CI evidence covers tarball contents, installation
+without scripts, version/JSON and MCP on all three OSes and both Node lanes. The expanded
+registry test now also exercises help, doctor, staged generation/apply and preservation
+of existing consumer files through the installed binary. That expanded test passes
+locally on Windows/Node 24.13.0; all six final-head CI legs must pass before matrix
+acceptance is marked complete.
+
+The release workflow now writes `SHA256SUMS` and draft release notes containing the
+source SHA, verifies the checksum after smoke testing, and retains those sidecars with
+the tested tarball for 90 days. Upload failure blocks publication. Actionlint passes,
+and a local rehearsal of the exact provenance/checksum commands accepts unchanged bytes
+and rejects tampering; the GitHub artifact upload and publication remain unexercised.
 
 Also not done: confirming control of the scoped name, publishing a first release, and
 recording a published checksum and source SHA in the release notes. No release workflow
@@ -488,14 +502,14 @@ scope ownership. The workflow itself remains unproven end to end.
   404 on 2026-11-14, which establishes no publicly accessible `latest` release at that
   endpoint, not that the package has never existed or that the scope is ours.
 - [x] A clean tarball install works without a source build or runtime dependencies.
-  `the staged artifact installs without scripts and serves MCP` in
+  `the staged artifact installs without scripts and exercises the installed CLI` in
   `packages/cli/test/package.test.ts`: `npm pack` of the staged workspace, then
   `npm install --ignore-scripts` into a consumer with no workspace links.
 - [ ] Installed CLI smoke tests pass on all three OSes and the supported Node matrix.
-  **Partial.** The registry suite checks version/JSON and MCP, and runs in all six
-  `check` legs (3 OS x floor/LTS) since PR #30. It does not yet check help, doctor or
-  staged generation/apply through the installed registry package. Those flows must be
-  covered before the full acceptance criterion is marked complete.
+  **Awaiting final-head CI.** The expanded registry test covers version/JSON, help,
+  doctor, staged generation/apply, preservation of existing files and MCP, and passes
+  locally. The CI matrix has all six `check` legs (3 OS x floor/LTS) since PR #30;
+  passing results for this expanded test are required before closing the criterion.
 - [ ] Published bytes match the tested checksum; version and provenance identify the source.
   **Open, blocked on publication.** No comparison of the tested artifact with a published
   `@anvil/cli` release has been recorded.
@@ -513,12 +527,15 @@ for it exists. These are the commands behind the reconciled checklists.
 | Eight required contexts, strict mode, no bypass | `gh api repos/tecruz/anvil/branches/main/protection` returned 8 contexts with `strict: true` and `enforce_admins: true`; `rulesets/25986193` returned `bypass_actors: []` |
 | A maintainer merges without a reviewer | PRs #30 and #31 report `mergedBy: tecruz`, `reviews: 0`, with `required_approving_review_count: 0` |
 | Duplicate run records are refused | `node --test --test-name-pattern="duplicate" packages/cli/test/eval-gate.test.ts`: 4 pass, 0 fail |
-| Full validation after the reconciliation | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
+| Full validation before the registry-smoke expansion | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
+| Expanded installed-registry smoke coverage, local Windows/Node 24.13.0 | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed, 0 failed. Full final-tree validation and CI remain pending. |
+| Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
+| Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
 
-The three open Phase 1 items and the open Phase 0/2/4 items each name what would close them.
-Neither the pilot nor a publication is recorded here as done. Approval and successful
-execution are separate facts.
+The three open Phase 1 items and the open Phase 0/4 items each name what would close them.
+The bounded pilot is recorded as complete, not as proof of product effectiveness.
+Publication remains on hold. Approval and successful execution are separate facts.
 
 ### Maintainer authorizations (2026-11-14)
 
