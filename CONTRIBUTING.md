@@ -29,16 +29,15 @@ widened to everything that depends on them -- usually a fraction of the full sui
 This is a solo-maintainer repository: there is no second reviewer, so review requirements
 are waived, but the checks below still have to pass before anything merges.
 
-1. All five required CI checks pass on the **final commit** of the PR:
+1. All eight required CI checks pass on the **final commit** of the PR:
    - `windows-latest`
    - `ubuntu-latest`
    - `macos-latest`
+   - `windows-latest (Node LTS)`
+   - `ubuntu-latest (Node LTS)`
+   - `macos-latest (Node LTS)`
    - `playbook registry (rot check)`
    - `gh contract (live)`
-
-   The three `(Node LTS)` legs -- `windows-latest (Node LTS)`, `ubuntu-latest (Node LTS)` and
-   `macos-latest (Node LTS)` -- must also be green on the final commit, even though branch
-   protection does not list them.
 2. `npm run check` passes locally (lint, typecheck, test suite, build, docs check, eval gate).
 3. `npm run eval -- --fake-agent` passes and `npm run eval:check` passes.
 4. No high-risk path (`.github/workflows/**`) is changed without flagging it in the PR
@@ -47,11 +46,12 @@ are waived, but the checks below still have to pass before anything merges.
    with `npm run eval -- --fake-agent` and confirm `npm run eval:check` passes before
    merging — the gate binds summaries to the implementation hash.
 
-**Branch protection is enforced.** Branch protection rules on `main` require all five CI
-checks above to pass before a merge, branches must be up to date (strict mode), and
-administrators cannot bypass the checks. Pull requests are required but need zero
-approving reviewers — this is a solo-maintainer repository, so review requirements are
-waived. Force pushes and deletion of `main` are blocked.
+**Branch protection is enforced.** Both the branch protection rules and the `main`
+ruleset require all eight CI contexts above to pass before a merge, and branches must be
+up to date with `main` (strict mode). Administrators cannot bypass the checks: branch
+protection is enforced for admins, and the ruleset has no bypass actors. Pull requests
+are required but need zero approving reviewers — this is a solo-maintainer repository, so
+review requirements are waived. Force pushes and deletion of `main` are blocked.
 
 Configuration was applied via the GitHub API after making the repository public, since
 rulesets require GitHub Pro on private repositories. The repository is now public.
