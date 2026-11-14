@@ -295,6 +295,14 @@ async function main(): Promise<void> {
   const orderRaw = flagValue('--order', args)
   const order = orderRaw === null ? 'alternate' : orderRaw
   const enabled = process.env.ANVIL_EVAL === '1'
+  // Test-only interruption hook. A fake-agent run halts after N newly checkpointed results,
+  // before the next run.json write, so a hermetic test can kill it at a known point and
+  // prove recovery from the checkpoint alone. It is honoured only with --fake-agent: a real
+  // run must never be halted by an inherited environment variable.
+  const haltAfterCheckpoints = fakeAgent
+    ? Number(process.env.ANVIL_EVAL_FAKE_HALT_AFTER_CHECKPOINTS ?? Number.NaN)
+    : Number.NaN
+  const haltAfter = Number.isInteger(haltAfterCheckpoints) && haltAfterCheckpoints > 0 ? haltAfterCheckpoints : null
 
   if (repetitionsRaw !== null && (!Number.isInteger(repetitions) || repetitions < 1)) {
     console.error(`--repetitions must be a positive integer, got ${repetitionsRaw}`)
@@ -565,6 +573,7 @@ async function main(): Promise<void> {
   )) {
     console.log(line)
   }
+  let checkpointsWritten = 0
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       const scenarioHash = hashScenario(scenario)
@@ -612,6 +621,13 @@ async function main(): Promise<void> {
           if (index === -1) {
             const checkpoint = recordResultFrom(result, scenarioHash, sourceHash, [attempt])
             writeCheckpoint(runId, checkpoint)
+            checkpointsWritten += 1
+            if (haltAfter !== null && checkpointsWritten >= haltAfter) {
+              // Deliberately before runRecord is persisted: recovery must come from the
+              // checkpoint. Block without exiting so the test can SIGKILL at this marker.
+              console.log(`anvil-eval: halted after checkpoint ${key}`)
+              await new Promise(() => setInterval(() => {}, 1 << 30))
+            }
             runRecord.executionOrder.push(key)
             runRecord.results.push(checkpoint)
           } else {
@@ -1749,14 +1765,23 @@ function writeReport(results: ScenarioResult[], runRecord: EvalRunRecord): void 
   console.log(`Summary written to ${latestPath}`)
 }
 
-/** Write JSON atomically: serialize to a temp file in the same directory, then rename. */
-function atomicWriteJson(path: string, value: unknown): void {
+/**
+ * Write JSON atomically: serialize to a temp file in the same directory, then rename.
+ *
+ * `rename` is injectable so a test can force the replacement to fail without changing the
+ * production path; it defaults to the real rename.
+ */
+export function atomicWriteJson(
+  path: string,
+  value: unknown,
+  rename: (from: string, to: string) => void = renameSync,
+): void {
   const dir = dirname(path)
   mkdirSync(dir, { recursive: true })
   const temp = join(dir, `.tmp-${randomUUID()}.json`)
   try {
     writeFileSync(temp, `${formatJson(value)}\n`, 'utf8')
-    renameSync(temp, path)
+    rename(temp, path)
   } catch (err) {
     // Never leave a half-written file in place of the last good one: remove the temp
     // and leave the existing file untouched.

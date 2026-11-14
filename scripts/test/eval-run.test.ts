@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -8,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 
 import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
 import {
+  atomicWriteJson,
   captureInstalledSkill,
   completedResultsFromRecord,
   explainSkillAccess,
@@ -686,5 +698,50 @@ describe('resumed results keep every recorded fact', () => {
     assert.equal(result?.skillAccessReason, 'read-of-installed-artifact')
     assert.equal(result?.verified, true)
     assert.equal(result?.hiddenVerified, true)
+  })
+})
+
+describe('atomicWriteJson failure handling', () => {
+  const failingRename = (error: Error) => () => {
+    throw error
+  }
+
+  test('a failed rename leaves the previous checkpoint intact with no temp file', () => {
+    const dir = temp('anvil-eval-atomic-existing-')
+    const target = join(dir, 'checkpoint.json')
+    const previous = { schemaVersion: 3, value: 'previous' }
+    const next = { schemaVersion: 3, value: 'next' }
+    atomicWriteJson(target, previous)
+    const bytes = readFileSync(target, 'utf8')
+    const failure = Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+
+    let thrown: unknown
+    try {
+      atomicWriteJson(target, next, failingRename(failure))
+    } catch (error) {
+      thrown = error
+    }
+
+    assert.equal(thrown, failure)
+    assert.equal(readFileSync(target, 'utf8'), bytes)
+    assert.deepEqual(JSON.parse(readFileSync(target, 'utf8')), previous)
+    assert.deepEqual(readdirSync(dir), ['checkpoint.json'])
+  })
+
+  test('a failed rename on a fresh path leaves no target and no temp file', () => {
+    const dir = temp('anvil-eval-atomic-fresh-')
+    const target = join(dir, 'checkpoint.json')
+    const failure = Object.assign(new Error('EBUSY: resource busy, rename'), { code: 'EBUSY' })
+
+    let thrown: unknown
+    try {
+      atomicWriteJson(target, { schemaVersion: 3, value: 'next' }, failingRename(failure))
+    } catch (error) {
+      thrown = error
+    }
+
+    assert.equal(thrown, failure)
+    assert.equal(existsSync(target), false)
+    assert.deepEqual(readdirSync(dir), [])
   })
 })
