@@ -5,8 +5,8 @@ Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconcil
 unknown cost, and skill-access evidence that was diagnosed from local, uncommitted session
 observations rather than rerun. Phase 4's installed-CLI matrix now passes on
 all six CI legs; publication is the remaining Phase 4 criterion. The Phase 0 merge-gate
-demonstration was recorded on 2026-11-14. Open: the remaining Phase 1 acceptance
-demonstrations and publication (needs publishing approval and control of the scoped npm name).
+demonstration was recorded on 2026-11-14. Open: the Phase 1 artifact-retention
+demonstration and publication (needs publishing approval and control of the scoped npm name).
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -137,11 +137,17 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 
 ### Acceptance
 
-- [ ] Hermetic tests interrupt a run after a known result and verify it remains readable.
-  **Open.** `scripts/test/eval-resume.test.ts` edits a completed record to simulate an
-  incomplete run, writes an inconsistent checkpoint, and proves resume rejects that
-  checkpoint before rerunning the missing key. It does not terminate a running harness
-  after a checkpoint or demonstrate that the interrupted process's evidence survives.
+- [x] Hermetic tests interrupt a run after a known result and verify it remains readable.
+  `an interrupted fake-agent run keeps its checkpoint and resume reuses it` in
+  `scripts/test/eval-resume.test.ts` starts the real fake-agent harness in an isolated copy,
+  waits for the `ANVIL_EVAL_FAKE_HALT_AFTER_CHECKPOINTS` marker line, and SIGKILLs the child
+  after two checkpoints. It asserts the second checkpoint parses, `readCheckpointDirectory`
+  accepts both checkpoints with zero rejections, `run.json` is still in-progress without the
+  halted key, and no `.tmp-*` file remains. `--resume` then reports
+  `Recovered completed checkpoints`, reports six of eight keys remaining, and reuses the
+  checkpointed attempt's timestamps rather than rerunning the key; the run completes and
+  `--check` passes against the baseline. This is a deterministic SIGKILL at a marker, not a
+  power-loss or filesystem-durability test.
 - [x] Partial, duplicate, corrupt, incompatible, and missing run records cannot pass the gate.
   `packages/cli/test/eval-gate.test.ts` covers each: no record, incomplete run, a subset
   offered as complete evidence, checkpoint hashes that no longer match, unknown schema
@@ -150,11 +156,13 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 - [x] Resume skips only compatible completed work and records each attempt explicitly.
   The same resume test refuses a checkpoint whose verifier evidence disagrees with the
   matrix, and the gate tests assert attempts accumulate rather than being overwritten.
-- [ ] Simulated checkpoint-write failure leaves the previous checkpoint intact. **Open.**
-  `atomicWriteJson` (`scripts/eval.ts:1706`) does the right thing -- temp file in the same
-  directory, rename, remove the temp on failure and leave the target untouched -- but no
-  fault-injection test exercises the failure branch. The guarantee is implemented, not
-  proven.
+- [x] Simulated checkpoint-write failure leaves the previous checkpoint intact.
+  `atomicWriteJson` in `scripts/eval.ts` takes an injectable rename operation. In
+  `scripts/test/eval-run.test.ts`, `a failed rename leaves the previous checkpoint intact
+  with no temp file` and `a failed rename on a fresh path leaves no target and no temp file`
+  inject a throwing rename and assert the error is rethrown, the target's bytes are unchanged
+  and still parse, and no `.tmp-*` file remains (or, for a fresh path, neither a target nor a
+  temp file). This covers a failed rename, not a failed write or fsync.
 - [x] Implementation changes during a run invalidate the evidence instead of relabeling it.
   `fails when the implementation changed under the run` and
   `fails when the implementation changed` in the gate tests, plus the harness-digest check.
@@ -550,13 +558,16 @@ for it exists. These are the commands behind the reconciled checklists.
 | Pending, failed, missing and earlier-head checks block merging; a green head does not | [Merge-gate demonstration](evidence/2026-11-14-merge-gate.md): draft PR #44, `BLOCKED` at `31a54d7`, `43fffd8` (pending and failed) and `bb8c60c`; `CLEAN` at `261968a` and `715145a`; closed unmerged; protection snapshots before and after identical |
 | A maintainer merges without a reviewer | PRs #30 and #31 report `mergedBy: tecruz`, `reviews: 0`, with `required_approving_review_count: 0` |
 | Duplicate run records are refused | `node --test --test-name-pattern="duplicate" packages/cli/test/eval-gate.test.ts`: 4 pass, 0 fail |
+| Interrupted runs keep a readable checkpoint and resume reuses it | `node --test --test-name-pattern="an interrupted fake-agent run" scripts/test/eval-resume.test.ts`: 1 pass, 0 fail on each of five consecutive runs and three concurrent runs. |
+| A failed checkpoint rename leaves the previous file intact | `node --test --test-name-pattern="failed rename" scripts/test/eval-run.test.ts`: 2 pass, 0 fail on each of five consecutive runs. |
 | Full validation before the registry-smoke expansion | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
 | Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
 
-The three open Phase 1 items and the open Phase 4 items each name what would close them.
+The remaining open Phase 1 artifact-retention item and the open Phase 4 items each name
+what would close them.
 The bounded pilot is recorded as complete, not as proof of product effectiveness.
 Publication remains on hold. Approval and successful execution are separate facts.
 
