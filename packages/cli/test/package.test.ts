@@ -802,7 +802,9 @@ describe('the registry tarball (ADR-0012)', () => {
     }
   })
 
-  test('the staged artifact installs without scripts and serves MCP', { timeout: 300_000 }, async () => {
+  test('the staged artifact installs without scripts and exercises the installed CLI', {
+    timeout: 300_000,
+  }, async () => {
     if (!haveBuild(join(CLI_DIR, 'dist'))) return
 
     const packDir = tempDir('anvil-registry-pack-')
@@ -843,25 +845,80 @@ describe('the registry tarball (ADR-0012)', () => {
     // because a registry install must not need an install step of its own. The git
     // channel's `prepare` build is what this channel exists to replace.
     const consumer = tempDir('anvil-registry-consumer-')
-    writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'consumer', private: true }), 'utf8')
+    writeFileSync(
+      join(consumer, 'package.json'),
+      JSON.stringify({ name: 'consumer', private: true, type: 'module', scripts: { test: 'node --test' } }),
+      'utf8',
+    )
+    const fixtureFiles = new Map([
+      ['.gitignore', 'node_modules/\n.anvil/\n'],
+      ['README.md', '# Consumer\n\nVerify with `npm test`.\n'],
+      ['smoke.test.js', "import { test } from 'node:test'\ntest('consumer smoke', () => {})\n"],
+    ])
+    for (const [path, content] of fixtureFiles) writeFileSync(join(consumer, path), content, 'utf8')
     const installed = await runProcess('npm', ['install', '--no-save', '--ignore-scripts', tarball], {
       cwd: consumer,
     })
     assert.equal(installed.exitCode, 0, `npm install failed: ${installed.stderr}`)
 
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: consumer, encoding: 'utf8', stdio: 'pipe' })
+    git('init', '-q', '-b', 'main')
+    git('add', '-A')
+    git('-c', 'user.email=t@t.t', '-c', 'user.name=t', 'commit', '-qm', 'consumer fixture')
+
     const installedBin = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'anvil.cmd' : 'anvil')
     assert.ok(existsSync(installedBin), `bin shim missing at ${installedBin}`)
-
-    const reported = await runProcess(installedBin, ['version', '--json'], {
-      cwd: consumer,
-      env: { ...process.env, NO_COLOR: '1' },
-    })
+    const runInstalled = (...args: string[]) =>
+      runProcess(installedBin, args, { cwd: consumer, env: { ...process.env, NO_COLOR: '1' } })
+    const reported = await runInstalled('version', '--json')
     assert.equal(reported.exitCode, 0, `version failed: ${reported.stderr}`)
     assert.equal(
       (JSON.parse(reported.stdout) as { data: { version: string } }).data.version,
       String(CLI_PKG.version),
       'the installed binary reports a different version than the tarball that carried it',
     )
+
+    const help = await runInstalled('--help')
+    assert.equal(help.exitCode, 0, `help failed: ${help.stderr}`)
+    assert.match(help.stdout, /\bdoctor\b/)
+    assert.match(help.stdout, /\binit\b/)
+
+    const doctor = await runInstalled('doctor', '--json')
+    assert.equal(doctor.exitCode, 0, `doctor failed: ${doctor.stderr}`)
+    const report = JSON.parse(doctor.stdout) as { schemaVersion: number; ok: boolean }
+    assert.equal(report.schemaVersion, 1)
+    assert.equal(report.ok, true)
+
+    // Exercise generation through the registry shim, not the checkout's source or bundle.
+    // Staging must leave final artifacts absent; apply must install that validated bundle
+    // without changing the consumer's existing files.
+    const generatedPaths = ['AGENTS.md', '.agents/skills/verify-change/SKILL.md', '.opencode/commands/review-change.md']
+    const staged = await runInstalled('init', '--json')
+    assert.equal(staged.exitCode, 0, `init failed: ${staged.stderr}`)
+    const proposal = JSON.parse(staged.stdout) as {
+      ok: boolean
+      data: { staged: boolean; applied: boolean; artifacts: Array<{ path: string }> }
+    }
+    assert.equal(proposal.ok, true)
+    assert.equal(proposal.data.staged, true)
+    assert.equal(proposal.data.applied, false)
+    assert.deepEqual(proposal.data.artifacts.map((artifact) => artifact.path).sort(), [...generatedPaths].sort())
+    for (const path of generatedPaths)
+      assert.equal(existsSync(join(consumer, path)), false, `${path} was applied early`)
+
+    const applied = await runInstalled('init', '--apply', '--json')
+    assert.equal(applied.exitCode, 0, `apply failed: ${applied.stderr}`)
+    const application = JSON.parse(applied.stdout) as {
+      ok: boolean
+      data: { applied: boolean; written: string[] }
+    }
+    assert.equal(application.ok, true)
+    assert.equal(application.data.applied, true)
+    assert.deepEqual([...application.data.written].sort(), [...generatedPaths].sort())
+    for (const path of generatedPaths) assert.ok(existsSync(join(consumer, path)), `apply omitted ${path}`)
+    assert.match(readFileSync(join(consumer, 'AGENTS.md'), 'utf8'), /npm test/)
+    assert.equal(existsSync(join(consumer, '.anvil', 'staging')), false, 'apply did not clear staging')
+    for (const [path, content] of fixtureFiles) assert.equal(readFileSync(join(consumer, path), 'utf8'), content)
 
     const installedBundle = join(consumer, 'node_modules', '@anvil', 'cli', 'dist', 'cli.js')
     assert.ok(existsSync(installedBundle), `the tarball did not install ${installedBundle}`)

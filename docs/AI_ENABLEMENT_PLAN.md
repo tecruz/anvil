@@ -113,7 +113,10 @@ need as `verified`, `blocked` or `unknown`, and never guesses between them:
 
 Still proposed: automatic tool installation, discovery-resource approval, richer
 company-context sources (staleness and contradiction checks beyond path existence), broader
-installation adapters, and real-agent evaluation evidence.
+installation adapters, and broader real-agent effectiveness evidence. The first bounded
+[installed-skill pilot](evidence/2026-11-14-skill-guidance.md) completed three paired
+comparisons, but does not establish benefit, observed skill use, or cross-technology
+coverage.
 
 ## Goal
 
@@ -288,6 +291,9 @@ be inferred entirely from source code.
 As of this plan's preparation, the latest committed summary in
 [eval-results/latest.json](../eval-results/latest.json) uses `fake-agent`. It checks
 evaluation machinery; it is not evidence of real-AI effectiveness across technologies.
+The separate [2026-11-14 pilot](evidence/2026-11-14-skill-guidance.md) retains real-agent
+outcomes without replacing that hermetic summary: task success tied in all three pairs,
+and cost and skill access remained unknown.
 
 ## Delivery order
 

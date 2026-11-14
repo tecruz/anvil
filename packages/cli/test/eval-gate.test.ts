@@ -618,6 +618,36 @@ describe('run record contract', () => {
     assert.match(gate.message, /did not complete/)
   })
 
+  // Duplicates are a corrupt record, not a harmless repetition: a key listed twice could
+  // let one result stand in for two runs, and a summary promoted from it would claim
+  // coverage the run never had. These three are the checks that refuse it.
+  test('fails when the run record declares duplicate run keys', () => {
+    const record = runRecord()
+    const keys = [...record.runKeys]
+    record.runKeys = [...keys, keys[0]!]
+    const gate = checkRunRecord(record, 'impl-hash', keys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /declares duplicate run keys/)
+  })
+
+  test('fails when the execution order contains duplicates', () => {
+    const record = runRecord()
+    const keys = [...record.runKeys]
+    record.executionOrder = [...keys, keys[0]!]
+    const gate = checkRunRecord(record, 'impl-hash', keys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /execution order contains duplicates/)
+  })
+
+  test('fails when the record contains duplicate results', () => {
+    const record = runRecord()
+    const keys = [...record.runKeys]
+    record.results = [...record.results, structuredClone(record.results[0]!)]
+    const gate = checkRunRecord(record, 'impl-hash', keys)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /records duplicate results/)
+  })
+
   test('fails when the implementation changed under the run', () => {
     const gate = checkRunRecord(runRecord({ implementation: 'old-impl' }), 'new-impl', [
       'tiny-code-change/bare/fake-agent/0',

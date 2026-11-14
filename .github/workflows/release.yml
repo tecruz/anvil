@@ -93,6 +93,11 @@ jobs:
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          # Sidecars live outside the tarball: preserving evidence must not repack or
+          # change the bytes that the installed-binary smoke test receives.
+          printf '%s  %s\n' "$checksum" "$(basename "$tarball")" > dist/SHA256SUMS
+          printf '## @anvil/cli@%s\n\nSource commit: `%s`\n\nTarball: `%s`\n\nSHA-256: `%s`\n' \
+            "$version" "$source_sha" "$(basename "$tarball")" "$checksum" > dist/RELEASE_NOTES.md
 
       # Install the tarball into an isolated consumer project and smoke-test the
       # installed binary: version, JSON doctor, and the MCP handshake. This is the
@@ -159,6 +164,29 @@ jobs:
           # The allowlist must actually carry the command the smoke test ran.
           bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
           tar tzf "$tarball" | grep -qx "package/${bin_path#./}"
+
+      # Check again after every command that exercised the installed artifact. A changed
+      # tarball must not be archived as approved evidence or sent to the registry.
+      - name: the tested tarball still matches its recorded checksum
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: retain the release evidence in the job summary
+        run: cat dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Logs and step outputs expire; keep the exact tested bytes and their source/hash
+      # together. These files also supply the notes/checksum for an approved GitHub release.
+      # Upload failure is blocking, before publication, not an optional post-publish report.
+      - name: retain the tested tarball, checksum and draft release notes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.3
+        with:
+          name: release-evidence-${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: |
+            dist/*.tgz
+            dist/SHA256SUMS
+            dist/RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 90
 
       # Publish the exact bytes that were tested. `npm publish` with no argument would
       # repack the working tree and re-run `prepare`, so the registry could receive a

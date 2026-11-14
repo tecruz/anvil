@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 3,
+  "runId": "2074b7a8-5753-4904-ad32-1dfaa72d4b62",
+  "startedAt": "2026-11-14T17:40:22.575Z",
+  "completedAt": "2026-11-14T17:46:05.411Z",
+  "completionState": "partial",
+  "commitSha": "b7db931e27a32aa0c35b462a2d0846ae6728abfd",
+  "implementation": "0c0c5295f75dd7a1b0b654a4d1ad5ead933adf17933bebde47b3fef309eb7ec8",
+  "bundleDigest": "9874ffa64a9def0b3cd23badd9c88f56d76f135a052bda4c5f972673f9084161",
+  "harnessDigest": "c6191714552bc6dc4336976e5b68de6899d148202baa9fdf386089ea21bcb046",
+  "models": [
+    {
+      "id": "opencode/deepseek-v4.1-flash-free",
+      "role": "small"
+    }
+  ],
+  "opencodeVersion": "2.1.4",
+  "nodeVersion": "v24.13.0",
+  "publishTranscripts": false,
+  "subset": true,
+  "repetitions": 3,
+  "seed": "20261114-skill-guidance-free",
+  "order": "alternate",
+  "scenarioHashes": {
+    "skill-guidance": {
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab"
+    }
+  },
+  "runKeys": [
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/0",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/0",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/1",
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/1",
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/2",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/2"
+  ],
+  "executionOrder": [
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/0",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/0",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/1",
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/1",
+    "skill-guidance/bare/opencode/deepseek-v4.1-flash-free/2",
+    "skill-guidance/anvil/opencode/deepseek-v4.1-flash-free/2"
+  ],
+  "results": [
+    {
+      "scenario": "skill-guidance",
+      "variant": "bare",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:40:22.647Z",
+          "completedAt": "2026-11-14T17:41:02.029Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 39358,
+      "transcript": "",
+      "skillInstall": "not-installed",
+      "skillAccess": "not-installed"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "anvil",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:41:02.034Z",
+          "completedAt": "2026-11-14T17:41:37.803Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 35741,
+      "transcript": "",
+      "skillInstall": "verified",
+      "skillAccess": "unknown"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "anvil",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:41:37.808Z",
+          "completedAt": "2026-11-14T17:42:25.934Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 48097,
+      "transcript": "",
+      "skillInstall": "verified",
+      "skillAccess": "unknown"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "bare",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:42:25.939Z",
+          "completedAt": "2026-11-14T17:43:08.835Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 42866,
+      "transcript": "",
+      "skillInstall": "not-installed",
+      "skillAccess": "not-installed"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "bare",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:43:08.841Z",
+          "completedAt": "2026-11-14T17:44:22.941Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 74074,
+      "transcript": "",
+      "skillInstall": "not-installed",
+      "skillAccess": "not-installed"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "anvil",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-14T17:44:22.949Z",
+          "completedAt": "2026-11-14T17:46:04.416Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 101436,
+      "transcript": "",
+      "skillInstall": "verified",
+      "skillAccess": "unknown"
+    }
+  ]
+}
