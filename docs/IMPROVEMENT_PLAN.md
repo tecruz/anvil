@@ -1,6 +1,6 @@
 # Implementation plan: reliability, evidence, and distribution
 
-Status: **Phases 0-3 complete; Phase 4 proposed.**
+Status: **Phases 0-3 complete; Phase 4 in progress.**
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -369,6 +369,13 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 ## Phase 4 — Ship a versioned prebuilt distribution
 
 **Outcome:** users install a tested artifact without fetching the source build toolchain.
+
+**Status:** in progress. The release workflow, the tarball allowlist, an install of the staged
+artifact with install scripts disabled, and the MCP smoke test are implemented. The packaging
+suite packs the same `@anvil/cli` target from a temporary copy, so the artifact the workflow
+publishes is covered on every pull request rather than first at release time. Not yet done:
+confirming control of the scoped name, publishing a first release, running the artifact smoke
+tests across the supported Node versions, and recording a published checksum in release notes.
 
 ### Decisions before implementation
 

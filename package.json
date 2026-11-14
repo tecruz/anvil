@@ -48,7 +48,7 @@
     "test": "node --test --test-reporter=spec \"packages/*/test/**/*.test.ts\" \"scripts/test/**/*.test.ts\"",
     "test:coverage": "node --test --experimental-test-coverage --test-reporter=spec \"packages/*/test/**/*.test.ts\"",
     "test:live": "node --test --test-reporter=spec \"packages/providers/test/gh-live.test.ts\" \"packages/discovery/test/live.test.ts\"",
-    "test:changed": "node scripts/test-changed.mjs",
+    "test:changed": "node scripts/test-changed.ts",
     "test:watch": "node --test --watch \"packages/*/test/**/*.test.ts\"",
     "eval": "node scripts/eval.ts",
     "eval:check": "node scripts/eval-check.mjs",

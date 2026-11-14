@@ -1389,7 +1389,7 @@ strict JSON, and the config was being ignored. The tell was looking at a source 
 afterwards and finding tabs. Nothing failed, no test broke, and the diff would have been
 reviewed as "formatting".
 
-**A changed-files test subset** (`scripts/test-changed.mjs`, `npm run test:changed`), which
+**A changed-files test subset** (`scripts/test-changed.ts`, `npm run test:changed`), which
 is what `TEST_FAST` asks for and the rule the plan calls "the one that makes agents usable".
 It selects whole workspace packages rather than files, widens to every package that depends
 on a changed one, treats a root-config change as "run everything", and does nothing when

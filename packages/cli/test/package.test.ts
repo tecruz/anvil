@@ -7,13 +7,14 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { runProcess } from '@anvil/core'
+import { checkHandshake } from '../../../scripts/check-mcp-handshake.ts'
 
 // packages/cli/test -> packages/cli -> packages -> repo root
 const here = dirname(fileURLToPath(import.meta.url))
@@ -442,5 +443,429 @@ describe('the packed tarball installs and runs', () => {
         assert.ok(!path.includes(bad), `tarball contains ${bad}: ${path}`)
       }
     }
+  })
+})
+
+interface JsonRpcLine {
+  jsonrpc: '2.0'
+  id?: unknown
+  result?: unknown
+  error?: { code: number; message: string }
+}
+
+/**
+ * How long a first-run MCP handshake may take before the child is killed.
+ *
+ * Without it a regression that leaves the server waiting for more input after stdin closes
+ * hangs the suite until the test runner's timeout, and the failure names the timeout rather
+ * than the broken handshake.
+ */
+const MCP_HANDSHAKE_TIMEOUT_MS = 30_000
+
+/**
+ * Drive one real MCP handshake over an installed bundle's stdio.
+ *
+ * Through `node` and the bundle path rather than the npm shim, because on Windows a `.cmd`
+ * cannot be given a stdin stream usefully. The shim itself is covered by the version and
+ * doctor runs above, so this test adds the one thing those cannot: that the transport
+ * survived bundling, `--ignore-scripts`, and installation away from the checkout.
+ *
+ * Every failure path settles the returned promise. A `JSON.parse` thrown inside the `close`
+ * handler used to escape as an uncaught exception and leave the promise pending, so a
+ * malformed response hung the test instead of failing it with the bytes that were wrong.
+ */
+function mcpHandshake(bundle: string, cwd: string): Promise<JsonRpcLine[]> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(process.execPath, [bundle, 'mcp'], {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: MCP_HANDSHAKE_TIMEOUT_MS,
+    })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', (error) => {
+      fail(error)
+    })
+    child.on('close', (code, signal) => {
+      if (code !== 0) {
+        const reason =
+          signal === null ? `exited ${code}` : `was killed by ${signal} (timeout ${MCP_HANDSHAKE_TIMEOUT_MS}ms)`
+        fail(new Error(`anvil mcp ${reason}: ${stderr}`))
+        return
+      }
+      try {
+        const lines = stdout
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '')
+          .map((line) => JSON.parse(line) as JsonRpcLine)
+        if (settled) return
+        settled = true
+        resolvePromise(lines)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        fail(new Error(`anvil mcp wrote a line that is not JSON (${detail}): ${stdout}`))
+      }
+    })
+    child.stdin.end(
+      `${[
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'package-smoke', version: '1' },
+          },
+        }),
+        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+        JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+      ].join('\n')}\n`,
+    )
+  })
+}
+
+const HANDSHAKE_TOOLS = ['anvil_doctor', 'anvil_plan', 'anvil_crew_status'] as const
+
+const VALID_INITIALIZE = {
+  protocolVersion: '2025-06-18',
+  serverInfo: { name: 'anvil', version: '0.1.0' },
+  capabilities: { tools: { listChanged: false } },
+}
+
+function validTools(): unknown[] {
+  return HANDSHAKE_TOOLS.map((name) => ({
+    name,
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  }))
+}
+
+/** The two responses a healthy server produces, with one side overridable per case. */
+function handshake(overrides: { init?: unknown; listResult?: unknown } = {}): unknown[] {
+  return [
+    { jsonrpc: '2.0', id: 1, result: overrides.init === undefined ? VALID_INITIALIZE : overrides.init },
+    {
+      jsonrpc: '2.0',
+      id: 2,
+      result: overrides.listResult === undefined ? { tools: validTools() } : overrides.listResult,
+    },
+  ]
+}
+
+function without(messages: unknown[], field: string): unknown[] {
+  return messages.map((message) => {
+    const copy = { ...(message as Record<string, unknown>) }
+    delete copy[field]
+    return copy
+  })
+}
+
+/**
+ * Regression cases for `scripts/check-mcp-handshake.ts`, the module `release.yml` runs before
+ * publishing. Testing it here rather than a local copy is the point: a green suite has to mean
+ * the release gate rejected these shapes.
+ */
+describe('the MCP handshake is validated, not just observed', () => {
+  test('a complete handshake passes and reports what it saw', () => {
+    assert.deepEqual(checkHandshake(handshake()), { protocolVersion: '2025-06-18', toolCount: 3 })
+  })
+
+  test('omitting the optional listChanged still passes', () => {
+    checkHandshake(
+      handshake({
+        init: { ...VALID_INITIALIZE, capabilities: { tools: {} } },
+      }),
+    )
+  })
+
+  test('a malformed initialize is rejected', () => {
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['a null result', null, /not a JSON object/],
+      ['an empty result', {}, /unsupported protocol version/],
+      ['an unsupported protocol version', { ...VALID_INITIALIZE, protocolVersion: '1999-01-01' }, /unsupported/],
+      [
+        'a missing server name',
+        { ...VALID_INITIALIZE, serverInfo: { version: '0.1.0' } },
+        /identify the server as anvil/,
+      ],
+      ['a missing server version', { ...VALID_INITIALIZE, serverInfo: { name: 'anvil' } }, /no server version/],
+      [
+        'an empty server version',
+        { ...VALID_INITIALIZE, serverInfo: { name: 'anvil', version: '' } },
+        /no server version/,
+      ],
+      ['a missing tools capability', { ...VALID_INITIALIZE, capabilities: {} }, /capabilities\.tools/],
+      ['a null tools capability', { ...VALID_INITIALIZE, capabilities: { tools: null } }, /capabilities\.tools/],
+      ['an array-valued tools capability', { ...VALID_INITIALIZE, capabilities: { tools: [] } }, /capabilities\.tools/],
+      ['a non-object tools capability', { ...VALID_INITIALIZE, capabilities: { tools: false } }, /capabilities\.tools/],
+      [
+        'a non-boolean listChanged',
+        { ...VALID_INITIALIZE, capabilities: { tools: { listChanged: 'yes' } } },
+        /listChanged/,
+      ],
+    ]
+    for (const [what, result, expected] of cases) {
+      assert.throws(() => checkHandshake(handshake({ init: result })), expected, `${what} must be rejected`)
+    }
+  })
+
+  test('an incomplete tool list is rejected', () => {
+    const cases: Array<[string, unknown, RegExp]> = [
+      ['a missing tools array', {}, /no tools array/],
+      ['a null tools array', { tools: null }, /no tools array/],
+      ['a non-array tools value', { tools: 'anvil_doctor' }, /no tools array/],
+      ['a null tool entry', { tools: [null] }, /is not a JSON object/],
+      ['a tool with no name', { tools: [{ name: '' }] }, /has no name/],
+      ['a tool with no inputSchema', { tools: HANDSHAKE_TOOLS.map((name) => ({ name })) }, /inputSchema/],
+      [
+        'a tool whose inputSchema is not an object',
+        { tools: HANDSHAKE_TOOLS.map((name) => ({ name, inputSchema: 'nope' })) },
+        /inputSchema/,
+      ],
+      [
+        'a tool whose inputSchema is not an object schema',
+        { tools: HANDSHAKE_TOOLS.map((name) => ({ name, inputSchema: { type: 'string' } })) },
+        /not an object schema/,
+      ],
+      [
+        'a tool whose inputSchema.properties is not an object',
+        { tools: HANDSHAKE_TOOLS.map((name) => ({ name, inputSchema: { type: 'object', properties: 42 } })) },
+        /inputSchema\.properties/,
+      ],
+      [
+        'a tool whose inputSchema.required holds non-strings',
+        {
+          tools: HANDSHAKE_TOOLS.map((name) => ({
+            name,
+            inputSchema: { type: 'object', required: [42] },
+          })),
+        },
+        /inputSchema\.required/,
+      ],
+      ['a missing required tool', { tools: validTools().slice(0, 1) }, /missing anvil_plan/],
+    ]
+    for (const [what, result, expected] of cases) {
+      assert.throws(() => checkHandshake(handshake({ listResult: result })), expected, `${what} must be rejected`)
+    }
+  })
+
+  test('a notification between the responses is accepted', () => {
+    // MCP servers may log while the handshake is in flight. A notification has no `id`, and
+    // treating it as a response would reject a healthy server.
+    checkHandshake([
+      handshake()[0],
+      {
+        jsonrpc: '2.0',
+        method: 'notifications/message',
+        params: { level: 'info', data: 'server initialized' },
+      },
+      handshake()[1],
+    ])
+  })
+
+  test('a malformed envelope is rejected before any payload is read', () => {
+    assert.throws(() => checkHandshake(without(handshake(), 'jsonrpc')), /JSON-RPC 2\.0/)
+    assert.throws(() => checkHandshake(without(handshake(), 'id')), /no request id/)
+    assert.throws(() => checkHandshake([]), /no responses/)
+    assert.throws(() => checkHandshake('not a list'), /not a list/)
+  })
+
+  test('a response that answers no request the handshake sent is rejected', () => {
+    // The id set is closed: id 7 answers nothing in this transcript, so a server that emitted
+    // it is not the one the smoke test describes.
+    assert.throws(
+      () => checkHandshake([...handshake(), { jsonrpc: '2.0', id: 7, result: {} }]),
+      /no request id the handshake sent/,
+    )
+  })
+
+  test('a response carrying neither result nor error is rejected', () => {
+    assert.throws(() => checkHandshake([handshake()[0], { jsonrpc: '2.0', id: 2 }]), /exactly one of result or error/)
+  })
+
+  test('a response carrying both result and error is rejected', () => {
+    assert.throws(
+      () =>
+        checkHandshake([
+          handshake()[0],
+          { jsonrpc: '2.0', id: 2, result: { tools: validTools() }, error: { code: -1, message: 'both' } },
+        ]),
+      /exactly one of result or error/,
+    )
+  })
+
+  test('a second response for the same request is rejected, not shadowed by the first', () => {
+    // This is the failure the earlier `find`-by-id implementation hid: a healthy first answer
+    // made a later failure for the same id invisible to the gate.
+    assert.throws(
+      () => checkHandshake([...handshake(), { jsonrpc: '2.0', id: 1, error: { code: -32603, message: 'late' } }]),
+      /more than one response with id 1/,
+    )
+  })
+
+  test('a notification must not carry an id or a blank method', () => {
+    assert.throws(
+      () => checkHandshake([{ jsonrpc: '2.0', id: 7, method: 'notifications/message' }]),
+      /must not carry a request id/,
+    )
+    assert.throws(() => checkHandshake([{ jsonrpc: '2.0', method: '' }]), /notification method/)
+  })
+
+  test('a JSON-RPC error is rejected with its message', () => {
+    assert.throws(
+      () =>
+        checkHandshake([
+          { jsonrpc: '2.0', id: 1, error: { code: -32603, message: 'boom' } },
+          { jsonrpc: '2.0', id: 2, result: { tools: validTools() } },
+        ]),
+      /boom/,
+    )
+  })
+})
+
+/** The filename npm gives the scoped package: @anvil/cli -> anvil-cli-0.1.0.tgz */
+function tarballName(): string {
+  return `${String(CLI_PKG.name).replace('@', '').replace('/', '-')}-${String(CLI_PKG.version)}.tgz`
+}
+
+async function listTarball(tarball: string): Promise<string[]> {
+  const listed = await runProcess('tar', ['tzf', tarball])
+  assert.equal(listed.exitCode, 0, `tar failed: ${listed.stderr}`)
+  return listed.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+}
+
+/**
+ * The registry artifact (ADR-0012).
+ *
+ * `npm pack --workspace @anvil/cli` is what `release.yml` publishes, and nothing above packs
+ * it: the suite above packs the *root*, which is the git-install unit and a different
+ * artifact. A wrong bin path, a `files` allowlist that omits the bundle, or a workspace whose
+ * bytes only work from a checkout would otherwise be discovered by a user after a publish --
+ * and a publish cannot be undone.
+ *
+ * The workspace is packed once exactly as the workflow invokes it, to prove the target
+ * resolves, and then from a temporary copy staged the way the workflow stages it (root
+ * README and LICENSE beside the manifest), which is the artifact that is installed. The
+ * temporary copy matters: staging into the checkout made two concurrent runs delete each
+ * other's files, and delete any edit made while packing.
+ */
+describe('the registry tarball (ADR-0012)', () => {
+  test('the workspace resolves and ships the bundle', { timeout: 300_000 }, async () => {
+    if (!haveBuild(join(CLI_DIR, 'dist'))) return
+
+    const packDir = tempDir('anvil-registry-workspace-pack-')
+    const packed = await runProcess(
+      'npm',
+      ['pack', '--workspace', String(CLI_PKG.name), '--pack-destination', packDir],
+      {
+        cwd: REPO_ROOT,
+      },
+    )
+    assert.equal(packed.exitCode, 0, `npm pack --workspace failed: ${packed.stderr}`)
+
+    const tarball = join(packDir, tarballName())
+    assert.ok(existsSync(tarball), `expected ${tarball} to exist`)
+    const paths = await listTarball(tarball)
+    const allowed = new Set([
+      'package/',
+      'package/package.json',
+      'package/README.md',
+      'package/LICENSE',
+      'package/dist/cli.js',
+    ])
+    for (const path of paths) {
+      assert.ok(allowed.has(path), `the workspace tarball contains an unexpected path: ${path}`)
+    }
+    for (const required of ['package/dist/cli.js', 'package/package.json']) {
+      assert.ok(paths.includes(required), `the workspace tarball is missing ${required}`)
+    }
+  })
+
+  test('the staged artifact installs without scripts and serves MCP', { timeout: 300_000 }, async () => {
+    if (!haveBuild(join(CLI_DIR, 'dist'))) return
+
+    const packDir = tempDir('anvil-registry-pack-')
+    // `release.yml` stages the root licence and README beside the workspace manifest, because
+    // npm only takes those from the package directory. Build that layout in a temp directory
+    // rather than in the checkout.
+    const packageDir = tempDir('anvil-registry-package-')
+    mkdirSync(join(packageDir, 'dist'), { recursive: true })
+    copyFileSync(join(CLI_DIR, 'package.json'), join(packageDir, 'package.json'))
+    copyFileSync(join(CLI_DIR, 'dist', 'cli.js'), join(packageDir, 'dist', 'cli.js'))
+    for (const file of ['LICENSE', 'README.md']) {
+      copyFileSync(join(REPO_ROOT, file), join(packageDir, file))
+    }
+
+    const packed = await runProcess('npm', ['pack', '--pack-destination', packDir], { cwd: packageDir })
+    assert.equal(packed.exitCode, 0, `npm pack failed: ${packed.stderr}`)
+
+    const tarball = join(packDir, tarballName())
+    assert.ok(existsSync(tarball), `expected ${tarball} to exist`)
+    const paths = await listTarball(tarball)
+
+    // ADR-0012's allowlist, and the four documents the release deliberately carries.
+    const allowed = new Set([
+      'package/',
+      'package/package.json',
+      'package/README.md',
+      'package/LICENSE',
+      'package/dist/cli.js',
+    ])
+    for (const path of paths) {
+      assert.ok(allowed.has(path), `registry tarball contains an unexpected path: ${path}`)
+    }
+    for (const required of ['package/dist/cli.js', 'package/package.json', 'package/README.md', 'package/LICENSE']) {
+      assert.ok(paths.includes(required), `registry tarball is missing ${required}`)
+    }
+
+    // A clean consumer: no workspace links, no devDependencies, and `--ignore-scripts`
+    // because a registry install must not need an install step of its own. The git
+    // channel's `prepare` build is what this channel exists to replace.
+    const consumer = tempDir('anvil-registry-consumer-')
+    writeFileSync(join(consumer, 'package.json'), JSON.stringify({ name: 'consumer', private: true }), 'utf8')
+    const installed = await runProcess('npm', ['install', '--no-save', '--ignore-scripts', tarball], {
+      cwd: consumer,
+    })
+    assert.equal(installed.exitCode, 0, `npm install failed: ${installed.stderr}`)
+
+    const installedBin = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'anvil.cmd' : 'anvil')
+    assert.ok(existsSync(installedBin), `bin shim missing at ${installedBin}`)
+
+    const reported = await runProcess(installedBin, ['version', '--json'], {
+      cwd: consumer,
+      env: { ...process.env, NO_COLOR: '1' },
+    })
+    assert.equal(reported.exitCode, 0, `version failed: ${reported.stderr}`)
+    assert.equal(
+      (JSON.parse(reported.stdout) as { data: { version: string } }).data.version,
+      String(CLI_PKG.version),
+      'the installed binary reports a different version than the tarball that carried it',
+    )
+
+    const installedBundle = join(consumer, 'node_modules', '@anvil', 'cli', 'dist', 'cli.js')
+    assert.ok(existsSync(installedBundle), `the tarball did not install ${installedBundle}`)
+    const responses = await mcpHandshake(installedBundle, consumer)
+    checkHandshake(responses)
   })
 })
