@@ -4,9 +4,9 @@ Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconcil
 2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
 unknown cost, and skill-access evidence that was diagnosed from local, uncommitted session
 observations rather than rerun. Phase 4's installed-CLI matrix now passes on
-all six CI legs; publication is the remaining Phase 4 criterion. Open: the remaining
-Phase 0/1 acceptance demonstrations and publication (needs publishing approval and control
-of the scoped npm name).
+all six CI legs; publication is the remaining Phase 4 criterion. The Phase 0 merge-gate
+demonstration was recorded on 2026-11-14. Open: the remaining Phase 1 acceptance
+demonstrations and publication (needs publishing approval and control of the scoped npm name).
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -80,11 +80,14 @@ change should be necessary unless inspection reveals a missing check.
 
 ### Acceptance
 
-- [ ] Verify in a disposable draft PR/test repository that pending, failed, missing, and
-  earlier-head checks block merging; the final successful head permits it. **Open.** The
-  settings are recorded and enforced, but that is configuration, not a demonstration:
-  evidence of a PR refusing each of the four states has not been recorded here. Do this
-  before the claim is called verified.
+- [x] Verify in a disposable draft PR/test repository that pending, failed, missing, and
+  earlier-head checks block merging; the final successful head permits it. Demonstrated
+  2026-11-14 in disposable draft PR #44 against the real `main` protection, with no settings
+  or workflow change and nothing merged: missing (`31a54d7`, `[skip ci]`), pending and failed
+  (`43fffd8`, run 43639842492) and an untested head on top of a green one (`bb8c60c` after
+  `261968a`) each reported `mergeStateStatus: BLOCKED`; the green heads `261968a`
+  (run 43640518600, attempt 2) and `715145a` (run 43642319922) reported `CLEAN`. See the
+  [merge-gate evidence](evidence/2026-11-14-merge-gate.md).
 - [x] A single maintainer can still merge after checks pass without finding another reviewer.
   PRs #30 (`43c8637`) and #31 (`c72f164`) were merged by the maintainer with
   `required_approving_review_count: 0` and zero submitted reviews.
@@ -544,6 +547,7 @@ for it exists. These are the commands behind the reconciled checklists.
 | Claim | Evidence |
 | --- | --- |
 | Eight required contexts, strict mode, no bypass | `gh api repos/tecruz/anvil/branches/main/protection` returned 8 contexts with `strict: true` and `enforce_admins: true`; `rulesets/25986193` returned `bypass_actors: []` |
+| Pending, failed, missing and earlier-head checks block merging; a green head does not | [Merge-gate demonstration](evidence/2026-11-14-merge-gate.md): draft PR #44, `BLOCKED` at `31a54d7`, `43fffd8` (pending and failed) and `bb8c60c`; `CLEAN` at `261968a` and `715145a`; closed unmerged; protection snapshots before and after identical |
 | A maintainer merges without a reviewer | PRs #30 and #31 report `mergedBy: tecruz`, `reviews: 0`, with `required_approving_review_count: 0` |
 | Duplicate run records are refused | `node --test --test-name-pattern="duplicate" packages/cli/test/eval-gate.test.ts`: 4 pass, 0 fail |
 | Full validation before the registry-smoke expansion | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
@@ -552,7 +556,7 @@ for it exists. These are the commands behind the reconciled checklists.
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
 
-The three open Phase 1 items and the open Phase 0/4 items each name what would close them.
+The three open Phase 1 items and the open Phase 4 items each name what would close them.
 The bounded pilot is recorded as complete, not as proof of product effectiveness.
 Publication remains on hold. Approval and successful execution are separate facts.
 
