@@ -52,8 +52,8 @@ const noColor = process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '
 const color = noColor ? (s: string): string => s : (s: string): string => `\u001b[36m${s}\u001b[0m`
 
 /** Run git, returning trimmed stdout, or null when git declines (missing ref, no repo). */
-function git(args: readonly string[]): string | null {
-  const out = gitRaw(args)
+function git(args: readonly string[], root: string): string | null {
+  const out = gitRaw(args, root)
   return out === null ? null : out.trim()
 }
 
@@ -65,48 +65,65 @@ function git(args: readonly string[]): string | null {
  * silently shifts every path by one character. `-z` also removes git's path quoting, so a
  * filename containing a space or a quote needs no unescaping.
  */
-function gitRaw(args: readonly string[]): string | null {
+function gitRaw(args: readonly string[], root: string): string | null {
   try {
-    return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+    return execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
   } catch {
     return null
   }
 }
 
 /** The ref to diff against: the merge base with the default branch, when there is one. */
-function baseRef(): string | null {
+function baseRef(root: string = repoRoot): string | null {
   const override = process.env.ANVIL_TEST_BASE
   if (override !== undefined && override !== '') return override
   for (const candidate of ['origin/main', 'main', 'origin/master', 'master']) {
-    if (git(['rev-parse', '--verify', '--quiet', candidate]) === null) continue
+    if (git(['rev-parse', '--verify', '--quiet', candidate], root) === null) continue
     // The merge base, not the branch tip: work that landed on main after this branch
     // started is not this branch's to verify.
-    return git(['merge-base', candidate, 'HEAD']) ?? candidate
+    return git(['merge-base', candidate, 'HEAD'], root) ?? candidate
   }
   return null
 }
 
+/**
+ * The paths a `--porcelain -z` status stream names.
+ *
+ * A rename is the one record that is not self-delimiting. With `-z`, git emits
+ * `XY <new-path>\0<old-path>\0`: the second path has *no* status columns of its own, so
+ * slicing three characters off it (as an earlier comment claimed it should) produced a
+ * truncated phantom path. Both paths are wanted -- a rename touches a file that may be
+ * deleted -- so a record that does not look like `XY ` is taken whole.
+ *
+ * `T` is a type change (regular file <-> symlink), and omitting it stored the whole record
+ * including its status columns, so the real file was never selected.
+ */
+export function porcelainPaths(output: string): string[] {
+  const paths: string[] = []
+  for (const record of output.split('\0')) {
+    if (record === '') continue
+    const path = /^[ MADRCU?!T]{2} /.test(record) ? record.slice(3) : record
+    const trimmed = path.trim()
+    if (trimmed !== '') paths.push(trimmed)
+  }
+  return paths
+}
+
 /** Repo-relative paths changed since the base, including uncommitted work. */
-function changedFiles(base: string | null): string[] {
+export function changedFiles(base: string | null, root: string = repoRoot): string[] {
   const out = new Set<string>()
   if (base !== null) {
-    for (const path of (gitRaw(['diff', '--name-only', '-z', `${base}...HEAD`]) ?? '').split('\0')) {
+    // `--no-renames` because `git diff` reports a rename as the new path alone. A suite that
+    // still imports or spawns the old file would then not be selected, even though the
+    // rename deleted it.
+    for (const path of (gitRaw(['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`], root) ?? '').split(
+      '\0',
+    )) {
       if (path.trim() !== '') out.add(path.trim())
     }
   }
   // Uncommitted work is the common case inside a worktree, and the case a crew hits.
-  // A porcelain record is two status columns and a space, then the path.
-  //
-  // A **rename** is the one record that is not self-delimiting. With `-z`, git emits
-  // `XY <new-path>\0<old-path>\0`: the second path has *no* status columns of its own, so
-  // slicing three characters off it (as the old comment claimed it should) produced a
-  // truncated phantom path. Both paths are wanted -- a rename touches a file that may be
-  // deleted -- so a record that does not look like `XY ` is taken whole.
-  for (const record of (gitRaw(['status', '--porcelain', '-z']) ?? '').split('\0')) {
-    if (record === '') continue
-    const path = /^[ MADRCU?!]{2} /.test(record) ? record.slice(3) : record
-    if (path.trim() !== '') out.add(path.trim())
-  }
+  for (const path of porcelainPaths(gitRaw(['status', '--porcelain', '-z'], root) ?? '')) out.add(path)
   return [...out]
 }
 

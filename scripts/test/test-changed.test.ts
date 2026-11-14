@@ -8,13 +8,22 @@
  */
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { affectedPackages, allRootTests, readGraph, rootTestsFor, testFilesForSelection } from '../test-changed.ts'
+import {
+  affectedPackages,
+  allRootTests,
+  changedFiles,
+  porcelainPaths,
+  readGraph,
+  rootTestsFor,
+  testFilesForSelection,
+} from '../test-changed.ts'
 
 const ROOT = resolve(fileURLToPath(new URL('../../', import.meta.url)))
 const graph = readGraph(ROOT)
@@ -44,6 +53,53 @@ function fixtureRoot(files: Record<string, string>): string {
 function selection(files: string[]): string[] {
   return testFilesForSelection(affectedPackages(files, graph, ROOT), rootTestsFor(files, ROOT), graph, ROOT)
 }
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync(
+    'git',
+    ['-c', 'user.email=selector@anvil.test', '-c', 'user.name=anvil selector', '-c', 'commit.gpgsign=false', ...args],
+    { cwd, encoding: 'utf8' },
+  )
+}
+
+/** A throwaway repository with one commit, so `changedFiles` has a real history to read. */
+function gitFixture(files: Record<string, string>): string {
+  const root = fixtureRoot(files)
+  git(root, 'init', '--initial-branch=main')
+  git(root, 'add', '--all')
+  git(root, 'commit', '-m', 'initial')
+  return root
+}
+
+describe('changed-file parsing', () => {
+  test('a rename keeps the path it deleted', () => {
+    // `--porcelain -z` emits `XY <new-path>\0<old-path>\0`, and the old path has no status
+    // columns of its own. Slicing three characters off it produced a phantom path.
+    assert.deepEqual(porcelainPaths('R  scripts/new.ts\0scripts/old.ts\0'), ['scripts/new.ts', 'scripts/old.ts'])
+  })
+
+  test('a type change is a path, not the whole record', () => {
+    // `T` (regular file <-> symlink) was missing from the status class, so the stored path
+    // was literally `T  scripts/a.ts` and the file was never selected.
+    assert.deepEqual(porcelainPaths('T  scripts/a.ts\0'), ['scripts/a.ts'])
+  })
+
+  test('a committed rename still selects the suite that imports the old path', () => {
+    // `git diff --name-only` reports only the new path of a rename, so the deleted path
+    // never reached the selector and the suite that still imports it did not run.
+    const root = gitFixture({
+      'scripts/old.ts': 'export const value = 1\n',
+      'scripts/test/uses-old.test.ts': "import { value } from '../old.ts'\nexport const x = value\n",
+    })
+    git(root, 'mv', 'scripts/old.ts', 'scripts/new.ts')
+    git(root, 'commit', '-m', 'rename')
+
+    const changed = changedFiles('HEAD~1', root)
+    assert.ok(changed.includes('scripts/old.ts'), 'the path the rename deleted is part of the change')
+    assert.ok(changed.includes('scripts/new.ts'))
+    assert.deepEqual(rootTestsFor(changed, root), ['scripts/test/uses-old.test.ts'])
+  })
+})
 
 describe('test:changed selection', () => {
   test('a change to the selector runs the suite that covers it', () => {
