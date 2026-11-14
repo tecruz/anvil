@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { after, describe, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
 import {
   captureInstalledSkill,
   completedResultsFromRecord,
+  explainSkillAccess,
   type InstalledSkillArtifact,
   isCheckCommand,
   observeSkillAccess,
@@ -357,6 +359,31 @@ describe('skill access observation', () => {
     assert.equal(observeSkillAccess(skill, none, root, capture(root)), 'unknown')
   })
 
+  test('records why each verdict was reached, so an unknown can be investigated later', () => {
+    const root = installedRoot()
+    const installed = capture(root)
+    assert.deepEqual(explainSkillAccess(skill, none, root, installed), {
+      access: 'unknown',
+      reason: 'no-tool-events',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, skills: [{ id: 'release-notes' }] }, root, installed), {
+      access: 'unknown',
+      reason: 'native-load-unattributable',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, null), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'observed',
+      reason: 'read-of-installed-artifact',
+    })
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: 'README.md' }] }, root, installed), {
+      access: 'not-observed',
+      reason: 'no-read-of-installed-artifact',
+    })
+  })
+
   test('a redirected installed path cannot attribute a read, not even of that path', () => {
     // The attack: read a copy elsewhere in the repository, then point the installed path at
     // it. Comparing paths after the agent finishes would describe the replacement.
@@ -415,6 +442,12 @@ describe('skill access observation', () => {
       observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
       'unknown',
     )
+    // The identity was captured, so this is not the `installed === null` path: the artifact
+    // changed after capture and the reason says exactly that.
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
   })
 
   test('a read after the original bytes are restored is not the artifact', (t) => {
@@ -481,11 +514,106 @@ describe('skill access observation', () => {
       observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed),
       'unknown',
     )
+    // `installed` is non-null; the re-capture is what fails, and the reason records that.
+    assert.deepEqual(explainSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, installed), {
+      access: 'unknown',
+      reason: 'artifact-not-attributable',
+    })
   })
 
   test('an uncaptured identity attributes nothing', () => {
     const root = installedRoot()
     assert.equal(observeSkillAccess(skill, { ...none, reads: [{ path: installedPath(root) }] }, root, null), 'unknown')
+  })
+})
+
+describe('fake-agent skill-access wiring', () => {
+  test('records the reason beside every skill verdict without touching the real repository', {
+    timeout: 600_000,
+  }, () => {
+    const source = fileURLToPath(new URL('../../', import.meta.url))
+    const workspace = mkdtempSync(join(tmpdir(), 'anvil-eval-skill-wiring-'))
+    const root = join(workspace, 'repo')
+    const runtime = join(workspace, 'runtime')
+    mkdirSync(root)
+    mkdirSync(runtime)
+    try {
+      // Run the real harness in an isolated copy. The fake agent never calls a model, and
+      // every result -- checkpoints and run.json -- lands under the copy, never this repo.
+      const skip = new Set(['node_modules', 'dist', '.git'])
+      for (const path of [
+        'packages',
+        'eval',
+        'scripts/eval.ts',
+        'scripts/eval-check-broker.ts',
+        'scripts/build.mjs',
+        'package.json',
+        'package-lock.json',
+      ]) {
+        cpSync(join(source, path), join(root, path), {
+          recursive: true,
+          filter: (entry) => !skip.has(basename(entry)),
+        })
+      }
+      symlinkSync(
+        join(source, 'node_modules'),
+        join(root, 'node_modules'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      )
+      // The child has to be hermetic through its environment alone. The developer's global
+      // Git config may enable signing or hooks that the copied harness's commits do not
+      // expect, and the harness's temp dirs must land under this test's runtime dir.
+      const gitConfig = join(workspace, 'gitconfig')
+      const hooks = join(workspace, 'hooks')
+      writeFileSync(gitConfig, '')
+      mkdirSync(hooks)
+      const env: NodeJS.ProcessEnv = { ...process.env, TMP: runtime, TEMP: runtime, TMPDIR: runtime }
+      delete env.ANVIL_EVAL
+      // The harness must run fixture test discovery, not inherit this parent's test context.
+      delete env.NODE_TEST_CONTEXT
+      for (const key of Object.keys(env)) {
+        if (key.startsWith('GIT_CONFIG_KEY_') || key.startsWith('GIT_CONFIG_VALUE_')) delete env[key]
+      }
+      delete env.GIT_DIR
+      delete env.GIT_WORK_TREE
+      delete env.GIT_INDEX_FILE
+      env.GIT_CONFIG_GLOBAL = gitConfig
+      env.GIT_CONFIG_NOSYSTEM = '1'
+      env.GIT_CONFIG_COUNT = '3'
+      env.GIT_CONFIG_KEY_0 = 'commit.gpgsign'
+      env.GIT_CONFIG_VALUE_0 = 'false'
+      env.GIT_CONFIG_KEY_1 = 'core.hooksPath'
+      env.GIT_CONFIG_VALUE_1 = hooks
+      env.GIT_CONFIG_KEY_2 = 'tag.gpgsign'
+      env.GIT_CONFIG_VALUE_2 = 'false'
+      // The harness passes user.name/user.email with `git -c` on its own commits; this gives
+      // any commit the anvil CLI makes in the child an identity without a global config.
+      env.GIT_AUTHOR_NAME = 'anvil eval'
+      env.GIT_AUTHOR_EMAIL = 'eval@anvil.local'
+      env.GIT_COMMITTER_NAME = 'anvil eval'
+      env.GIT_COMMITTER_EMAIL = 'eval@anvil.local'
+      const invocation = spawnSync(
+        process.execPath,
+        ['scripts/eval.ts', '--fake-agent', '--scenario', 'skill-guidance'],
+        { cwd: root, env, encoding: 'utf8', timeout: 540_000 },
+      )
+      assert.equal(invocation.error, undefined, invocation.error?.message)
+      assert.equal(invocation.status, 0, `${invocation.stdout}\n${invocation.stderr}`)
+
+      const record = JSON.parse(readFileSync(join(root, 'eval-results', 'run.json'), 'utf8')) as EvalRunRecord
+      assert.equal(record.results.length, 2)
+      const bare = record.results.find((result) => result.variant === 'bare')!
+      const anvil = record.results.find((result) => result.variant === 'anvil')!
+
+      assert.equal(bare.skillInstall, 'not-installed')
+      assert.equal(bare.skillAccess, 'not-installed')
+      assert.equal(bare.skillAccessReason, 'not-installed')
+      assert.equal(anvil.skillInstall, 'verified')
+      assert.equal(anvil.skillAccess, 'unknown')
+      assert.equal(anvil.skillAccessReason, 'no-tool-events')
+    } finally {
+      rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
   })
 })
 
@@ -534,6 +662,7 @@ describe('resumed results keep every recorded fact', () => {
         transcript: '',
         skillInstall: 'verified',
         skillAccess: 'observed',
+        skillAccessReason: 'read-of-installed-artifact',
       },
     ],
   }
@@ -550,10 +679,11 @@ describe('resumed results keep every recorded fact', () => {
     },
   ] as EvalScenario[]
 
-  test('a resumed report keeps skillInstall and skillAccess', () => {
+  test('a resumed report keeps skillInstall, skillAccess and the access reason', () => {
     const [result] = completedResultsFromRecord(record, scenarios)
     assert.equal(result?.skillInstall, 'verified')
     assert.equal(result?.skillAccess, 'observed')
+    assert.equal(result?.skillAccessReason, 'read-of-installed-artifact')
     assert.equal(result?.verified, true)
     assert.equal(result?.hiddenVerified, true)
   })

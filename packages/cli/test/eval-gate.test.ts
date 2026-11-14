@@ -562,6 +562,7 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       ...(result.error === undefined ? {} : { error: result.error }),
       ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
       ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
+      ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
       attempts: [
         {
           startedAt: '2026-10-27T00:02:00.000Z',
@@ -1262,26 +1263,36 @@ describe('skill comparison scenarios', () => {
     const run = latest([skillScenario()])
     run.results[0]!.skillInstall = 'verified'
     run.results[0]!.skillAccess = 'observed'
+    run.results[0]!.skillAccessReason = 'read-of-installed-artifact'
     const parsed = parseLatest(JSON.parse(JSON.stringify(run)))
     assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
     assert.equal(parsed.results[0]!.skillInstall, 'verified')
     assert.equal(parsed.results[0]!.skillAccess, 'observed')
+    assert.equal(parsed.results[0]!.skillAccessReason, 'read-of-installed-artifact')
 
     const invalid = parseLatest({
       ...run,
       results: [{ ...run.results[0], skillInstall: 'installed' }],
     })
     assert.match(invalid as string, /skillInstall is invalid/)
+
+    const badReason = parseLatest({
+      ...run,
+      results: [{ ...run.results[0], skillAccessReason: 'because' }],
+    })
+    assert.match(badReason as string, /skillAccessReason is invalid/)
   })
 
   test('skill verdicts survive a run record round trip, so resume does not lose them', () => {
     const record = runRecord()
     record.results[0]!.skillInstall = 'failed'
     record.results[0]!.skillAccess = 'not-installed'
+    record.results[0]!.skillAccessReason = 'not-installed'
     const parsed = parseRunRecord(JSON.parse(JSON.stringify(record)))
     assert.ok(typeof parsed !== 'string', JSON.stringify(parsed))
     assert.equal(parsed.results[0]!.skillInstall, 'failed')
     assert.equal(parsed.results[0]!.skillAccess, 'not-installed')
+    assert.equal(parsed.results[0]!.skillAccessReason, 'not-installed')
   })
 
   function skillScenarios(): EvalScenario[] {
@@ -1347,6 +1358,111 @@ describe('skill comparison scenarios', () => {
     const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /skillAccess disagrees with run record/)
+  })
+
+  test('a skill-access reason that argues against its verdict is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccessReason = 'read-of-installed-artifact'
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason=read-of-installed-artifact with skillAccess=unknown/)
+  })
+
+  test('a skill-access reason without a verdict is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccessReason = 'native-load-unattributable'
+    delete anvil.skillAccess
+    const gate = checkEvalGate(baseline(scenarios), run, baseline(scenarios).scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /records a skill-access reason without a verdict/)
+  })
+
+  test('a summary that disagrees with its run record about the access reason is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const anvil = run.results.find((result) => result.variant === 'anvil')!
+    anvil.skillAccessReason = 'native-load-unattributable'
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    summary.results.find((result) => result.variant === 'anvil')!.skillAccessReason = 'no-tool-events'
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason disagrees with run record/)
+  })
+
+  test('a summary that omits the access reason its run record keeps is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    run.results.find((result) => result.variant === 'anvil')!.skillAccessReason = 'native-load-unattributable'
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    delete summary.results.find((result) => result.variant === 'anvil')!.skillAccessReason
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason disagrees with run record/)
+  })
+
+  test('a summary that adds an access reason the run record lacks is refused', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    summary.results.find((result) => result.variant === 'anvil')!.skillAccessReason = 'native-load-unattributable'
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /skillAccessReason disagrees with run record/)
+  })
+
+  test('matching reason and verdict pairs pass in both the run record and the summary', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    for (const result of run.results) {
+      result.skillAccessReason = result.variant === 'anvil' ? 'native-load-unattributable' : 'not-installed'
+    }
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, true, gate.message)
+  })
+
+  test('an older record and summary with verdicts but no reasons still pass', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    for (const result of run.results) delete result.skillAccessReason
+    const record = runRecordFor(run)
+    const summary: EvalLatest = { ...run, implementation: 'impl-hash' }
+    const gate = checkEvalGate(baseline(scenarios), summary, baseline(scenarios).scenarios, 'impl-hash', record)
+    assert.equal(gate.ok, true, gate.message)
+  })
+
+  test('a checkpoint that records an access reason reconciles without losing it', () => {
+    const scenarios = skillScenarios()
+    const run = skillRun()
+    run.results.find((result) => result.variant === 'anvil')!.skillAccessReason = 'native-load-unattributable'
+    const record = runRecordFor(run)
+    const missing = record.results.find((result) => result.variant === 'anvil')!
+    record.results = record.results.filter((result) => result !== missing)
+    const hashes = Object.fromEntries(
+      scenarios.map((entry) => [entry.id, { scenarioHash: 'scenario-hash', sourceHash: 'source-hash' }]),
+    )
+    const dir = temp('anvil-eval-checkpoint-reason-')
+    writeFileSync(
+      join(dir, checkpointFileName(missing)),
+      JSON.stringify({ schemaVersion: EVAL_SCHEMA_VERSION, ...missing }),
+      'utf8',
+    )
+    const read = readCheckpointDirectory(dir)
+    assert.equal(read.rejected.length, 0, read.rejected.join('\n'))
+    assert.equal(read.entries.length, 1)
+    const reconciled = reconcileRunRecord(record, read.entries, hashes, scenarios)
+    assert.equal(reconciled.changed, true, reconciled.rejected.join('\n'))
+    const got = reconciled.record.results.find((result) => result.variant === 'anvil')!
+    assert.equal(got.skillAccess, 'unknown')
+    assert.equal(got.skillAccessReason, 'native-load-unattributable')
   })
 
   test('access without a verified installation is refused', () => {

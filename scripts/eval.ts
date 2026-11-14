@@ -71,6 +71,7 @@ import {
   type EvalRunRecordResult,
   type EvalScenario,
   type EvalSkillAccess,
+  type EvalSkillAccessReason,
   type EvalSkillSpec,
   hashImplementation,
   hashScenario,
@@ -796,11 +797,13 @@ async function runScenario(
     } else if (variant !== 'anvil') {
       result.skillInstall = 'not-installed'
       result.skillAccess = 'not-installed'
+      result.skillAccessReason = 'not-installed'
     } else {
       const installed = await installScenarioSkill(scenario.skill, workdir)
       result.skillInstall = installed.ok ? 'verified' : 'failed'
       if (!installed.ok) {
         result.skillAccess = 'not-installed'
+        result.skillAccessReason = 'not-installed'
         result.error = `skill installation failed: ${installed.reason}`
         return result
       }
@@ -900,18 +903,25 @@ async function runScenario(
     if (scenario.skill !== undefined && variant === 'anvil' && result.skillInstall === 'verified') {
       // `unknown` when the run produced no tool events at all (a fake agent, or an agent that
       // died before acting). Absence of supported evidence is not proof the skill was not used.
-      result.skillAccess = fake
-        ? 'unknown'
-        : observeSkillAccess(
-            scenario.skill,
-            {
-              executions: agentExecutions,
-              reads: agentReads,
-              skills: agentSkills,
-            },
-            workdir,
-            installedArtifact,
-          )
+      // The reason is recorded beside the verdict: `unknown` alone cannot distinguish "no
+      // evidence was parsed" from "the artifact changed" or "the id was loaded natively".
+      if (fake) {
+        result.skillAccess = 'unknown'
+        result.skillAccessReason = 'no-tool-events'
+      } else {
+        const observation = explainSkillAccess(
+          scenario.skill,
+          {
+            executions: agentExecutions,
+            reads: agentReads,
+            skills: agentSkills,
+          },
+          workdir,
+          installedArtifact,
+        )
+        result.skillAccess = observation.access
+        result.skillAccessReason = observation.reason
+      }
     }
 
     // For verify-only scenarios with execution capture, the harness records the
@@ -1384,6 +1394,12 @@ export async function installScenarioSkill(
   return { ok: true, reason: 'the installed skill verified against the approved source' }
 }
 
+/** The verdict and the evidence that produced it. */
+export interface SkillAccessObservation {
+  access: EvalSkillAccess
+  reason: EvalSkillAccessReason
+}
+
 /**
  * Whether the agent was seen using the skill this run installed.
  *
@@ -1420,15 +1436,45 @@ export function observeSkillAccess(
   root: string,
   installed: InstalledSkillArtifact | null,
 ): EvalSkillAccess {
-  if (events.executions.length === 0 && events.reads.length === 0 && events.skills.length === 0) return 'unknown'
+  return explainSkillAccess(skill, events, root, installed).access
+}
+
+/**
+ * Explain the verdict, not just compute it.
+ *
+ * The rule is the one documented above. Splitting the *reason* out is what keeps a report
+ * answerable after the worktree is deleted: "unknown" from an unattributable native load,
+ * from a run with no tool events, and from an artifact that changed are three different
+ * findings, and the pilot that motivated this field could not tell them apart from its
+ * retained run record alone.
+ */
+export function explainSkillAccess(
+  skill: EvalSkillSpec,
+  events: {
+    executions: readonly { command: string }[]
+    reads: readonly { path: string }[]
+    skills: readonly { id: string }[]
+  },
+  root: string,
+  installed: InstalledSkillArtifact | null,
+): SkillAccessObservation {
+  if (events.executions.length === 0 && events.reads.length === 0 && events.skills.length === 0) {
+    return { access: 'unknown', reason: 'no-tool-events' }
+  }
   // Re-capture before attributing anything: this describes the artifact after the agent,
   // which is exactly what a redirection or a same-path replacement changes.
   const current = captureInstalledSkill(root, skill.name)
-  if (installed === null || current === null || !sameInstalledIdentity(current, installed)) return 'unknown'
-  if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) return 'observed'
+  if (installed === null || current === null || !sameInstalledIdentity(current, installed)) {
+    return { access: 'unknown', reason: 'artifact-not-attributable' }
+  }
+  if (events.reads.some((entry) => isInstalledSkillPath(entry.path, root, installed))) {
+    return { access: 'observed', reason: 'read-of-installed-artifact' }
+  }
   // The id is the only thing a load reports, and the id can be shadowed by another source.
-  if (events.skills.some((entry) => entry.id === skill.name)) return 'unknown'
-  return 'not-observed'
+  if (events.skills.some((entry) => entry.id === skill.name)) {
+    return { access: 'unknown', reason: 'native-load-unattributable' }
+  }
+  return { access: 'not-observed', reason: 'no-read-of-installed-artifact' }
 }
 
 /** The installed artifact's identity, captured before the agent runs. */
@@ -1743,6 +1789,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
+    ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
   }
 }
 
@@ -1881,6 +1928,7 @@ export function completedResultsFromRecord(
         ...(prior.error === undefined ? {} : { error: prior.error }),
         ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
         ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
+        ...(prior.skillAccessReason === undefined ? {} : { skillAccessReason: prior.skillAccessReason }),
       }),
     )
   }
@@ -1915,6 +1963,7 @@ function recordResultFrom(
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
+    ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
   }
 }
 
@@ -2369,7 +2418,8 @@ function printSummary(results: ScenarioResult[]): void {
     )
     if (r.error !== undefined) console.log(`  error: ${r.error}`)
     if (r.skillInstall !== undefined && r.skillInstall !== 'not-requested') {
-      console.log(`  skill: install=${r.skillInstall} access=${r.skillAccess ?? 'unknown'}`)
+      const reason = r.skillAccessReason === undefined ? '' : ` (${r.skillAccessReason})`
+      console.log(`  skill: install=${r.skillInstall} access=${r.skillAccess ?? 'unknown'}${reason}`)
     }
   }
   for (const line of formatPairedSummary(summarizePairs(results))) console.log(line)
