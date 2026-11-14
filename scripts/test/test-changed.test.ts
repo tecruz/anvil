@@ -99,6 +99,22 @@ describe('changed-file parsing', () => {
     assert.ok(changed.includes('scripts/new.ts'))
     assert.deepEqual(rootTestsFor(changed, root), ['scripts/test/uses-old.test.ts'])
   })
+
+  test('an untracked directory is expanded to the suites inside it', () => {
+    // `git status --porcelain` collapses a new directory to one record, `?? scripts/test/new/`,
+    // and no suite is named that. A suite added in a new subdirectory -- which `allRootTests`
+    // enumerates recursively -- was discovered and then never selected.
+    const root = gitFixture({ 'scripts/test/existing.test.ts': 'export const x = 1\n' })
+    mkdirSync(join(root, 'scripts', 'test', 'nested'), { recursive: true })
+    writeFileSync(join(root, 'scripts', 'test', 'nested', 'new.test.ts'), 'export const y = 1\n')
+
+    const changed = changedFiles(null, root)
+    assert.ok(
+      changed.includes('scripts/test/nested/new.test.ts'),
+      `expected the file, not the directory, in ${JSON.stringify(changed)}`,
+    )
+    assert.deepEqual(rootTestsFor(changed, root), ['scripts/test/nested/new.test.ts'])
+  })
 })
 
 describe('test:changed selection', () => {
@@ -274,6 +290,33 @@ describe('test:changed selection', () => {
 
   test('a change to the Windows path form still matches', () => {
     assert.ok(selection(['scripts\\check-mcp-handshake.ts']).includes(CHECKER_SUITE))
+  })
+
+  test('a change to a CLI command selects every suite that drives the CLI end to end', () => {
+    // The harness runs the CLI it is evaluating -- `anvil setup plan` and `anvil setup apply`
+    // through `installScenarioSkill`, and `anvil init` for the derived context -- by spawning
+    // `packages/cli/src/main.ts`. It assembles that path from segments, so no literal names
+    // it and the import graph has no edge to the command surface. Declaring the edge on
+    // `scripts/eval.ts` gives it to every suite that depends on the harness: one that imports
+    // it, and the two that only spawn it as a subprocess.
+    for (const source of ['packages/cli/src/commands/setup.ts', 'packages/cli/src/commands/init.ts']) {
+      const files = selection([source])
+      for (const suite of ['eval-skill-install.test.ts', 'eval-resume.test.ts', 'eval-execution-evidence.test.ts']) {
+        assert.ok(files.includes(join(ROOT, 'scripts', 'test', suite)), `${source} must select ${suite}`)
+      }
+      assert.ok(files.includes(join(ROOT, 'packages', 'cli', 'test', 'setup.test.ts')), 'and the package suite')
+    }
+  })
+
+  test('an unrelated root suite is not widened by the CLI entry point', () => {
+    // The edge belongs to the harness and the suites that depend on it, not to every suite
+    // in the tree.
+    const files = selection(['packages/cli/src/commands/setup.ts'])
+    assert.ok(!files.includes(CHECKER_SUITE), 'a suite that never runs the CLI does not depend on it')
+    assert.ok(
+      !files.includes(join(ROOT, 'scripts', 'test', 'eval-fixtures.test.ts')),
+      'nor does one that reads only fixtures',
+    )
   })
 
   test('a docs-only change selects nothing, and says so by returning nothing', () => {

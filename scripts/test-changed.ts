@@ -123,7 +123,14 @@ export function changedFiles(base: string | null, root: string = repoRoot): stri
     }
   }
   // Uncommitted work is the common case inside a worktree, and the case a crew hits.
-  for (const path of porcelainPaths(gitRaw(['status', '--porcelain', '-z'], root) ?? '')) out.add(path)
+  //
+  // `--untracked-files=all` because the default collapses a new directory into one record
+  // (`?? scripts/test/new/`). No suite is named `scripts/test/new/`, so a suite added in a
+  // new subdirectory -- the exact case `allRootTests` enumerates recursively -- would be
+  // discovered and then never selected.
+  for (const path of porcelainPaths(gitRaw(['status', '--porcelain', '-z', '--untracked-files=all'], root) ?? '')) {
+    out.add(path)
+  }
   return [...out]
 }
 
@@ -230,6 +237,23 @@ const RUNTIME_CALLS = new Set([
 /** Module specifiers that expose the runtime calls above. */
 const CHILD_PROCESS_MODULES = new Set(['node:child_process', 'child_process'])
 
+/**
+ * Product entry points a module runs only as a subprocess, which no literal names.
+ *
+ * `scripts/eval.ts` runs the CLI it is evaluating: `anvilCli()` resolves the built bundle, or
+ * `packages/cli/src/main.ts` when there is no build. That path is assembled from segments
+ * inside the harness, so no string literal names the entry point and the import graph has no
+ * edge to the command surface -- yet a change to a command is exactly what a suite that
+ * drives the harness exercises end to end. Declaring the edge on the module gives it to
+ * every suite that depends on the harness, including the ones that only spawn it.
+ *
+ * Naming the entry point is the smallest true statement; listing every module the CLI
+ * imports would be the hand-maintained list this file exists to avoid.
+ */
+const MODULE_SPAWNED_ENTRYPOINTS: ReadonlyMap<string, readonly string[]> = new Map([
+  ['scripts/eval.ts', ['packages/cli/src/main.ts']],
+])
+
 /** A repo-relative file an import or a spawned argument names. */
 function dependencyPath(literal: string): string | null {
   const rel = literal.replace(/\\/g, '/').replace(/^\.\//, '')
@@ -255,6 +279,12 @@ function dependenciesOf(path: string, root: string, cache: Map<string, string[]>
   // were wrong before. The parser distinguishes all three, so no heuristic is needed.
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, false)
   const files = new Set<string>()
+
+  // A module that runs the product as a subprocess gives that edge to every suite that
+  // depends on it; the suite's own source names nothing the parser can see.
+  for (const entry of MODULE_SPAWNED_ENTRYPOINTS.get(relative(root, path).replace(/\\/g, '/')) ?? []) {
+    files.add(entry)
+  }
 
   const addSpecifier = (specifier: string): void => {
     if (specifier.startsWith('.')) {
@@ -529,7 +559,9 @@ export function testFilesFor(packages: readonly WorkspacePackage[], graph: Works
  * their exports, and the string literals naming a script the suite spawns or a tree it copies.
  * A hand-maintained list was wrong twice -- it missed the suites entirely, then missed the
  * package modules they import -- and a list that has to be edited whenever a dependency is
- * added is a list that will be wrong again.
+ * added is a list that will be wrong again. The one edge the AST cannot see -- a product
+ * entry point a module runs through a subprocess -- is declared in
+ * `MODULE_SPAWNED_ENTRYPOINTS` and resolved through the same import closure.
  *
  * Two things are deliberately outside static imports: a suite that is deleted is not run
  * (there is nothing to open), and data a suite reads by path at runtime is handled below.
