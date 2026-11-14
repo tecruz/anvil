@@ -41,7 +41,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, globSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
@@ -544,12 +544,16 @@ export function testFilesFor(packages: readonly WorkspacePackage[], graph: Works
     // Not every package has tests: the plugin is typed by the typechecker and covered by
     // the packaging suite, so `packages/plugin-opencode` has no test directory at all.
     if (dir === null || !existsSync(dir)) return []
-    // Recursive, because `npm test` globs `packages/*/test/**/*.test.ts`; a suite in a
-    // subdirectory must not fall out of a changed-files run.
-    return readdirSync(dir, { recursive: true, encoding: 'utf8' })
-      .filter((file) => file.endsWith('.test.ts'))
+    // `npm test` hands `packages/*/test/**/*.test.ts` to `node --test`, which expands it with
+    // `fs.globSync` and excludes `node_modules` at any depth. Matching that exactly keeps a
+    // changed-files run to the suites a full run would execute: nested suites and fixtures
+    // are in; hidden entries, `node_modules`, and anything reached only through a directory
+    // symlink (including a cycle) are out. A recursive `readdirSync` disagreed on all three.
+    // `join` alone is enough: it normalises separators on Windows, and on POSIX a backslash
+    // is an ordinary filename character that must survive.
+    return globSync('**/*.test.ts', { cwd: dir, exclude: (name) => name === 'node_modules' })
       .sort()
-      .map((file) => join(dir, file.replace(/\\/g, '/')))
+      .map((file) => join(dir, file))
   })
 }
 
