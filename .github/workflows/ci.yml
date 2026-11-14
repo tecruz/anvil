@@ -1,9 +1,10 @@
 # CI for anvil.
 #
-# The matrix is the plan's, and the order is the plan's too: Windows first, because path
-# length, CRLF and the `.cmd` shim behaviour are where this tool's process layer breaks
-# first. A green Linux run says very little about a tool whose hardest requirement is
-# running on someone else's Windows machine.
+# The matrix is the plan's, and the order is the plan's too: the exact engines floor and the
+# current LTS on all three operating systems, with Windows first because path length, CRLF
+# and the `.cmd` shim behaviour are where this tool's process layer breaks first. A green
+# Linux run says very little about a tool whose hardest requirement is running on someone
+# else's Windows machine.
 #
 # What CI runs is exactly what `npm run check` runs, because the `CI_PARITY` rule exists to
 # catch the case where they diverge: an agent is told "verified" on the strength of a
@@ -33,24 +34,71 @@ concurrency:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
+    # Branch protection and the main ruleset require the bare OS names, so the floor legs
+    # keep them. Select by lane, not version, so an engines bump cannot rename a required
+    # check.
+    name: ${{ matrix.node.lane == 'floor' && matrix.os || format('{0} (Node LTS)', matrix.os) }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Two lanes on every OS: the exact engines floor and the current LTS. The floor is
+        # pinned exactly rather than read from `engines`, because setup-node resolved
+        # ">=22.18.0" to whatever the runner happened to have cached (24.x at the time),
+        # so the floor was never actually tested.
+        #
+        # LTS is `lts/*` with check-latest rather than a pinned patch: the goal is the
+        # current LTS, and a pinned patch silently ages out of that role. `report toolchain`
+        # logs the resolved version, so a run still says which one it exercised.
         os: [windows-latest, ubuntu-latest, macos-latest]
+        node:
+          - version: '22.18.0'
+            lane: floor
+          - version: 'lts/*'
+            lane: lts
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          # The engines field, not a pinned patch: the test suite runs TypeScript through
-          # `node --test`, so a too-old node fails in a way that looks like a test bug.
-          node-version-file: package.json
+          node-version: ${{ matrix.node.version }}
+          check-latest: ${{ matrix.node.lane == 'lts' }}
           cache: npm
+
+      - name: report toolchain
+        run: |
+          node --version
+          npm --version
+
+      # The guard makes an engines bump without a matrix bump fail: if package.json stops
+      # requiring exactly the version this lane pins, the "floor" lane is no longer the
+      # floor, and a green run would be claiming coverage it does not have.
+      - name: verify engines floor
+        if: ${{ matrix.node.lane == 'floor' }}
+        shell: bash
+        run: |
+          node --input-type=commonjs <<'NODE'
+          const fs = require('node:fs');
+          const { engines } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const range = engines && engines.node;
+          const match = typeof range === 'string' && /^>=(\d+\.\d+\.\d+)$/.exec(range.trim());
+          if (!match) {
+            console.error(`engines.node is ${JSON.stringify(range)}; expected a single ">=x.y.z" floor`);
+            process.exit(1);
+          }
+          const expected = match[1];
+          if (process.versions.node !== expected) {
+            console.error(`expected node ${expected} on the floor lane, got ${process.versions.node}`);
+            process.exit(1);
+          }
+          console.log(`node ${process.versions.node} matches the engines floor ${range}`);
+          NODE
 
       - run: npm ci
 
+      # The full check runs on both lanes, not a smoke test on the floor: CI_PARITY says CI
+      # and `npm run check` are the same command, and the suite is the version-sensitive part
+      # -- a lint-only run on the floor would prove almost nothing about compatibility.
       - name: check (lint, typecheck, test, build)
         run: npm run check
 
