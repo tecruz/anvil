@@ -9,7 +9,7 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -22,6 +22,7 @@ import {
   porcelainPaths,
   readGraph,
   rootTestsFor,
+  testFilesFor,
   testFilesForSelection,
 } from '../test-changed.ts'
 
@@ -132,6 +133,59 @@ describe('test:changed selection', () => {
     )
     const full = testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)
     for (const file of onDisk) assert.ok(full.includes(join(ROOT, 'scripts', 'test', file)), file)
+  })
+
+  test('a full selection runs every package suite under packages', () => {
+    const packagesDir = join(ROOT, 'packages')
+    const onDisk: string[] = []
+    for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const testDir = join(packagesDir, entry.name, 'test')
+      if (!existsSync(testDir)) continue
+      for (const file of readdirSync(testDir, { recursive: true, encoding: 'utf8' }).filter((candidate) =>
+        candidate.endsWith('.test.ts'),
+      )) {
+        onDisk.push(join(testDir, file))
+      }
+    }
+    const full = testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)
+    for (const file of onDisk) assert.ok(full.includes(file), file)
+  })
+
+  test('package selection discovers nested suites and skips packages without tests', () => {
+    // `npm test` globs `packages/*/test/**/*.test.ts`, but a nonrecursive read of the test
+    // directory only found the suites directly under it. A nested suite was silently left
+    // out of a changed-files run that claimed to cover its package.
+    const root = fixtureRoot({
+      'package.json': JSON.stringify({ workspaces: ['packages/*'] }),
+      'packages/nested/package.json': JSON.stringify({ name: '@anvil/nested' }),
+      'packages/nested/test/z.test.ts': 'export const z = 1\n',
+      'packages/nested/test/subdir/a.test.ts': 'export const a = 1\n',
+      'packages/nested/test/helper.ts': 'export const helper = 1\n',
+      'packages/nested/test/unit.spec.ts': 'export const spec = 1\n',
+      'packages/nested/test/legacy.test.js': 'export const legacy = 1\n',
+      'packages/nested/test/backup.test.ts.bak': 'export const backup = 1\n',
+      'packages/untested/package.json': JSON.stringify({ name: '@anvil/untested' }),
+      'packages/empty/package.json': JSON.stringify({ name: '@anvil/empty' }),
+    })
+    mkdirSync(join(root, 'packages', 'empty', 'test'), { recursive: true })
+    const fixtureGraph = readGraph(root)
+    const nested = fixtureGraph.packages.find((pkg) => pkg.dirName === 'nested')
+    const untested = fixtureGraph.packages.find((pkg) => pkg.dirName === 'untested')
+    const empty = fixtureGraph.packages.find((pkg) => pkg.dirName === 'empty')
+    assert.ok(nested !== undefined && untested !== undefined && empty !== undefined)
+
+    const expected = [
+      join(root, 'packages', 'nested', 'test', 'subdir', 'a.test.ts'),
+      join(root, 'packages', 'nested', 'test', 'z.test.ts'),
+    ]
+    // The exact list also proves the helper, `.spec.ts`, `.test.js` and `.test.ts.bak` files
+    // are excluded, and that the nested suite sorts before the top-level one.
+    assert.deepEqual(testFilesFor([nested], fixtureGraph), expected)
+    assert.deepEqual(testFilesFor([untested], fixtureGraph), [])
+    assert.deepEqual(testFilesFor([empty], fixtureGraph), [])
+    assert.deepEqual(testFilesFor([nested], { ...fixtureGraph, dirOf: () => null }), [])
+    assert.deepEqual(testFilesForSelection([nested], [], fixtureGraph, root), expected)
   })
 
   test('a change to the handshake checker runs the suite that covers it', () => {

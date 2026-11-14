@@ -544,10 +544,12 @@ export function testFilesFor(packages: readonly WorkspacePackage[], graph: Works
     // Not every package has tests: the plugin is typed by the typechecker and covered by
     // the packaging suite, so `packages/plugin-opencode` has no test directory at all.
     if (dir === null || !existsSync(dir)) return []
-    return readdirSync(dir)
+    // Recursive, because `npm test` globs `packages/*/test/**/*.test.ts`; a suite in a
+    // subdirectory must not fall out of a changed-files run.
+    return readdirSync(dir, { recursive: true, encoding: 'utf8' })
       .filter((file) => file.endsWith('.test.ts'))
       .sort()
-      .map((file) => join(dir, file))
+      .map((file) => join(dir, file.replace(/\\/g, '/')))
   })
 }
 
