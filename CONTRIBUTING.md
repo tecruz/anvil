@@ -54,7 +54,8 @@ are required but need zero approving reviewers — this is a solo-maintainer rep
 review requirements are waived. Force pushes and deletion of `main` are blocked.
 The gate was [demonstrated on 2026-11-14](docs/evidence/2026-11-14-merge-gate.md): pending,
 failed, missing and earlier-head checks each left a PR blocked, and only a fully green
-current head was mergeable.
+current head reported `CLEAN`. Strict mode (`BEHIND`) was not exercised, because `main` did
+not move during the demonstration.
 
 Configuration was applied via the GitHub API after making the repository public, since
 rulesets require GitHub Pro on private repositories. The repository is now public.

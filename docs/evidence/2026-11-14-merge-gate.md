@@ -20,8 +20,10 @@ would really merge at a green state.
 - Base for every capture: `main` at `f0c28c9b929c0ffacb1384fbe8056df9d2c11a09`. `main` was
   re-read before each capture and never moved.
 - CI: the existing `.github/workflows/ci.yml`, unchanged.
-- Outcome: PR #44 was closed unmerged (`mergedAt: null`, `mergeCommit: null`) and its branch
-  deleted. The workflow runs are kept, because the run IDs below point at them.
+- Outcome: PR #44 was closed unmerged (GraphQL `mergedAt: null`, `mergeCommit: null`) and
+  its branch deleted. The REST `merge_commit_sha` on a PR is GitHub's test-merge ref, not
+  evidence of a merge, so it is not used here. The workflow runs are kept, because the run
+  IDs below point at them.
 
 ## Protection under test
 
@@ -42,9 +44,11 @@ Read from the GitHub API at 2026-11-14T20:51:45Z, before the first push, and aga
 
 ## Method
 
-Each state is one commit pushed fast-forward to the demo branch. A draft PR always reports
-`mergeStateStatus: DRAFT`, which hides the check-based gate, so the PR was marked ready for
-review immediately before each capture and returned to draft immediately after.
+Each state is one commit pushed fast-forward to the demo branch, except pending and failed,
+which are two captures of the same commit, `43fffd8`, before and after its run finished. A
+draft PR always reports `mergeStateStatus: DRAFT`, which hides the check-based gate, so the
+PR was marked ready for review immediately before each capture and returned to draft
+immediately after.
 `ready_for_review` does not trigger `ci.yml`.
 
 Each capture recorded three read-only views of the PR head:
@@ -81,7 +85,9 @@ Every required context reported by GraphQL had `isRequired: true` and app `15368
 
 The earlier-head row is the outcome Phase 0 names: a green result for `261968a` did not
 authorize `bb8c60c`. Check results are bound to the commit they ran on, and the gate reads
-only the current head.
+only the current head. This demonstrates head-SHA binding only. Strict mode (`BEHIND`, a
+branch that is no longer up to date with `main`) was not exercised, because `main` did not
+move during the demonstration.
 
 ### The green head's first attempt
 
@@ -90,16 +96,18 @@ The first attempt at the green head did not pass. Run 43640518600 attempt 1 (sta
 1813 passed, 1 failed, 6 skipped. The failure was
 `packages/derive/test/setup-apply.test.ts:146`, "applies a current plan once, writes the
 exact bytes and journals a verified success", which ran for 20 053 ms and failed with
-`PREFLIGHT_FAILED`: "The approval directory access control list cannot be read". That is
-the 20-second limit on the Windows ACL tool in `packages/derive/src/setup-approval.ts`
-being reached on a slow runner, not a change in this branch: the tree was identical to
-`main`, whose own CI run 43637956443 passed. The demonstration stopped there and was not
-captured as green.
+`PREFLIGHT_FAILED`: "The approval directory access control list cannot be read". The
+duration is consistent with the 20-second `timeout` on the Windows ACL tool
+(`packages/derive/src/setup-approval.ts:514`) on a slow runner, but the log cannot prove the
+timeout fired: `runWindowsTool` catches every error and returns `null`
+(`setup-approval.ts:516-519`), so a timeout and any other tool failure look the same. It
+was not a change in this branch: the tree was identical to `main`, whose own CI run
+43637956443 passed. The demonstration stopped there and was not captured as green.
 
 With approval, only the failed job was rerun. Attempt 2 (started 21:13:10Z) passed
 `windows-latest` (job 132590277837), leaving all eight required checks `SUCCESS` on
-`261968a`, and that is the green state captured above. The flaky test is left to a
-separate issue.
+`261968a`, and that is the green state captured above. The flaky test is followed up in
+[issue #45](https://github.com/tecruz/anvil/issues/45).
 
 ## Sanitized excerpts
 
