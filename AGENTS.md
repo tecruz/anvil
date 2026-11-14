@@ -1,15 +1,15 @@
 # Monorepo (npm)
 
-Typescript project, with javascript.
+Typescript project, with javascript. Default branch: `origin/main`.
 
 ## Commands
 
 - **Install:** `npm ci` _(detected)_ `package-lock.json`
 - **Build:** `npm run build` `AGENTS.md:8`
-- **Test:** `npm run test` `CONTRIBUTING.md:38`
-- **Test (changed files only):** `npm run test:changed` `README.md:105`
+- **Test:** `npm run test` `CONTRIBUTING.md:70`
+- **Test (changed files only):** `npm run test:changed` `README.md:142`
 - **Lint:** `npm run lint` `AGENTS.md:11`
-- **Format:** `npm run format` _(detected)_ `package.json:47`
+- **Format:** `npm run format` `AGENTS.md:12`
 - **Typecheck:** `npm run typecheck` `AGENTS.md:13`
 
 ## Layout
@@ -56,7 +56,7 @@ See `docs/ARCHITECTURE.md`.
 - Linting is enforced by biome; run it before proposing a change.
 - Formatting is handled by biome.
 - Pre-commit hooks (githooks) run on every commit.
-- CI runs on 2 workflow file(s).
+- CI runs on 3 workflow file(s).
 
 ## For agents
 
