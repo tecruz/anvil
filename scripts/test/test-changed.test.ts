@@ -15,12 +15,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -206,29 +207,48 @@ describe('test:changed selection', () => {
       ].join('\n'),
       'utf8',
     )
+    // The same fixture is also reached through a symlink to its root. On macOS `tmpdir()` is
+    // under `/var`, a symlink to `/private/var`, so every fixture root is reached that way
+    // there; the alias reproduces that on every platform.
+    const aliasParent = mkdtempSync(join(tmpdir(), 'anvil-selector-alias-'))
+    temps.push(aliasParent)
+    const aliasRoot = join(aliasParent, 'root')
+    symlinkSync(root, aliasRoot, 'dir')
+
+    const expected = [
+      join('packages', 'shapes', 'test', 'alias.test.ts'),
+      join('packages', 'shapes', 'test', 'fixtures', 'fixture.test.ts'),
+      join('packages', 'shapes', 'test', 'nested', 'deep.test.ts'),
+      join('packages', 'shapes', 'test', 'top.test.ts'),
+    ]
     // A suite run under `node --test` inherits the runner's child context; without clearing
     // it the nested runner reports to this process instead of its own reporter.
     const { NODE_TEST_CONTEXT: _context, ...env } = process.env
-    const ran = execFileSync(
-      process.execPath,
-      ['--test', `--test-reporter=${pathToFileURL(reporter).href}`, 'packages/*/test/**/*.test.ts'],
-      { cwd: root, encoding: 'utf8', env },
-    )
-      .split('\n')
-      .filter((line) => line !== '')
-    // Events name a file both relative to the cwd and absolute; compare the set of files.
-    const ranFiles = [...new Set(ran.map((file) => resolve(root, file)))].sort()
+    for (const cwd of [root, aliasRoot]) {
+      const ran = execFileSync(
+        process.execPath,
+        ['--test', `--test-reporter=${pathToFileURL(reporter).href}`, 'packages/*/test/**/*.test.ts'],
+        { cwd, encoding: 'utf8', env },
+      )
+        .split('\n')
+        .filter((line) => line !== '')
+      // Events name a file both relative to the cwd and absolute, and the absolute form is
+      // built from the runner's resolved cwd, which has the root's symlinks resolved. Compare
+      // root-relative paths, resolving only the root: resolving each file would collapse
+      // `alias.test.ts` into `top.test.ts`, the very distinction this test checks.
+      const realRoot = realpathSync(cwd)
+      const ranFiles = [...new Set(ran.map((file) => (isAbsolute(file) ? relative(realRoot, file) : file)))].sort()
+      assert.deepEqual(ranFiles, expected, cwd)
 
-    const expected = [
-      join(testDir, 'alias.test.ts'),
-      join(testDir, 'fixtures', 'fixture.test.ts'),
-      join(testDir, 'nested', 'deep.test.ts'),
-      join(testDir, 'top.test.ts'),
-    ]
-    assert.deepEqual(ranFiles, expected)
-    const shapes = readGraph(root).packages.find((pkg) => pkg.dirName === 'shapes')
-    assert.ok(shapes !== undefined)
-    assert.deepEqual(testFilesFor([shapes], readGraph(root)), expected)
+      const cwdGraph = readGraph(cwd)
+      const shapes = cwdGraph.packages.find((pkg) => pkg.dirName === 'shapes')
+      assert.ok(shapes !== undefined)
+      assert.deepEqual(
+        testFilesFor([shapes], cwdGraph).map((file) => relative(cwd, file)),
+        expected,
+        cwd,
+      )
+    }
   })
 
   test('a POSIX test filename containing a backslash is kept verbatim', { skip: process.platform === 'win32' }, () => {
