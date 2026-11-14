@@ -29,12 +29,16 @@ widened to everything that depends on them -- usually a fraction of the full sui
 This is a solo-maintainer repository: there is no second reviewer, so review requirements
 are waived, but the checks below still have to pass before anything merges.
 
-1. All five CI checks pass on the **final commit** of the PR:
+1. All five required CI checks pass on the **final commit** of the PR:
    - `windows-latest`
    - `ubuntu-latest`
    - `macos-latest`
    - `playbook registry (rot check)`
    - `gh contract (live)`
+
+   The three `(Node LTS)` legs -- `windows-latest (Node LTS)`, `ubuntu-latest (Node LTS)` and
+   `macos-latest (Node LTS)` -- must also be green on the final commit, even though branch
+   protection does not list them.
 2. `npm run check` passes locally (lint, typecheck, test suite, build, docs check, eval gate).
 3. `npm run eval -- --fake-agent` passes and `npm run eval:check` passes.
 4. No high-risk path (`.github/workflows/**`) is changed without flagging it in the PR
