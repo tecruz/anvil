@@ -250,6 +250,34 @@ generated plan. It refuses stale or tampered plans, changed source bytes, a dest
 appeared since planning, and dirty or unknown repository state. Validation is not approval:
 the plan itself always reports `approval: "not-granted"`.
 
+A saved owner-command plan goes stale when the repository moves, or when an input that
+shapes one of its actions changes: an `install` command (its text, directory or position), a
+tool that has an `install` (its id, install text, version range or `required`), or the
+default working directory. A declaration that adds no action leaves an otherwise identical
+plan current: a `test`, `lint` or other non-install command, a tool without an `install`, a
+tool's `bin` or `reason`, and everything in `project.env`, `project.services`,
+`project.references`, `project.credentials`, `project.access` and `project.hardware`. A
+future anvil that adds a declaration array therefore does not invalidate saved plans. When a
+check does report `stale`, the reason says so: re-run `anvil setup plan`, review the fresh
+proposal and validate that one.
+
+A `local-skill` execution plan does not read those declarations at all. It goes stale when
+the repository moves, when its source file's bytes change or disappear, or when its
+destination appears; re-run the same `anvil setup plan --adapter local-skill ...` command.
+
+A staged `anvil init` bundle follows the same rule as an owner-command plan: only the
+declarations that can change a generated file, currently `project.commands`, feed its input
+hash. A config with no declared commands hashes exactly like no config, so adding the first
+reference or removing the last credential keeps a staged bundle current.
+
+**One-time staleness when upgrading to this version.** Plans and bundles saved by an earlier
+anvil hashed the whole effective `project` config. That hash cannot match the narrower one,
+so every owner-command plan saved before the upgrade validates as `stale` once, and so does
+every `anvil init` bundle that was staged while anything was declared; a bundle staged with
+no declarations keeps its hash. Nothing is applied in either case. Re-run `anvil setup plan`
+or `anvil init`, review the result, and continue from the fresh plan or bundle. `local-skill`
+execution plans are unaffected.
+
 ### Approving one local-skill plan
 
 Approval is a separate, single-use grant, stored outside the repository:
@@ -572,6 +600,16 @@ Two layers, repo-local wins:
   rejected. `required` defaults to true. Checks run only with
   `--check`.
 
+The three requirement arrays share one id namespace. An id may appear at most once across
+`project.credentials`, `project.access` and `project.hardware`, because each entry becomes a
+named action (`request:<id>` or `provide-hardware:<id>`) and reports its id; a `vpn`
+credential and a `vpn` access entry would name two different needs. The rule holds across
+config layers too: a repository layer that declares `access: [{ "id": "vpn", ... }]` is
+rejected while the global layer's `credentials` (which it does not replace) still declare
+`vpn`. Ids are compared exactly, so `vpn` and `VPN` are different ids. Tools, services,
+references and environment variables are separate namespaces, so `--fail-on-blocked` can
+still list one name under two kinds; the readiness report says which.
+
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year. That
 also means an older anvil rejects a config that uses `project.credentials`,
@@ -724,8 +762,17 @@ job. Commit in the worktree and let a human run `anvil ship <key>`; do not use
 `git push --no-verify` to get around it. If the claim also reported that the guard could
 not be installed, the git in use does not support `extensions.worktreeConfig`.
 
-**`The staging bundle is stale`.** The repository changed between `anvil init` and
-`anvil init --apply`. Re-run `anvil init`, review the new diff, and apply again.
+**`The staging bundle is stale`.** The repository or a declared command changed between
+`anvil init` and `anvil init --apply`, or the bundle was staged by an earlier anvil (see the
+one-time staleness note under setup plans). Re-run `anvil init`, review the new diff, and
+apply again.
+
+**A setup plan validates as `stale`.** For an owner-command plan: the repository moved, an
+install command, a tool install or the working directory changed, or the plan was saved by an
+earlier anvil. Re-run `anvil setup plan`, review the fresh proposal and validate that one.
+Requirement declarations such as `project.credentials`, test commands and tools without an
+install do not invalidate it. For a `local-skill` plan: the repository moved, or the source
+file or destination changed; re-run the same `--adapter local-skill` command.
 
 **A claim was refused.** Every refusal names the reason: a branch that already exists, an
 occupied worktree path, a dirty base branch, or a path over the Windows length budget.

@@ -77,6 +77,41 @@ function checkedDirectory(dir: string): string {
   return dir
 }
 
+/**
+ * The declarations that can change this proposal, and only those.
+ *
+ * An action comes from an install command, a tool with a non-empty `install`, or the
+ * project's default working directory, and it carries nothing else from them. Every other
+ * declaration — a `test` or `lint` command, a tool's `bin` or `reason`, a tool with no
+ * `install`, and `env`, `services`, `references`, `credentials`, `access`, `hardware` —
+ * describes something `anvil ready` checks; it adds, removes and alters no setup action.
+ * Hashing those would invalidate a reviewed plan for a change that cannot change its bytes,
+ * and every saved plan across an upgrade that introduces a new declaration array.
+ *
+ * Indexes are kept: an action's id and source name its position (`project.commands[2]`).
+ */
+function setupInputs(declared: ProjectConfig, projectDir: string) {
+  return {
+    installCommands: declared.commands.flatMap((command, index) =>
+      command.kind === 'install' ? [{ index, cmd: command.cmd, dir: command.dir ?? null }] : [],
+    ),
+    toolInstalls: declared.tools.flatMap((tool, index) =>
+      tool.install === undefined || tool.install.trim() === ''
+        ? []
+        : [
+            {
+              index,
+              id: tool.id,
+              install: tool.install,
+              version: tool.version ?? null,
+              required: tool.required ?? true,
+            },
+          ],
+    ),
+    projectDir,
+  }
+}
+
 export function buildSetupPlan(options: {
   repository: SetupRepositoryState
   declared: ProjectConfig
@@ -143,7 +178,7 @@ export function buildSetupPlan(options: {
     approval: 'not-granted' as const,
     executionSupported: false as const,
     repository: { ...options.repository },
-    inputsDigest: digest({ declared, projectDir }),
+    inputsDigest: digest(setupInputs(declared, projectDir)),
     actions,
     warnings,
   }
@@ -152,7 +187,7 @@ export function buildSetupPlan(options: {
 
 /**
  * Compare untrusted saved JSON with a freshly generated plan. Equality is intentionally
- * strict: extra keys, changed commands or different repository/declaration inputs all fail.
+ * strict: extra keys, changed commands or different repository/setup inputs all fail.
  * This only validates a proposal; there are no accepted approval records in this slice.
  */
 export function validateSetupPlan(saved: unknown, current: SetupPlan): SetupPlanValidation {
@@ -176,7 +211,10 @@ export function validateSetupPlan(saved: unknown, current: SetupPlan): SetupPlan
     // Compare the entire object, not just an attacker-supplied digest. This also rejects extra
     // fields (including forged approvals) and malformed structures with recomputed digests.
     if (canonicalJson(saved) !== canonicalJson(current)) {
-      return result('stale', 'The saved plan differs from the current repository state or effective declarations.')
+      return result(
+        'stale',
+        'The saved plan differs from the repository state or the setup inputs (install commands, tool installs and the default working directory), or was saved by an anvil version that hashed them differently. Re-run `anvil setup plan`, review the fresh proposal and validate again.',
+      )
     }
   } catch {
     return result('invalid', 'The saved plan is not supported JSON data.')

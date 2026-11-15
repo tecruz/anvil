@@ -772,6 +772,103 @@ describe('project: owner-declared capabilities', () => {
       )
     }
   })
+
+  test('rejects an id shared by two requirement arrays', () => {
+    // A requirement id names an action (`request:vpn`) and appears in the readiness report.
+    // Checking each array separately let a credential and an access entry share one name.
+    const pairs = [
+      {
+        project: { credentials: [{ id: 'vpn' }], access: [{ id: 'vpn', kind: 'vpn' }] },
+        at: 'project.access[0].id',
+        prior: 'project.credentials[0]',
+      },
+      {
+        project: { credentials: [{ id: 'gpu' }], hardware: [{ id: 'gpu', gpu: {} }] },
+        at: 'project.hardware[0].id',
+        prior: 'project.credentials[0]',
+      },
+      {
+        project: { access: [{ id: 'vpn', kind: 'vpn' }], hardware: [{ id: 'vpn', gpu: {} }] },
+        at: 'project.hardware[0].id',
+        prior: 'project.access[0]',
+      },
+    ]
+    for (const { project, at, prior } of pairs) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.ok(err.message.includes(`${at}: duplicate id`), err.message)
+          assert.ok(err.message.includes(prior), err.message)
+          return true
+        },
+        JSON.stringify(project),
+      )
+    }
+  })
+
+  test('rejects an id shared across config layers', () => {
+    // Each layer replaces only the arrays it names, so a global credential and a repository
+    // access entry both stay in effect. They must not share a name either.
+    const global = mergeConfig(defaultConfig(), { project: { credentials: [{ id: 'vpn' }] } }, 'global.json')
+    assert.throws(
+      () => mergeConfig(global, { project: { access: [{ id: 'vpn', kind: 'vpn' }] } }, 'repo.json'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.ok(err.message.includes('repo.json'), err.message)
+        assert.ok(err.message.includes('project.access[0].id: duplicate id "vpn"'), err.message)
+        assert.ok(err.message.includes('project.credentials[0] in a lower config layer'), err.message)
+        return true
+      },
+    )
+    const globalHardware = mergeConfig(
+      defaultConfig(),
+      { project: { access: [{ id: 'a', kind: 'vpn' }], hardware: [{ id: 'gpu', gpu: {} }] } },
+      'global.json',
+    )
+    assert.throws(
+      () => mergeConfig(globalHardware, { project: { credentials: [{ id: 'gpu' }] } }, 'repo.json'),
+      /project\.credentials\[0\]\.id: duplicate id "gpu"; already declared at project\.hardware\[0\]/,
+    )
+  })
+
+  test('loadConfig rejects a global credential and a repository access entry with one id', () => {
+    const home = tempDir()
+    const repo = tempDir()
+    writeFileSync(join(home, 'anvil.config.json'), JSON.stringify({ project: { credentials: [{ id: 'vpn' }] } }))
+    writeFileSync(
+      join(repo, 'anvil.config.json'),
+      JSON.stringify({ project: { access: [{ id: 'vpn', kind: 'vpn' }] } }),
+    )
+    assert.throws(
+      () => loadConfig({ repoRoot: repo, env: { ANVIL_CONFIG_HOME: home } }),
+      /project\.access\[0\]\.id: duplicate id "vpn"; already declared at project\.credentials\[0\] in a lower config layer/,
+    )
+  })
+
+  test('a layer that replaces the colliding array is not a cross-layer duplicate', () => {
+    // Replacing `credentials` drops the global entry, so the repository may reuse its id elsewhere.
+    const global = mergeConfig(defaultConfig(), { project: { credentials: [{ id: 'vpn' }] } }, 'global.json')
+    const merged = mergeConfig(
+      global,
+      { project: { credentials: [{ id: 'npm' }], access: [{ id: 'vpn', kind: 'vpn' }] } },
+      'repo.json',
+    )
+    assert.deepEqual(
+      merged.project.credentials.map((c) => c.id),
+      ['npm'],
+    )
+    assert.deepEqual(
+      merged.project.access.map((a) => a.id),
+      ['vpn'],
+    )
+    // An unrelated repository array leaves the inherited ids alone.
+    const unrelated = mergeConfig(global, { project: { hardware: [{ id: 'gpu', gpu: {} }] } }, 'repo.json')
+    assert.deepEqual(
+      unrelated.project.credentials.map((c) => c.id),
+      ['vpn'],
+    )
+  })
 })
 
 describe('tokenizeCommand', () => {

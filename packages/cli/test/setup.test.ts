@@ -433,7 +433,31 @@ describe('anvil setup', () => {
     commit(root)
     const stale = run(root, ['validate', '--plan', saved, '--json'])
     assert.equal(stale.code, 5)
-    assert.equal((JSON.parse(stale.stdout) as { data: SetupPlanValidation }).data.status, 'stale')
+    const staleData = (JSON.parse(stale.stdout) as { data: SetupPlanValidation }).data
+    assert.equal(staleData.status, 'stale')
+    assert.match(staleData.reason, /anvil setup plan/)
+  })
+
+  test('a requirement-only declaration change keeps a saved plan current', () => {
+    const root = repo({ commands: [{ kind: 'install', cmd: 'npm ci' }] })
+    const home = join(root, '.config-home')
+    mkdirSync(home)
+    const configPath = join(home, 'anvil.config.json')
+    const write = (project: Record<string, unknown>) => writeFileSync(configPath, JSON.stringify({ project }))
+    const commands = [{ kind: 'install', cmd: 'npm ci' }]
+    write({ commands })
+    const saved = save(proposal(root))
+    // A requirement cannot change the proposal, so editing one must not send the owner
+    // through another review of identical bytes.
+    write({
+      commands,
+      credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }],
+      access: [{ id: 'vpn', kind: 'vpn' }],
+      hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' } }],
+    })
+    const result = run(root, ['validate', '--plan', saved, '--json'])
+    assert.equal(result.code, 0, result.stdout)
+    assert.equal((JSON.parse(result.stdout) as { data: SetupPlanValidation }).data.status, 'current')
   })
 
   test('global declaration changes invalidate a saved plan even when Git stays clean', () => {

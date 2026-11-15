@@ -131,17 +131,116 @@ describe('setup proposals', () => {
     }
   })
 
-  test('a moved repository, new HEAD, changed requirements or changed working directory invalidates the plan', () => {
+  test('a moved repository, new HEAD, changed install input or working directory invalidates the plan', () => {
     const declared = config({ tools: [{ id: 'node', install: 'install node', version: '^22' }] })
     const saved = plan(declared)
-    for (const current of [
+    const current = [
       plan(declared, { ...repository, root: '/other-repo' }),
       plan(declared, { ...repository, head: 'b'.repeat(40) }),
       plan(config({ tools: [{ id: 'node', install: 'install node', version: '^24' }] })),
       plan(declared, repository, 'app'),
-      plan({ ...declared, env: [{ name: 'NEW_REQUIREMENT' }] }),
+      plan(config({ commands: [{ kind: 'install', cmd: 'npm ci' }] })),
+    ]
+    for (const candidate of current) {
+      const validation = validateSetupPlan(saved, candidate)
+      assert.equal(validation.status, 'stale')
+      assert.match(validation.reason, /anvil setup plan/, 'a stale plan names the command to re-run')
+    }
+  })
+
+  test('a requirement-only declaration change keeps a reviewed plan current', () => {
+    // A plan is built from install commands, tool installs and the working directory. A
+    // credential, access or hardware entry adds no action, so editing one cannot change the
+    // proposal — and an upgrade that adds a requirement array must not invalidate every
+    // saved plan either.
+    const base = { tools: [{ id: 'node', install: 'install node' }] }
+    const saved = plan(config(base))
+    for (const changed of [
+      config({ ...base, env: [{ name: 'NEW_REQUIREMENT' }] }),
+      config({ ...base, services: [{ id: 'db', port: 5432 }] }),
+      config({ ...base, references: [{ id: 'adr', path: 'docs/adr/0001.md' }] }),
+      config({ ...base, credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }] }),
+      config({ ...base, access: [{ id: 'vpn', kind: 'vpn' }] }),
+      config({ ...base, hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' } }] }),
     ]) {
-      assert.equal(validateSetupPlan(saved, current).status, 'stale')
+      const candidate = plan(changed)
+      assert.equal(candidate.inputsDigest, saved.inputsDigest)
+      assert.equal(validateSetupPlan(saved, candidate).status, 'current')
+    }
+  })
+
+  test('a declaration that adds no action keeps a reviewed plan current', () => {
+    // A test or lint command, a tool without an install and a tool's `bin` or `reason` are
+    // checked by `anvil ready`; none of them becomes or changes a setup action.
+    const node = { id: 'node', install: 'install node', version: '^22' }
+    const base = {
+      commands: [{ kind: 'install' as const, cmd: 'npm ci' }],
+      tools: [node],
+    }
+    const saved = plan(config(base))
+    for (const changed of [
+      config({ ...base, commands: [...base.commands, { kind: 'test', cmd: 'npm test' }] }),
+      config({ ...base, commands: [...base.commands, { kind: 'lint', cmd: 'npm run lint', dir: 'web' }] }),
+      config({ ...base, tools: [...base.tools, { id: 'jq', version: '^1.7' }] }),
+      config({ ...base, tools: [...base.tools, { id: 'gh', install: '   ' }] }),
+      config({ ...base, tools: [{ ...node, bin: 'nodejs', reason: 'runtime' }] }),
+    ] as ProjectConfig[]) {
+      const candidate = plan(changed)
+      assert.deepEqual(candidate.actions, saved.actions)
+      assert.equal(candidate.inputsDigest, saved.inputsDigest, JSON.stringify(changed))
+      assert.equal(validateSetupPlan(saved, candidate).status, 'current')
+    }
+  })
+
+  test('the inputs digest covers every field an action is built from', () => {
+    // Validation compares whole plans, so a changed action is caught even without the digest;
+    // the digest is still the plan's own statement of what it was built from, so it must move
+    // with each of those inputs and nothing else.
+    const tool = { id: 'node', install: 'install node', version: '^22' }
+    const base = config({ commands: [{ kind: 'install', cmd: 'npm ci' }], tools: [tool] })
+    const digest = plan(base).inputsDigest
+    for (const [label, changed, projectDir] of [
+      ['install command text', config({ ...base, commands: [{ kind: 'install', cmd: 'pnpm i' }] }), ''],
+      ['install command dir', config({ ...base, commands: [{ kind: 'install', cmd: 'npm ci', dir: 'web' }] }), ''],
+      [
+        // The position names the action (`command:1`), so moving the install command matters
+        // even though the inserted test command itself is not a setup input.
+        'install command position',
+        config({
+          ...base,
+          commands: [
+            { kind: 'test', cmd: 'npm test' },
+            { kind: 'install', cmd: 'npm ci' },
+          ],
+        }),
+        '',
+      ],
+      ['tool install text', config({ ...base, tools: [{ ...tool, install: 'brew install node' }] }), ''],
+      ['tool id', config({ ...base, tools: [{ ...tool, id: 'nodejs' }] }), ''],
+      ['tool version', config({ ...base, tools: [{ ...tool, version: '^24' }] }), ''],
+      ['tool required', config({ ...base, tools: [{ ...tool, required: false }] }), ''],
+      ['new tool install', config({ ...base, tools: [tool, { id: 'jq', install: 'install jq' }] }), ''],
+      ['default working directory', base, 'app'],
+    ] as Array<[string, ProjectConfig, string]>) {
+      assert.notEqual(plan(changed, repository, projectDir).inputsDigest, digest, label)
+    }
+  })
+
+  test('a plan saved before setup inputs were narrowed validates as stale once', () => {
+    // Earlier versions hashed the whole effective `project` config. The current digest cannot
+    // match it, so such a plan is refused (fail-safe) and must be re-planned once, even when
+    // nothing in the repository changed.
+    for (const declared of [config(), config({ tools: [{ id: 'node', install: 'install node' }] })]) {
+      const current = plan(declared)
+      const olderInputsDigest = createHash('sha256')
+        .update(JSON.stringify(recanonicalize({ declared, projectDir: '' })))
+        .digest('hex')
+      const older = rehash({ ...current, inputsDigest: olderInputsDigest })
+      assert.notEqual(older.inputsDigest, current.inputsDigest)
+      const validation = validateSetupPlan(older, current)
+      assert.equal(validation.status, 'stale')
+      assert.match(validation.reason, /anvil version/)
+      assert.match(validation.reason, /anvil setup plan/)
     }
   })
 
