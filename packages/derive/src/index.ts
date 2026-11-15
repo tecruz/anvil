@@ -111,12 +111,15 @@ export {
   verifyLocalSkillInstall,
 } from './setup-apply.ts'
 export {
+  type ApprovalInspectionIo,
+  type ApprovalProtectionIo,
   approvalStoreDir,
   buildSetupApprovalGrant,
   consumeSetupApproval,
   type GrantRecordRead,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  inspectSetupApprovalTransition,
   isTrustedRootAlias,
   prepareSetupApprovalStore,
   type ReadSetupApprovalGrantResult,
@@ -135,6 +138,7 @@ export {
   type SetupApprovalRecord,
   type SetupApprovalStatus,
   type SetupApprovalStoreOptions,
+  type SetupApprovalTransitionInspection,
   type SetupApprovalTransitionState,
   type SetupApprovalVerdict,
   saveSetupApprovalGrant,

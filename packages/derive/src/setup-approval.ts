@@ -467,18 +467,42 @@ function posixProtectionProblem(path: string, kind: 'directory' | 'file'): strin
 }
 
 /**
- * Why one record path is not private, or null when it is.
- *
- * A record another user could write is not authority, so the check applies to the store, every
- * grant directory and every record file, not only the store root. POSIX uses ownership and mode
- * bits; Windows uses the object's access control list, because a Windows `lstat` reports no
- * meaningful owner or mode.
+ * One protection check's verdict. A timed-out ACL query is separated from every other refusal
+ * so a caller can say which happened without re-inspecting the message text.
  */
-function protectionProblem(path: string, kind: 'directory' | 'file'): string | null {
+interface ProtectionInspection {
+  /** Why the record is not private, or null when it is. */
+  problem: string | null
+  /** True when the ACL query was bounded out, which is a refusal, not a pass. */
+  timedOut: boolean
+  /** The bound that fired, or 0 when the check did not time out. */
+  timeoutMs: number
+}
+
+/** A refusal that names the bound that fired, rather than an unreadable record. */
+function timeoutReason(subject: string, timeoutMs: number): string {
+  return `${subject} could not be read within ${timeoutMs} ms; it is refused rather than trusted.`
+}
+
+/**
+ * Inspect one record path. The check applies to the store, every grant directory and every
+ * record file, not only the store root. POSIX uses ownership and mode bits; Windows uses the
+ * object's access control list, because a Windows `lstat` reports no meaningful owner or mode.
+ */
+function inspectProtection(
+  path: string,
+  kind: 'directory' | 'file',
+  io: ApprovalInspectionIo = {},
+): ProtectionInspection {
   const structure = structureProblem(path, kind)
-  if (structure !== null) return structure
-  if (process.platform === 'win32') return windowsProtectionProblem(path, kind)
-  return posixProtectionProblem(path, kind)
+  if (structure !== null) return { problem: structure, timedOut: false, timeoutMs: 0 }
+  if ((io.platform ?? process.platform) === 'win32') return windowsProtectionProblem(path, kind, io)
+  return { problem: posixProtectionProblem(path, kind), timedOut: false, timeoutMs: 0 }
+}
+
+/** Why one record path is not private, or null when it is. */
+function protectionProblem(path: string, kind: 'directory' | 'file', io: ApprovalInspectionIo = {}): string | null {
+  return inspectProtection(path, kind, io).problem
 }
 
 /** The `<domain>\<user>` name Windows uses for the current user's account. */
@@ -586,6 +610,22 @@ interface WindowsAcl {
 /** The current user, owner and allow SIDs of one object, or why they could not be read. */
 type WindowsAclRead = { ok: true; acl: WindowsAcl } | { ok: false; timedOut: boolean; timeoutMs: number }
 
+/**
+ * Test seams for the protection check.
+ *
+ * `readAcl` lets a test prove the timeout reason on any platform, with a stubbed reader rather
+ * than a real one-millisecond deadline that only a slow host reproduces. `platform` lets a
+ * POSIX host exercise the Windows branch. Neither is reachable from repository configuration,
+ * so neither can weaken a real check.
+ */
+export interface ApprovalProtectionIo {
+  readAcl?: (path: string) => WindowsAclRead
+}
+
+export interface ApprovalInspectionIo extends ApprovalProtectionIo {
+  platform?: NodeJS.Platform
+}
+
 function readWindowsAcl(path: string): WindowsAclRead {
   const shell = windowsPowerShell()
   if (shell === null) return { ok: false, timedOut: false, timeoutMs: windowsToolTimeoutMs() }
@@ -622,25 +662,40 @@ const WINDOWS_TRUSTED_SIDS = new Set(['S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-
  * when the current list looks private. Output that cannot be read is also a refusal, which
  * keeps the check fail-closed.
  */
-function windowsProtectionProblem(path: string, kind: 'directory' | 'file'): string | null {
-  const read = readWindowsAcl(path)
+function windowsProtectionProblem(
+  path: string,
+  kind: 'directory' | 'file',
+  io: ApprovalProtectionIo = {},
+): ProtectionInspection {
+  const readAcl = io.readAcl ?? readWindowsAcl
+  const read = readAcl(path)
   if (!read.ok) {
     // A timeout is still a refusal: an ACL that could not be read in time might name any
     // principal. Saying so separately keeps a slow host from looking like a broken store.
     return read.timedOut
-      ? `The approval ${kind} access control list could not be read within ${read.timeoutMs} ms; it is refused rather than trusted.`
-      : `The approval ${kind} access control list cannot be read.`
+      ? {
+          problem: `${timeoutReason(`The approval ${kind} access control list`, read.timeoutMs)} It could name any principal, so it is not treated as private.`,
+          timedOut: true,
+          timeoutMs: read.timeoutMs,
+        }
+      : {
+          problem: `The approval ${kind} access control list cannot be read.`,
+          timedOut: false,
+          timeoutMs: read.timeoutMs,
+        }
   }
   const acl = read.acl
   if (acl.owner !== acl.self && !WINDOWS_TRUSTED_SIDS.has(acl.owner)) {
-    return `The approval ${kind} is owned by ${acl.owner}.`
+    return { problem: `The approval ${kind} is owned by ${acl.owner}.`, timedOut: false, timeoutMs: 0 }
   }
-  if (acl.allow.length === 0) return `The approval ${kind} has no access control entry for its owner.`
+  if (acl.allow.length === 0) {
+    return { problem: `The approval ${kind} has no access control entry for its owner.`, timedOut: false, timeoutMs: 0 }
+  }
   for (const sid of acl.allow) {
     if (sid === acl.self || WINDOWS_TRUSTED_SIDS.has(sid)) continue
-    return `The approval ${kind} grants access to ${sid}.`
+    return { problem: `The approval ${kind} grants access to ${sid}.`, timedOut: false, timeoutMs: 0 }
   }
-  return null
+  return { problem: null, timedOut: false, timeoutMs: 0 }
 }
 
 /** Restrict a Windows store to the current user, dropping every inherited entry. */
@@ -921,34 +976,74 @@ export function saveSetupApprovalGrant(
 export type SetupApprovalTransitionState = 'none' | 'revoked' | 'consumed' | 'unknown'
 
 /**
- * Read the single terminal-state record. Absent, a valid kind, or uninspectable.
+ * A terminal-state read plus why it was uninspectable.
+ *
+ * The state alone cannot say whether a timeout, another user's access or corrupt JSON made a
+ * record `unknown`. Callers that report a reason use this; callers that only branch on the
+ * state can keep using the state itself.
+ */
+export interface SetupApprovalTransitionInspection {
+  state: SetupApprovalTransitionState
+  /** Why the state is `unknown`, or null for a known state. */
+  reason: string | null
+}
+
+/**
+ * Read the single terminal-state record and say why it could not be inspected.
  *
  * A caller that holds the repository lock can read this to distinguish a reservation that
  * won the grant from one that never did; an `unknown` record is corruption once the writer
- * that would have published it can no longer be in flight.
+ * that would have published it can no longer be in flight. A timed-out ACL query stays
+ * `unknown` and says so, rather than being reported as a corrupt record.
  */
-export function readSetupApprovalTransition(dir: string): SetupApprovalTransitionState {
+export function inspectSetupApprovalTransition(
+  dir: string,
+  io: ApprovalInspectionIo = {},
+): SetupApprovalTransitionInspection {
   const path = join(dir, TRANSITION_FILE)
   let stat: ReturnType<typeof lstatSync>
   try {
     stat = lstatSync(path)
   } catch (cause) {
-    return (cause as NodeJS.ErrnoException).code === 'ENOENT' ? 'none' : 'unknown'
+    return (cause as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'none', reason: null }
+      : { state: 'unknown', reason: 'The grant state record cannot be inspected.' }
   }
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) return 'unknown'
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    return {
+      state: 'unknown',
+      reason: 'The grant state record cannot be inspected: it is a link or not a regular file.',
+    }
+  }
   // A transition record another user can rewrite could revoke or consume a grant at will.
-  if (protectionProblem(path, 'file') !== null) return 'unknown'
+  const protection = inspectProtection(path, 'file', io)
+  if (protection.problem !== null) {
+    return {
+      state: 'unknown',
+      reason: protection.timedOut
+        ? `The grant state record cannot be inspected: ${timeoutReason('its protection check', protection.timeoutMs)}`
+        : `The grant state record cannot be inspected: it is not private to the current user. ${protection.problem}`,
+    }
+  }
   const raw = readRegularFile(path, MAX_RECORD_BYTES)
-  if (raw === null) return 'unknown'
+  if (raw === null) return { state: 'unknown', reason: 'The grant state record cannot be read.' }
   try {
     const parsed: unknown = JSON.parse(raw)
     if (isPlainObject(parsed) && (parsed.kind === 'revoked' || parsed.kind === 'consumed') && isIsoDate(parsed.at)) {
-      return parsed.kind
+      return { state: parsed.kind, reason: null }
     }
   } catch {
     // Fall through to unknown.
   }
-  return 'unknown'
+  return {
+    state: 'unknown',
+    reason: 'The grant state record cannot be inspected: it is not a valid terminal-state record.',
+  }
+}
+
+/** The terminal state alone. See {@link inspectSetupApprovalTransition} for the reason. */
+export function readSetupApprovalTransition(dir: string, io: ApprovalInspectionIo = {}): SetupApprovalTransitionState {
+  return inspectSetupApprovalTransition(dir, io).state
 }
 
 function writeTransition(dir: string, kind: 'revoked' | 'consumed', now: Date): 'written' | 'exists' {
@@ -975,7 +1070,12 @@ function checkedRecordName(name: string): void {
  * Read an auxiliary record from a validated grant directory. A link, a multiply-linked file
  * or a record another user could rewrite is `unknown`, never trusted JSON.
  */
-export function readGrantRecord(dir: string, name: string, maxBytes = MAX_RECORD_BYTES): GrantRecordRead {
+export function readGrantRecord(
+  dir: string,
+  name: string,
+  maxBytes = MAX_RECORD_BYTES,
+  io: ApprovalInspectionIo = {},
+): GrantRecordRead {
   checkedRecordName(name)
   const path = join(dir, name)
   let stat: ReturnType<typeof lstatSync>
@@ -989,8 +1089,17 @@ export function readGrantRecord(dir: string, name: string, maxBytes = MAX_RECORD
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
     return { state: 'unknown', reason: 'The grant record is a link or not a regular file.' }
   }
-  if (protectionProblem(path, 'file') !== null) {
-    return { state: 'unknown', reason: 'The grant record is not private to the current user.' }
+  // A timeout is not a permissions problem: an ACL query that ran out of time says nothing
+  // about who may write the record, and misreporting it hides a slow host behind a refusal
+  // that looks like tampering.
+  const protection = inspectProtection(path, 'file', io)
+  if (protection.problem !== null) {
+    return {
+      state: 'unknown',
+      reason: protection.timedOut
+        ? timeoutReason('The grant record protection check', protection.timeoutMs)
+        : `The grant record is not private to the current user: ${protection.problem}`,
+    }
   }
   const raw = readRegularFile(path, maxBytes)
   if (raw === null) return { state: 'unknown', reason: 'The grant record cannot be read.' }
@@ -1063,11 +1172,12 @@ export function inspectSetupApproval(
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readSetupApprovalTransition(dir)
-  if (transition === 'unknown')
-    return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
-  if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
-  if (transition === 'consumed') {
+  const transition = inspectSetupApprovalTransition(dir)
+  if (transition.state === 'unknown') {
+    return approvalRecord(id, 'unknown', transition.reason ?? 'The grant state record cannot be inspected.', grant)
+  }
+  if (transition.state === 'revoked') return approvalRecord(id, 'revoked', 'The grant was revoked.', grant)
+  if (transition.state === 'consumed') {
     return approvalRecord(
       id,
       'consumed',
@@ -1114,10 +1224,11 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
   if (!read.ok) return approvalRecord(id, read.status, read.reason, null)
   const { grant, dir } = read
 
-  const transition = readSetupApprovalTransition(dir)
-  if (transition === 'unknown')
-    return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
-  if (transition === 'consumed') {
+  const transition = inspectSetupApprovalTransition(dir)
+  if (transition.state === 'unknown') {
+    return approvalRecord(id, 'unknown', transition.reason ?? 'The grant state record cannot be inspected.', grant)
+  }
+  if (transition.state === 'consumed') {
     return approvalRecord(
       id,
       'consumed',
@@ -1125,7 +1236,7 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
       grant,
     )
   }
-  if (transition === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
+  if (transition.state === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
 
   const now = options.now ?? new Date()
   let written: 'written' | 'exists'
@@ -1138,8 +1249,8 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
     return approvalRecord(id, 'revoked', 'The grant was revoked. It can no longer authorize an application.', grant)
   }
   // Another transition won the race; report whichever terminal state it wrote.
-  const after = readSetupApprovalTransition(dir)
-  if (after === 'consumed') {
+  const after = inspectSetupApprovalTransition(dir)
+  if (after.state === 'consumed') {
     return approvalRecord(
       id,
       'consumed',
@@ -1147,8 +1258,8 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
       grant,
     )
   }
-  if (after === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
-  return approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant)
+  if (after.state === 'revoked') return approvalRecord(id, 'revoked', 'The grant was already revoked.', grant)
+  return approvalRecord(id, 'unknown', after.reason ?? 'The grant state record cannot be inspected.', grant)
 }
 
 /**
@@ -1167,17 +1278,17 @@ export function consumeSetupApproval(
   if (!read.ok) return { record: approvalRecord(id, read.status, read.reason, null), reserved: false }
   const { grant, dir } = read
 
-  const transition = readSetupApprovalTransition(dir)
-  if (transition === 'unknown') {
+  const transition = inspectSetupApprovalTransition(dir)
+  if (transition.state === 'unknown') {
     return {
-      record: approvalRecord(id, 'unknown', 'The grant state record cannot be inspected.', grant),
+      record: approvalRecord(id, 'unknown', transition.reason ?? 'The grant state record cannot be inspected.', grant),
       reserved: false,
     }
   }
-  if (transition === 'consumed') {
+  if (transition.state === 'consumed') {
     return { record: approvalRecord(id, 'consumed', 'This grant has already been used.', grant), reserved: false }
   }
-  if (transition === 'revoked') {
+  if (transition.state === 'revoked') {
     return { record: approvalRecord(id, 'revoked', 'The grant was revoked.', grant), reserved: false }
   }
 

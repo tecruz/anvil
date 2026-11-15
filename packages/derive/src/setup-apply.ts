@@ -33,6 +33,7 @@ import {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  inspectSetupApprovalTransition,
   readGrantRecord,
   readSetupApprovalGrant,
   readSetupApprovalTransition,
@@ -846,14 +847,14 @@ async function settleUnderLock(
     if (!binding.ok) return refusal(binding.reason, plan, lockedRead.grant)
     const after = readSetupApplicationJournal(lockedRead.dir)
     if (after.state !== 'absent') return settleExistingAttempt(after, lockedRead.grant, flow)
-    const transition = readSetupApprovalTransition(lockedRead.dir)
+    const transition = inspectSetupApprovalTransition(lockedRead.dir)
     // A live writer holds the repository lock for the whole consume-and-journal sequence, so
     // a record still unreadable once this caller holds the lock is corrupt, not in flight.
-    if (transition === 'unknown') {
-      return refusal('The grant state record cannot be inspected.', plan, lockedRead.grant)
+    if (transition.state === 'unknown') {
+      return refusal(transition.reason ?? 'The grant state record cannot be inspected.', plan, lockedRead.grant)
     }
-    if (transition === 'revoked') return refusal('The grant was revoked.', plan, lockedRead.grant)
-    if (transition === 'none' && options.noAttemptReason !== undefined) {
+    if (transition.state === 'revoked') return refusal('The grant was revoked.', plan, lockedRead.grant)
+    if (transition.state === 'none' && options.noAttemptReason !== undefined) {
       // No application won this grant: the caller's original refusal is the accurate report.
       return refusal(options.noAttemptReason, plan, lockedRead.grant)
     }

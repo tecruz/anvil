@@ -231,8 +231,14 @@ The store is authority, so it is checked on every read and write. It must be a r
 private to the current user: on POSIX the store, the grant directory and every record file
 must be owned by the current user with no group or other write bit (the store is created `0700`
 and records `0600`, regardless of umask); on Windows the same three levels must be owned by the
-current user and grant access to the current user only, and a foreign owner, a foreign access
-control entry, or an ACL that cannot be read is refused. The path must not pass through a link
+current user and grant access to the current user only; a foreign owner, a foreign access
+control entry, an ACL that cannot be read, and an ACL query that exceeds the tool bound
+(`WINDOWS_TOOL_TIMEOUT_MS`, 60 s by default) are all refused. A timeout is reported as a
+timeout, naming the bound that fired, rather than as an unreadable record or a permissions
+problem: the record is still never trusted, but a slow host is no longer mistaken for a
+tampered one. `ANVIL_APPROVAL_TOOL_TIMEOUT_MS` is a bounded process-level override (1-300,000
+ms) for a slow host; an invalid value falls back to the default and cannot remove the bound.
+The path must not pass through a link
 or junction either, except for the known macOS root aliases `/var`, `/tmp` and `/etc`. A refusal
 leaves nothing created: a store reached through a link is rejected before anything is created
 or touched, and a store anvil creates is removed again if initialization then fails. A store
