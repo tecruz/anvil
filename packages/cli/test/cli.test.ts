@@ -167,6 +167,65 @@ describe('anvil init staging containment', () => {
   }
 })
 
+describe('anvil init staging hash covers only what the generators read', () => {
+  /**
+   * Stage with one effective config, switch to another, then apply.
+   *
+   * The config lives in the global layer (`ANVIL_CONFIG_HOME`), outside the repository, so
+   * writing it cannot change the profile or the audit and the only difference between the
+   * two runs is the declaration under test.
+   */
+  function stageThenApply(before: object | null, after: object | null): RunResult {
+    const dir = tempDir('anvil-cli-init-hash-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'hash-fixture', scripts: { test: 'true' } }))
+    const home = tempDir('anvil-cli-init-home-')
+    const env = { ANVIL_CONFIG_HOME: home }
+    const write = (project: object | null) => {
+      const path = join(home, 'anvil.config.json')
+      if (project === null) rmSync(path, { force: true })
+      else writeFileSync(path, JSON.stringify({ project }))
+    }
+    write(before)
+    const staged = runAnvil(['init', '--only', 'agents-file', '--json'], { cwd: dir, env })
+    assert.equal(staged.code, 0, staged.stdout + staged.stderr)
+    write(after)
+    return runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir, env })
+  }
+  const commands = [{ kind: 'test', cmd: 'npm run test:unit' }]
+  const requirements = {
+    tools: [{ id: 'node', version: '^22', install: 'install node' }],
+    references: [{ id: 'adr', path: 'docs/adr/0001.md' }],
+    env: [{ name: 'DATABASE_URL' }],
+    credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }],
+    access: [{ id: 'vpn', kind: 'vpn' }],
+  }
+
+  test('adding the first declaration that no generator reads keeps a staged bundle current', () => {
+    const result = stageThenApply(null, { references: requirements.references })
+    assert.equal(result.code, 0, result.stdout + result.stderr)
+  })
+
+  test('removing the last such declaration keeps a staged bundle current', () => {
+    const result = stageThenApply({ credentials: requirements.credentials }, null)
+    assert.equal(result.code, 0, result.stdout + result.stderr)
+  })
+
+  test('editing requirements beside declared commands keeps a staged bundle current', () => {
+    // init hashes `generationInputs(declared)`, not the whole config: the generated files
+    // carry the declared test command and nothing from the other arrays.
+    const result = stageThenApply({ commands }, { commands, ...requirements })
+    assert.equal(result.code, 0, result.stdout + result.stderr)
+  })
+
+  test('a changed declared command makes a staged bundle stale', () => {
+    // The projection still covers what the generators do read.
+    const result = stageThenApply({ commands }, { commands: [{ kind: 'test', cmd: 'npm run test:all' }] })
+    assert.notEqual(result.code, 0, 'a bundle built from another command must not apply')
+    assert.match(result.stdout + result.stderr, /stale/)
+  })
+})
+
 describe('anvil init staging creation containment', () => {
   for (const linkedDirectory of ['.anvil', '.anvil/staging']) {
     for (const populated of [false, true]) {

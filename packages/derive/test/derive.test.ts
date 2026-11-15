@@ -356,6 +356,84 @@ test('a declaration the generators never read cannot invalidate a staged bundle'
   assert.notEqual(stagingHash(changedCommand), base)
 })
 
+/** A config with every declaration the generators must ignore, plus the given commands. */
+function everyNonCommandDeclaration(commands: ProjectConfig['commands']): ProjectConfig {
+  return {
+    ...defaultConfig().project,
+    commands,
+    tools: [{ id: 'node', version: '^22', install: 'install node', reason: 'runtime' }],
+    references: [{ id: 'adr', path: 'docs/adr/0001.md' }],
+    env: [{ name: 'DATABASE_URL' }],
+    services: [{ id: 'db', port: 5432 }],
+    credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }],
+    access: [{ id: 'vpn', kind: 'vpn' }],
+    hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' } }],
+  }
+}
+
+test('generationInputs is exactly what the generators read', () => {
+  // The staging hash trusts `generationInputs` to name every declaration a generated file
+  // can depend on. Build every artifact from the full config and from that projection alone:
+  // if a generator ever reads another array, the outputs diverge and this fails before a
+  // reviewed bundle can be applied over bytes its hash never covered.
+  const dir = materialize('node-npm')
+  const profile = profileIn(dir)
+  const matches = matchesFor(profile)
+  const generators = [generateAgentsFile, generateVerifySkill, generateReviewCommand]
+  const build = (declared: ProjectConfig | undefined) =>
+    generators.map((g) => g(declared === undefined ? { profile, matches } : { profile, matches, declared })?.content)
+
+  const commands: ProjectConfig['commands'] = [
+    { kind: 'test', cmd: 'npm run test:unit' },
+    { kind: 'lint', cmd: 'npm run lint:all' },
+  ]
+  const full = everyNonCommandDeclaration(commands)
+  const projected = { ...defaultConfig().project, ...generationInputs(full) }
+  assert.deepEqual(build(full), build(projected))
+  assert.ok(
+    build(full).some((content) => content?.includes('npm run test:unit')),
+    'the declared command must reach a generated file, or this test proves nothing',
+  )
+
+  // No declared command generates what no config generates, which is why both project to
+  // `undefined` and hash alike.
+  const noCommands = everyNonCommandDeclaration([])
+  assert.equal(generationInputs(noCommands), undefined)
+  assert.equal(generationInputs(undefined), undefined)
+  assert.deepEqual(build(noCommands), build(undefined))
+})
+
+test('a config with no declared commands stages under the same hash as no config', () => {
+  // Adding the first reference or removing the last credential cannot change a generated
+  // byte, so it must not change the hash either.
+  const noConfig = hashInputs({ profile: { root: '/repo' }, report: { score: 0, findings: [] }, playbookIds: [] })
+  assert.equal(stagingHash(defaultConfig().project), noConfig)
+  assert.equal(stagingHash(everyNonCommandDeclaration([])), noConfig)
+  assert.notEqual(stagingHash(everyNonCommandDeclaration([{ kind: 'test', cmd: 'npm test' }])), noConfig)
+})
+
+test('a bundle staged before the projection is stale once, and only when it had declarations', () => {
+  // Earlier versions hashed the whole effective `project` config whenever anything was
+  // declared. Those hashes cannot match the projection, so such a bundle is refused once and
+  // `anvil init` must be re-run; a bundle staged with no declarations keeps its hash.
+  const input = { profile: { root: '/repo' }, report: { score: 0, findings: [] }, playbookIds: [] }
+  const full = everyNonCommandDeclaration([{ kind: 'test', cmd: 'npm test' }])
+  const olderHash = hashInputs({ ...input, declared: full })
+  assert.notEqual(stagingHash(full), olderHash)
+  const olderReferencesOnly = hashInputs({ ...input, declared: everyNonCommandDeclaration([]) })
+  assert.notEqual(stagingHash(everyNonCommandDeclaration([])), olderReferencesOnly)
+  assert.equal(stagingHash(defaultConfig().project), hashInputs(input))
+
+  const dir = materialize('node-npm')
+  const { artifact } = stageOnce(dir)
+  const manifest = inspectStaging(dir).manifest
+  assert.ok(manifest !== null)
+  const check = checkApplyPreconditions(dir, { ...manifest, inputHash: olderHash }, stagingHash(full))
+  assert.equal(check.ok, false)
+  assert.match(check.reason ?? '', /stale/)
+  assert.ok(artifact.content.length > 0)
+})
+
 function stageOnce(dir: string): {
   inputHash: string
   artifact: GeneratedArtifact

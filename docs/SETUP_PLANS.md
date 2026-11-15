@@ -38,7 +38,7 @@ The normal CLI envelope carries a `SetupPlan` in its `data` field:
 | `executed`, `executionSupported` | Both `false` |
 | `approval` | Always `"not-granted"` |
 | `repository` | Physical root, HEAD commit or `null`, and Git worktree state |
-| `inputsDigest` | SHA-256 of the install commands, tool installs and default working directory that shape the proposal |
+| `inputsDigest` | SHA-256 of the fields actions are built from: each `install` command's index, text and directory; each tool with an `install`, its index, id, install text, version range and `required`; and the default working directory |
 | `actions` | Ordered owner-declared install proposals |
 | `warnings` | Explicit limits and missing knowledge |
 | `digest` | SHA-256 of the canonical payload excluding `digest` itself |
@@ -105,9 +105,11 @@ hide one. These cases are refused before index-reading commands run.
 
 Validation compares the saved payload with a newly generated plan, not just its claimed
 digest. It refuses changed commands, added fields, forged approval fields, changed setup
-inputs, another repository root, or a different HEAD. A requirement declaration such as
-`project.credentials`, `project.access` or `project.hardware` cannot add, remove or alter an
-action, so it is not a setup input; editing one keeps an otherwise identical plan current.
+inputs, another repository root, or a different HEAD. A declaration that cannot add, remove
+or alter an action is not a setup input: a non-install command, a tool without an `install`,
+a tool's `bin` or `reason`, and the `env`, `services`, `references`, `credentials`, `access`
+and `hardware` arrays. Editing one keeps an otherwise identical plan current. A plan saved by
+an anvil that hashed the whole `project` config validates as `stale` once after upgrading.
 Dirty, missing-HEAD, nested profile or incomplete repository state cannot validate as current.
 
 The validation payload reports `current`, `stale`, `invalid` or `unknown` and always retains

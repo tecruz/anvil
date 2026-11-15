@@ -1098,6 +1098,12 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
       const hardware = parseDeclaredHardware(project.hardware, 'project.hardware', requirementIds, issues)
       if (hardware !== undefined) next.project.hardware = hardware
     }
+    // The registry above sees only this layer. An array the layer is silent about keeps the
+    // lower layer's entries, so a global `credentials: [{ id: "vpn" }]` and a repository
+    // `access: [{ id: "vpn" }]` would still meet in the effective config. Check the arrays
+    // this layer declares against the ones it inherits. Two inherited arrays were already
+    // checked when the lower layer was merged, and two declared here were checked above.
+    if (issues.length === 0) checkInheritedRequirementIds(project, next.project, issues)
   }
 
   if (issues.length > 0) {
@@ -1108,6 +1114,38 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
   }
 
   return next
+}
+
+const REQUIREMENT_ARRAYS = ['credentials', 'access', 'hardware'] as const
+
+/**
+ * Reject a requirement id this layer declares when a lower layer's array, still in effect
+ * because this layer does not replace it, already uses the same id.
+ */
+function checkInheritedRequirementIds(
+  layer: Record<string, unknown>,
+  merged: ProjectConfig,
+  issues: ValidationIssue[],
+): void {
+  const inherited = new Map<string, string>()
+  for (const key of REQUIREMENT_ARRAYS) {
+    if (layer[key] !== undefined) continue
+    merged[key].forEach((entry, index) => {
+      if (!inherited.has(entry.id)) inherited.set(entry.id, `project.${key}[${index}]`)
+    })
+  }
+  if (inherited.size === 0) return
+  for (const key of REQUIREMENT_ARRAYS) {
+    if (layer[key] === undefined) continue
+    merged[key].forEach((entry, index) => {
+      const prior = inherited.get(entry.id)
+      if (prior === undefined) return
+      issues.push({
+        path: `project.${key}[${index}].id`,
+        message: `duplicate id "${entry.id}"; already declared at ${prior} in a lower config layer`,
+      })
+    })
+  }
 }
 
 function readLayer(path: string): Record<string, unknown> | null {

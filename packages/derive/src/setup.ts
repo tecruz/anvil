@@ -78,20 +78,38 @@ function checkedDirectory(dir: string): string {
 }
 
 /**
- * The declarations that can change this proposal.
+ * The declarations that can change this proposal, and only those.
  *
- * An action comes from an install command, a tool's `install` text, or the project's
- * default working directory. Every other declaration (`env`, `services`, `references`,
- * `credentials`, `access`, `hardware`) describes something `anvil ready` checks; it adds,
- * removes and alters no setup action. Hashing those entries would invalidate a reviewed
- * plan for a change that cannot change its bytes, and it would invalidate every saved plan
- * across an upgrade that introduces a new requirement array.
+ * An action comes from an install command, a tool with a non-empty `install`, or the
+ * project's default working directory, and it carries nothing else from them. Every other
+ * declaration — a `test` or `lint` command, a tool's `bin` or `reason`, a tool with no
+ * `install`, and `env`, `services`, `references`, `credentials`, `access`, `hardware` —
+ * describes something `anvil ready` checks; it adds, removes and alters no setup action.
+ * Hashing those would invalidate a reviewed plan for a change that cannot change its bytes,
+ * and every saved plan across an upgrade that introduces a new declaration array.
+ *
+ * Indexes are kept: an action's id and source name its position (`project.commands[2]`).
  */
-function setupInputs(
-  declared: ProjectConfig,
-  projectDir: string,
-): Pick<ProjectConfig, 'commands' | 'tools'> & { projectDir: string } {
-  return { commands: declared.commands, tools: declared.tools, projectDir }
+function setupInputs(declared: ProjectConfig, projectDir: string) {
+  return {
+    installCommands: declared.commands.flatMap((command, index) =>
+      command.kind === 'install' ? [{ index, cmd: command.cmd, dir: command.dir ?? null }] : [],
+    ),
+    toolInstalls: declared.tools.flatMap((tool, index) =>
+      tool.install === undefined || tool.install.trim() === ''
+        ? []
+        : [
+            {
+              index,
+              id: tool.id,
+              install: tool.install,
+              version: tool.version ?? null,
+              required: tool.required ?? true,
+            },
+          ],
+    ),
+    projectDir,
+  }
 }
 
 export function buildSetupPlan(options: {
@@ -195,7 +213,7 @@ export function validateSetupPlan(saved: unknown, current: SetupPlan): SetupPlan
     if (canonicalJson(saved) !== canonicalJson(current)) {
       return result(
         'stale',
-        'The saved plan differs from the repository state or the setup inputs (install commands, tool installs and the default working directory). Re-run `anvil setup plan`, review the fresh proposal and validate again.',
+        'The saved plan differs from the repository state or the setup inputs (install commands, tool installs and the default working directory), or was saved by an anvil version that hashed them differently. Re-run `anvil setup plan`, review the fresh proposal and validate again.',
       )
     }
   } catch {

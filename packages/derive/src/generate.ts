@@ -18,7 +18,7 @@ import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 import { INTENDED_BEHAVIOR_QUESTION } from './brief.ts'
 
 /**
- * The declarations that can change a generated artifact.
+ * The declarations that can change a generated artifact, or `undefined` when none can.
  *
  * Every generator in this module reads `commands` and nothing else. Tool, reference,
  * environment, service, credential, access and hardware declarations describe what a machine
@@ -26,8 +26,13 @@ import { INTENDED_BEHAVIOR_QUESTION } from './brief.ts'
  * inputs so a changed repository is caught, not so a declaration that cannot change a byte
  * invalidates a diff the owner already reviewed — or every bundle in flight when an upgrade
  * adds a new declaration array.
+ *
+ * No declared command generates exactly what no config generates, so both return `undefined`
+ * and `hashInputs` omits the field: adding the first reference, or removing the last
+ * credential, keeps a staged bundle's hash.
  */
-export function generationInputs(declared: ProjectConfig): Pick<ProjectConfig, 'commands'> {
+export function generationInputs(declared: ProjectConfig | undefined): Pick<ProjectConfig, 'commands'> | undefined {
+  if (declared === undefined || declared.commands.length === 0) return undefined
   return { commands: declared.commands }
 }
 
