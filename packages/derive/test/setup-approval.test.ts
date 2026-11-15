@@ -529,6 +529,7 @@ describe('setup approval grants', () => {
     saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
     const dir = join(store, ID)
     write(store, `${ID}/application.json`, JSON.stringify({ schemaVersion: 1 }))
+    write(store, `${ID}/transition.json`, JSON.stringify({ schemaVersion: 1, kind: 'revoked', at: T0.toISOString() }))
 
     // A readable ACL that grants another principal is a permissions problem, not a timeout.
     const io = {
@@ -541,10 +542,13 @@ describe('setup approval grants', () => {
     const read = readGrantRecord(dir, 'application.json', 64 * 1024, io)
     assert.equal(read.state, 'unknown')
     assert.match(read.state === 'unknown' ? read.reason : '', /not private to the current user/)
-    assert.doesNotMatch(read.state === 'unknown' ? read.reason : '', /timed out/)
-    // The transition read distinguishes the two as well.
+    assert.doesNotMatch(read.state === 'unknown' ? read.reason : '', /could not be read within/)
+    // The transition read distinguishes the two as well: a readable foreign entry is a
+    // permissions problem, not a timeout, so the branch the stub exercises is not skipped.
     const transition = inspectSetupApprovalTransition(dir, io)
-    assert.equal(transition.state, 'none')
+    assert.equal(transition.state, 'unknown')
+    assert.match(transition.reason ?? '', /not private to the current user/)
+    assert.doesNotMatch(transition.reason ?? '', /could not be read within/)
   })
 
   test('a linked Windows store is refused without modifying its target', (t) => {
