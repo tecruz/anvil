@@ -24,15 +24,25 @@
  *     itself, and refuses one it cannot resolve or that lives inside the repository.
  *  4. **anvil proposes, it never installs.** A setup action carries `requiresApproval` and
  *     is text. The only install command that appears is one the owner wrote down.
+ *  5. **Credentials and access are never verified, and hardware is a process snapshot.**
+ *     A credential or restricted access is at most `declared`: presence of an environment
+ *     variable name is not authorization, and nothing is contacted to check it. Hardware is
+ *     compared against the running process, not the physical host, and GPUs are never
+ *     observed at all.
  */
 
 import { lookup } from 'node:dns/promises'
 import { lstatSync, realpathSync, statSync } from 'node:fs'
 import { isIP, Socket } from 'node:net'
+import { availableParallelism, machine, totalmem } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
+  type DeclaredAccess,
+  type DeclaredAccessKind,
   type DeclaredCommand,
+  type DeclaredCredential,
   type DeclaredEnvVar,
+  type DeclaredHardware,
   type DeclaredReference,
   type DeclaredReferenceScope,
   type DeclaredService,
@@ -157,6 +167,74 @@ export interface ReadyReference {
   status: ReadyReferenceStatus
 }
 
+/**
+ * How far a declared credential or access requirement was decided.
+ *
+ * `declared`: everything observable was checked and present; the rest is the owner's word.
+ * Never verified: a present environment variable is not authorization.
+ */
+export type ReadyRequirementStatus = 'missing' | 'empty' | 'declared' | 'unknown'
+
+/** One env var name used as local evidence, with its presence. Its value is never read. */
+export interface ReadyRequirementEvidence {
+  name: string
+  status: ReadyEnvStatus
+}
+
+/** One owner-declared credential. Only the presence of the named variables is observed. */
+export interface ReadyCredential {
+  id: string
+  reason: string | null
+  required: boolean
+  /** Who grants it, as the owner wrote it. Shown, never acted on. */
+  grantedBy: string | null
+  env: ReadyRequirementEvidence[]
+  status: ReadyRequirementStatus
+}
+
+/** One owner-declared restricted access. `target` is a label; nothing is contacted. */
+export interface ReadyAccess {
+  id: string
+  kind: DeclaredAccessKind
+  target: string | null
+  reason: string | null
+  required: boolean
+  grantedBy: string | null
+  env: ReadyRequirementEvidence[]
+  status: ReadyRequirementStatus
+}
+
+/** How one hardware constraint was decided against the process snapshot. */
+export type ReadyHardwareCheckStatus = 'satisfied' | 'unsatisfied' | 'unknown'
+
+export interface ReadyHardwareCheck {
+  constraint: 'platform' | 'arch' | 'cpus' | 'memory' | 'gpu' | 'device'
+  expected: string
+  observed: string | null
+  status: ReadyHardwareCheckStatus
+}
+
+/** One owner-declared hardware requirement and each constraint compared against it. */
+export interface ReadyHardware {
+  id: string
+  reason: string | null
+  required: boolean
+  checks: ReadyHardwareCheck[]
+  status: ReadyHardwareCheckStatus
+}
+
+/** A snapshot of the process environment, not a guarantee about the physical host. */
+export interface HostSnapshot {
+  platform: string
+  arch: string
+  machine: string | null
+  cpus: number | null
+  memoryBytes: number | null
+}
+
+/** Whether a declared `/dev` node exists. Never opened or read, only stat'ed on POSIX. */
+export type ReadyDeviceStatus = 'present' | 'missing' | 'unknown'
+
 export interface ReadyAction {
   id: string
   summary: string
@@ -181,6 +259,9 @@ export interface ReadyReport {
   env: ReadyEnvVar[]
   services: ReadyService[]
   references: ReadyReference[]
+  credentials: ReadyCredential[]
+  access: ReadyAccess[]
+  hardware: ReadyHardware[]
   context: ReadyContext[]
   actions: ReadyAction[]
   warnings: string[]
@@ -299,6 +380,22 @@ export interface ReadyEnvironment {
    * decided -- a permission error, no repository root, or a link that leaves the repository.
    */
   fileStatus?(relPath: string): ReadyReferenceStatus
+  /**
+   * A snapshot of the process environment: platform, architecture, CPUs and memory.
+   *
+   * Optional like {@link envStatus}: absent, and every hardware check is `unknown` rather
+   * than assumed satisfied. This is a process view, not the physical host, and it never
+   * spawns a process or touches the network.
+   */
+  host?(): HostSnapshot
+  /**
+   * The existence of a POSIX `/dev` node, by absolute path.
+   *
+   * Optional so a test without a `/dev` need not implement it; absent, and a declared
+   * device is `unknown`. Stat only: the node is never opened, and on Windows the answer is
+   * always `unknown` because a UNC path could reach the network.
+   */
+  deviceStatus?(absPath: string): ReadyDeviceStatus
 }
 
 /** True when an executable file at `absPath` can actually be launched. */
@@ -609,6 +706,27 @@ async function connectService(
   return connectCandidates(addresses, port)
 }
 
+/** The readers a host snapshot is built from. Injected so tests never read the real host. */
+export interface HostReaders {
+  platform?: () => string
+  arch?: () => string
+  machine?: () => string
+  availableParallelism?: () => number
+  totalmem?: () => number
+  constrainedMemory?: () => number | undefined
+}
+
+/** A stat result as far as a device check needs it: existence, never contents. */
+export interface DeviceStat {
+  isCharacterDevice(): boolean
+  isBlockDevice(): boolean
+  isFile(): boolean
+  isDirectory(): boolean
+}
+
+/** The `/dev` shape a declared device must have before it is stat'ed. */
+const HOST_DEVICE_PATH = /^\/dev\/[A-Za-z0-9._/-]+$/
+
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
   options: {
@@ -621,12 +739,18 @@ export function systemEnvironment(
     serviceRunner?: (host: string, port: number) => Promise<ServiceProbe>
     /** Overridable for tests: name resolution for a service host. Defaults to DNS. */
     lookupRunner?: (host: string) => Promise<readonly { address: string }[]>
+    /** Overridable for tests: the process snapshot readers. Defaults to the real process. */
+    hostReaders?: HostReaders
+    /** Overridable for tests: the device stat. Defaults to {@link statSync}. */
+    statRunner?: (path: string) => DeviceStat
   } = {},
 ): ReadyEnvironment {
   const platform = options.platform ?? process.platform
   const runner = options.runner ?? runProcess
   const resolve = options.lookupRunner ?? defaultResolve
   const serviceRunner = options.serviceRunner ?? ((host, port) => connectService(host, port, resolve))
+  const readers = options.hostReaders ?? {}
+  const statRunner = options.statRunner ?? statSync
   return {
     resolve(bin) {
       return resolveCommand(bin, options)?.path ?? null
@@ -715,6 +839,58 @@ export function systemEnvironment(
         return isAbsentError(error) ? 'missing' : 'unknown'
       }
     },
+    host() {
+      // Every reader is contained: a platform that cannot report one fact still reports the
+      // rest, and a throwing reader is an absent fact rather than a failed report.
+      const safe = <T>(reader: () => T): T | null => {
+        try {
+          return reader()
+        } catch {
+          return null
+        }
+      }
+      const hostPlatform = safe(readers.platform ?? (() => options.platform ?? process.platform)) ?? ''
+      const hostArch = safe(readers.arch ?? (() => process.arch)) ?? ''
+      const hostMachine = safe(readers.machine ?? (() => machine()))
+      const cpuCount = safe(readers.availableParallelism ?? (() => availableParallelism()))
+      const cpus = typeof cpuCount === 'number' && Number.isInteger(cpuCount) && cpuCount >= 1 ? cpuCount : null
+      const total = safe(readers.totalmem ?? (() => totalmem()))
+      const totalBytes = typeof total === 'number' && Number.isFinite(total) && total > 0 ? total : null
+      // A container can cap memory below the host's total. A cap that is absent, zero or at
+      // least the total is no constraint; only a smaller positive cap is the honest figure.
+      let memoryBytes = totalBytes
+      const constrained = safe(readers.constrainedMemory ?? (() => process.constrainedMemory()))
+      if (
+        totalBytes !== null &&
+        typeof constrained === 'number' &&
+        Number.isFinite(constrained) &&
+        constrained > 0 &&
+        constrained < totalBytes
+      ) {
+        memoryBytes = constrained
+      }
+      return {
+        platform: hostPlatform,
+        arch: hostArch,
+        machine: hostMachine === '' ? null : hostMachine,
+        cpus,
+        memoryBytes,
+      }
+    },
+    deviceStatus(absPath) {
+      // Never stat on Windows: a UNC path could reach the network, and `/dev` is POSIX-only.
+      if (platform === 'win32') return 'unknown'
+      if (!HOST_DEVICE_PATH.test(absPath) || absPath.split('/').includes('..') || absPath.includes('//')) {
+        return 'unknown'
+      }
+      try {
+        // Existence is the whole check: any node type counts, and it is never opened or read.
+        statRunner(absPath)
+        return 'present'
+      } catch (error) {
+        return isAbsentError(error) ? 'missing' : 'unknown'
+      }
+    },
   }
 }
 
@@ -755,9 +931,12 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
   const env = collectEnv(declared.env, check, environment)
   const services = await collectServices(declared.services, check, environment)
   const references = collectReferences(declared.references, environment)
+  const credentials = collectCredentials(declared.credentials, check, environment)
+  const access = collectAccess(declared.access, check, environment)
+  const hardware = collectHardware(declared.hardware, check, environment)
   const context = collectContext(profile)
   const warnings = collectWarnings(profile, declared.commands)
-  const actions = proposeActions(tools, env, services, references, context)
+  const actions = proposeActions(tools, env, services, references, credentials, access, hardware, context)
   // Only required needs decide the status. An optional, playbook-suggested tool or a
   // non-required variable or service is guidance, not a need: its absence must not turn a
   // ready repository into an unknown one.
@@ -765,14 +944,28 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
   const requiredEnvReadiness = env.filter((e) => e.required).map(envState)
   const requiredServiceReadiness = services.filter((s) => s.required).map(serviceState)
   const requiredReferenceReadiness = references.filter((r) => r.required).map(referenceState)
+  const requiredCredentialReadiness = credentials.filter((c) => c.required).map(requirementState)
+  const requiredAccessReadiness = access.filter((a) => a.required).map(requirementState)
+  const requiredHardwareReadiness = hardware.filter((h) => h.required).map(hardwareState)
   const hasRequiredNeeds =
     tools.some((t) => t.required) ||
     env.some((e) => e.required) ||
     services.some((s) => s.required) ||
-    references.some((r) => r.required)
+    references.some((r) => r.required) ||
+    credentials.some((c) => c.required) ||
+    access.some((a) => a.required) ||
+    hardware.some((h) => h.required)
   const status = overallStatus(
     commands,
-    [...requiredReadiness, ...requiredEnvReadiness, ...requiredServiceReadiness, ...requiredReferenceReadiness],
+    [
+      ...requiredReadiness,
+      ...requiredEnvReadiness,
+      ...requiredServiceReadiness,
+      ...requiredReferenceReadiness,
+      ...requiredCredentialReadiness,
+      ...requiredAccessReadiness,
+      ...requiredHardwareReadiness,
+    ],
     context,
     warnings,
     hasRequiredNeeds,
@@ -784,6 +977,9 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     ...requiredEnvReadiness,
     ...requiredServiceReadiness,
     ...requiredReferenceReadiness,
+    ...requiredCredentialReadiness,
+    ...requiredAccessReadiness,
+    ...requiredHardwareReadiness,
     ...context.map((c) => c.status),
   ]
 
@@ -803,6 +999,9 @@ export async function buildReadyReport(options: BuildReadyOptions): Promise<Read
     env,
     services,
     references,
+    credentials,
+    access,
+    hardware,
     context,
     actions,
     warnings,
@@ -1074,6 +1273,241 @@ function envState(item: ReadyEnvVar): ReadinessState {
 }
 
 /**
+ * The presence of each declared evidence variable, by name. No value is read.
+ *
+ * Without `--check`, nothing is consulted and every name is `unknown`.
+ */
+function collectRequirementEvidence(
+  names: readonly string[] | undefined,
+  check: boolean,
+  environment: ReadyEnvironment,
+): ReadyRequirementEvidence[] {
+  return (names ?? []).map((name) => ({
+    name,
+    status: check ? (environment.envStatus?.(name) ?? 'unknown') : 'unknown',
+  }))
+}
+
+/**
+ * Decide a credential or access requirement from its local evidence.
+ *
+ * A present variable is `declared`, never verified: anvil cannot tell a valid, authorized
+ * credential from an exported placeholder. With no evidence declared there is nothing to
+ * observe, so the requirement is `declared` as soon as it is checked.
+ */
+function requirementStatus(env: readonly ReadyRequirementEvidence[], check: boolean): ReadyRequirementStatus {
+  if (!check) return 'unknown'
+  if (env.some((item) => item.status === 'present')) return 'declared'
+  if (env.some((item) => item.status === 'unknown')) return 'unknown'
+  // An empty value is a misconfiguration, not a present credential.
+  if (env.some((item) => item.status === 'empty')) return 'empty'
+  if (env.length > 0) return 'missing'
+  return 'declared'
+}
+
+/** Credentials are never verified: missing or empty evidence blocks, everything else is unknown. */
+function requirementState(item: ReadyCredential | ReadyAccess): ReadinessState {
+  if (item.status === 'missing' || item.status === 'empty') return 'blocked'
+  return 'unknown'
+}
+
+function collectCredentials(
+  declared: readonly DeclaredCredential[],
+  check: boolean,
+  environment: ReadyEnvironment,
+): ReadyCredential[] {
+  return declared.map((entry) => {
+    const env = collectRequirementEvidence(entry.env, check, environment)
+    return {
+      id: entry.id,
+      reason: entry.reason ?? null,
+      required: entry.required ?? true,
+      grantedBy: entry.grantedBy ?? null,
+      env,
+      status: requirementStatus(env, check),
+    }
+  })
+}
+
+function collectAccess(
+  declared: readonly DeclaredAccess[],
+  check: boolean,
+  environment: ReadyEnvironment,
+): ReadyAccess[] {
+  return declared.map((entry) => {
+    const env = collectRequirementEvidence(entry.env, check, environment)
+    return {
+      id: entry.id,
+      kind: entry.kind,
+      target: entry.target ?? null,
+      reason: entry.reason ?? null,
+      required: entry.required ?? true,
+      grantedBy: entry.grantedBy ?? null,
+      env,
+      status: requirementStatus(env, check),
+    }
+  })
+}
+
+/** Normalise an `os.machine()` answer to the architecture vocabulary the config uses. */
+function normaliseMachine(machineName: string): string | null {
+  switch (machineName.trim().toLowerCase()) {
+    case 'x86_64':
+    case 'amd64':
+      return 'x64'
+    case 'aarch64':
+    case 'arm64':
+      return 'arm64'
+    case 'i386':
+    case 'i686':
+    case 'x86':
+      return 'ia32'
+    case 'armv7l':
+    case 'armv6l':
+    case 'arm':
+      return 'arm'
+    default:
+      return null
+  }
+}
+
+/** The snapshot, or null when it is unavailable or cannot be read. */
+function safeHost(environment: ReadyEnvironment): HostSnapshot | null {
+  if (environment.host === undefined) return null
+  try {
+    return environment.host()
+  } catch {
+    // A snapshot that cannot be read is an absent fact, never a pass or a blocker.
+    return null
+  }
+}
+
+/** A device's existence, or `unknown` when the seam is absent or cannot answer. */
+function safeDeviceStatus(environment: ReadyEnvironment, device: string): ReadyDeviceStatus {
+  if (environment.deviceStatus === undefined) return 'unknown'
+  try {
+    return environment.deviceStatus(device)
+  } catch {
+    return 'unknown'
+  }
+}
+
+function hardwareCheckStatus(checks: readonly ReadyHardwareCheck[]): ReadyHardwareCheckStatus {
+  if (checks.some((check) => check.status === 'unsatisfied')) return 'unsatisfied'
+  if (checks.some((check) => check.status === 'unknown')) return 'unknown'
+  return 'satisfied'
+}
+
+const GIB = 1024 ** 3
+
+/**
+ * Compare each hardware constraint against a snapshot of this process.
+ *
+ * A GPU check is always `unknown`: anvil does not observe GPUs, and a present `/dev/nvidia0`
+ * is not evidence of a working device. Without `--check` or without a host seam every check
+ * is `unknown`, the fail-closed direction.
+ */
+function collectHardware(
+  declared: readonly DeclaredHardware[],
+  check: boolean,
+  environment: ReadyEnvironment,
+): ReadyHardware[] {
+  const host = check ? safeHost(environment) : null
+  return declared.map((entry) => {
+    const checks: ReadyHardwareCheck[] = []
+    const observedPlatform = host?.platform ?? null
+
+    if (entry.platform !== undefined) {
+      const status: ReadyHardwareCheckStatus =
+        observedPlatform === null || observedPlatform === ''
+          ? 'unknown'
+          : (entry.platform as readonly string[]).includes(observedPlatform)
+            ? 'satisfied'
+            : 'unsatisfied'
+      checks.push({
+        constraint: 'platform',
+        expected: entry.platform.join(' | '),
+        observed: observedPlatform,
+        status,
+      })
+    }
+
+    if (entry.arch !== undefined) {
+      let observed = host?.arch ?? null
+      let status: ReadyHardwareCheckStatus = 'unknown'
+      if (observed !== null && observed !== '') {
+        const declaredArch = entry.arch as readonly string[]
+        const hostMachine = host?.machine ?? null
+        if (hostMachine === null) {
+          status = declaredArch.includes(observed) ? 'satisfied' : 'unsatisfied'
+        } else {
+          const normalised = normaliseMachine(hostMachine)
+          if (normalised === null || normalised !== observed) {
+            // An emulated process (Rosetta, qemu) reports a different machine than its arch.
+            // That disagreement cannot be resolved into a pass or a failure.
+            observed = `${observed} (machine ${hostMachine})`
+          } else {
+            status = declaredArch.includes(observed) ? 'satisfied' : 'unsatisfied'
+          }
+        }
+      }
+      checks.push({ constraint: 'arch', expected: entry.arch.join(' | '), observed, status })
+    }
+
+    if (entry.minCpus !== undefined) {
+      const observed = host?.cpus ?? null
+      checks.push({
+        constraint: 'cpus',
+        expected: `>= ${entry.minCpus}`,
+        observed: observed === null ? null : String(observed),
+        status: observed === null ? 'unknown' : observed >= entry.minCpus ? 'satisfied' : 'unsatisfied',
+      })
+    }
+
+    if (entry.minMemoryGiB !== undefined) {
+      const bytes = host?.memoryBytes ?? null
+      checks.push({
+        constraint: 'memory',
+        expected: `>= ${entry.minMemoryGiB} GiB`,
+        observed: bytes === null ? null : `${(bytes / GIB).toFixed(1)} GiB`,
+        status: bytes === null ? 'unknown' : bytes >= entry.minMemoryGiB * GIB ? 'satisfied' : 'unsatisfied',
+      })
+    }
+
+    if (entry.gpu !== undefined) {
+      // A GPU is never observed. A present device node does not make this satisfied.
+      checks.push({ constraint: 'gpu', expected: entry.gpu.vendor ?? 'any', observed: null, status: 'unknown' })
+    }
+
+    for (const device of entry.devices ?? []) {
+      // A device check needs only its own seam: without `--check`, without the seam, or when
+      // the seam throws, the answer is `unknown` rather than a pass or a blocker.
+      const deviceStatus = check ? safeDeviceStatus(environment, device) : 'unknown'
+      checks.push({
+        constraint: 'device',
+        expected: device,
+        observed: deviceStatus,
+        status: deviceStatus === 'present' ? 'satisfied' : deviceStatus === 'missing' ? 'unsatisfied' : 'unknown',
+      })
+    }
+
+    return {
+      id: entry.id,
+      reason: entry.reason ?? null,
+      required: entry.required ?? true,
+      checks,
+      status: hardwareCheckStatus(checks),
+    }
+  })
+}
+
+function hardwareState(item: ReadyHardware): ReadinessState {
+  if (item.status === 'satisfied') return 'verified'
+  if (item.status === 'unsatisfied') return 'blocked'
+  return 'unknown'
+}
+
+/**
  * Decide each declared service's reachability. Without `--check` nothing is contacted.
  *
  * A connect that could not be decided (`inconclusive`) is `unknown`, never a blocker: a slow
@@ -1192,11 +1626,49 @@ function collectWarnings(profile: ProjectProfile, declared: readonly DeclaredCom
   return warnings
 }
 
+/** The reason suffix shared by credential and access actions: who to ask, never a value. */
+function requestSuffix(requirement: ReadyCredential | ReadyAccess): string {
+  const reason = requirement.reason === null ? '' : ` (${requirement.reason})`
+  const ask = requirement.grantedBy === null ? '; request it from whoever grants it' : `; ask ${requirement.grantedBy}`
+  return `${reason}${ask}`
+}
+
+/** The action for a required credential or access requirement, or null when it is not due. */
+function requirementAction(item: ReadyCredential | ReadyAccess, summary: string): ReadyAction | null {
+  if (!item.required) return null
+  if (item.status === 'declared') {
+    return {
+      id: `request:${item.id}`,
+      summary,
+      command: null,
+      requiresApproval: true,
+      reason: `${item.id} is required and anvil cannot verify it; presence is not authorization${requestSuffix(item)}`,
+    }
+  }
+  if (item.status !== 'missing' && item.status !== 'empty') return null
+  const names = item.env.map((evidence) => evidence.name).join(', ')
+  // The names are evidence, never values: anvil has no value to put in a reason.
+  const state =
+    item.status === 'empty'
+      ? `its declared evidence (${names}) is set only to empty values`
+      : `none of its declared evidence (${names}) is set`
+  return {
+    id: `request:${item.id}`,
+    summary,
+    command: null,
+    requiresApproval: true,
+    reason: `${item.id} is required but ${state}${requestSuffix(item)}`,
+  }
+}
+
 function proposeActions(
   tools: readonly ReadyTool[],
   env: readonly ReadyEnvVar[],
   services: readonly ReadyService[],
   references: readonly ReadyReference[],
+  credentials: readonly ReadyCredential[],
+  access: readonly ReadyAccess[],
+  hardware: readonly ReadyHardware[],
   context: readonly ReadyContext[],
 ): ReadyAction[] {
   const actions: ReadyAction[] = []
@@ -1284,6 +1756,34 @@ function proposeActions(
       reason: `${reference.path} is approved as ${reference.scope} context but does not exist${
         reference.reason === null ? '' : ` (${reference.reason})`
       }; restore it or remove the declaration`,
+    })
+  }
+
+  for (const credential of credentials) {
+    const action = requirementAction(credential, `Request ${credential.id}`)
+    if (action !== null) actions.push(action)
+  }
+
+  for (const requirement of access) {
+    const action = requirementAction(requirement, `Request ${requirement.kind} access: ${requirement.id}`)
+    if (action !== null) actions.push(action)
+  }
+
+  for (const requirement of hardware) {
+    if (!requirement.required || requirement.status !== 'unsatisfied') continue
+    const failed = requirement.checks
+      .filter((check) => check.status === 'unsatisfied')
+      .map((check) => `${check.constraint} expected ${check.expected}, observed ${check.observed ?? 'unknown'}`)
+      .join('; ')
+    actions.push({
+      id: `provide-hardware:${requirement.id}`,
+      summary: `Provide hardware for ${requirement.id}`,
+      // No command: anvil cannot change the machine a person is on.
+      command: null,
+      requiresApproval: true,
+      reason: `${requirement.id} is required but ${failed}${
+        requirement.reason === null ? '' : ` (${requirement.reason})`
+      }; provide hardware that satisfies it`,
     })
   }
 

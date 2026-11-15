@@ -33,6 +33,9 @@ function describe(config: AnvilConfig): Array<[string, string]> {
     ['project.env', String(config.project.env.length)],
     ['project.services', String(config.project.services.length)],
     ['project.references', String(config.project.references.length)],
+    ['project.credentials', String(config.project.credentials.length)],
+    ['project.access', String(config.project.access.length)],
+    ['project.hardware', String(config.project.hardware.length)],
   ]
 }
 

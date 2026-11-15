@@ -5,13 +5,16 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
+import type { DeclaredAccess, DeclaredCredential, DeclaredHardware } from '@anvil/core'
 import {
   buildReadyReport,
   connectErrorState,
+  type HostSnapshot,
   isInsideRepository,
   isLoopbackAddress,
   isRunnableExecutable,
   probeArgsFor,
+  type ReadyDeviceStatus,
   type ReadyEnvironment,
   systemEnvironment,
 } from '@anvil/derive'
@@ -51,6 +54,10 @@ function env(
     files?: readonly string[]
     /** Paths whose status cannot be decided (a permission error, for example). */
     unreadable?: readonly string[]
+    /** The process snapshot; omitted so the absent seam is exercised when not given. */
+    host?: HostSnapshot
+    /** Answer per absolute `/dev` path; omitted so the absent seam is exercised too. */
+    devices?: Record<string, ReadyDeviceStatus>
   } = {},
 ): ReadyEnvironment {
   const found = new Set(options.found ?? [])
@@ -73,6 +80,10 @@ function env(
         : new Set(options.files ?? []).has(relPath)
           ? 'present'
           : 'missing',
+    ...(options.host === undefined ? {} : { host: () => options.host as HostSnapshot }),
+    ...(options.devices === undefined
+      ? {}
+      : { deviceStatus: (absPath: string): ReadyDeviceStatus => options.devices?.[absPath] ?? 'missing' }),
   }
 }
 
@@ -112,6 +123,12 @@ function untouchedEnv(): ReadyEnvironment {
     fileStatus(relPath) {
       throw new Error(`environment.fileStatus called for ${relPath}`)
     },
+    host() {
+      throw new Error('environment.host called without --check')
+    },
+    deviceStatus(absPath) {
+      throw new Error(`environment.deviceStatus called for ${absPath} without --check`)
+    },
   }
 }
 
@@ -123,7 +140,28 @@ function playbookMatch(id: string, verify: string[]): MatchResult {
   } as unknown as MatchResult
 }
 
-const noDeclared = { commands: [], tools: [], env: [], services: [], references: [] }
+const noDeclared = {
+  commands: [],
+  tools: [],
+  env: [],
+  services: [],
+  references: [],
+  credentials: [],
+  access: [],
+  hardware: [],
+}
+
+/** A declaration with only the requested requirement kind, to keep each test readable. */
+function declaredWith(
+  overrides: { credentials?: DeclaredCredential[]; access?: DeclaredAccess[]; hardware?: DeclaredHardware[] } = {},
+) {
+  return {
+    ...noDeclared,
+    credentials: overrides.credentials ?? [],
+    access: overrides.access ?? [],
+    hardware: overrides.hardware ?? [],
+  }
+}
 
 describe('isRunnableExecutable', () => {
   test('a non-executable file is not runnable, and a real executable is', () => {
@@ -171,7 +209,16 @@ describe('buildReadyReport: status vocabulary', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [], services: [], references: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'make check' }],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: false,
       environment: env(),
     })
@@ -236,7 +283,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ commands: { test: [{ cmd: 'pytest', source: 'detected', evidence: 'x:1' }] } }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'make' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'make' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: false,
       environment: untouchedEnv(),
     })
@@ -299,7 +355,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'evil' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'evil' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => repoBin,
@@ -319,7 +384,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'evil' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'evil' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => repoBin,
@@ -339,7 +413,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'node' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => '/usr/local/bin/node',
@@ -504,7 +587,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ root: repo }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'linked' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'linked' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => entry,
@@ -542,7 +634,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf({ root: alias }),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'go' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'go' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => candidate,
@@ -563,7 +664,16 @@ describe('buildReadyReport: tools come from the project commands', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node-abs', bin: absolute }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'node-abs', bin: absolute }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => {
@@ -596,6 +706,9 @@ describe('buildReadyReport: tools come from the project commands', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ found: ['node'] }),
@@ -621,6 +734,9 @@ describe('buildReadyReport: tools come from the project commands', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: {
@@ -652,6 +768,9 @@ describe('buildReadyReport: tools come from the project commands', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ found: ['node'] }),
@@ -685,6 +804,9 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ found: [] }),
@@ -701,7 +823,16 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'mystery-tool' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'mystery-tool' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: env({ found: [] }),
     })
@@ -714,7 +845,16 @@ describe('buildReadyReport: a required declared tool drives blocked', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'make' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'make' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: env({ found: ['make'], probes: { make: { ok: true, version: '4.4.1' } } }),
     })
@@ -744,7 +884,16 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '>=20 <21' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'node', version: '>=20 <21' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
     })
@@ -829,7 +978,16 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'tool', version: '4.5.6' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'tool', version: '4.5.6' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => 'C:\\external\\tool.exe',
@@ -851,7 +1009,16 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'python', version: '3.13.0' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'python', version: '3.13.0' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: {
         resolve: () => 'C:\\external\\python.exe',
@@ -867,7 +1034,16 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '>=22' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'node', version: '>=22' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
     })
@@ -891,6 +1067,9 @@ describe('buildReadyReport: declared version ranges', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
@@ -905,7 +1084,16 @@ describe('buildReadyReport: declared version ranges', () => {
       const report = await buildReadyReport({
         profile: profileOf(),
         matches: [],
-        declared: { commands: [], tools: [{ id: 'node', version: '>=20' }], env: [], services: [], references: [] },
+        declared: {
+          commands: [],
+          tools: [{ id: 'node', version: '>=20' }],
+          env: [],
+          services: [],
+          references: [],
+          credentials: [],
+          access: [],
+          hardware: [],
+        },
         check: true,
         environment: env({ found: ['node'], probes: { node: { ok: true, version } } }),
       })
@@ -926,6 +1114,9 @@ describe('buildReadyReport: declared version ranges', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: {
@@ -953,6 +1144,9 @@ describe('buildReadyReport: declared version ranges', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ found: ['node'], probes: { node: { ok: true, version: '20.11.1' } } }),
@@ -967,7 +1161,16 @@ describe('buildReadyReport: declared version ranges', () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
-      declared: { commands: [], tools: [{ id: 'node', version: '^20' }], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [{ id: 'node', version: '^20' }],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: false,
       environment: untouchedEnv(),
     })
@@ -984,6 +1187,9 @@ describe('buildReadyReport: declared environment variables', () => {
     env,
     services: [],
     references: [],
+    credentials: [],
+    access: [],
+    hardware: [],
   })
 
   test('a present variable verifies, and its value never enters the report', async () => {
@@ -1124,7 +1330,7 @@ describe('buildReadyReport: declared environment variables', () => {
 describe('buildReadyReport: declared services', () => {
   const declaredServices = (
     services: Array<{ id: string; host?: string; port: number; reason?: string; required?: boolean }>,
-  ) => ({ commands: [], tools: [], env: [], services, references: [] })
+  ) => ({ commands: [], tools: [], env: [], services, references: [], credentials: [], access: [], hardware: [] })
 
   test('a listening service verifies, and only reachability is claimed', async () => {
     const report = await buildReadyReport({
@@ -1322,6 +1528,9 @@ describe('buildReadyReport: declared services', () => {
         env: [],
         services: [{ id: 'db', port: 5432 }],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
       check: true,
       environment: env({ services: { '127.0.0.1:5432': 'closed' } }),
@@ -1342,7 +1551,7 @@ describe('buildReadyReport: approved context references', () => {
       reason?: string
       required?: boolean
     }>,
-  ) => ({ commands: [], tools: [], env: [], services: [], references })
+  ) => ({ commands: [], tools: [], env: [], services: [], references, credentials: [], access: [], hardware: [] })
 
   test('a present reference verifies and keeps its scope', async () => {
     const report = await buildReadyReport({
@@ -1549,6 +1758,504 @@ describe('buildReadyReport: approved context references', () => {
   })
 })
 
+describe('buildReadyReport: declared credentials and access', () => {
+  test('without --check every requirement is unknown and no seam is touched', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({
+        credentials: [{ id: 'api', env: ['API_TOKEN'] }],
+        access: [{ id: 'vpn', kind: 'vpn', target: 'corp', env: ['VPN_UP'] }],
+        hardware: [{ id: 'box', minCpus: 4, devices: ['/dev/nvidia0'] }],
+      }),
+      check: false,
+      environment: untouchedEnv(),
+    })
+    assert.equal(report.credentials[0]?.status, 'unknown')
+    assert.deepEqual(report.credentials[0]?.env, [{ name: 'API_TOKEN', status: 'unknown' }])
+    assert.equal(report.access[0]?.status, 'unknown')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+    assert.ok(report.hardware[0]?.checks.every((check) => check.status === 'unknown'))
+    assert.equal(report.status, 'unknown')
+  })
+
+  test('a missing credential blocks and proposes a request action with no value', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({
+        credentials: [{ id: 'api', env: ['API_TOKEN'], reason: 'the API', grantedBy: 'the platform team' }],
+      }),
+      check: true,
+      environment: env(),
+    })
+    assert.equal(report.credentials[0]?.status, 'missing')
+    assert.equal(report.status, 'blocked')
+    const action = report.actions.find((a) => a.id === 'request:api')
+    assert.ok(action, 'a request action is proposed')
+    assert.equal(action.command, null, 'anvil must not invent a command to fetch a credential')
+    assert.match(action.reason, /none of its declared evidence \(API_TOKEN\) is set/)
+    assert.match(action.reason, /ask the platform team/)
+  })
+
+  test('one present name of several is enough for declared, not verified', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ credentials: [{ id: 'api', env: ['API_TOKEN', 'ALT_TOKEN'] }] }),
+      check: true,
+      environment: env({ variables: { ALT_TOKEN: 'present-value' } }),
+    })
+    assert.equal(report.credentials[0]?.status, 'declared')
+    assert.deepEqual(report.credentials[0]?.env, [
+      { name: 'API_TOKEN', status: 'missing' },
+      { name: 'ALT_TOKEN', status: 'present' },
+    ])
+    assert.equal(report.status, 'unknown', 'presence is not authorization')
+  })
+
+  test('only empty evidence is empty, and it blocks', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ credentials: [{ id: 'api', env: ['API_TOKEN'] }] }),
+      check: true,
+      environment: env({ variables: { API_TOKEN: '' } }),
+    })
+    assert.equal(report.credentials[0]?.status, 'empty')
+    assert.equal(report.status, 'blocked')
+    const action = report.actions.find((a) => a.id === 'request:api')
+    assert.match(action?.reason ?? '', /is set only to empty values/)
+  })
+
+  test('a present credential is declared, counted unknown, and its value never appears', async () => {
+    const secret = 'super-secret-value-that-must-not-leak'
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ credentials: [{ id: 'api', env: ['API_TOKEN'] }] }),
+      check: true,
+      environment: env({ variables: { API_TOKEN: secret } }),
+    })
+    assert.equal(report.credentials[0]?.status, 'declared')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.summary.unknown, 1, 'a declared credential is counted as unknown, never verified')
+    const action = report.actions.find((a) => a.id === 'request:api')
+    assert.match(action?.reason ?? '', /presence is not authorization/)
+    assert.ok(!JSON.stringify(report).includes(secret), 'an environment value never enters the report')
+  })
+
+  test('a credential with no declared evidence is declared once checked', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ credentials: [{ id: 'docs-only', grantedBy: 'security' }] }),
+      check: true,
+      environment: env(),
+    })
+    assert.equal(report.credentials[0]?.status, 'declared')
+    assert.deepEqual(report.credentials[0]?.env, [])
+    assert.equal(report.status, 'unknown')
+    assert.ok(report.actions.some((a) => a.id === 'request:docs-only'))
+  })
+
+  test('a missing optional credential is reported but does not block', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ credentials: [{ id: 'api', env: ['API_TOKEN'], required: false }] }),
+      check: true,
+      environment: env(),
+    })
+    assert.equal(report.credentials[0]?.status, 'missing')
+    assert.equal(report.credentials[0]?.required, false)
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.summary.blocked, 0)
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('access echoes its kind and target and contacts nothing', async () => {
+    const environment: ReadyEnvironment = {
+      ...env({ variables: { NPM_TOKEN: 'present-value' } }),
+      checkService: () => {
+        throw new Error('access must never be contacted')
+      },
+    }
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({
+        access: [
+          {
+            id: 'registry',
+            kind: 'registry',
+            target: 'npm.corp.example',
+            env: ['NPM_TOKEN'],
+            reason: 'the private registry',
+          },
+        ],
+      }),
+      check: true,
+      environment,
+    })
+    const access = report.access[0]
+    assert.equal(access?.kind, 'registry')
+    assert.equal(access?.target, 'npm.corp.example')
+    assert.equal(access?.status, 'declared')
+    assert.equal(report.status, 'unknown')
+    assert.ok(
+      report.actions.some((a) => a.id === 'request:registry' && a.summary === 'Request registry access: registry'),
+    )
+  })
+
+  test('blocked beats unknown: a blocked hardware need outranks a declared credential', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({
+        credentials: [{ id: 'api', env: ['API_TOKEN'] }],
+        hardware: [{ id: 'cpu-box', minCpus: 64 }],
+      }),
+      check: true,
+      environment: env({ variables: { API_TOKEN: 'present-value' }, host: hostOf({ cpus: 8 }) }),
+    })
+    assert.equal(report.credentials[0]?.status, 'declared')
+    assert.equal(report.hardware[0]?.status, 'unsatisfied')
+    assert.equal(report.status, 'blocked')
+  })
+
+  test('a report with no new declarations carries empty arrays', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: noDeclared,
+      check: true,
+      environment: env(),
+    })
+    assert.deepEqual(report.credentials, [])
+    assert.deepEqual(report.access, [])
+    assert.deepEqual(report.hardware, [])
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.actions.length, 0)
+  })
+})
+
+const GIB = 1024 ** 3
+
+/** A deterministic process snapshot; a test never reads the real CPU or memory. */
+function hostOf(overrides: Partial<HostSnapshot> = {}): HostSnapshot {
+  return { platform: 'linux', arch: 'x64', machine: null, cpus: 8, memoryBytes: 16 * GIB, ...overrides }
+}
+
+describe('buildReadyReport: declared hardware', () => {
+  test('a platform outside the declared list is unsatisfied and blocks', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'mac', platform: ['darwin', 'win32'] }] }),
+      check: true,
+      environment: env({ host: hostOf({ platform: 'linux' }) }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unsatisfied')
+    assert.equal(report.hardware[0]?.status, 'unsatisfied')
+    assert.equal(report.status, 'blocked')
+    const action = report.actions.find((a) => a.id === 'provide-hardware:mac')
+    assert.ok(action, 'a hardware action is proposed')
+    assert.equal(action.command, null)
+    assert.match(action.reason, /platform expected darwin \| win32, observed linux/)
+  })
+
+  test('an architecture outside the declared list is unsatisfied and blocks', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'arm', arch: ['arm64'] }] }),
+      check: true,
+      environment: env({ host: hostOf({ arch: 'x64' }) }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.constraint, 'arch')
+    assert.equal(report.hardware[0]?.status, 'unsatisfied')
+    assert.equal(report.status, 'blocked')
+  })
+
+  test('an emulated process is unknown, not a pass or a failure', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'native', arch: ['x64'] }] }),
+      check: true,
+      environment: env({ host: hostOf({ arch: 'x64', machine: 'arm64' }) }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unknown')
+    assert.equal(report.hardware[0]?.checks[0]?.observed, 'x64 (machine arm64)')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+  })
+
+  test('a machine name that cannot be mapped is unknown', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'native', arch: ['x64'] }] }),
+      check: true,
+      environment: env({ host: hostOf({ arch: 'x64', machine: 'mips64' }) }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unknown')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+  })
+
+  test('an unknown CPU count is unknown, not a mismatch', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'cpu', minCpus: 4 }] }),
+      check: true,
+      environment: env({ host: hostOf({ cpus: null }) }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unknown')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+  })
+
+  test('too little memory is unsatisfied, and enough memory is satisfied', async () => {
+    const low = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'memory', minMemoryGiB: 8 }] }),
+      check: true,
+      environment: env({ host: hostOf({ memoryBytes: 4 * GIB }) }),
+    })
+    assert.equal(low.hardware[0]?.checks[0]?.status, 'unsatisfied')
+    assert.equal(low.hardware[0]?.checks[0]?.expected, '>= 8 GiB')
+    assert.equal(low.hardware[0]?.checks[0]?.observed, '4.0 GiB')
+    assert.equal(low.status, 'blocked')
+
+    const enough = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'memory', minMemoryGiB: 8 }] }),
+      check: true,
+      environment: env({ host: hostOf({ memoryBytes: 16 * GIB }) }),
+    })
+    assert.equal(enough.hardware[0]?.checks[0]?.status, 'satisfied')
+    assert.equal(enough.hardware[0]?.checks[0]?.observed, '16.0 GiB')
+    assert.equal(enough.status, 'verified')
+  })
+
+  test('a present GPU device does not make the GPU check satisfied', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({
+        hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' }, devices: ['/dev/nvidia0'] }],
+      }),
+      check: true,
+      environment: env({ host: hostOf(), devices: { '/dev/nvidia0': 'present' } }),
+    })
+    const checks = report.hardware[0]?.checks ?? []
+    const gpu = checks.find((check) => check.constraint === 'gpu')
+    const device = checks.find((check) => check.constraint === 'device')
+    assert.equal(gpu?.expected, 'nvidia')
+    assert.equal(gpu?.observed, null)
+    assert.equal(gpu?.status, 'unknown')
+    assert.equal(device?.status, 'satisfied', 'the node exists, but that is not a working GPU')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+  })
+
+  test('a missing device is unsatisfied and blocks', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'gpu', devices: ['/dev/nvidia0'] }] }),
+      check: true,
+      environment: env({ host: hostOf(), devices: { '/dev/nvidia0': 'missing' } }),
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unsatisfied')
+    assert.equal(report.hardware[0]?.checks[0]?.observed, 'missing')
+    assert.equal(report.status, 'blocked')
+    assert.ok(report.actions.some((a) => a.id === 'provide-hardware:gpu'))
+  })
+
+  test('without a host seam every hardware check is unknown', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'box', platform: ['linux'], minCpus: 4 }] }),
+      check: true,
+      environment: env(),
+    })
+    assert.ok(report.hardware[0]?.checks.every((check) => check.status === 'unknown'))
+    assert.equal(report.hardware[0]?.status, 'unknown')
+    assert.equal(report.status, 'unknown')
+    assert.equal(report.actions.length, 0)
+  })
+
+  test('a device check needs only its own seam, and a throwing seam is unknown', async () => {
+    const declared = declaredWith({ hardware: [{ id: 'kvm', devices: ['/dev/kvm', '/dev/missing'] }] })
+    const base = env()
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared,
+      check: true,
+      environment: { ...base, deviceStatus: (path) => (path === '/dev/kvm' ? 'present' : 'missing') },
+    })
+    assert.deepEqual(
+      report.hardware[0]?.checks.map((check) => check.status),
+      ['satisfied', 'unsatisfied'],
+    )
+    assert.equal(report.status, 'blocked')
+    const action = report.actions.find((a) => a.id === 'provide-hardware:kvm')
+    assert.match(action?.reason ?? '', /device expected \/dev\/missing, observed missing/)
+
+    const throwing = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared,
+      check: true,
+      environment: {
+        ...base,
+        deviceStatus: () => {
+          throw new Error('stat failed')
+        },
+      },
+    })
+    assert.ok(throwing.hardware[0]?.checks.every((check) => check.status === 'unknown'))
+  })
+})
+
+describe('systemEnvironment: host snapshot and devices', () => {
+  test('a container memory cap below total memory is the observed memory', () => {
+    const environment = systemEnvironment({
+      platform: 'linux',
+      hostReaders: {
+        platform: () => 'linux',
+        arch: () => 'x64',
+        machine: () => '',
+        availableParallelism: () => 8,
+        totalmem: () => 100 * GIB,
+        constrainedMemory: () => 40 * GIB,
+      },
+    })
+    assert.deepEqual(environment.host?.(), {
+      platform: 'linux',
+      arch: 'x64',
+      machine: null,
+      cpus: 8,
+      memoryBytes: 40 * GIB,
+    })
+  })
+
+  test('an absent, zero or larger memory cap is ignored', () => {
+    for (const constrainedMemory of [() => 0, () => undefined, () => 200 * GIB]) {
+      const environment = systemEnvironment({
+        hostReaders: {
+          machine: () => '',
+          totalmem: () => 100 * GIB,
+          constrainedMemory,
+        },
+      })
+      assert.equal(environment.host?.().memoryBytes, 100 * GIB)
+    }
+  })
+
+  test('a throwing reader is an absent fact, not a crash', () => {
+    const environment = systemEnvironment({
+      hostReaders: {
+        platform: () => {
+          throw new Error('no platform')
+        },
+        arch: () => {
+          throw new Error('no arch')
+        },
+        machine: () => {
+          throw new Error('no machine')
+        },
+        availableParallelism: () => {
+          throw new Error('no cpu count')
+        },
+        totalmem: () => {
+          throw new Error('no memory')
+        },
+        constrainedMemory: () => {
+          throw new Error('no cap')
+        },
+      },
+    })
+    assert.deepEqual(environment.host?.(), {
+      platform: '',
+      arch: '',
+      machine: null,
+      cpus: null,
+      memoryBytes: null,
+    })
+  })
+
+  test('a CPU count that is not a positive integer is null', () => {
+    for (const availableParallelism of [() => 0, () => 1.5, () => -2]) {
+      const environment = systemEnvironment({
+        hostReaders: {
+          platform: () => 'linux',
+          arch: () => 'x64',
+          machine: () => 'x86_64',
+          availableParallelism,
+          totalmem: () => 8 * GIB,
+          constrainedMemory: () => undefined,
+        },
+      })
+      assert.equal(environment.host?.().cpus, null)
+    }
+  })
+
+  test('deviceStatus never stats on Windows or outside /dev', () => {
+    const statRunner = () => {
+      throw new Error('stat must not be called')
+    }
+    const windows = systemEnvironment({ platform: 'win32', statRunner })
+    assert.equal(windows.deviceStatus?.('/dev/nvidia0'), 'unknown')
+
+    for (const path of ['/etc/passwd', '/dev/../etc/passwd', '/dev//sda', 'relative', 'C:\\dev\\x']) {
+      const environment = systemEnvironment({ platform: 'linux', statRunner })
+      assert.equal(environment.deviceStatus?.(path), 'unknown', path)
+    }
+  })
+
+  test('deviceStatus reports existence only, and an undecidable error as unknown', () => {
+    const stat = {
+      isCharacterDevice: () => true,
+      isBlockDevice: () => false,
+      isFile: () => false,
+      isDirectory: () => false,
+    }
+    const seen: string[] = []
+    const present = systemEnvironment({
+      platform: 'linux',
+      statRunner: (path) => {
+        seen.push(path)
+        return stat
+      },
+    })
+    assert.equal(present.deviceStatus?.('/dev/nvidia0'), 'present')
+    assert.deepEqual(seen, ['/dev/nvidia0'])
+
+    const missing = systemEnvironment({
+      platform: 'linux',
+      statRunner: () => {
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+      },
+    })
+    assert.equal(missing.deviceStatus?.('/dev/nvidia0'), 'missing')
+
+    const denied = systemEnvironment({
+      platform: 'linux',
+      statRunner: () => {
+        throw Object.assign(new Error('denied'), { code: 'EACCES' })
+      },
+    })
+    assert.equal(denied.deviceStatus?.('/dev/nvidia0'), 'unknown')
+  })
+})
+
 describe('buildReadyReport: context and conflicts stay visible', () => {
   test('no instruction file is blocked and proposes `anvil init`', async () => {
     const report = await buildReadyReport({
@@ -1599,7 +2306,16 @@ describe('buildReadyReport: context and conflicts stay visible', () => {
         commands: { test: [{ cmd: 'npm test', source: 'detected', evidence: 'package.json:12' }] },
       }),
       matches: [],
-      declared: { commands: [{ kind: 'test', cmd: 'make check' }], tools: [], env: [], services: [], references: [] },
+      declared: {
+        commands: [{ kind: 'test', cmd: 'make check' }],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       check: false,
       environment: env(),
     })

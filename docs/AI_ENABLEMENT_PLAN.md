@@ -199,8 +199,13 @@ build, run and verify the project.
   health or authorization.
 - [x] Environment checks and setup never run implicitly during repository profiling.
 - [x] Secret values are not copied into generated context or diagnostic output.
-- [ ] Restricted credentials, missing corporate access and unavailable hardware
-  produce explicit blockers, not an invented successful setup.
+- [x] Restricted credentials, missing corporate access and unavailable hardware
+  produce explicit blockers, not an invented successful setup. Declared credential and
+  access requirements are never `verified`: they block only when declared local evidence
+  (an environment variable name) is absent under `--check`, and are otherwise
+  `declared`/`unknown`. Hardware platform, architecture, CPU count, memory and declared
+  `/dev` devices are compared against a snapshot of the process environment; GPU
+  capability and remote access are never observed.
 
 ## 3. Turn recommendations into approved integrations
 

@@ -599,7 +599,16 @@ describe('anvil setup', () => {
         head: git(root, 'rev-parse', 'HEAD').trim(),
         worktree: worktreeFromStatus(status),
       },
-      declared: { commands: [], tools: [], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       projectDir: '',
     })
     assert.equal(plan.repository.worktree, 'unknown')
@@ -783,7 +792,16 @@ describe('anvil setup', () => {
     assert.equal(state.worktree, 'unknown')
     const current = buildSetupPlan({
       repository: state,
-      declared: { commands: [], tools: [], env: [], services: [], references: [] },
+      declared: {
+        commands: [],
+        tools: [],
+        env: [],
+        services: [],
+        references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+      },
       projectDir: '',
     })
     assert.equal(validateSetupPlan(saved, current).status, 'stale')
