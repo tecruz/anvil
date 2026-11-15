@@ -9,6 +9,8 @@ import type { DeclaredAccess, DeclaredCredential, DeclaredHardware } from '@anvi
 import {
   buildReadyReport,
   connectErrorState,
+  type DeviceStat,
+  type HostReaders,
   type HostSnapshot,
   isInsideRepository,
   isLoopbackAddress,
@@ -102,33 +104,27 @@ function recordingRunner(launches: string[]) {
   }
 }
 
-/** An environment that fails the test if touched: proof that a path spawned nothing. */
-function untouchedEnv(): ReadyEnvironment {
+/**
+ * An environment that records every call and then throws: proof that a path spawned nothing.
+ *
+ * The throw alone is not enough. `buildReadyReport` contains a throwing `host()` or
+ * `deviceStatus()` as an absent fact, so a test that only relied on the throw would still
+ * pass if the guard were removed. Each test asserts the recorded calls are empty instead.
+ */
+function untouchedEnv(calls: string[]): ReadyEnvironment {
+  const touched = (what: string): never => {
+    calls.push(what)
+    throw new Error(`environment.${what} called without --check`)
+  }
   return {
-    resolve(bin) {
-      throw new Error(`environment.resolve called for ${bin} without --check`)
-    },
-    async probe(bin) {
-      throw new Error(`environment.probe called for ${bin} without --check`)
-    },
-    isRunnable(absPath) {
-      throw new Error(`environment.isRunnable called for ${absPath} without --check`)
-    },
-    envStatus(name) {
-      throw new Error(`environment.envStatus called for ${name} without --check`)
-    },
-    checkService(host, port) {
-      throw new Error(`environment.checkService called for ${host}:${port} without --check`)
-    },
-    fileStatus(relPath) {
-      throw new Error(`environment.fileStatus called for ${relPath}`)
-    },
-    host() {
-      throw new Error('environment.host called without --check')
-    },
-    deviceStatus(absPath) {
-      throw new Error(`environment.deviceStatus called for ${absPath} without --check`)
-    },
+    resolve: (bin) => touched(`resolve(${bin})`),
+    probe: async (bin) => touched(`probe(${bin})`),
+    isRunnable: (absPath) => touched(`isRunnable(${absPath})`),
+    envStatus: (name) => touched(`envStatus(${name})`),
+    checkService: (host, port) => touched(`checkService(${host}:${port})`),
+    fileStatus: (relPath) => touched(`fileStatus(${relPath})`),
+    host: () => touched('host()'),
+    deviceStatus: (absPath) => touched(`deviceStatus(${absPath})`),
   }
 }
 
@@ -280,6 +276,7 @@ describe('buildReadyReport: tools come from the project commands', () => {
   })
 
   test('without --check nothing is spawned and every tool is unknown', async () => {
+    const calls: string[] = []
     const report = await buildReadyReport({
       profile: profileOf({ commands: { test: [{ cmd: 'pytest', source: 'detected', evidence: 'x:1' }] } }),
       matches: [],
@@ -294,8 +291,9 @@ describe('buildReadyReport: tools come from the project commands', () => {
         hardware: [],
       },
       check: false,
-      environment: untouchedEnv(),
+      environment: untouchedEnv(calls),
     })
+    assert.deepEqual(calls, [], 'no environment seam may be touched')
     assert.ok(report.tools.every((t) => t.status === 'unknown'))
     assert.equal(report.checked, false)
     assert.equal(report.status, 'unknown')
@@ -1158,6 +1156,7 @@ describe('buildReadyReport: declared version ranges', () => {
   })
 
   test('without --check a range is carried but compatibility is unknown', async () => {
+    const calls: string[] = []
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
@@ -1172,8 +1171,9 @@ describe('buildReadyReport: declared version ranges', () => {
         hardware: [],
       },
       check: false,
-      environment: untouchedEnv(),
+      environment: untouchedEnv(calls),
     })
+    assert.deepEqual(calls, [], 'no environment seam may be touched')
     assert.equal(report.tools[0]?.status, 'unknown')
     assert.equal(report.tools[0]?.versionRange, '^20')
     assert.equal(report.status, 'unknown')
@@ -1250,13 +1250,15 @@ describe('buildReadyReport: declared environment variables', () => {
   })
 
   test('without --check nothing is read and every variable is unknown', async () => {
+    const calls: string[] = []
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
       declared: declaredEnv([{ name: 'API_TOKEN' }]),
       check: false,
-      environment: untouchedEnv(),
+      environment: untouchedEnv(calls),
     })
+    assert.deepEqual(calls, [], 'no environment seam may be touched')
     assert.equal(report.env[0]?.status, 'unknown')
     assert.equal(report.status, 'unknown')
   })
@@ -1416,13 +1418,15 @@ describe('buildReadyReport: declared services', () => {
   })
 
   test('without --check no service is contacted', async () => {
+    const calls: string[] = []
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
       declared: declaredServices([{ id: 'postgres', port: 5432 }]),
       check: false,
-      environment: untouchedEnv(),
+      environment: untouchedEnv(calls),
     })
+    assert.deepEqual(calls, [], 'no environment seam may be touched')
     assert.equal(report.services[0]?.status, 'unknown')
     assert.equal(report.status, 'unknown')
   })
@@ -1760,6 +1764,7 @@ describe('buildReadyReport: approved context references', () => {
 
 describe('buildReadyReport: declared credentials and access', () => {
   test('without --check every requirement is unknown and no seam is touched', async () => {
+    const calls: string[] = []
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
@@ -1769,8 +1774,9 @@ describe('buildReadyReport: declared credentials and access', () => {
         hardware: [{ id: 'box', minCpus: 4, devices: ['/dev/nvidia0'] }],
       }),
       check: false,
-      environment: untouchedEnv(),
+      environment: untouchedEnv(calls),
     })
+    assert.deepEqual(calls, [], 'no environment seam may be touched')
     assert.equal(report.credentials[0]?.status, 'unknown')
     assert.deepEqual(report.credentials[0]?.env, [{ name: 'API_TOKEN', status: 'unknown' }])
     assert.equal(report.access[0]?.status, 'unknown')
@@ -1947,6 +1953,17 @@ function hostOf(overrides: Partial<HostSnapshot> = {}): HostSnapshot {
   return { platform: 'linux', arch: 'x64', machine: null, cpus: 8, memoryBytes: 16 * GIB, ...overrides }
 }
 
+/** A fake `lstat` result of one node type; a device test never stats the real `/dev`. */
+function nodeOf(kind: 'directory' | 'file' | 'char' | 'symlink'): DeviceStat {
+  return {
+    isCharacterDevice: () => kind === 'char',
+    isBlockDevice: () => false,
+    isFile: () => kind === 'file',
+    isDirectory: () => kind === 'directory',
+    isSymbolicLink: () => kind === 'symlink',
+  }
+}
+
 describe('buildReadyReport: declared hardware', () => {
   test('a platform outside the declared list is unsatisfied and blocks', async () => {
     const report = await buildReadyReport({
@@ -1978,7 +1995,7 @@ describe('buildReadyReport: declared hardware', () => {
     assert.equal(report.status, 'blocked')
   })
 
-  test('an emulated process is unknown, not a pass or a failure', async () => {
+  test('a process arch that differs from the OS machine type is unknown, not a pass or a failure', async () => {
     const report = await buildReadyReport({
       profile: profileOf(),
       matches: [],
@@ -2148,14 +2165,25 @@ describe('systemEnvironment: host snapshot and devices', () => {
 
   test('an absent, zero or larger memory cap is ignored', () => {
     for (const constrainedMemory of [() => 0, () => undefined, () => 200 * GIB]) {
+      // Every reader is injected, so the real platform, arch, machine and CPU count are never read.
       const environment = systemEnvironment({
+        platform: 'linux',
         hostReaders: {
+          platform: () => 'linux',
+          arch: () => 'x64',
           machine: () => '',
+          availableParallelism: () => 4,
           totalmem: () => 100 * GIB,
           constrainedMemory,
         },
       })
-      assert.equal(environment.host?.().memoryBytes, 100 * GIB)
+      assert.deepEqual(environment.host?.(), {
+        platform: 'linux',
+        arch: 'x64',
+        machine: null,
+        cpus: 4,
+        memoryBytes: 100 * GIB,
+      })
     }
   })
 
@@ -2207,52 +2235,256 @@ describe('systemEnvironment: host snapshot and devices', () => {
     }
   })
 
-  test('deviceStatus never stats on Windows or outside /dev', () => {
-    const statRunner = () => {
-      throw new Error('stat must not be called')
+  test('deviceStatus never stats on Windows, outside /dev, or under /dev/fd and /dev/std*', () => {
+    const calls: string[] = []
+    const lstatRunner = (path: string): DeviceStat => {
+      calls.push(path)
+      return nodeOf('file')
     }
-    const windows = systemEnvironment({ platform: 'win32', statRunner })
+    const windows = systemEnvironment({ platform: 'win32', lstatRunner })
     assert.equal(windows.deviceStatus?.('/dev/nvidia0'), 'unknown')
 
-    for (const path of ['/etc/passwd', '/dev/../etc/passwd', '/dev//sda', 'relative', 'C:\\dev\\x']) {
-      const environment = systemEnvironment({ platform: 'linux', statRunner })
+    for (const path of [
+      '/etc/passwd',
+      '/dev/../etc/passwd',
+      '/dev//sda',
+      '/dev/sda/',
+      '/dev/./sda',
+      '/dev/fd',
+      '/dev/fd/3',
+      '/dev/fd/3/package.json',
+      '/dev/FD/3/package.json',
+      '/dev/stdin',
+      '/dev/stdout',
+      '/dev/stderr',
+      'relative',
+      'C:\\dev\\x',
+    ]) {
+      const environment = systemEnvironment({ platform: 'linux', lstatRunner })
       assert.equal(environment.deviceStatus?.(path), 'unknown', path)
     }
+    // A thrown runner would be swallowed as `unknown`; only a call count proves no stat ran.
+    assert.deepEqual(calls, [])
+  })
+
+  test('/dev/fd/<n>/package.json never reports a repository file as a present device', () => {
+    // A runner that answers like a following `stat` on Linux: `/dev/fd/<n>` leads to the open
+    // repository directory, so the old single `stat` found its package.json and said present.
+    const calls: string[] = []
+    const following = (path: string): DeviceStat => {
+      calls.push(path)
+      return path.endsWith('package.json') ? nodeOf('file') : nodeOf('directory')
+    }
+    const environment = systemEnvironment({ platform: 'linux', lstatRunner: following })
+    assert.equal(environment.deviceStatus?.('/dev/fd/3/package.json'), 'unknown')
+    assert.deepEqual(calls, [])
+  })
+
+  test('deviceStatus lstats every component and treats a link anywhere as unknown', () => {
+    const walk = (path: string, nodes: Record<string, DeviceStat>) => {
+      const calls: string[] = []
+      const environment = systemEnvironment({
+        platform: 'linux',
+        lstatRunner: (current) => {
+          calls.push(current)
+          const node = nodes[current]
+          if (node === undefined) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+          return node
+        },
+      })
+      return { status: environment.deviceStatus?.(path), calls }
+    }
+    const dir = nodeOf('directory')
+
+    // A plain path: every component is visited, in order, and the device is present.
+    assert.deepEqual(
+      walk('/dev/dri/renderD128', { '/dev': dir, '/dev/dri': dir, '/dev/dri/renderD128': nodeOf('char') }),
+      { status: 'present', calls: ['/dev', '/dev/dri', '/dev/dri/renderD128'] },
+    )
+    // A link partway stops the walk: nothing past it is stat'ed.
+    assert.deepEqual(
+      walk('/dev/disk/by-id/nvme0', {
+        '/dev': dir,
+        '/dev/disk': dir,
+        '/dev/disk/by-id': nodeOf('symlink'),
+        '/dev/disk/by-id/nvme0': nodeOf('file'),
+      }),
+      { status: 'unknown', calls: ['/dev', '/dev/disk', '/dev/disk/by-id'] },
+    )
+    // A link as the final node is not followed, so its target is never vouched for.
+    assert.deepEqual(walk('/dev/kvm', { '/dev': dir, '/dev/kvm': nodeOf('symlink') }), {
+      status: 'unknown',
+      calls: ['/dev', '/dev/kvm'],
+    })
+    // `/dev` itself being a link leaves `/dev` undecidable.
+    assert.deepEqual(walk('/dev/kvm', { '/dev': nodeOf('symlink'), '/dev/kvm': nodeOf('char') }), {
+      status: 'unknown',
+      calls: ['/dev'],
+    })
+    // A non-directory partway cannot lead to a device anvil can vouch for.
+    assert.deepEqual(walk('/dev/null/x', { '/dev': dir, '/dev/null': nodeOf('char'), '/dev/null/x': nodeOf('file') }), {
+      status: 'unknown',
+      calls: ['/dev', '/dev/null'],
+    })
+    // An absent component is missing.
+    assert.deepEqual(walk('/dev/dri/renderD128', { '/dev': dir }), {
+      status: 'missing',
+      calls: ['/dev', '/dev/dri'],
+    })
   })
 
   test('deviceStatus reports existence only, and an undecidable error as unknown', () => {
-    const stat = {
-      isCharacterDevice: () => true,
-      isBlockDevice: () => false,
-      isFile: () => false,
-      isDirectory: () => false,
-    }
-    const seen: string[] = []
-    const present = systemEnvironment({
-      platform: 'linux',
-      statRunner: (path) => {
-        seen.push(path)
-        return stat
-      },
-    })
-    assert.equal(present.deviceStatus?.('/dev/nvidia0'), 'present')
-    assert.deepEqual(seen, ['/dev/nvidia0'])
-
     const missing = systemEnvironment({
       platform: 'linux',
-      statRunner: () => {
+      lstatRunner: (path) => {
+        if (path === '/dev') return nodeOf('directory')
         throw Object.assign(new Error('gone'), { code: 'ENOENT' })
       },
     })
     assert.equal(missing.deviceStatus?.('/dev/nvidia0'), 'missing')
 
+    const notDir = systemEnvironment({
+      platform: 'linux',
+      lstatRunner: (path) => {
+        if (path === '/dev') return nodeOf('directory')
+        throw Object.assign(new Error('not a dir'), { code: 'ENOTDIR' })
+      },
+    })
+    assert.equal(notDir.deviceStatus?.('/dev/nvidia0'), 'missing')
+
     const denied = systemEnvironment({
       platform: 'linux',
-      statRunner: () => {
+      lstatRunner: () => {
         throw Object.assign(new Error('denied'), { code: 'EACCES' })
       },
     })
     assert.equal(denied.deviceStatus?.('/dev/nvidia0'), 'unknown')
+  })
+
+  test('a /dev/fd device that skipped validation is unknown in the report, never satisfied', async () => {
+    const calls: string[] = []
+    const { deviceStatus } = systemEnvironment({
+      platform: 'linux',
+      lstatRunner: (path) => {
+        calls.push(path)
+        return path.endsWith('package.json') ? nodeOf('file') : nodeOf('directory')
+      },
+    })
+    assert.ok(deviceStatus)
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'escape', devices: ['/dev/fd/3/package.json'] }] }),
+      check: true,
+      environment: { ...env(), deviceStatus },
+    })
+    assert.equal(report.hardware[0]?.checks[0]?.status, 'unknown')
+    assert.equal(report.hardware[0]?.status, 'unknown')
+    assert.deepEqual(calls, [])
+  })
+})
+
+describe('buildReadyReport: the host snapshot is read only when needed', () => {
+  /** Every host reader, counting its calls. Each one returns a fixed fake fact. */
+  function countingReaders(calls: string[]): HostReaders {
+    const count =
+      <T>(name: string, value: T) =>
+      (): T => {
+        calls.push(name)
+        return value
+      }
+    return {
+      platform: count('platform', 'linux' as NodeJS.Platform),
+      arch: count('arch', 'x64'),
+      machine: count('machine', 'x86_64'),
+      availableParallelism: count('availableParallelism', 8),
+      totalmem: count('totalmem', 16 * GIB),
+      constrainedMemory: count('constrainedMemory', undefined),
+    }
+  }
+
+  test('with no hardware declared, no host reader runs even under --check', async () => {
+    const calls: string[] = []
+    const { host } = systemEnvironment({ platform: 'linux', hostReaders: countingReaders(calls) })
+    assert.ok(host)
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: noDeclared,
+      check: true,
+      environment: { ...env(), host },
+    })
+    assert.deepEqual(report.hardware, [])
+    assert.deepEqual(calls, [])
+  })
+
+  test('with only GPU and device constraints, the host snapshot is not taken', async () => {
+    const calls: string[] = []
+    let hostCalls = 0
+    const { host } = systemEnvironment({ platform: 'linux', hostReaders: countingReaders(calls) })
+    assert.ok(host)
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' }, devices: ['/dev/nvidia0'] }] }),
+      check: true,
+      environment: {
+        ...env({ devices: { '/dev/nvidia0': 'present' } }),
+        host: () => {
+          hostCalls++
+          return host()
+        },
+      },
+    })
+    assert.equal(report.hardware[0]?.checks.length, 2)
+    assert.equal(hostCalls, 0)
+    assert.deepEqual(calls, [])
+  })
+
+  test('a declared constraint that needs the host reads it once', async () => {
+    const calls: string[] = []
+    const { host } = systemEnvironment({ platform: 'linux', hostReaders: countingReaders(calls) })
+    assert.ok(host)
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'cpus', minCpus: 4 }] }),
+      check: true,
+      environment: { ...env(), host },
+    })
+    assert.equal(report.hardware[0]?.status, 'satisfied')
+    assert.deepEqual(calls.sort(), [
+      'arch',
+      'availableParallelism',
+      'constrainedMemory',
+      'machine',
+      'platform',
+      'totalmem',
+    ])
+  })
+})
+
+describe('buildReadyReport: optional hardware', () => {
+  test('an unmet optional hardware entry is unsatisfied but does not block', async () => {
+    const report = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'big', minCpus: 64, required: false }] }),
+      check: true,
+      environment: env({ host: hostOf({ cpus: 8 }) }),
+    })
+    assert.equal(report.hardware[0]?.status, 'unsatisfied')
+    assert.notEqual(report.status, 'blocked')
+
+    // The same mismatch on a required entry blocks, so the difference is `required` alone.
+    const required = await buildReadyReport({
+      profile: profileOf(),
+      matches: [],
+      declared: declaredWith({ hardware: [{ id: 'big', minCpus: 64 }] }),
+      check: true,
+      environment: env({ host: hostOf({ cpus: 8 }) }),
+    })
+    assert.equal(required.status, 'blocked')
   })
 })
 

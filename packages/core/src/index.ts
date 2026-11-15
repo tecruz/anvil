@@ -37,6 +37,7 @@ export {
   defaultConfig,
   ensureParentDir,
   globalConfigPath,
+  isSafeDevicePath,
   type LoadConfigOptions,
   loadConfig,
   mergeConfig,

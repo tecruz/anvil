@@ -46,6 +46,7 @@ import {
   type DeclaredReference,
   type DeclaredReferenceScope,
   type DeclaredService,
+  isSafeDevicePath,
   type ProjectConfig,
   parseVersion,
   resolveCommand,
@@ -392,8 +393,9 @@ export interface ReadyEnvironment {
    * The existence of a POSIX `/dev` node, by absolute path.
    *
    * Optional so a test without a `/dev` need not implement it; absent, and a declared
-   * device is `unknown`. Stat only: the node is never opened, and on Windows the answer is
-   * always `unknown` because a UNC path could reach the network.
+   * device is `unknown`. `lstat` only, one path component at a time, so no link is followed
+   * out of `/dev`: the node is never opened, and on Windows the answer is always `unknown`
+   * because a UNC path could reach the network.
    */
   deviceStatus?(absPath: string): ReadyDeviceStatus
 }
@@ -716,16 +718,17 @@ export interface HostReaders {
   constrainedMemory?: () => number | undefined
 }
 
-/** A stat result as far as a device check needs it: existence, never contents. */
+/**
+ * An `lstat` result as far as a device check needs it: the node's type, never its contents.
+ * A link is reported as a link, never followed.
+ */
 export interface DeviceStat {
   isCharacterDevice(): boolean
   isBlockDevice(): boolean
   isFile(): boolean
   isDirectory(): boolean
+  isSymbolicLink(): boolean
 }
-
-/** The `/dev` shape a declared device must have before it is stat'ed. */
-const HOST_DEVICE_PATH = /^\/dev\/[A-Za-z0-9._/-]+$/
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
@@ -741,8 +744,11 @@ export function systemEnvironment(
     lookupRunner?: (host: string) => Promise<readonly { address: string }[]>
     /** Overridable for tests: the process snapshot readers. Defaults to the real process. */
     hostReaders?: HostReaders
-    /** Overridable for tests: the device stat. Defaults to {@link statSync}. */
-    statRunner?: (path: string) => DeviceStat
+    /**
+     * Overridable for tests: the per-component device `lstat`. Defaults to {@link lstatSync}.
+     * It must not follow links; the check relies on that to stay inside `/dev`.
+     */
+    lstatRunner?: (path: string) => DeviceStat
   } = {},
 ): ReadyEnvironment {
   const platform = options.platform ?? process.platform
@@ -750,7 +756,7 @@ export function systemEnvironment(
   const resolve = options.lookupRunner ?? defaultResolve
   const serviceRunner = options.serviceRunner ?? ((host, port) => connectService(host, port, resolve))
   const readers = options.hostReaders ?? {}
-  const statRunner = options.statRunner ?? statSync
+  const lstatRunner = options.lstatRunner ?? lstatSync
   return {
     resolve(bin) {
       return resolveCommand(bin, options)?.path ?? null
@@ -880,16 +886,30 @@ export function systemEnvironment(
     deviceStatus(absPath) {
       // Never stat on Windows: a UNC path could reach the network, and `/dev` is POSIX-only.
       if (platform === 'win32') return 'unknown'
-      if (!HOST_DEVICE_PATH.test(absPath) || absPath.split('/').includes('..') || absPath.includes('//')) {
-        return 'unknown'
+      // The config loader already rejects these; check again so a caller that skips it (or a
+      // path that changed shape) still cannot reach `/dev/fd/<n>/...` or leave `/dev`.
+      if (!isSafeDevicePath(absPath)) return 'unknown'
+      // Walk the path one component at a time with `lstat`, so no link is followed partway:
+      // `/dev/fd` is a link to `/proc/self/fd` on Linux, and following it could land on any
+      // file the process has open. A link anywhere -- including the final node -- cannot be
+      // shown to stay inside `/dev`, so it is `unknown`. Nothing is opened or read.
+      const segments = absPath.split('/').slice(1)
+      let current = ''
+      for (let index = 0; index < segments.length; index++) {
+        current += `/${segments[index]}`
+        let node: DeviceStat
+        try {
+          node = lstatRunner(current)
+        } catch (error) {
+          return isAbsentError(error) ? 'missing' : 'unknown'
+        }
+        if (node.isSymbolicLink()) return 'unknown'
+        // Only a plain directory can lead further. Anything else partway is not a path to a
+        // device node anvil can vouch for, so it is undecided rather than an accusation.
+        if (index < segments.length - 1 && !node.isDirectory()) return 'unknown'
       }
-      try {
-        // Existence is the whole check: any node type counts, and it is never opened or read.
-        statRunner(absPath)
-        return 'present'
-      } catch (error) {
-        return isAbsentError(error) ? 'missing' : 'unknown'
-      }
+      // Existence is the whole check: any non-link node type counts.
+      return 'present'
     },
   }
 }
@@ -1412,7 +1432,16 @@ function collectHardware(
   check: boolean,
   environment: ReadyEnvironment,
 ): ReadyHardware[] {
-  const host = check ? safeHost(environment) : null
+  // Read the host only when some entry compares against it. With no hardware declared, or
+  // only GPU and device constraints, no host reader runs at all.
+  const needsHost = declared.some(
+    (entry) =>
+      entry.platform !== undefined ||
+      entry.arch !== undefined ||
+      entry.minCpus !== undefined ||
+      entry.minMemoryGiB !== undefined,
+  )
+  const host = check && needsHost ? safeHost(environment) : null
   return declared.map((entry) => {
     const checks: ReadyHardwareCheck[] = []
     const observedPlatform = host?.platform ?? null
@@ -1443,8 +1472,9 @@ function collectHardware(
         } else {
           const normalised = normaliseMachine(hostMachine)
           if (normalised === null || normalised !== observed) {
-            // An emulated process (Rosetta, qemu) reports a different machine than its arch.
-            // That disagreement cannot be resolved into a pass or a failure.
+            // The process architecture differs from the OS machine type (for example 32-bit
+            // Node on a 64-bit OS), or the machine type is not one anvil can map. Which one
+            // the project needs cannot be decided, so this is neither a pass nor a failure.
             observed = `${observed} (machine ${hostMachine})`
           } else {
             status = declaredArch.includes(observed) ? 'satisfied' : 'unsatisfied'

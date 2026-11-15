@@ -718,7 +718,26 @@ describe('project: owner-declared capabilities', () => {
   })
 
   test('rejects a declared device that is not a POSIX /dev node', () => {
-    for (const device of ['/etc/passwd', '/dev/../etc', '\\\\server\\share', 'C:\\x', 'relative', '/dev//sda']) {
+    for (const device of [
+      '/etc/passwd',
+      '/dev/../etc',
+      '\\\\server\\share',
+      'C:\\x',
+      'relative',
+      '/dev//sda',
+      '/dev/sda/',
+      '/dev/./sda',
+      '/dev/',
+      // These alias a process's open files, so /dev/fd/<n>/package.json reaches the repository.
+      '/dev/fd',
+      '/dev/fd/3',
+      '/dev/fd/3/package.json',
+      '/dev/FD/3',
+      '/dev/stdin',
+      '/dev/stdout',
+      '/dev/stderr',
+      '/dev/StdErr',
+    ]) {
       assert.throws(
         () => mergeConfig(defaultConfig(), { project: { hardware: [{ id: 'x', devices: [device] }] } }, 'cfg'),
         (err: unknown) => {
@@ -728,6 +747,13 @@ describe('project: owner-declared capabilities', () => {
         },
         device,
       )
+    }
+  })
+
+  test('accepts plain /dev device paths, including names that only start like fd', () => {
+    for (const device of ['/dev/kvm', '/dev/nvidia0', '/dev/dri/renderD128', '/dev/fd0', '/dev/fdx/a']) {
+      const merged = mergeConfig(defaultConfig(), { project: { hardware: [{ id: 'x', devices: [device] }] } }, 'cfg')
+      assert.deepEqual(merged.project.hardware?.[0]?.devices, [device], device)
     }
   })
 

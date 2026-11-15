@@ -386,10 +386,14 @@ reports three states and never guesses between them.
   `minMemoryGiB` (total memory, capped by the container limit — not free memory), declared
   `/dev` device nodes (existence only, POSIX only; Windows is always `unknown`), and a GPU
   requirement that is always `unknown` because anvil never observes GPUs. A mismatch in
-  platform, architecture, CPU count, memory or a device is `unsatisfied` and blocks; an
-  emulated process (Rosetta, qemu), an unreadable fact or an absent `--check` is `unknown`.
-  Nothing is spawned and no network is touched. Without `--check` every hardware check is
-  `unknown`.
+  platform, architecture, CPU count, memory or a device makes that entry `unsatisfied`; only
+  a required entry (the default) then blocks the report, and an unmet `"required": false`
+  entry is reported without blocking. A process architecture that differs from the OS
+  machine type (for example 32-bit Node on a 64-bit OS) or a machine type anvil cannot map,
+  an unreadable fact, or an absent `--check` is `unknown`. A device path is checked with
+  `lstat`, one component at a time, and a symbolic link anywhere on it is `unknown`, so the
+  check never follows a link out of `/dev`. Nothing is spawned and no network is touched.
+  Without `--check` every hardware check is `unknown`.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
@@ -545,8 +549,10 @@ Two layers, repo-local wins:
   and `arch` are non-empty any-of lists; `minCpus` is an integer 1..4096; `minMemoryGiB`
   is greater than 0 and at most 65536. `gpu` accepts only `vendor` (`nvidia`, `amd`,
   `apple`, `intel`, `any`, default `any`) and is never observed. `devices` are POSIX
-  `/dev` paths, existence only: paths outside `/dev`, containing `..` or `//`, and
-  Windows/UNC paths are rejected. `required` defaults to true. Checks run only with
+  `/dev` paths, existence only: paths outside `/dev`, paths with an empty, `.` or `..`
+  segment (including `//` and a trailing `/`), `/dev/fd`, anything under `/dev/fd/`,
+  `/dev/std*` (they alias a process's open files, not devices), and Windows/UNC paths are
+  rejected. `required` defaults to true. Checks run only with
   `--check`.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in

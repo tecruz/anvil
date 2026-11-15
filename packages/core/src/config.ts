@@ -205,7 +205,7 @@ export interface DeclaredHardware {
   gpu?: { vendor?: DeclaredGpuVendor }
   /**
    * POSIX device nodes, existence only. Each must match `^/dev/[A-Za-z0-9._/-]+$`, contain
-   * no `..` segment and no `//`.
+   * no empty, `.` or `..` segment, and must not be `/dev/fd`, under `/dev/fd/` or `/dev/std*`.
    */
   devices?: string[]
   /** Why the project needs it. */
@@ -782,10 +782,21 @@ const GPU_VENDORS: readonly DeclaredGpuVendor[] = ['nvidia', 'amd', 'apple', 'in
 /** A POSIX device node a hardware declaration may name. Existence only, never opened. */
 const DEVICE_PATH = /^\/dev\/[A-Za-z0-9._/-]+$/
 
-/** True when `value` names a `/dev` node without traversal or a doubled separator. */
-function isSafeDevicePath(value: string): boolean {
+/**
+ * True when `value` is a plain path to a node under `/dev`.
+ *
+ * Every segment must be a name: no empty segment (`//` or a trailing `/`), no `.` and no
+ * `..`. `/dev/fd`, `/dev/fd/*` and `/dev/std*` are rejected because they alias the files a
+ * process has open rather than naming a device, so `/dev/fd/<n>/package.json` would reach a
+ * repository file. The comparison ignores case so a case-insensitive file system cannot
+ * reopen that door. Shared with the check-time guard in `@anvil/derive`.
+ */
+export function isSafeDevicePath(value: string): boolean {
   if (!DEVICE_PATH.test(value)) return false
-  return !value.split('/').includes('..') && !value.includes('//')
+  const segments = value.split('/').slice(2)
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return false
+  const first = (segments[0] ?? '').toLowerCase()
+  return first !== 'fd' && !first.startsWith('std')
 }
 
 /** Read an enum array that must be non-empty. A single bad entry drops the whole list. */
@@ -892,7 +903,8 @@ function parseDeclaredHardware(
         if (typeof device !== 'string' || !isSafeDevicePath(device)) {
           issues.push({
             path: `${at}.devices[${deviceIndex}]`,
-            message: 'expected an absolute /dev device path without ".." or "//"',
+            message:
+              'expected an absolute /dev device path with no empty, "." or ".." segment, not /dev/fd or /dev/std*',
           })
           return
         }
