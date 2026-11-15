@@ -25,6 +25,16 @@ import { loadProfile, parseMaxFiles } from './doctor.ts'
 import type { Command, CommandContext } from './types.ts'
 
 /**
+ * How long an apply waits for the repository lock.
+ *
+ * The holder performs several Windows ACL reads and one harden step, each bounded by the
+ * approval module's tool timeout. The old 20-second wait could expire while the holder was
+ * still doing legitimate, bounded work on a loaded Windows runner. This is a wait bound, not
+ * an authority change: a holder that never releases still makes the contender fail.
+ */
+const SETUP_APPLY_LOCK_TIMEOUT_MS = 120_000
+
+/**
  * Classify `git status`. A non-zero exit is incomplete, and so is a warning on stderr:
  * Git can report `could not open directory` while exiting 0 with empty stdout, which
  * must not become `clean`.
@@ -352,7 +362,7 @@ export const setupCommand: Command = {
         saved,
         repository,
         grantId: grantId as string,
-        lock: (work) => withRepoLock({ cwd: root, name: 'setup-apply' }, work),
+        lock: (work) => withRepoLock({ cwd: root, name: 'setup-apply', timeoutMs: SETUP_APPLY_LOCK_TIMEOUT_MS }, work),
         refresh: refreshRepository,
       })
       if (record.status === 'applied') {
