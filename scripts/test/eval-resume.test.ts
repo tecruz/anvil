@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
-import { once } from 'node:events'
 import {
   cpSync,
   existsSync,
@@ -27,12 +26,19 @@ import {
   resultKey,
 } from '../../packages/cli/src/eval-gate.ts'
 
+interface Invocation {
+  status: number | null
+  output: string
+}
+
 interface IsolatedHarness {
   root: string
   env: NodeJS.ProcessEnv
   read: (path: string) => string
   write: (path: string, value: unknown) => void
-  invoke: (...args: string[]) => { status: number | null; output: string }
+  invoke: (...args: string[]) => Invocation
+  /** Invoke with an explicit cap, for a test that shares one deadline across steps. */
+  invokeWithin: (timeoutMs: number, ...args: string[]) => Invocation
   cleanup: () => void
 }
 
@@ -103,21 +109,24 @@ function isolatedHarness(prefix: string): IsolatedHarness {
   env.GIT_COMMITTER_NAME = 'anvil eval'
   env.GIT_COMMITTER_EMAIL = 'eval@anvil.local'
 
+  function invokeWithin(timeoutMs: number, ...args: string[]): Invocation {
+    const result = spawnSync(process.execPath, ['scripts/eval.ts', '--fake-agent', ...args], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+    })
+    assert.equal(result.error, undefined, result.error?.message)
+    return { status: result.status, output: `${result.stdout}\n${result.stderr}` }
+  }
+
   return {
     root,
     env,
     read: (path) => readFileSync(join(root, path), 'utf8'),
     write: (path, value) => writeFileSync(join(root, path), `${JSON.stringify(value, null, 2)}\n`),
-    invoke: (...args) => {
-      const result = spawnSync(process.execPath, ['scripts/eval.ts', '--fake-agent', ...args], {
-        cwd: root,
-        env,
-        encoding: 'utf8',
-        timeout: 300_000,
-      })
-      assert.equal(result.error, undefined, result.error?.message)
-      return { status: result.status, output: `${result.stdout}\n${result.stderr}` }
-    },
+    invoke: (...args) => invokeWithin(300_000, ...args),
+    invokeWithin,
     cleanup: () => rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }),
   }
 }
@@ -165,13 +174,70 @@ function waitForMarker(
   })
 }
 
-/** Kill the child and wait for its close, so no process is touching files during cleanup. */
-async function killAndWait(child: ChildProcess): Promise<void> {
-  if (child.pid === undefined) return
-  if (child.exitCode !== null || child.signalCode !== null) return
-  const closed = once(child, 'close')
-  child.kill('SIGKILL')
-  await closed
+/**
+ * A child whose `close` is captured immediately after spawn.
+ *
+ * `close` can be emitted before the test gets around to killing or reaping the child, so a
+ * later `once(child, 'close')` can wait forever. Capturing the promise at spawn time makes
+ * the wait independent of how much of the child's earlier lifecycle has already happened.
+ */
+interface TrackedChild {
+  child: ChildProcess
+  closed: Promise<void>
+}
+
+function spawnTracked(command: string, args: string[], options: Parameters<typeof spawn>[2]): TrackedChild {
+  const child = spawn(command, args, options)
+  return { child, closed: new Promise((resolve) => child.once('close', () => resolve())) }
+}
+
+/** Kill the child and wait, bounded, for its close, so no process touches files during cleanup. */
+async function killAndWait(tracked: TrackedChild, timeoutMs: number): Promise<void> {
+  const { child, closed } = tracked
+  // A child that already exited still needs its close waited for: stdio streams are closed
+  // only then, and the fixture is not safe to read or delete until they are.
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    child.kill('SIGKILL')
+  }
+  let timer: NodeJS.Timeout | undefined
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `timed out after ${timeoutMs}ms waiting for child ${child.pid ?? '(no pid)'} to close after SIGKILL (exit code ${child.exitCode}, signal ${child.signalCode})`,
+          ),
+        ),
+      timeoutMs,
+    )
+  })
+  try {
+    await Promise.race([closed, timedOut])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * A shared budget for a multi-step test.
+ *
+ * Each step's preference is clamped to the time left, so the steps cannot add up to more
+ * than the budget. Without this, four independent caps of 300s, 240s, 300s and 300s can
+ * outlive the test runner's own timeout, and the test dies with no useful failure message.
+ */
+interface Deadline {
+  step: (preferredMs: number, label: string) => number
+}
+
+function budget(budgetMs: number): Deadline {
+  const deadline = Date.now() + budgetMs
+  return {
+    step(preferredMs, label) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw new Error(`the test's ${budgetMs}ms budget was spent before ${label}`)
+      return Math.min(preferredMs, remaining)
+    },
+  }
 }
 
 test('fake-agent resume validates verifier evidence before recovery and preserves evidence on refusal', {
@@ -282,35 +348,41 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
 })
 
 test('an interrupted fake-agent run keeps its checkpoint and resume reuses it', {
+  // The budget below is deliberately smaller than this timeout, so a slow step fails with its
+  // own message instead of the runner killing the test first.
   timeout: 900_000,
 }, async () => {
   const harness = isolatedHarness('anvil-eval-interrupted-')
-  let child: ChildProcess | undefined
+  // The five steps cannot add up to more than this: baseline 240s + halt marker 150s + the
+  // killed child 30s + resume 240s + check 120s. Previously each step had its own 240-300s
+  // cap, which summed to ~1140s and outlived the runner's 900s timeout.
+  const deadline = budget(780_000)
+  let running: TrackedChild | undefined
   try {
-    const { root, env, read, invoke } = harness
+    const { root, env, read, invokeWithin } = harness
     // A complete baseline first: the final --check then proves the resumed record is
     // certifiable against this matrix instead of bootstrapping on a missing baseline.
-    const baseline = invoke('--write-baseline')
+    const baseline = invokeWithin(deadline.step(240_000, 'the baseline'), '--write-baseline')
     assert.equal(baseline.status, 0, baseline.output)
 
     // Halt after two new checkpoints: run.json then holds the first result, while the
     // second result exists only in its checkpoint. Killing here proves recovery from the
     // checkpoint rather than from a partially written record.
     const capture = { output: '' }
-    child = spawn(process.execPath, ['scripts/eval.ts', '--fake-agent'], {
+    running = spawnTracked(process.execPath, ['scripts/eval.ts', '--fake-agent'], {
       cwd: root,
       env: { ...env, ANVIL_EVAL_FAKE_HALT_AFTER_CHECKPOINTS: '2' },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     const marker = /anvil-eval: halted after checkpoint (.+?)\r?\n/
-    await waitForMarker(child, marker, capture, 240_000)
+    await waitForMarker(running.child, marker, capture, deadline.step(180_000, 'the halt marker'))
     const match = capture.output.match(marker)
     assert.ok(match !== null, capture.output)
     const haltedKey = match[1]!
     // SIGKILL is TerminateProcess on Windows and immediate on POSIX; either way the child
     // has exited before any file below is read.
-    await killAndWait(child)
-    child = undefined
+    await killAndWait(running, deadline.step(30_000, 'the killed child'))
+    running = undefined
 
     const interrupted = JSON.parse(read('eval-results/run.json')) as EvalRunRecord
     assert.equal(interrupted.completionState, 'in-progress')
@@ -343,7 +415,7 @@ test('an interrupted fake-agent run keeps its checkpoint and resume reuses it', 
     )
 
     // Resume without the halt hook: it must adopt the checkpoint instead of rerunning it.
-    const resumedInvocation = invoke('--resume')
+    const resumedInvocation = invokeWithin(deadline.step(240_000, 'the resume'), '--resume')
     assert.equal(resumedInvocation.status, 0, resumedInvocation.output)
     assert.match(resumedInvocation.output, /Recovered completed checkpoints for run /)
     assert.match(
@@ -365,11 +437,11 @@ test('an interrupted fake-agent run keeps its checkpoint and resume reuses it', 
     assert.equal(reused.attempts[0]!.completedAt, checkpoint.attempts[0]!.completedAt)
     assert.equal(reused.durationMs, checkpoint.durationMs)
 
-    const check = invoke('--check')
+    const check = invokeWithin(deadline.step(120_000, 'the final check'), '--check')
     assert.equal(check.status, 0, check.output)
     assert.doesNotMatch(check.output, /No eval baseline exists yet/)
   } finally {
-    if (child !== undefined) await killAndWait(child)
+    if (running !== undefined) await killAndWait(running, 60_000)
     harness.cleanup()
   }
 })
