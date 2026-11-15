@@ -397,11 +397,12 @@ reports three states and never guesses between them.
   `/dev/log`, and often `/dev/rtc` and `/dev/cdrom` — report `unknown` rather than
   `present`. Any non-link node at the end counts as present, including a directory or a
   regular file. Because each step re-resolves the path, a directory on it could be swapped
-  for a link between two `lstat` calls, so any directory on the walk that is shared-writable
-  (world-writable or sticky, like `/dev/shm` and `/dev/mqueue`), or whose mode cannot be
-  read, also makes the device `unknown`. A privileged process that can modify the other
-  `/dev` directories could still race the check. Nothing is spawned and no network is
-  touched. Without `--check` every hardware check is `unknown`.
+  for a link between two `lstat` calls by anyone who can write to it. So every directory on
+  the walk, `/dev` included, must be owned by root (uid 0) and be neither group-writable,
+  world-writable nor sticky; a directory that is not (such as `/dev/shm` or `/dev/mqueue`),
+  or whose owner or mode cannot be read, makes the device `unknown`. Only root can then
+  change the directories on the path while it is walked. Nothing is spawned and no network
+  is touched. Without `--check` every hardware check is `unknown`.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 

@@ -394,7 +394,7 @@ export interface ReadyEnvironment {
    *
    * Optional so a test without a `/dev` need not implement it; absent, and a declared
    * device is `unknown`. A best-effort `lstat` walk, one path component at a time, that is
-   * `unknown` on a link or a shared-writable directory: the node is never opened, and on
+   * `unknown` on a link or a directory not exclusively root's: the node is never opened, and on
    * Windows the answer is always `unknown` because a UNC path could reach the network.
    */
   deviceStatus?(absPath: string): ReadyDeviceStatus
@@ -730,16 +730,35 @@ export interface DeviceStat {
   isSymbolicLink(): boolean
   /**
    * The node's permission bits, as `lstat` reports them. Read only for directories on the
-   * walk; absent, and the check cannot rule out a shared-writable directory, so it is
-   * `unknown`.
+   * walk; absent or not an integer, and the check cannot rule out a writable directory, so
+   * it is `unknown`.
    */
   mode?: number
+  /**
+   * The node's owner, as `lstat` reports it. Read only for directories on the walk, which
+   * must be owned by root (uid 0); absent or not an integer, and the answer is `unknown`.
+   */
+  uid?: number
 }
 
+/** Members of the directory's group may create or rename entries (`g+w`). */
+const GROUP_WRITABLE = 0o020
 /** Anyone may create or rename entries in a directory with this bit (`o+w`). */
 const WORLD_WRITABLE = 0o002
 /** The sticky bit: set on shared scratch directories such as `/dev/shm` and `/dev/mqueue`. */
 const STICKY = 0o1000
+
+/**
+ * True when only root can change what a directory on a device walk contains: it is owned by
+ * uid 0 and is not group-writable, world-writable or sticky. Anything unreported is false.
+ */
+function isRootOnlyDirectory(node: DeviceStat): boolean {
+  const { mode, uid } = node
+  if (typeof mode !== 'number' || !Number.isInteger(mode)) return false
+  if (typeof uid !== 'number' || !Number.isInteger(uid)) return false
+  if (uid !== 0) return false
+  return (mode & (GROUP_WRITABLE | WORLD_WRITABLE | STICKY)) === 0
+}
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
@@ -907,9 +926,9 @@ export function systemEnvironment(
       //
       // Each step re-resolves the whole path, so a directory checked a moment ago could be
       // swapped for a link before the next `lstat`. Only someone who can write to a directory
-      // on the path can do that, so any shared-writable directory (world-writable or sticky,
-      // like `/dev/shm`) makes the answer `unknown`. This is best effort: a process that can
-      // already modify the non-world-writable `/dev` directories could still race it.
+      // on the path can do that, so every directory on it must be owned by root and be
+      // neither group-writable, world-writable nor sticky (which rules out `/dev/shm` and
+      // `/dev/mqueue`); anything else is `unknown`. Only root can then race the walk.
       const segments = absPath.split('/').slice(1)
       let current = ''
       for (let index = 0; index < segments.length; index++) {
@@ -925,10 +944,9 @@ export function systemEnvironment(
         // device node anvil can vouch for, so it is undecided rather than an accusation.
         if (index < segments.length - 1) {
           if (!node.isDirectory()) return 'unknown'
-          // Fail closed: a mode that was not reported cannot rule out a shared directory.
-          const mode = node.mode
-          if (typeof mode !== 'number' || !Number.isInteger(mode)) return 'unknown'
-          if ((mode & WORLD_WRITABLE) !== 0 || (mode & STICKY) !== 0) return 'unknown'
+          // Fail closed: an owner or mode that was not reported cannot rule out a directory
+          // someone other than root could change.
+          if (!isRootOnlyDirectory(node)) return 'unknown'
         }
       }
       // Existence is the whole check: any non-link node type counts.

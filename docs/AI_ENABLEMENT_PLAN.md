@@ -206,7 +206,8 @@ build, run and verify the project.
   `declared`/`unknown`. Hardware platform, architecture, CPU count and memory are
   compared against a snapshot of the process environment; each declared `/dev` device is
   checked separately by a best-effort `lstat` walk of its path, and is `unknown` when a link
-  or a shared-writable directory is on the way. GPU capability and remote access are never
+  is on the way or a directory on it is not root-owned or is group-writable,
+  world-writable or sticky. GPU capability and remote access are never
   observed.
 
 ## 3. Turn recommendations into approved integrations
