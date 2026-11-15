@@ -23,10 +23,13 @@ import {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
   inspectSetupApproval,
+  inspectSetupApprovalTransition,
   isTrustedRootAlias,
   LOCAL_SKILL_ADAPTER,
   prepareSetupApprovalStore,
+  readGrantRecord,
   readSetupApprovalGrant,
+  readSetupApprovalTransition,
   revokeSetupApproval,
   SETUP_APPROVAL_TTL_MS,
   type SetupRepositoryState,
@@ -476,6 +479,76 @@ describe('setup approval grants', () => {
     // A harden that timed out is a refusal, and the directory this call created is removed
     // rather than left behind with the inherited ACL.
     assert.equal(existsSync(store), false)
+  })
+
+  test('a transition-record ACL timeout is reported as a timeout, not as a corrupt record', () => {
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const dir = join(store, ID)
+    write(store, `${ID}/transition.json`, JSON.stringify({ schemaVersion: 1, kind: 'revoked', at: T0.toISOString() }))
+
+    // Without the stub this record is a readable revocation, so the stub is what changes it.
+    assert.equal(readSetupApprovalTransition(dir), 'revoked')
+
+    // A stubbed ACL reader proves the timeout branch on any platform, without a real 1 ms
+    // deadline that only a slow host reproduces.
+    const io = { platform: 'win32' as const, readAcl: () => ({ ok: false as const, timedOut: true, timeoutMs: 250 }) }
+    const inspection = inspectSetupApprovalTransition(dir, io)
+    assert.equal(inspection.state, 'unknown')
+    assert.match(inspection.reason ?? '', /grant state record cannot be inspected/)
+    assert.match(inspection.reason ?? '', /protection check could not be read within 250 ms/)
+    assert.match(inspection.reason ?? '', /refused rather than trusted/)
+    assert.doesNotMatch(inspection.reason ?? '', /not private/)
+    // Fail closed: the state readers still report the record as untrusted.
+    assert.equal(readSetupApprovalTransition(dir, io), 'unknown')
+  })
+
+  test('a grant-record ACL timeout is reported as a timeout, not as a permissions problem', () => {
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const dir = join(store, ID)
+    write(store, `${ID}/application.json`, JSON.stringify({ schemaVersion: 1 }))
+
+    assert.equal(readGrantRecord(dir, 'application.json').state, 'present')
+
+    const io = { platform: 'win32' as const, readAcl: () => ({ ok: false as const, timedOut: true, timeoutMs: 250 }) }
+    const read = readGrantRecord(dir, 'application.json', 64 * 1024, io)
+    assert.equal(read.state, 'unknown')
+    assert.match(
+      read.state === 'unknown' ? read.reason : '',
+      /grant record protection check could not be read within 250 ms/,
+    )
+    assert.doesNotMatch(read.state === 'unknown' ? read.reason : '', /not private to the current user/)
+  })
+
+  test('a genuine ACL refusal keeps the "not private" reason, distinct from a timeout', () => {
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const dir = join(store, ID)
+    write(store, `${ID}/application.json`, JSON.stringify({ schemaVersion: 1 }))
+    write(store, `${ID}/transition.json`, JSON.stringify({ schemaVersion: 1, kind: 'revoked', at: T0.toISOString() }))
+
+    // A readable ACL that grants another principal is a permissions problem, not a timeout.
+    const io = {
+      platform: 'win32' as const,
+      readAcl: () => ({
+        ok: true as const,
+        acl: { self: 'S-1-5-21-1', owner: 'S-1-5-21-1', allow: ['S-1-5-21-1', 'S-1-1-0'] },
+      }),
+    }
+    const read = readGrantRecord(dir, 'application.json', 64 * 1024, io)
+    assert.equal(read.state, 'unknown')
+    assert.match(read.state === 'unknown' ? read.reason : '', /not private to the current user/)
+    assert.doesNotMatch(read.state === 'unknown' ? read.reason : '', /could not be read within/)
+    // The transition read distinguishes the two as well: a readable foreign entry is a
+    // permissions problem, not a timeout, so the branch the stub exercises is not skipped.
+    const transition = inspectSetupApprovalTransition(dir, io)
+    assert.equal(transition.state, 'unknown')
+    assert.match(transition.reason ?? '', /not private to the current user/)
+    assert.doesNotMatch(transition.reason ?? '', /could not be read within/)
   })
 
   test('a linked Windows store is refused without modifying its target', (t) => {
