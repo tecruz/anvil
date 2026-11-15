@@ -232,7 +232,13 @@ Discover -> inspect -> approve -> install/configure -> verify
 
 ### Acceptance
 
-- [ ] Discovering a resource never authorizes installing or executing it.
+- [x] Discovering a resource never authorizes installing or executing it.
+  `packages/cli/test/discovery-authority.test.ts` seeds a discovered install command that
+  would write a marker if anything ran it, then drives the real CLI: `playbook discover`
+  writes only its cache, `plan` and `brief` display the entry as `live` guidance, `setup plan`
+  and `setup validate` use only owner declarations and grant nothing, and `setup apply`
+  refuses an owner-command proposal. The marker is never written and no approval store is
+  created.
 - [x] Approval applies to the reviewed resource and actions, not arbitrary future
   discovery results. A grant binds the full plan digest, repository identity, source hash,
   destination and adapter fingerprint, and is single-use. _Partial: implemented for the
