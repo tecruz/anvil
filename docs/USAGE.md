@@ -390,10 +390,18 @@ reports three states and never guesses between them.
   a required entry (the default) then blocks the report, and an unmet `"required": false`
   entry is reported without blocking. A process architecture that differs from the OS
   machine type (for example 32-bit Node on a 64-bit OS) or a machine type anvil cannot map,
-  an unreadable fact, or an absent `--check` is `unknown`. A device path is checked with
-  `lstat`, one component at a time, and a symbolic link anywhere on it is `unknown`, so the
-  check never follows a link out of `/dev`. Nothing is spawned and no network is touched.
-  Without `--check` every hardware check is `unknown`.
+  an unreadable fact, or an absent `--check` is `unknown`. A device check is a best-effort
+  existence check: the path is walked with `lstat`, one component at a time, and is never
+  opened or read. A symbolic link anywhere on it is `unknown`, so paths that are usually
+  links — `/dev/disk/by-id/*`, `/dev/serial/by-id/*`, `/dev/char/*`, `/dev/core`,
+  `/dev/log`, and often `/dev/rtc` and `/dev/cdrom` — report `unknown` rather than
+  `present`. Any non-link node at the end counts as present, including a directory or a
+  regular file. Because each step re-resolves the path, a directory on it could be swapped
+  for a link between two `lstat` calls, so any directory on the walk that is shared-writable
+  (world-writable or sticky, like `/dev/shm` and `/dev/mqueue`), or whose mode cannot be
+  read, also makes the device `unknown`. A privileged process that can modify the other
+  `/dev` directories could still race the check. Nothing is spawned and no network is
+  touched. Without `--check` every hardware check is `unknown`.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 

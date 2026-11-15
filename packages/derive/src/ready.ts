@@ -393,9 +393,9 @@ export interface ReadyEnvironment {
    * The existence of a POSIX `/dev` node, by absolute path.
    *
    * Optional so a test without a `/dev` need not implement it; absent, and a declared
-   * device is `unknown`. `lstat` only, one path component at a time, so no link is followed
-   * out of `/dev`: the node is never opened, and on Windows the answer is always `unknown`
-   * because a UNC path could reach the network.
+   * device is `unknown`. A best-effort `lstat` walk, one path component at a time, that is
+   * `unknown` on a link or a shared-writable directory: the node is never opened, and on
+   * Windows the answer is always `unknown` because a UNC path could reach the network.
    */
   deviceStatus?(absPath: string): ReadyDeviceStatus
 }
@@ -728,7 +728,18 @@ export interface DeviceStat {
   isFile(): boolean
   isDirectory(): boolean
   isSymbolicLink(): boolean
+  /**
+   * The node's permission bits, as `lstat` reports them. Read only for directories on the
+   * walk; absent, and the check cannot rule out a shared-writable directory, so it is
+   * `unknown`.
+   */
+  mode?: number
 }
+
+/** Anyone may create or rename entries in a directory with this bit (`o+w`). */
+const WORLD_WRITABLE = 0o002
+/** The sticky bit: set on shared scratch directories such as `/dev/shm` and `/dev/mqueue`. */
+const STICKY = 0o1000
 
 /** The real environment: PATH lookup, a bounded probe, and a non-executing path check. */
 export function systemEnvironment(
@@ -893,6 +904,12 @@ export function systemEnvironment(
       // `/dev/fd` is a link to `/proc/self/fd` on Linux, and following it could land on any
       // file the process has open. A link anywhere -- including the final node -- cannot be
       // shown to stay inside `/dev`, so it is `unknown`. Nothing is opened or read.
+      //
+      // Each step re-resolves the whole path, so a directory checked a moment ago could be
+      // swapped for a link before the next `lstat`. Only someone who can write to a directory
+      // on the path can do that, so any shared-writable directory (world-writable or sticky,
+      // like `/dev/shm`) makes the answer `unknown`. This is best effort: a process that can
+      // already modify the non-world-writable `/dev` directories could still race it.
       const segments = absPath.split('/').slice(1)
       let current = ''
       for (let index = 0; index < segments.length; index++) {
@@ -906,7 +923,13 @@ export function systemEnvironment(
         if (node.isSymbolicLink()) return 'unknown'
         // Only a plain directory can lead further. Anything else partway is not a path to a
         // device node anvil can vouch for, so it is undecided rather than an accusation.
-        if (index < segments.length - 1 && !node.isDirectory()) return 'unknown'
+        if (index < segments.length - 1) {
+          if (!node.isDirectory()) return 'unknown'
+          // Fail closed: a mode that was not reported cannot rule out a shared directory.
+          const mode = node.mode
+          if (typeof mode !== 'number' || !Number.isInteger(mode)) return 'unknown'
+          if ((mode & WORLD_WRITABLE) !== 0 || (mode & STICKY) !== 0) return 'unknown'
+        }
       }
       // Existence is the whole check: any non-link node type counts.
       return 'present'

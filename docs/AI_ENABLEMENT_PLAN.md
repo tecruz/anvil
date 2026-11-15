@@ -203,9 +203,11 @@ build, run and verify the project.
   produce explicit blockers, not an invented successful setup. Declared credential and
   access requirements are never `verified`: they block only when declared local evidence
   (an environment variable name) is absent under `--check`, and are otherwise
-  `declared`/`unknown`. Hardware platform, architecture, CPU count, memory and declared
-  `/dev` devices are compared against a snapshot of the process environment; GPU
-  capability and remote access are never observed.
+  `declared`/`unknown`. Hardware platform, architecture, CPU count and memory are
+  compared against a snapshot of the process environment; each declared `/dev` device is
+  checked separately by a best-effort `lstat` walk of its path, and is `unknown` when a link
+  or a shared-writable directory is on the way. GPU capability and remote access are never
+  observed.
 
 ## 3. Turn recommendations into approved integrations
 

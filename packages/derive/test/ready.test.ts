@@ -1953,14 +1953,24 @@ function hostOf(overrides: Partial<HostSnapshot> = {}): HostSnapshot {
   return { platform: 'linux', arch: 'x64', machine: null, cpus: 8, memoryBytes: 16 * GIB, ...overrides }
 }
 
-/** A fake `lstat` result of one node type; a device test never stats the real `/dev`. */
-function nodeOf(kind: 'directory' | 'file' | 'char' | 'symlink'): DeviceStat {
+/** The permission bits a node of each kind usually has; directories are a plain 0755. */
+const DEFAULT_MODES = { directory: 0o040755, file: 0o100644, char: 0o020660, symlink: 0o120777 } as const
+
+/**
+ * A fake `lstat` result of one node type; a device test never stats the real `/dev`.
+ * `mode: null` leaves the mode out, as a runner that cannot report one would.
+ */
+function nodeOf(
+  kind: 'directory' | 'file' | 'char' | 'symlink',
+  mode: number | null = DEFAULT_MODES[kind],
+): DeviceStat {
   return {
     isCharacterDevice: () => kind === 'char',
     isBlockDevice: () => false,
     isFile: () => kind === 'file',
     isDirectory: () => kind === 'directory',
     isSymbolicLink: () => kind === 'symlink',
+    ...(mode === null ? {} : { mode }),
   }
 }
 
@@ -2331,6 +2341,130 @@ describe('systemEnvironment: host snapshot and devices', () => {
       status: 'missing',
       calls: ['/dev', '/dev/dri'],
     })
+  })
+
+  test('a shared-writable directory anywhere on the walk makes a device unknown', () => {
+    const walk = (path: string, nodes: Record<string, DeviceStat>) => {
+      const calls: string[] = []
+      const environment = systemEnvironment({
+        platform: 'linux',
+        lstatRunner: (current) => {
+          calls.push(current)
+          const node = nodes[current]
+          if (node === undefined) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+          return node
+        },
+      })
+      return { status: environment.deviceStatus?.(path), calls }
+    }
+    const dir = nodeOf('directory')
+
+    // A normal 0755 chain is the baseline: present.
+    assert.deepEqual(
+      walk('/dev/dri/renderD128', { '/dev': dir, '/dev/dri': dir, '/dev/dri/renderD128': nodeOf('char') }),
+      {
+        status: 'present',
+        calls: ['/dev', '/dev/dri', '/dev/dri/renderD128'],
+      },
+    )
+    // `/dev/shm` and `/dev/mqueue` are 1777: world-writable and sticky. The walk stops there.
+    for (const shared of ['/dev/shm', '/dev/mqueue']) {
+      assert.deepEqual(
+        walk(`${shared}/queue`, {
+          '/dev': dir,
+          [shared]: nodeOf('directory', 0o041777),
+          [`${shared}/queue`]: nodeOf('file'),
+        }),
+        { status: 'unknown', calls: ['/dev', shared] },
+        shared,
+      )
+    }
+    // Either bit alone is enough.
+    assert.equal(
+      walk('/dev/w/x', { '/dev': dir, '/dev/w': nodeOf('directory', 0o040777), '/dev/w/x': nodeOf('char') }).status,
+      'unknown',
+      'world-writable only',
+    )
+    assert.equal(
+      walk('/dev/s/x', { '/dev': dir, '/dev/s': nodeOf('directory', 0o041755), '/dev/s/x': nodeOf('char') }).status,
+      'unknown',
+      'sticky only',
+    )
+    // `/dev` itself is a directory on the walk too.
+    assert.equal(
+      walk('/dev/kvm', { '/dev': nodeOf('directory', 0o041777), '/dev/kvm': nodeOf('char') }).status,
+      'unknown',
+    )
+    // The directory holding the final node is checked, not only the ones above it.
+    assert.equal(
+      walk('/dev/dri/renderD128', {
+        '/dev': dir,
+        '/dev/dri': nodeOf('directory', 0o040757),
+        '/dev/dri/renderD128': nodeOf('char'),
+      }).status,
+      'unknown',
+    )
+    // Fail closed: a directory whose mode was not reported is not vouched for.
+    assert.equal(walk('/dev/kvm', { '/dev': nodeOf('directory', null), '/dev/kvm': nodeOf('char') }).status, 'unknown')
+    // The final node's own mode is not a directory on the walk, so a 0666 device is present.
+    assert.equal(walk('/dev/null', { '/dev': dir, '/dev/null': nodeOf('char', 0o020666) }).status, 'present')
+  })
+
+  test('the reproduced /dev/shm pivot race is unknown, never present', () => {
+    // The re-review's repro: `/dev/shm/anvil-review-pivot` is a real directory when it is
+    // lstat'ed, then is flipped to a link to /etc before `.../passwd` is lstat'ed, which then
+    // resolves through it to /etc/passwd. The runner below plays that sequence.
+    const calls: string[] = []
+    let flipped = false
+    const environment = systemEnvironment({
+      platform: 'linux',
+      lstatRunner: (path) => {
+        calls.push(path)
+        if (path === '/dev') return nodeOf('directory')
+        if (path === '/dev/shm') return nodeOf('directory', 0o041777)
+        if (path === '/dev/shm/anvil-review-pivot') {
+          flipped = true
+          return nodeOf('directory')
+        }
+        if (path === '/dev/shm/anvil-review-pivot/passwd' && flipped) return nodeOf('file')
+        throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+      },
+    })
+    assert.equal(environment.deviceStatus?.('/dev/shm/anvil-review-pivot/passwd'), 'unknown')
+    // The walk stops at the shared directory, before the pivot could matter.
+    assert.deepEqual(calls, ['/dev', '/dev/shm'])
+  })
+
+  test('the default device runner is node:fs lstatSync, never statSync', () => {
+    // Swap both functions for recording fakes, so the real /dev is never touched. A default of
+    // `statSync` would follow links; only `lstatSync` may be called.
+    const fsModule = createRequire(import.meta.url)('node:fs') as {
+      statSync: (path: string, ...args: unknown[]) => unknown
+      lstatSync: (path: string, ...args: unknown[]) => unknown
+    }
+    const originalStat = fsModule.statSync
+    const originalLstat = fsModule.lstatSync
+    const lstatCalls: string[] = []
+    const statCalls: string[] = []
+    fsModule.lstatSync = (path) => {
+      lstatCalls.push(String(path))
+      return path === '/dev' ? nodeOf('directory') : nodeOf('char')
+    }
+    fsModule.statSync = (path) => {
+      statCalls.push(String(path))
+      return nodeOf('char')
+    }
+    syncBuiltinESMExports()
+    try {
+      const environment = systemEnvironment({ platform: 'linux' })
+      assert.equal(environment.deviceStatus?.('/dev/anvil-default-binding'), 'present')
+    } finally {
+      fsModule.statSync = originalStat
+      fsModule.lstatSync = originalLstat
+      syncBuiltinESMExports()
+    }
+    assert.deepEqual(lstatCalls, ['/dev', '/dev/anvil-default-binding'])
+    assert.deepEqual(statCalls, [])
   })
 
   test('deviceStatus reports existence only, and an undecidable error as unknown', () => {
