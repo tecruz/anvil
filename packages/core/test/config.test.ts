@@ -53,14 +53,14 @@ describe('mergeConfig', () => {
   test('does not mutate the base config', () => {
     const base = defaultConfig()
     const next = mergeConfig(base, { provider: { default: 'github' } }, 'test')
-    assert.equal(base.provider.default, 'local')
+    assert.equal(base.provider.default, null)
     assert.equal(next.provider.default, 'github')
   })
 
   test('overrides only the keys present in the layer', () => {
     const next = mergeConfig(defaultConfig(), { output: { color: 'never' } }, 'test')
     assert.equal(next.output.color, 'never')
-    assert.equal(next.provider.default, 'local')
+    assert.equal(next.provider.default, null)
   })
 
   test('a layer that sets one key does not require its siblings', () => {
@@ -157,7 +157,7 @@ describe('mergeConfig', () => {
     // A typo in one key must not leave the others half-merged.
     assert.throws(() => mergeConfig(defaultConfig(), { provider: { default: 'github' }, git: { bad: 1 } }, 'cfg'))
     const fresh = defaultConfig()
-    assert.equal(fresh.provider.default, 'local')
+    assert.equal(fresh.provider.default, null)
   })
 })
 

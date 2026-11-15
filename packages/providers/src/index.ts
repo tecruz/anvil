@@ -16,3 +16,18 @@ export {
   renderTicketFile,
   type TicketFileInput,
 } from './local.ts'
+export {
+  assertSupportedProvider,
+  type CreateProviderOptions,
+  capabilitiesOf,
+  createTicketProvider,
+  isSupportedProvider,
+  type ProviderSelection,
+  type ProviderSelectionResult,
+  type ProviderSource,
+  refFor,
+  requireCapability,
+  resolveProviderId,
+  SUPPORTED_PROVIDERS,
+  type SupportedProviderId,
+} from './resolve.ts'

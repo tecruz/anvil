@@ -155,22 +155,56 @@ export function branchNameFor(ref: TicketRef, title: string, prefix?: string): s
   return slug === '' ? head : `${head}/${key}-${slug}`
 }
 
+/**
+ * The provider a reference names by itself, if any.
+ *
+ * Two shapes carry one: a hosted ticket URL (`.../issues/42`) and a `gh-42` / `gl-42`
+ * key. Everything else -- `42`, `#42`, `local-3`, `PROJ-123` -- names no provider, and the
+ * caller's default decides. This is separate from `parseRef` because provider selection
+ * and reference parsing are two questions, and a caller has to answer the first before it
+ * can answer the second.
+ */
+export function providerHintFor(input: string): ProviderId | null {
+  const raw = input.trim()
+
+  if (/^https?:\/\/[^\s]+$/i.test(raw)) {
+    const parsed = parseTicketUrl(raw)
+    return parsed === null ? null : parsed.provider
+  }
+
+  const hosted = /^(gh|gl)-(\d+)$/i.exec(raw)
+  if (hosted !== null) return (hosted[1] as string).toLowerCase() === 'gh' ? 'github' : 'gitlab'
+
+  return null
+}
+
 /** Parse a user-supplied ref: `42`, `#42`, `gh-42`, `PROJ-123`, or a full URL. */
 export function parseRef(input: string, defaultProvider: ProviderId = 'local'): TicketRef {
   const raw = input.trim()
 
   // A URL carries its own provider, and is worth honouring: pasting a ticket link is the
   // most natural thing a user can do.
-  const url = /^(https?:\/\/[^\s]+)$/.exec(raw)
+  const url = /^(https?:\/\/[^\s]+)$/i.exec(raw)
   if (url !== null) {
     const parsed = parseTicketUrl(raw)
     if (parsed !== null) return parsed
   }
 
+  // `gh-42` and `gl-42` name their provider, exactly as the URL forms do. Without this a
+  // `github` selection would fetch issue 42 correctly, but a `gh-42` reference typed
+  // against the default (local) provider would look for a local markdown file called
+  // `gh-42`.
+  const hosted = /^(gh|gl)-(\d+)$/i.exec(raw)
+  if (hosted !== null) {
+    const prefix = (hosted[1] as string).toLowerCase()
+    const id = hosted[2] as string
+    return { provider: prefix === 'gh' ? 'github' : 'gitlab', id, key: `${prefix}-${id}` }
+  }
+
   const hash = /^#(\d+)$/.exec(raw)
   if (hash !== null) {
     const id = hash[1] as string
-    return { provider: defaultProvider, id, key: `${defaultProvider}-${id}` }
+    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
   }
 
   const prefixed = /^([A-Za-z][\w-]*?)-(\d+)$/.exec(raw)
@@ -187,11 +221,25 @@ export function parseRef(input: string, defaultProvider: ProviderId = 'local'): 
   const numeric = /^(\d+)$/.exec(raw)
   if (numeric !== null) {
     const id = numeric[1] as string
-    return { provider: defaultProvider, id, key: `${defaultProvider}-${id}` }
+    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
   }
 
   // Anything else is treated as a key verbatim, e.g. `PROJ-123` or `local-7`.
   return { provider: defaultProvider, id: raw, key: raw.toLowerCase() }
+}
+
+/**
+ * The prefix a provider uses in a human key.
+ *
+ * `github-42` and `gh-42` are the same ticket, and the transport, the claim registry and
+ * the branch name all key on the short form. Deriving the key from the provider keeps a
+ * numeric reference (`anvil claim 42 --provider github`) identical to the spelled-out one
+ * (`anvil claim gh-42`), so a claim cannot end up under two keys.
+ */
+function keyPrefix(provider: ProviderId): string {
+  if (provider === 'github') return 'gh'
+  if (provider === 'gitlab') return 'gl'
+  return provider
 }
 
 function parseTicketUrl(url: string): TicketRef | null {

@@ -11,16 +11,11 @@ import { join } from 'node:path'
 import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
-import {
-  DEFAULT_TICKETS_DIR,
-  GhForgeTransport,
-  GitHubProvider,
-  hostFromRemote,
-  LocalTicketProvider,
-} from '@anvil/providers'
-import { parseRef, type Ticket } from '@anvil/tickets'
+import { GhForgeTransport, GitHubProvider, hostFromRemote, requireCapability } from '@anvil/providers'
+import type { Ticket } from '@anvil/tickets'
 import { readClaims } from '@anvil/worktrees'
 import { type ShipResult, ship } from '@anvil/worktrees/ship'
+import { ticketProviderFor } from '../tickets.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
@@ -126,7 +121,7 @@ export const shipCommand: Command = {
       defaultBranch: null,
     }).profile
 
-    const ticket = await loadTicketFor(ctx, repoRoot, claim.ticket)
+    const ticket = await loadTicketFor(repoRoot, claim.ticket)
 
     // GitHub is the only forge in M4, so the transport is chosen by whether the repo's
     // remote is GitHub at all. Anything else is a clear error rather than a guess.
@@ -143,10 +138,18 @@ export const shipCommand: Command = {
       })
     }
 
-    const provider = new GitHubProvider({ ...(host === null ? {} : { host }) })
     const transport = new GhForgeTransport({
       ...(host === null ? {} : { host }),
     })
+
+    // The ticket update goes to the provider the claim came from, not always to GitHub: a
+    // local ticket is a real ticket, and `ship` is what advances it.
+    const ticketProvider = await ticketProviderFor(repoRoot, {
+      ref: claim.ticket.key,
+      provider: claim.ticket.provider,
+    })
+    requireCapability(ticketProvider.provider, 'comment', 'comment on a ticket')
+    requireCapability(ticketProvider.provider, 'transition', 'move a ticket between states')
 
     const result: ShipResult = await ship({
       repoRoot,
@@ -165,8 +168,8 @@ export const shipCommand: Command = {
       skipVerify: args.values['skip-verify'] === true,
       updateTicket: args.values['no-ticket-update'] !== true,
       ticketOps: {
-        comment: (ref, body) => provider.comment(ref, body),
-        transition: (ref, to) => provider.transition(ref, to),
+        comment: (ref, body) => ticketProvider.provider.comment(ref, body),
+        transition: (ref, to) => ticketProvider.provider.transition(ref, to),
       },
     })
 
@@ -275,16 +278,15 @@ async function mainRootFor(ctx: CommandContext): Promise<string> {
   return (await mainWorktreeRoot(cwd)) ?? cwd
 }
 
-async function loadTicketFor(
-  _ctx: CommandContext,
-  repoRoot: string,
-  ref: { provider: string; id: string; key: string },
-): Promise<Ticket> {
-  if (ref.provider === 'github') {
-    const host = hostFromRemote((await git(['remote', 'get-url', 'origin'], { cwd: repoRoot })).stdout.trim() ?? null)
-    return new GitHubProvider({ ...(host === null ? {} : { host }) }).fetch(parseRef(ref.id, 'github'))
+async function loadTicketFor(repoRoot: string, ref: { provider: string; id: string; key: string }): Promise<Ticket> {
+  // The claim records the provider and the key, so the lookup is the same resolution rule
+  // as every other command, with the claim's provider as the explicit selection. A local
+  // ticket is read from `ANVIL_TICKETS_DIR` rather than from a hardcoded default.
+  const resolved = await ticketProviderFor(repoRoot, { ref: ref.key, provider: ref.provider })
+  if (resolved.ref === undefined) {
+    throw new AnvilError(ErrorCode.Internal, `The claim for ${ref.key} has no ticket reference`, {
+      hint: 'This is a bug in anvil: a claim always records the ticket it was made from.',
+    })
   }
-  return new LocalTicketProvider({
-    dir: join(repoRoot, DEFAULT_TICKETS_DIR),
-  }).fetch(parseRef(ref.id, 'local'))
+  return resolved.provider.fetch(resolved.ref)
 }

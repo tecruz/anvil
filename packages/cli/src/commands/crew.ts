@@ -5,7 +5,6 @@
  * runs every worktree's verification under a concurrency policy the tool will explain.
  */
 
-import { join } from 'node:path'
 import {
   AnvilError,
   ErrorCode,
@@ -16,11 +15,12 @@ import {
   runProcess,
   tokenizeCommand,
 } from '@anvil/core'
-import { DEFAULT_TICKETS_DIR, LocalTicketProvider } from '@anvil/providers'
-import { parseRef, type Ticket } from '@anvil/tickets'
+import { requireCapability } from '@anvil/providers'
+import type { Ticket } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import { formatCost, lookupSessionCosts } from '../cost.ts'
+import { ticketProviderFor } from '../tickets.ts'
 import { recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -51,6 +51,7 @@ export const crewCommand: Command = {
     '',
     '--launch          start an agent in each new worktree',
     '--runner <r>      agent binary, default `opencode`',
+    '--provider <p>    ticket provider for the whole crew: local (default) or github',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
     '--force-parallel  ignore the cache policy and use --jobs literally',
     '--cost            with `status`, show what each agent session cost',
@@ -64,6 +65,7 @@ export const crewCommand: Command = {
     limit: { type: 'string' },
     launch: { type: 'boolean' },
     runner: { type: 'string' },
+    provider: { type: 'string' },
     prefix: { type: 'string' },
     base: { type: 'string' },
     jobs: { type: 'string' },
@@ -82,11 +84,7 @@ export const crewCommand: Command = {
     }
 
     const repoRoot = await mainRootFor(ctx)
-    const provider = new LocalTicketProvider({
-      dir: join(repoRoot, process.env.ANVIL_TICKETS_DIR ?? DEFAULT_TICKETS_DIR),
-    })
-
-    if (sub === 'up') return crewUpFlow(ctx, repoRoot, provider, args)
+    if (sub === 'up') return crewUpFlow(ctx, repoRoot, args)
     if (sub === 'verify') return crewVerifyFlow(ctx, repoRoot, args)
     return crewStatusFlow(ctx, repoRoot, args)
   },
@@ -99,14 +97,21 @@ export const crewCommand: Command = {
 async function crewUpFlow(
   ctx: CommandContext,
   repoRoot: string,
-  provider: LocalTicketProvider,
   args: ReturnType<typeof parseCliArgs>,
 ): Promise<number | undefined> {
+  const explicit = typeof args.values.provider === 'string' ? args.values.provider : null
+  // One config read for the whole crew: the provider selection and the worktree root come
+  // from the same layer, so they cannot disagree.
+  const { config } = loadConfig({ repoRoot })
+  // Resolve the selection before anything else, so an unknown `--provider` is refused with
+  // the supported list rather than wrapped in a per-ticket error.
+  const base = await ticketProviderFor(repoRoot, { provider: explicit }, { config })
   const refs = splitRefs(args.values.tickets)
   if (refs.length === 0) {
     // No explicit list: take the ready work. A crew is most useful when you do not have to
     // enumerate the tickets yourself.
-    const all = await provider.list({ state: 'todo' })
+    requireCapability(base.provider, 'list', 'list tickets')
+    const all = (await base.provider.list?.({ state: 'todo' })) ?? []
     const limit = (typeof args.values.limit === 'string' ? parsePositiveInt(args.values.limit) : null) ?? all.length
     if (all.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'No tickets in state `todo`', {
@@ -117,21 +122,29 @@ async function crewUpFlow(
   }
 
   const tickets: Ticket[] = []
-  for (const ref of refs) {
+  for (const raw of refs) {
     try {
-      tickets.push(await provider.fetch(parseRef(ref, 'local')))
+      // Resolved per reference, so `--tickets 1,gh-2` mixes providers exactly as the
+      // selection rule says it should.
+      const resolved = await ticketProviderFor(repoRoot, { ref: raw, provider: explicit }, { config })
+      if (resolved.ref === undefined) throw new Error('no reference was resolved')
+      tickets.push(await resolved.provider.fetch(resolved.ref))
     } catch (err) {
       throw new AnvilError(
         ErrorCode.Usage,
-        `Cannot read ticket "${ref}": ${err instanceof Error ? err.message : String(err)}`,
+        `Cannot read ticket "${raw}": ${err instanceof Error ? err.message : String(err)}`,
         {
-          hint: 'Run `anvil issue list` to see what is available.',
+          // Keep the underlying remediation (the supported provider list, a login command,
+          // the file that was missing) instead of replacing it.
+          hint:
+            err instanceof AnvilError && err.hint !== undefined
+              ? err.hint
+              : 'Run `anvil issue list` to see what is available.',
         },
       )
     }
   }
 
-  const { config } = loadConfig({ repoRoot })
   const runner = typeof args.values.runner === 'string' ? args.values.runner : 'opencode'
 
   const result = await crewUp({

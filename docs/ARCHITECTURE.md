@@ -72,8 +72,8 @@ own. The import graph below is the real one, read from the source.
 | `packages/discovery` | What the ecosystem published that the curated registry does not know, and the skills already installed on this machine | `core`, `playbooks` |
 | `packages/derive` | The LLM seam: brief, generate, validate, diff, staging | `core`, `profile`, `audit`, `playbooks` |
 | `packages/git` | Git operations, worktree preflight, path normalisation | `core` |
-| `packages/tickets` | The canonical ticket model and the provider interface | `profile` |
-| `packages/providers` | The `gh` and local-markdown providers | `core`, `tickets`, `worktrees` |
+| `packages/tickets` | The canonical ticket model, reference parsing, and the provider interface | `core`, `profile` |
+| `packages/providers` | The `gh` and local-markdown providers, the shared contract tests, and the one place a command resolves which provider to use | `core`, `tickets`, `worktrees` |
 | `packages/pr` | Pull request construction: title, body, risk checklist, reviewers | `profile`, `tickets` |
 | `packages/worktrees` | Claims, the crew, the ship pipeline | `core`, `git`, `pr`, `profile`, `tickets` |
 | `packages/cli` | The command surface: parsing, help, output, exit codes, and the stdio MCP server | all of the above |
@@ -95,6 +95,39 @@ Two consequences worth knowing:
   three read-only commands — `doctor`, `plan` and `crew status` — by running the CLI and
   returning its envelope, so an MCP client and a shell cannot disagree about what the
   tool said.
+
+## Tickets and providers
+
+A ticket command resolves its provider once, in `packages/providers/src/resolve.ts`, from:
+
+1. `--provider local|github` on the command,
+2. `provider.default` from the resolved configuration,
+3. the reference's own provider — a ticket URL, or a `gh-42` key,
+4. `local`.
+
+The reference is parsed against the selected provider, and the claim registry records the
+provider that was actually used, so `ship` and `issue sync` never have to guess. An
+unknown provider is refused with the list of the supported ones; a GitLab URL is
+recognised and refused that way rather than parsed as a local ticket.
+
+| Provider | Transport | Account | Network | Capabilities | State mapping |
+| --- | --- | --- | --- | --- | --- |
+| `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | `create`, `list`, `comment`, `transition`, `link` | native `state:` frontmatter |
+| `github` | `gh`, always `execFile` with an argument array | `gh auth login` | yes, through `gh` | `create`, `list`, `comment`, `transition`, `link` | open/closed; `in_progress`, `in_review`, `wontfix` are labels |
+
+Both implement the same `TicketProvider` interface and pass the same contract tests
+(`packages/providers/test/contract.test.ts`), including the same states, comment semantics
+and acceptance-criteria extraction — that is what keeps `local` a real provider rather
+than a test double ([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)).
+
+`ProviderCapabilities` is the contract commands check before acting. A missing capability
+fails the command with the capability named (`cannot create a ticket: missing the "create"
+capability`), never with a transport error from inside the provider.
+
+Resolution itself does no I/O, and `local` is built without touching `gh`: a machine with
+no account, no network and no GitHub CLI keeps the whole ticket workflow. Detection,
+audit and `doctor` do not build a provider at all, so they gained no network call from
+this.
 
 ## The contracts
 

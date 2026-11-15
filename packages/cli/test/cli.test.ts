@@ -840,7 +840,7 @@ describe('anvil config', () => {
   test('show defaults when nothing is configured', () => {
     const res = runAnvil(['config', 'show'])
     assert.equal(res.code, 0)
-    assert.match(res.stdout, /provider\.default\s+local/)
+    assert.match(res.stdout, /provider\.default\s+\(auto\)/)
     assert.match(res.stdout, /absent/)
   })
 
@@ -948,7 +948,7 @@ describe('anvil config init inside a repo', () => {
         env: { ANVIL_CONFIG_HOME: configHome },
       })
       const data = jsonOf(res).data as {
-        config: { provider: { default: string } }
+        config: { provider: { default: string | null } }
         sources: Array<{ kind: string; present: boolean }>
       }
       assert.equal(data.config.provider.default, 'github')
