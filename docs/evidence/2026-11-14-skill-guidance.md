@@ -142,9 +142,10 @@ The harness now labels the evidence source in its paired report. A `fake-agent` 
 remains a real-agent record in `eval-results/pilots/`, separate from the hermetic
 `eval-results/latest.json`; see [`eval-results/README.md`](../../eval-results/README.md).
 
-Under the report's current five-pair rule, this pilot's result is **insufficient evidence**,
-not an improvement or a regression: all three pairs tied on task success, and three pairs are
-below the minimum needed to call a direction. The slower mean duration is descriptive, not a
+Under the report's direction rule (five usable pairs, at least three one-sided wins and a
+margin of two), this pilot's result is **insufficient evidence**, not an improvement or a
+regression: all three pairs tied on task success, and three pairs are below the minimum
+needed to call a direction. The slower mean duration is descriptive, not a
 verdict, and cost and skill access stay unknown. This does not change the original conclusion
 or justify a rerun.
 

@@ -53,7 +53,8 @@ describe('paired comparison', () => {
       onlyBare: 0,
       neither: 0,
       runErrors: { bare: 1, anvil: 0 },
-      successfulDurationMs: { bare: 10_000, anvil: 6_000, pairs: 1 },
+      errorPairs: { pairs: 1, onlyAnvil: 1, onlyBare: 0 },
+      successfulDurationMs: { bare: 10_000, anvil: 6_000, pairs: 1, untimed: 0 },
       successfulCostUsd: { bare: 0.1, anvil: 0.06, pairs: 1, unpriced: 0 },
     })
   })
@@ -131,21 +132,21 @@ describe('paired comparison', () => {
     const small = summarizePairs([result({ variant: 'bare' }), result({ variant: 'anvil' })])
     assert.match(
       formatPairedSummary(small).join('\n'),
-      /verdict\s+insufficient evidence: 1 complete pair is below the 5 needed to call a direction/,
+      /verdict\s+insufficient evidence: 1 usable pair is below the 5 needed to call a direction/,
     )
 
     // Six scenarios with one repetition each are six one-pair measurements. Summing them
     // into "six pairs" must not make the warning disappear.
     const oneEach = summarizePairs(
-      Array.from({ length: 6 }, (_, index) => [
-        result({ variant: 'bare', scenario: `scenario-${index}` }),
-        result({ variant: 'anvil', scenario: `scenario-${index}` }),
-      ]).flat(),
+      ['a', 'b', 'c', 'd', 'e', 'f'].flatMap((scenario) => [
+        result({ scenario, variant: 'bare' }),
+        result({ scenario, variant: 'anvil' }),
+      ]),
     )
     assert.equal(oneEach.totals.pairs, 6)
     const oneEachText = formatPairedSummary(oneEach).join('\n')
     assert.equal(
-      (oneEachText.match(/insufficient evidence: 1 complete pair is below the 5/g) ?? []).length,
+      (oneEachText.match(/insufficient evidence: 1 usable pair is below the 5/g) ?? []).length,
       6,
       'each group keeps its own verdict',
     )
@@ -158,38 +159,147 @@ describe('paired comparison', () => {
     )
     assert.equal(large.totals.pairs, 5)
     const largeText = formatPairedSummary(large).join('\n')
-    assert.match(largeText, /insufficient evidence: neither variant uniquely succeeded in any of 5 complete pairs/)
+    assert.match(largeText, /insufficient evidence: neither variant uniquely succeeded in any of 5 usable pairs/)
     assert.doesNotMatch(largeText, /is below the 5 needed/)
   })
 
-  test('a directional count needs five pairs before it is called improvement or regression', () => {
-    const pairs = (wins: 'anvil' | 'bare', count: number, total = 5) =>
-      Array.from({ length: total }, (_, repetition) => {
-        const winner: 'anvil' | 'bare' | null = repetition < count ? wins : null
-        return [
-          result({ variant: 'bare', repetition, verified: winner !== 'anvil' }),
-          result({ variant: 'anvil', repetition, verified: winner !== 'bare' }),
-        ]
-      }).flat()
+  /** `total` repetitions of one scenario/model: `anvil` anvil-only wins, `bare` bare-only wins, the rest both succeed. */
+  const split = (anvil: number, bare: number, total: number, extra: Partial<ScenarioResult> = {}) =>
+    Array.from({ length: total }, (_, repetition) => {
+      const winner: 'anvil' | 'bare' | null = repetition < anvil ? 'anvil' : repetition < anvil + bare ? 'bare' : null
+      return [
+        result({ ...extra, variant: 'bare', repetition, verified: winner !== 'anvil' }),
+        result({ ...extra, variant: 'anvil', repetition, verified: winner !== 'bare' }),
+      ]
+    }).flat()
+  const verdictOf = (anvil: number, bare: number, total: number) =>
+    classifyPairedResult(summarizePairs(split(anvil, bare, total)).totals).verdict
 
-    const improvement = summarizePairs(pairs('anvil', 3))
-    assert.equal(improvement.totals.onlyAnvil, 3)
+  test('a direction needs five usable pairs, three one-sided wins and a margin of two', () => {
+    const improvement = summarizePairs(split(3, 0, 5))
     assert.deepEqual(classifyPairedResult(improvement.totals), {
       verdict: 'measured-improvement',
       reason: 'anvil succeeded where bare did not in 3 pairs; the reverse happened in 0',
     })
     assert.match(formatPairedSummary(improvement).join('\n'), /verdict\s+measured improvement:/)
 
-    const regression = summarizePairs(pairs('bare', 3))
-    assert.equal(regression.totals.onlyBare, 3)
+    const regression = summarizePairs(split(0, 3, 5))
     assert.equal(classifyPairedResult(regression.totals).verdict, 'measured-regression')
     assert.match(formatPairedSummary(regression).join('\n'), /verdict\s+measured regression:/)
 
-    // Four directional wins are still too few: the same result at n=4 says nothing.
-    const tooFew = summarizePairs(pairs('anvil', 3, 4))
-    assert.equal(tooFew.totals.onlyAnvil, 3)
-    assert.equal(classifyPairedResult(tooFew.totals).verdict, 'insufficient-evidence')
-    assert.match(formatPairedSummary(tooFew).join('\n'), /4 complete pairs is below the 5 needed to call a direction/)
+    // The boundary, one step on each side of every threshold.
+    const table: Array<[number, number, number, string]> = [
+      [3, 0, 4, 'insufficient-evidence'], // four usable pairs
+      [3, 0, 5, 'measured-improvement'], // exactly five, three one-sided, margin three
+      [3, 1, 5, 'measured-improvement'], // margin exactly two
+      [3, 2, 5, 'insufficient-evidence'], // mixed wins, margin one
+      [2, 3, 5, 'insufficient-evidence'], // mixed wins the other way
+      [2, 2, 5, 'insufficient-evidence'], // nonzero tie
+      [2, 0, 5, 'insufficient-evidence'], // margin two but only two one-sided wins
+      [1, 0, 5, 'insufficient-evidence'], // one differing pair calls nothing
+      [1, 3, 5, 'measured-regression'], // regression with margin exactly two
+      [4, 2, 6, 'measured-improvement'],
+      [4, 3, 7, 'insufficient-evidence'],
+    ]
+    for (const [anvil, bare, total, expected] of table) {
+      assert.equal(verdictOf(anvil, bare, total), expected, `${anvil}-${bare} of ${total}`)
+    }
+    assert.match(
+      classifyPairedResult(summarizePairs(split(3, 2, 5)).totals).reason,
+      /anvil only 3, bare only 2: a direction needs at least 3 one-sided pairs and a margin of 2/,
+    )
+    assert.match(
+      classifyPairedResult(summarizePairs(split(2, 2, 5)).totals).reason,
+      /2 pairs went each way; the pairs do not separate the variants/,
+    )
+  })
+
+  test('pairs with a run error are excluded from the verdict and counted', () => {
+    // Five pairs where anvil's skill installation failed: a harness failure, not a regression.
+    const harness = summarizePairs(
+      Array.from({ length: 5 }, (_, repetition) => [
+        result({ variant: 'bare', repetition }),
+        result({
+          variant: 'anvil',
+          repetition,
+          verified: false,
+          skillInstall: 'failed',
+          error: 'skill installation failed: missing source',
+        }),
+      ]).flat(),
+    )
+    assert.deepEqual(harness.totals.errorPairs, { pairs: 5, onlyAnvil: 0, onlyBare: 5 })
+    assert.deepEqual(classifyPairedResult(harness.totals), {
+      verdict: 'insufficient-evidence',
+      reason: 'no usable pair to compare (0 incomplete, 5 with a run error)',
+    })
+    assert.match(formatPairedSummary(harness).join('\n'), /5 complete, 0 incomplete, 5 with a run error \(excluded/)
+
+    // Three clean anvil wins plus two errored bare-only pairs: the errored pairs must neither
+    // count as usable nor dilute the margin.
+    const mixed = summarizePairs([
+      ...split(3, 0, 5),
+      ...[5, 6].flatMap((repetition) => [
+        result({ variant: 'bare', repetition }),
+        result({ variant: 'anvil', repetition, verified: false, error: 'the agent timed out' }),
+      ]),
+    ])
+    assert.deepEqual(classifyPairedResult(mixed.totals), {
+      verdict: 'measured-improvement',
+      reason:
+        'anvil succeeded where bare did not in 3 pairs; the reverse happened in 0; 2 pairs with a run error excluded',
+    })
+
+    // Four clean pairs and one errored pair is below the minimum, not five.
+    const short = summarizePairs([
+      ...split(3, 0, 4),
+      result({ variant: 'bare', repetition: 4 }),
+      result({ variant: 'anvil', repetition: 4, error: 'the agent exited with code 1' }),
+    ])
+    assert.match(classifyPairedResult(short.totals).reason, /^4 usable pairs is below the 5 needed/)
+  })
+
+  test('incomplete and zero-pair groups never get a direction', () => {
+    const none = summarizePairs([result({ variant: 'anvil' })])
+    assert.deepEqual(classifyPairedResult(none.totals), {
+      verdict: 'insufficient-evidence',
+      reason: 'no usable pair to compare (1 incomplete, 0 with a run error)',
+    })
+    // Four complete anvil wins and three incomplete anvil-only repetitions: incomplete pairs
+    // do not reach the five-pair minimum.
+    const partial = summarizePairs([
+      ...split(4, 0, 4),
+      ...[10, 11, 12].map((repetition) => result({ variant: 'anvil', repetition })),
+    ])
+    assert.equal(partial.totals.incomplete, 3)
+    assert.equal(classifyPairedResult(partial.totals).verdict, 'insufficient-evidence')
+    assert.match(classifyPairedResult(partial.totals).reason, /^4 usable pairs is below the 5 needed/)
+  })
+
+  test('totals are descriptive: groups are never pooled into an overall verdict', () => {
+    // Six scenarios with one anvil-only win between them: pooled, that is five usable pairs.
+    const pooled = summarizePairs(
+      ['a', 'b', 'c', 'd', 'e', 'f'].flatMap((scenario, index) => [
+        result({ scenario, variant: 'bare', verified: index !== 0 }),
+        result({ scenario, variant: 'anvil' }),
+      ]),
+    )
+    const text = formatPairedSummary(pooled).join('\n')
+    assert.doesNotMatch(text, /Verdict \(all repetitions\)/)
+    assert.doesNotMatch(text, /measured improvement/)
+    assert.match(text, /These totals are descriptive\. There is no overall verdict/)
+
+    // Two groups with different verdicts each keep their own.
+    const differing = summarizePairs([
+      ...split(3, 0, 5, { scenario: 'improves' }),
+      ...split(0, 3, 5, { scenario: 'regresses' }),
+    ])
+    const differingText = formatPairedSummary(differing).join('\n')
+    const verdictLines = differingText.split('\n').filter((line) => /^\s+verdict\s/.test(line))
+    assert.equal(verdictLines.length, 2)
+    assert.match(verdictLines[0]!, /measured improvement/)
+    assert.match(verdictLines[1]!, /measured regression/)
+    assert.doesNotMatch(differingText, /insufficient evidence/)
   })
 
   test('synthetic fake-agent checks are never presented as real-agent evidence', () => {
@@ -201,37 +311,59 @@ describe('paired comparison', () => {
     assert.match(syntheticText, /Evidence source: synthetic harness check \(fake-agent\)/)
     assert.match(syntheticText, /This is not real-agent evidence/)
     assert.match(syntheticText, /evidence\s+synthetic fake-agent check/)
+    assert.doesNotMatch(syntheticText, /real-agent record/)
 
     const real = summarizePairs([result({ variant: 'bare' }), result({ variant: 'anvil' })])
     const realText = formatPairedSummary(real).join('\n')
     assert.match(realText, /Evidence source: real-agent results/)
-    assert.doesNotMatch(realText, /synthetic harness check/)
+    assert.match(realText, /evidence\s+real-agent record/)
+    assert.doesNotMatch(realText, /synthetic/)
+
+    const unknown = summarizePairs([
+      result({ variant: 'bare', model: null }),
+      result({ variant: 'anvil', model: null }),
+    ])
+    const unknownText = formatPairedSummary(unknown).join('\n')
+    assert.match(unknownText, /Evidence source: unknown; no model was recorded/)
+    assert.match(unknownText, /evidence\s+unknown source \(no model recorded\); not real-agent evidence/)
+    assert.doesNotMatch(unknownText, /real-agent results|real-agent record/)
 
     const mixed = summarizePairs([
       result({ variant: 'bare', scenario: 'synthetic', model: 'fake-agent' }),
       result({ variant: 'anvil', scenario: 'synthetic', model: 'fake-agent' }),
       result({ variant: 'bare', scenario: 'real' }),
       result({ variant: 'anvil', scenario: 'real' }),
+      result({ variant: 'bare', scenario: 'unrecorded', model: null }),
+      result({ variant: 'anvil', scenario: 'unrecorded', model: null }),
     ])
-    assert.match(
-      formatPairedSummary(mixed).join('\n'),
-      /Evidence source: mixed \(1 synthetic, 1 real-agent group\(s\)\)/,
+    const mixedText = formatPairedSummary(mixed).join('\n')
+    assert.match(mixedText, /Evidence source: mixed \(1 synthetic, 1 real-agent, 1 unknown group\(s\)\)/)
+    // Each group keeps its own label: `real` sorts first, then `synthetic`, then `unrecorded`.
+    const labels = mixedText.split('\n').filter((line) => /^\s+evidence\s/.test(line))
+    assert.deepEqual(
+      labels.map((line) => line.trim().replace(/^evidence\s+/, '')),
+      [
+        'real-agent record',
+        'synthetic fake-agent check',
+        'unknown source (no model recorded); not real-agent evidence',
+      ],
     )
   })
 
-  test('a verdict does not turn unknown cost into a measured value', () => {
+  test('a verdict does not turn unknown cost or duration into a measured value', () => {
     const summary = summarizePairs(
       Array.from({ length: 5 }, (_, repetition) => [
-        result({ variant: 'bare', repetition, costUsd: null }),
-        result({ variant: 'anvil', repetition, costUsd: null }),
+        result({ variant: 'bare', repetition, costUsd: null, durationMs: null }),
+        result({ variant: 'anvil', repetition, costUsd: null, durationMs: repetition === 0 ? 1000 : null }),
       ]).flat(),
     )
     const text = formatPairedSummary(summary).join('\n')
     assert.equal(summary.totals.successfulCostUsd.bare, null)
     assert.equal(summary.totals.successfulCostUsd.anvil, null)
+    assert.deepEqual(summary.totals.successfulDurationMs, { bare: null, anvil: null, pairs: 0, untimed: 5 })
     assert.match(text, /successful cost\s+unknown/)
-    assert.match(text, /Unknown cost stays unknown rather than becoming zero/)
-    assert.match(text, /Verdict \(all repetitions\): insufficient evidence:/)
+    assert.match(text, /successful time\s+unknown \(5 successful pairs without a recorded duration\)/)
+    assert.match(text, /Unknown cost or duration stays unknown rather than becoming zero/)
   })
 })
 

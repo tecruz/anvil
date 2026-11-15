@@ -73,9 +73,11 @@ import {
   type EvalSkillAccess,
   type EvalSkillAccessReason,
   type EvalSkillSpec,
+  FAKE_AGENT_MODEL,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
+  hermeticEvidenceProblems,
   latestAttemptState,
   parseBaseline,
   parseLatest,
@@ -108,8 +110,29 @@ const baselinePath = join(resultsDir, 'baseline.json')
 const runRecordPath = join(resultsDir, 'run.json')
 const runArchiveDir = join(resultsDir, 'runs')
 const checkpointsDir = join(resultsDir, 'checkpoints')
-/** The fewest complete pairs before the report calls a direction instead of "not enough". */
+/**
+ * The direction rule, in three parts. A group is called `measured improvement` or
+ * `measured regression` only when all of these hold; anything else is `insufficient evidence`.
+ *
+ *   1. At least MIN_PAIRS_FOR_DIRECTION usable pairs: complete (both variants have a result)
+ *      and free of run errors. A pair where either side hit an agent timeout/exit or a
+ *      harness failure says nothing about the agent, so it is excluded, not scored.
+ *   2. The winning side succeeded alone in at least MIN_ONE_SIDED_FOR_DIRECTION pairs.
+ *   3. It won by at least MIN_MARGIN_FOR_DIRECTION one-sided pairs over the other side.
+ *
+ * Pairs where both or neither succeeded carry no direction. These are descriptive thresholds
+ * for a small sample, not a significance test: 3-0 or 3-1 is called, 1-0, 2-0 and 3-2 are not.
+ */
 export const MIN_PAIRS_FOR_DIRECTION = 5
+export const MIN_ONE_SIDED_FOR_DIRECTION = 3
+export const MIN_MARGIN_FOR_DIRECTION = 2
+
+/** Declared here, not beside the report, because the run starts before later module code. */
+const EVIDENCE_GROUP_LABEL: Record<EvidenceSource, string> = {
+  synthetic: 'synthetic fake-agent check',
+  real: 'real-agent record',
+  unknown: 'unknown source (no model recorded); not real-agent evidence',
+}
 
 const VERDICT_LABEL: Record<PairedVerdict, string> = {
   'measured-improvement': 'measured improvement',
@@ -266,7 +289,8 @@ export interface ScenarioResult extends EvalResultSummary {
   /** What the work cost, when the ledger knows. */
   costUsd: number | null
   tokens: number | null
-  durationMs: number
+  /** Wall-clock time of the attempt; null when a parsed record did not carry it. */
+  durationMs: number | null
   /** The agent's own words, so a failure can be read rather than guessed at. */
   transcript: string
   /** What the verifier said, so a failure can be read rather than guessed at. */
@@ -365,7 +389,7 @@ async function main(): Promise<void> {
   // gated matrix, so it is complete; extended and all are exploratory measurements.
   const isSubset = only !== null || suite !== 'smoke'
 
-  const models = fakeAgent ? ([{ id: 'fake-agent', role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
+  const models = fakeAgent ? ([{ id: FAKE_AGENT_MODEL, role: 'small' }] satisfies EvalModel[]) : selectedModels(args)
   if (models.length === 0) {
     console.error('No model matched the requested role. Use --models small, --models frontier or --models all.')
     process.exit(1)
@@ -716,8 +740,17 @@ async function main(): Promise<void> {
     }
   }
 
-  if (completionState === 'completed') {
+  // The hermetic files hold fake-agent evidence only. A completed real-agent run keeps its
+  // run record and raw report but is never promoted into latest.json, so the routine gate and
+  // a reader cannot mistake it for the synthetic harness check.
+  const promotionProblems =
+    completionState === 'completed' ? hermeticEvidenceProblems({ results: results.map(summaryOf) }, runRecord) : []
+  if (completionState === 'completed' && promotionProblems.length === 0) {
     writeReport(results, runRecord)
+  } else if (completionState === 'completed') {
+    console.error(
+      `Run ${runId} is not a fake-agent run, so eval-results/latest.json is unchanged; keep it as a pilot record instead:\n  - ${promotionProblems.join('\n  - ')}`,
+    )
   } else {
     console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
   }
@@ -777,7 +810,7 @@ async function runScenario(
     size: scenario.size,
     kind: scenario.kind,
     variant,
-    model: fake ? 'fake-agent' : model.id,
+    model: fake ? FAKE_AGENT_MODEL : model.id,
     modelRole: fake ? null : model.role,
     opencodeVersion,
     scenarioHash,
@@ -2069,8 +2102,13 @@ export interface PairedCounts {
   neither: number
   /** Results that recorded an error: an agent timeout/exit, or harness setup, counted per variant. */
   runErrors: { bare: number; anvil: number }
-  /** Mean duration over pairs where both variants succeeded. */
-  successfulDurationMs: { bare: number | null; anvil: number | null; pairs: number }
+  /**
+   * Complete pairs where either variant recorded a run error, and how their task success
+   * split. They stay in the descriptive counts above but are excluded from the verdict.
+   */
+  errorPairs: { pairs: number; onlyAnvil: number; onlyBare: number }
+  /** Mean duration over both-successful pairs where both durations are known. */
+  successfulDurationMs: { bare: number | null; anvil: number | null; pairs: number; untimed: number }
   /** Mean ledger cost over both-successful pairs where both prices are known. */
   successfulCostUsd: { bare: number | null; anvil: number | null; pairs: number; unpriced: number }
 }
@@ -2103,9 +2141,11 @@ interface PairAccumulator {
   onlyBare: number
   neither: number
   runErrors: { bare: number; anvil: number }
+  errorPairs: { pairs: number; onlyAnvil: number; onlyBare: number }
   durationBare: number
   durationAnvil: number
   durationPairs: number
+  durationUntimed: number
   costBare: number
   costAnvil: number
   costPairs: number
@@ -2121,9 +2161,11 @@ function emptyAccumulator(): PairAccumulator {
     onlyBare: 0,
     neither: 0,
     runErrors: { bare: 0, anvil: 0 },
+    errorPairs: { pairs: 0, onlyAnvil: 0, onlyBare: 0 },
     durationBare: 0,
     durationAnvil: 0,
     durationPairs: 0,
+    durationUntimed: 0,
     costBare: 0,
     costAnvil: 0,
     costPairs: 0,
@@ -2141,11 +2183,17 @@ function classifyPair(accumulator: PairAccumulator, bare: ScenarioResult, anvil:
   accumulator.pairs += 1
   const bareSucceeded = taskSucceeded(bare)
   const anvilSucceeded = taskSucceeded(anvil)
+  const runError = bare.error !== undefined || anvil.error !== undefined
+  if (runError) accumulator.errorPairs.pairs += 1
   if (bareSucceeded && anvilSucceeded) {
     accumulator.bothSucceeded += 1
-    accumulator.durationBare += bare.durationMs
-    accumulator.durationAnvil += anvil.durationMs
-    accumulator.durationPairs += 1
+    if (bare.durationMs !== null && anvil.durationMs !== null) {
+      accumulator.durationBare += bare.durationMs
+      accumulator.durationAnvil += anvil.durationMs
+      accumulator.durationPairs += 1
+    } else {
+      accumulator.durationUntimed += 1
+    }
     if (bare.costUsd !== null && anvil.costUsd !== null) {
       accumulator.costBare += bare.costUsd
       accumulator.costAnvil += anvil.costUsd
@@ -2155,8 +2203,10 @@ function classifyPair(accumulator: PairAccumulator, bare: ScenarioResult, anvil:
     }
   } else if (anvilSucceeded) {
     accumulator.onlyAnvil += 1
+    if (runError) accumulator.errorPairs.onlyAnvil += 1
   } else if (bareSucceeded) {
     accumulator.onlyBare += 1
+    if (runError) accumulator.errorPairs.onlyBare += 1
   } else {
     accumulator.neither += 1
   }
@@ -2173,10 +2223,12 @@ function finishAccumulator(accumulator: PairAccumulator): PairedCounts {
     onlyBare: accumulator.onlyBare,
     neither: accumulator.neither,
     runErrors: { ...accumulator.runErrors },
+    errorPairs: { ...accumulator.errorPairs },
     successfulDurationMs: {
       bare: durationPairs === 0 ? null : accumulator.durationBare / durationPairs,
       anvil: durationPairs === 0 ? null : accumulator.durationAnvil / durationPairs,
       pairs: durationPairs,
+      untimed: accumulator.durationUntimed,
     },
     successfulCostUsd: {
       bare: costPairs === 0 ? null : accumulator.costBare / costPairs,
@@ -2303,53 +2355,78 @@ export interface PairedVerdictSummary {
 }
 
 /**
- * Turn paired task-success counts into a directional verdict.
+ * Turn one group's paired task-success counts into a directional verdict.
  *
- * This is a count of observed pairs, not a significance test: five pairs are enough to say
- * which side won more often in this sample, never enough to claim the effect generalizes.
- * Duration and cost do not enter the verdict, because a difference in either is descriptive
- * and may be unknown. An incomplete pair, or a ledger price the run did not record, is left
- * out rather than guessed.
+ * Applies the direction rule documented at MIN_PAIRS_FOR_DIRECTION. Only usable pairs count:
+ * an incomplete pair, or a pair where either variant recorded a run error, is left out rather
+ * than scored. Duration and cost never enter the verdict, because a difference in either is
+ * descriptive and may be unknown. A verdict belongs to one scenario and model: pooling groups
+ * would let several individually insufficient comparisons add up to a claim none of them
+ * supports, so the report never classifies its totals.
  */
 export function classifyPairedResult(
-  counts: Pick<PairedCounts, 'pairs' | 'incomplete' | 'bothSucceeded' | 'onlyAnvil' | 'onlyBare' | 'neither'>,
+  counts: Pick<PairedCounts, 'pairs' | 'incomplete' | 'onlyAnvil' | 'onlyBare' | 'errorPairs'>,
 ): PairedVerdictSummary {
-  if (counts.pairs === 0) {
+  const usable = counts.pairs - counts.errorPairs.pairs
+  const anvil = counts.onlyAnvil - counts.errorPairs.onlyAnvil
+  const bare = counts.onlyBare - counts.errorPairs.onlyBare
+  const excluded =
+    counts.errorPairs.pairs === 0
+      ? ''
+      : `; ${counts.errorPairs.pairs} ${plural(counts.errorPairs.pairs, 'pair')} with a run error excluded`
+  if (usable === 0) {
     return {
       verdict: 'insufficient-evidence',
-      reason: `no complete ${plural(counts.incomplete, 'pair')} to compare (${counts.incomplete} incomplete)`,
+      reason: `no usable pair to compare (${counts.incomplete} incomplete, ${counts.errorPairs.pairs} with a run error)`,
     }
   }
-  if (counts.pairs < MIN_PAIRS_FOR_DIRECTION) {
+  if (usable < MIN_PAIRS_FOR_DIRECTION) {
     return {
       verdict: 'insufficient-evidence',
-      reason: `${counts.pairs} complete ${plural(counts.pairs, 'pair')} is below the ${MIN_PAIRS_FOR_DIRECTION} needed to call a direction`,
+      reason: `${usable} usable ${plural(usable, 'pair')} is below the ${MIN_PAIRS_FOR_DIRECTION} needed to call a direction${excluded}`,
     }
   }
-  if (counts.onlyAnvil > counts.onlyBare) {
+  if (anvil === bare) {
+    return {
+      verdict: 'insufficient-evidence',
+      reason:
+        anvil === 0
+          ? `neither variant uniquely succeeded in any of ${usable} usable ${plural(usable, 'pair')}${excluded}`
+          : `${anvil} ${plural(anvil, 'pair')} went each way; the pairs do not separate the variants${excluded}`,
+    }
+  }
+  const winner = Math.max(anvil, bare)
+  const loser = Math.min(anvil, bare)
+  if (winner < MIN_ONE_SIDED_FOR_DIRECTION || winner - loser < MIN_MARGIN_FOR_DIRECTION) {
+    return {
+      verdict: 'insufficient-evidence',
+      reason: `anvil only ${anvil}, bare only ${bare}: a direction needs at least ${MIN_ONE_SIDED_FOR_DIRECTION} one-sided pairs and a margin of ${MIN_MARGIN_FOR_DIRECTION}${excluded}`,
+    }
+  }
+  if (anvil > bare) {
     return {
       verdict: 'measured-improvement',
-      reason: `anvil succeeded where bare did not in ${counts.onlyAnvil} ${plural(counts.onlyAnvil, 'pair')}; the reverse happened in ${counts.onlyBare}`,
-    }
-  }
-  if (counts.onlyBare > counts.onlyAnvil) {
-    return {
-      verdict: 'measured-regression',
-      reason: `bare succeeded where anvil did not in ${counts.onlyBare} ${plural(counts.onlyBare, 'pair')}; the reverse happened in ${counts.onlyAnvil}`,
+      reason: `anvil succeeded where bare did not in ${anvil} ${plural(anvil, 'pair')}; the reverse happened in ${bare}${excluded}`,
     }
   }
   return {
-    verdict: 'insufficient-evidence',
-    reason:
-      counts.onlyAnvil === 0
-        ? `neither variant uniquely succeeded in any of ${counts.pairs} complete ${plural(counts.pairs, 'pair')}`
-        : `${counts.onlyAnvil} ${plural(counts.onlyAnvil, 'pair')} went each way; the pairs do not separate the variants`,
+    verdict: 'measured-regression',
+    reason: `bare succeeded where anvil did not in ${bare} ${plural(bare, 'pair')}; the reverse happened in ${anvil}${excluded}`,
   }
 }
 
-/** Whether a model id is the canned fake agent, and therefore not real-agent evidence. */
-function isSyntheticModel(model: string | null): boolean {
-  return model === 'fake-agent'
+type EvidenceSource = 'synthetic' | 'real' | 'unknown'
+
+/**
+ * What produced a group's results.
+ *
+ * Only the canned fake agent is synthetic, and only a recorded model id is real-agent
+ * evidence. A result with no model recorded is unknown: an absent fact must not become a
+ * positive claim in either direction.
+ */
+function evidenceSourceOf(model: string | null): EvidenceSource {
+  if (model === null) return 'unknown'
+  return model === FAKE_AGENT_MODEL ? 'synthetic' : 'real'
 }
 
 /**
@@ -2360,15 +2437,19 @@ function isSyntheticModel(model: string | null): boolean {
  * blended them would let a canned answer stand in for a model.
  */
 function evidenceSourceLine(summary: PairedSummary): string {
-  const synthetic = summary.groups.filter((group) => isSyntheticModel(group.model)).length
-  const real = summary.groups.length - synthetic
-  if (synthetic > 0 && real === 0) {
+  const count = { synthetic: 0, real: 0, unknown: 0 }
+  for (const group of summary.groups) count[evidenceSourceOf(group.model)] += 1
+  const total = summary.groups.length
+  if (count.synthetic === total) {
     return 'Evidence source: synthetic harness check (fake-agent); a canned answer was used, no model was called. This is not real-agent evidence.'
   }
-  if (real > 0 && synthetic === 0) {
+  if (count.real === total) {
     return 'Evidence source: real-agent results. A claim covers only the scenarios, model and conditions recorded in the run record.'
   }
-  return `Evidence source: mixed (${synthetic} synthetic, ${real} real-agent group(s)). Read each group's evidence line before comparing them.`
+  if (count.unknown === total) {
+    return 'Evidence source: unknown; no model was recorded, so these results are not presented as real-agent evidence.'
+  }
+  return `Evidence source: mixed (${count.synthetic} synthetic, ${count.real} real-agent, ${count.unknown} unknown group(s)). Read each group's evidence line; verdicts are never pooled across groups.`
 }
 
 /**
@@ -2387,23 +2468,30 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
   for (const group of summary.groups) {
     const verdict = classifyPairedResult(group)
     lines.push(group.model === null ? group.scenario : `${group.scenario} [${group.model}]`)
+    lines.push(`  evidence         ${EVIDENCE_GROUP_LABEL[evidenceSourceOf(group.model)]}`)
     lines.push(
-      `  evidence         ${isSyntheticModel(group.model) ? 'synthetic fake-agent check' : 'real-agent record'}`,
+      `  repetitions      ${group.pairs} complete, ${group.incomplete} incomplete, ${group.errorPairs.pairs} with a run error (excluded from the verdict)`,
     )
-    lines.push(`  repetitions      ${group.pairs} complete, ${group.incomplete} incomplete`)
     lines.push(
       `  task success     both ${group.bothSucceeded}, anvil only ${group.onlyAnvil}, bare only ${group.onlyBare}, neither ${group.neither}`,
     )
     lines.push(`  run errors       bare ${group.runErrors.bare}, anvil ${group.runErrors.anvil}`)
     lines.push(`  verdict          ${VERDICT_LABEL[verdict.verdict]}: ${verdict.reason}`)
     lines.push(`  scope            ${group.scenario} only; no claim beyond these pairs and conditions`)
-    if (group.successfulDurationMs.pairs === 0) {
+    if (group.bothSucceeded === 0) {
       lines.push('  successful time  no pair succeeded in both variants')
+    } else if (group.successfulDurationMs.pairs === 0) {
+      lines.push(
+        `  successful time  unknown (${group.successfulDurationMs.untimed} successful ${plural(
+          group.successfulDurationMs.untimed,
+          'pair',
+        )} without a recorded duration)`,
+      )
     } else {
       lines.push(
         `  successful time  bare ${formatSeconds(group.successfulDurationMs.bare)}, anvil ${formatSeconds(
           group.successfulDurationMs.anvil,
-        )} (n=${group.successfulDurationMs.pairs})`,
+        )} (n=${group.successfulDurationMs.pairs}, ${group.successfulDurationMs.untimed} untimed)`,
       )
     }
     if (group.successfulCostUsd.pairs === 0) {
@@ -2427,20 +2515,21 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
     }
   }
   const totals = summary.totals
-  const totalsVerdict = classifyPairedResult(totals)
   lines.push('')
   lines.push(
-    `All repetitions: ${totals.pairs} complete, ${totals.incomplete} incomplete; both ${totals.bothSucceeded}, anvil only ${totals.onlyAnvil}, bare only ${totals.onlyBare}, neither ${totals.neither}.`,
+    `All repetitions: ${totals.pairs} complete, ${totals.incomplete} incomplete, ${totals.errorPairs.pairs} with a run error; both ${totals.bothSucceeded}, anvil only ${totals.onlyAnvil}, bare only ${totals.onlyBare}, neither ${totals.neither}.`,
   )
-  lines.push(`Verdict (all repetitions): ${VERDICT_LABEL[totalsVerdict.verdict]}: ${totalsVerdict.reason}.`)
+  lines.push(
+    'These totals are descriptive. There is no overall verdict: each verdict above belongs to one scenario and model, and groups are never pooled into a claim.',
+  )
   lines.push(
     'Task success means the verifier passed and any declared hidden verifier passed; only pairs where both variants succeeded contribute to the time and cost means.',
   )
   lines.push(
-    'A verdict counts observed pairs; it is not a significance test, and time or cost differences do not change it. Unknown cost stays unknown rather than becoming zero.',
+    `A verdict counts usable pairs (complete, no run error): it needs ${MIN_PAIRS_FOR_DIRECTION} of them, at least ${MIN_ONE_SIDED_FOR_DIRECTION} where only the winning variant succeeded, and a margin of ${MIN_MARGIN_FOR_DIRECTION} such pairs. It is not a significance test, and time or cost differences do not change it. Unknown cost or duration stays unknown rather than becoming zero.`,
   )
   lines.push(
-    'Run errors are not attributed to the agent: they include agent timeouts or exits and harness setup failures, such as a failed skill installation.',
+    'Run errors are not attributed to the agent: they include agent timeouts or exits and harness setup failures, such as a failed skill installation. A pair with a run error on either side is excluded from its verdict.',
   )
   return lines
 }
@@ -2526,7 +2615,7 @@ function printSummary(results: ScenarioResult[]): void {
         (r.verified ? 'yes' : 'no').padEnd(8),
         (r.hiddenVerified === null ? '-' : r.hiddenVerified ? 'yes' : 'no').padEnd(6),
         cost.padEnd(8),
-        `${Math.round(r.durationMs / 1000)}s`,
+        r.durationMs === null ? '-' : `${Math.round(r.durationMs / 1000)}s`,
       ].join('  '),
     )
     if (r.error !== undefined) console.log(`  error: ${r.error}`)
@@ -2633,6 +2722,15 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
     expect: scenario.expect,
   }))
+  // The committed hermetic evidence must be synthetic. A real-agent result promoted by hand
+  // fails here even when every other check would pass.
+  const hermetic = hermeticEvidenceProblems(latest, runRecord ?? null)
+  if (hermetic.length > 0) {
+    console.error(
+      `eval gate failed: the hermetic evidence is not fake-agent only; real-agent records belong under eval-results/pilots/:\n  - ${hermetic.join('\n  - ')}`,
+    )
+    return 1
+  }
   const gate = checkEvalGate(baseline, latest, current, hashImplementation(repoRoot), runRecord, hashHarness())
   if (!gate.ok) {
     console.error(gate.message)

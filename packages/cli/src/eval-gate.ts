@@ -270,8 +270,8 @@ export interface EvalRunRecordResult {
   costUsd: number | null
   /** Total tokens, including cache reads and writes when the ledger counts them. */
   tokens: number | null
-  /** How long the last completed attempt took, in milliseconds. */
-  durationMs: number
+  /** How long the last completed attempt took, in milliseconds; null when the record omits it. */
+  durationMs: number | null
   /** The agent's transcript from the last completed attempt. */
   transcript: string
   /** Any agent error from the last completed attempt. */
@@ -900,7 +900,7 @@ export function parseRunRecordResult(
     repetition,
     costUsd: typeof value.costUsd === 'number' && Number.isFinite(value.costUsd) ? value.costUsd : null,
     tokens: typeof value.tokens === 'number' && Number.isFinite(value.tokens) ? value.tokens : null,
-    durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : 0,
+    durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : null,
     transcript: typeof value.transcript === 'string' ? value.transcript : '',
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
     ...(skillInstall === undefined ? {} : { skillInstall }),
@@ -1695,6 +1695,43 @@ export function checkRunRecordCompatibility(
     ok: true,
     message: `run ${record.runId} is compatible with the current source, harness, and models`,
   }
+}
+
+/** The model id the hermetic harness records for its canned agent. */
+export const FAKE_AGENT_MODEL = 'fake-agent'
+
+/**
+ * Why evidence is not synthetic-only, as one message per offending result or model.
+ *
+ * `eval-results/latest.json` and the run record it references are the hermetic harness check:
+ * every result must come from the canned fake agent. A real-agent run is evidence of a
+ * different kind, kept under `eval-results/pilots/`, and must never be promoted into the
+ * hermetic files, where a gate or a reader would take it for the routine check. A result with
+ * no model recorded is refused too, because it cannot be shown to be synthetic.
+ */
+export function hermeticEvidenceProblems(
+  latest: { results: ReadonlyArray<Pick<EvalResultSummary, 'scenario' | 'variant' | 'model' | 'repetition'>> },
+  runRecord: Pick<EvalRunRecord, 'runId' | 'models' | 'results'> | null,
+): string[] {
+  const problems: string[] = []
+  for (const result of latest.results) {
+    if (result.model !== FAKE_AGENT_MODEL) {
+      problems.push(`latest summary result ${resultKey(result)} is not a ${FAKE_AGENT_MODEL} result`)
+    }
+  }
+  if (runRecord !== null) {
+    for (const model of runRecord.models) {
+      if (model.id !== FAKE_AGENT_MODEL) {
+        problems.push(`run ${runRecord.runId} declares model ${model.id}, not ${FAKE_AGENT_MODEL}`)
+      }
+    }
+    for (const result of runRecord.results) {
+      if (result.model !== FAKE_AGENT_MODEL) {
+        problems.push(`run ${runRecord.runId} result ${resultKey(result)} is not a ${FAKE_AGENT_MODEL} result`)
+      }
+    }
+  }
+  return problems
 }
 
 /** The stable key for one scenario/variant/model/repetition result. */

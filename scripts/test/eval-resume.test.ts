@@ -445,3 +445,32 @@ test('an interrupted fake-agent run keeps its checkpoint and resume reuses it', 
     harness.cleanup()
   }
 })
+
+test('the gate refuses hermetic evidence that is not fake-agent only', { timeout: 600_000 }, () => {
+  const harness = isolatedHarness('anvil-eval-hermetic-')
+  try {
+    const { root, invoke } = harness
+    const baseline = invoke('--write-baseline')
+    assert.equal(baseline.status, 0, baseline.output)
+    const passing = invoke('--check')
+    assert.equal(passing.status, 0, passing.output)
+
+    // Relabel the promoted run as a real model everywhere it is recorded: the summary, the run
+    // record and its archive. Every other check still agrees, so only the guard can refuse it.
+    const files = [
+      'eval-results/latest.json',
+      'eval-results/run.json',
+      ...readdirSync(join(root, 'eval-results', 'runs')).map((name) => `eval-results/runs/${name}`),
+    ]
+    for (const file of files) {
+      const path = join(root, file)
+      writeFileSync(path, readFileSync(path, 'utf8').replaceAll('"fake-agent"', '"opencode/real-model"'))
+    }
+    const refused = invoke('--check')
+    assert.notEqual(refused.status, 0, refused.output)
+    assert.match(refused.output, /the hermetic evidence is not fake-agent only/)
+    assert.match(refused.output, /declares model opencode\/real-model, not fake-agent/)
+  } finally {
+    harness.cleanup()
+  }
+})
