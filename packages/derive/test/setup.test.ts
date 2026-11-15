@@ -202,6 +202,19 @@ describe('setup proposals', () => {
     for (const [label, changed, projectDir] of [
       ['install command text', config({ ...base, commands: [{ kind: 'install', cmd: 'pnpm i' }] }), ''],
       ['install command dir', config({ ...base, commands: [{ kind: 'install', cmd: 'npm ci', dir: 'web' }] }), ''],
+      [
+        // The position names the action (`command:1`), so moving the install command matters
+        // even though the inserted test command itself is not a setup input.
+        'install command position',
+        config({
+          ...base,
+          commands: [
+            { kind: 'test', cmd: 'npm test' },
+            { kind: 'install', cmd: 'npm ci' },
+          ],
+        }),
+        '',
+      ],
       ['tool install text', config({ ...base, tools: [{ ...tool, install: 'brew install node' }] }), ''],
       ['tool id', config({ ...base, tools: [{ ...tool, id: 'nodejs' }] }), ''],
       ['tool version', config({ ...base, tools: [{ ...tool, version: '^24' }] }), ''],
