@@ -15,6 +15,7 @@
 import type { DeclaredCommand, ProjectConfig } from '@anvil/core'
 import type { MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
+import { INTENDED_BEHAVIOR_QUESTION } from './brief.ts'
 
 export interface GeneratedArtifact {
   path: string
@@ -265,6 +266,17 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   }
   lines.push('')
 
+  lines.push('## Product expectations')
+  lines.push('')
+  lines.push(
+    '- Business expectations were not assessed here: what the product should do, and its acceptance criteria, are open questions, not facts.',
+  )
+  lines.push(
+    '- Source code and tests are evidence of the current implementation, not by themselves the definition of correct product behavior.',
+  )
+  lines.push(`- Ask: ${INTENDED_BEHAVIOR_QUESTION}`)
+  lines.push('')
+
   lines.push('## For agents')
   lines.push('')
   lines.push(
@@ -404,6 +416,12 @@ export function generateReviewCommand(options: GenerateOptions): GeneratedArtifa
     body.push(`!\`${run(lint)}\``)
     body.push('')
   }
+  body.push('Treat what the code does as evidence of the current implementation; it does not by')
+  body.push('itself define intended product behavior. If the diff depends on an undocumented')
+  body.push('business expectation, name it as an open question instead of inventing an answer.')
+  body.push('')
+  body.push(`If the intent is unclear, ask: ${INTENDED_BEHAVIOR_QUESTION}`)
+  body.push('')
   body.push('Report: correctness problems, missing edge cases, and anything that would be')
   body.push('hard to review. If the diff touches a high-risk path, say so explicitly.')
 

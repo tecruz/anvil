@@ -27,6 +27,8 @@ import {
   generateReviewCommand,
   generateVerifySkill,
   hashInputs,
+  INTENDED_BEHAVIOR_QUESTION,
+  INTENDED_BEHAVIOR_QUESTION_ID,
   inspectStaging,
   readManifest,
   readRepoFile,
@@ -1021,6 +1023,24 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
     assert.match(artifact.content, /inferred from ecosystem convention/)
   })
 
+  test('keeps business expectations open and source code as implementation evidence', () => {
+    const dir = materialize('go-module')
+    const profile = profileIn(dir)
+    const matches = matchesFor(profile)
+
+    const agents = generateAgentsFile({ profile, matches }).content
+    assert.match(agents, /## Product expectations/)
+    assert.match(agents, /Business expectations were not assessed/)
+    assert.match(agents, /evidence of the current implementation/)
+    assert.ok(agents.includes(INTENDED_BEHAVIOR_QUESTION), 'the generated file asks the same question as the brief')
+
+    const review = generateReviewCommand({ profile, matches })
+    assert.ok(review !== null)
+    assert.match(review.content, /evidence of the current implementation/)
+    assert.match(review.content, /instead of inventing an answer/)
+    assert.ok(review.content.includes(INTENDED_BEHAVIOR_QUESTION))
+  })
+
   test('includes the module map for a monorepo', () => {
     const dir = materialize('node-workspace')
     const profile = profileIn(dir)
@@ -1332,5 +1352,88 @@ describe('brief', () => {
       warnings: ['discovery cache for node is stale; its entries were ignored'],
     })
     assert.deepEqual(brief.warnings, ['discovery cache for node is stale; its entries were ignored'])
+  })
+
+  test('states how evidence may be used and leaves business intent open', () => {
+    // "The code does this" is a fact about the implementation. It is not the product spec,
+    // and a brief that blurred the two invited a model to promote observed behavior into an
+    // invented business requirement.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: () => null,
+    })
+
+    assert.equal(brief.schemaVersion, 2)
+    assert.deepEqual(brief.contextPolicy, {
+      sourceCode: 'implementation-evidence-not-product-spec',
+      references: 'pointers-only',
+      businessExpectations: 'not-assessed',
+    })
+    assert.deepEqual(
+      brief.questions.map((q) => q.id),
+      [INTENDED_BEHAVIOR_QUESTION_ID],
+    )
+    assert.equal(brief.questions[0]?.prompt, INTENDED_BEHAVIOR_QUESTION)
+    assert.deepEqual(brief.questions[0]?.referenceIds, [])
+    assert.match(brief.questions[0]?.reason ?? '', /not assessed/)
+  })
+
+  test('a requirements reference is attached to the question, never treated as its answer', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const readPaths: string[] = []
+    const readme = 'PRIVATE-README-CONTENT'
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: (path) => {
+        readPaths.push(path)
+        return path === 'README.md' ? readme : `content of ${path}`
+      },
+      declared: {
+        commands: [],
+        tools: [],
+        env: [],
+        services: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+        references: [
+          { id: 'prd', path: 'docs/prd.md', scope: 'requirements' },
+          { id: 'adr', path: 'README.md', scope: 'architecture' },
+        ],
+      },
+    })
+
+    // The question survives an approved requirements document. Approval means "this may help
+    // a reader answer it", not "anvil read this, so the answer is known".
+    assert.equal(brief.questions.length, 1)
+    assert.deepEqual(brief.questions[0]?.referenceIds, ['prd'])
+    assert.deepEqual(
+      brief.references.map((r) => r.id),
+      ['prd', 'adr'],
+    )
+
+    // Pointer-only wins over the excerpt allowlist: README.md is safe to excerpt in general,
+    // but here the owner approved it as a reference and the contents are not anvil's to copy.
+    assert.equal(readPaths.includes('README.md'), false, 'a referenced document must not be read')
+    assert.ok(readPaths.includes('package.json'), 'an unrelated allowlisted manifest is still read')
+    assert.equal(
+      brief.excerpts.some((e) => e.path === 'README.md'),
+      false,
+    )
+    assert.ok(brief.excerpts.some((e) => e.path === 'package.json'))
+    assert.ok(!JSON.stringify(brief).includes(readme), 'referenced contents must not reach the brief')
+    assert.ok(
+      brief.warnings.some((w) => /README\.md is an approved context reference/.test(w)),
+      brief.warnings.join('; '),
+    )
   })
 })

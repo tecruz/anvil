@@ -1099,6 +1099,49 @@ describe('declared capabilities reach the brief', () => {
       ['docs/adr/0001.md'],
     )
   })
+
+  test('the brief keeps business intent as a question and treats references as pointers', () => {
+    const dir = tempDir('anvil-brief-question-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    mkdirSync(join(dir, 'docs'), { recursive: true })
+    writeFileSync(join(dir, 'docs', 'prd.md'), 'PRD-CONTENT-MUST-NOT-APPEAR')
+    writeFileSync(
+      join(dir, 'anvil.config.json'),
+      JSON.stringify({
+        project: { references: [{ id: 'prd', path: 'docs/prd.md', scope: 'requirements' }] },
+      }),
+    )
+
+    const res = runAnvil(['brief', '--json', '--offline'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const data = JSON.parse(res.stdout) as {
+      ok: boolean
+      data: {
+        schemaVersion: number
+        contextPolicy: Record<string, string>
+        questions: Array<{ prompt: string; referenceIds: string[] }>
+        references: Array<{ path: string }>
+      }
+    }
+    assert.equal(data.ok, true)
+    assert.equal(data.data.schemaVersion, 2)
+    assert.equal(data.data.contextPolicy.sourceCode, 'implementation-evidence-not-product-spec')
+    assert.equal(data.data.contextPolicy.references, 'pointers-only')
+    assert.equal(data.data.contextPolicy.businessExpectations, 'not-assessed')
+    assert.equal(data.data.questions.length, 1)
+    assert.match(data.data.questions[0]?.prompt ?? '', /intended product behavior/)
+    assert.deepEqual(data.data.questions[0]?.referenceIds, ['prd'])
+    assert.deepEqual(
+      data.data.references.map((r) => r.path),
+      ['docs/prd.md'],
+    )
+    assert.ok(!res.stdout.includes('PRD-CONTENT-MUST-NOT-APPEAR'), 'a pointer is not its contents')
+
+    const text = runAnvil(['brief', '--offline'], { cwd: dir })
+    assert.match(text.stdout, /Evidence use/)
+    assert.match(text.stdout, /Questions to resolve/)
+    assert.match(text.stdout, /approved references: prd/)
+  })
 })
 
 describe('per-command help', () => {

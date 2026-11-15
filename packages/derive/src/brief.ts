@@ -13,6 +13,10 @@
  *  - **No secrets.** The file list is filtered, and file *contents* are only included
  *    for a small allowlist of manifest-shaped paths. An agent working in a corporate repo
  *    should not have secrets pushed into its context by a convenience feature.
+ *
+ * The brief also states what it did not establish. Source code is evidence of the current
+ * implementation, references are pointers, and business expectations remain questions. That
+ * way a model cannot turn "the code does this" into "the product is supposed to do this".
  */
 
 import type { Finding, ReadinessReport } from '@anvil/audit'
@@ -59,8 +63,77 @@ export interface BriefFileExcerpt {
   truncated: boolean
 }
 
+/**
+ * How each kind of input may be used by the model.
+ *
+ * The distinction is the difference between a fact and a decision. Detected facts describe
+ * the repository as it is; source code is evidence of the current implementation; and the
+ * business expectations behind that implementation were not assessed at all.
+ */
+export interface BriefContextPolicy {
+  sourceCode: 'implementation-evidence-not-product-spec'
+  references: 'pointers-only'
+  businessExpectations: 'not-assessed'
+}
+
+/**
+ * A question the repository does not answer.
+ *
+ * A question is deliberately not a gap: a gap says something is missing from the repository,
+ * while a question says anvil did not establish the answer. An approved reference may help a
+ * reader answer it, but the reference is a pointer, never an answer anvil read for them.
+ */
+export interface BriefQuestion {
+  id: string
+  prompt: string
+  /** Why this is open, so a reader cannot mistake it for a generated recommendation. */
+  reason: string
+  /** Approved documents that may help answer it. Listing a pointer is not reading it. */
+  referenceIds: string[]
+}
+
+export const INTENDED_BEHAVIOR_QUESTION_ID = 'intended-product-behavior'
+
+/** The single question the current brief can ask without reading an owner's documents. */
+export const INTENDED_BEHAVIOR_QUESTION = 'What intended product behavior and acceptance criteria should guide changes?'
+
+/** A fresh copy, so a caller cannot mutate the policy every other consumer sees. */
+export function briefContextPolicy(): BriefContextPolicy {
+  return {
+    sourceCode: 'implementation-evidence-not-product-spec',
+    references: 'pointers-only',
+    businessExpectations: 'not-assessed',
+  }
+}
+
+/**
+ * The questions anvil can state without interpreting a document.
+ *
+ * Requirements references are attached by id, because they are the approved places a reader
+ * might find the answer. Their presence changes nothing else: the question stays open, and
+ * the brief carries no contents from them.
+ */
+export function briefQuestions(declared: ProjectConfig | undefined): BriefQuestion[] {
+  const referenceIds = [
+    ...new Set(
+      (declared?.references ?? [])
+        .filter((reference) => (reference.scope ?? 'other') === 'requirements')
+        .map((reference) => reference.id),
+    ),
+  ]
+  return [
+    {
+      id: INTENDED_BEHAVIOR_QUESTION_ID,
+      prompt: INTENDED_BEHAVIOR_QUESTION,
+      reason:
+        'Business expectations were not assessed from this repository. Source code and tests show the current implementation, not necessarily the intended product behavior.',
+      referenceIds,
+    },
+  ]
+}
+
 export interface Brief {
-  schemaVersion: 1
+  schemaVersion: 2
   target: BriefTarget
   repo: {
     root: string
@@ -122,6 +195,10 @@ export interface Brief {
   excerpts: BriefFileExcerpt[]
   /** Approved context documents, by path and scope only. Their contents are never copied. */
   references: BriefReference[]
+  /** How the model may use source code and references; what it must not treat as decided. */
+  contextPolicy: BriefContextPolicy
+  /** What the repository does not answer, so the model asks rather than invents. */
+  questions: BriefQuestion[]
   /** What the repo lacks, so the model does not write guidance for things already present. */
   gaps: string[]
   /**
@@ -265,8 +342,17 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   }))
 
   const excerpts: BriefFileExcerpt[] = []
+  const warnings = [...(options.warnings ?? [])]
+  // An approved reference is a pointer, and pointer-only treatment wins over the general
+  // excerpt allowlist. Otherwise approving `README.md` as context would be the way to get its
+  // contents copied into the brief, which is exactly what the approval did not grant.
+  const referenced = new Set((options.declared?.references ?? []).map((r) => excerptKey(r.path)))
   for (const { path, maxBytes } of EXCERPT_ALLOW) {
     if (!profile.files.includes(path)) continue
+    if (referenced.has(excerptKey(path))) {
+      warnings.push(`${path} is an approved context reference; its contents were not copied into this brief.`)
+      continue
+    }
     const content = read(path)
     if (content === null) continue
     const truncated = content.length > maxBytes
@@ -278,7 +364,7 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     target,
     repo: {
       root: profile.root,
@@ -326,9 +412,21 @@ export function buildBrief(options: BuildBriefOptions): Brief {
       scope: r.scope ?? 'other',
       reason: r.reason ?? null,
     })),
+    contextPolicy: briefContextPolicy(),
+    questions: briefQuestions(options.declared),
     gaps: computeGaps(report, profile),
-    warnings: [...(options.warnings ?? [])],
+    warnings,
   }
+}
+
+/** Compare excerpt and reference paths the way the two filesystems do. */
+function excerptKey(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/{2,}/g, '/')
+    .toLowerCase()
 }
 
 function flattenGuidance(
