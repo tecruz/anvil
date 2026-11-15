@@ -107,7 +107,9 @@ was not a change in this branch: the tree was identical to `main`, whose own CI 
 With approval, only the failed job was rerun. Attempt 2 (started 21:13:10Z) passed
 `windows-latest` (job 132590277837), leaving all eight required checks `SUCCESS` on
 `261968a`, and that is the green state captured above. The flaky test is followed up in
-[issue #45](https://github.com/tecruz/anvil/issues/45).
+[issue #45](https://github.com/tecruz/anvil/issues/45); the bounded timeout and the
+remaining Windows CI evidence are recorded in
+[the 2026-11-15 follow-up](2026-11-15-windows-acl-timeout.md).
 
 ## Sanitized excerpts
 

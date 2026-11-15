@@ -502,21 +502,58 @@ function windowsPowerShell(): string | null {
 }
 
 /**
- * Run a Windows system tool from its own directory, returning its output or null when it cannot
- * be run. The executable path is absolute and the working directory holds no repository, so
- * neither the search path nor a checked-out binary can be chosen by a repository.
+ * The default bound for a Windows system tool call.
+ *
+ * A cold Windows PowerShell can start slowly on a loaded runner: the 2026-11-14 merge-gate
+ * run recorded a 20,053 ms failure consistent with the old 20-second cap (issue #45). The
+ * bound is larger but still finite, and a timeout is a refusal, not a pass.
  */
-function runWindowsTool(executable: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string | null {
+export const WINDOWS_TOOL_TIMEOUT_MS = 60_000
+/** An operator may raise the bound for a slow host, but never above this. */
+const MAX_WINDOWS_TOOL_TIMEOUT_MS = 300_000
+
+/**
+ * The Windows tool timeout for this process.
+ *
+ * `ANVIL_APPROVAL_TOOL_TIMEOUT_MS` exists because a slow Windows host, or a test that needs to
+ * prove the timeout branch without waiting a minute, cannot change a compiled constant. It is
+ * a process-level override, not configuration a repository can set. An invalid value falls
+ * back to the default rather than disabling the bound.
+ */
+function windowsToolTimeoutMs(): number {
+  const raw = process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return WINDOWS_TOOL_TIMEOUT_MS
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > MAX_WINDOWS_TOOL_TIMEOUT_MS) return WINDOWS_TOOL_TIMEOUT_MS
+  return parsed
+}
+
+type WindowsToolRun =
+  | { ok: true; output: string; timeoutMs: number }
+  | { ok: false; timedOut: boolean; timeoutMs: number }
+
+/**
+ * Run a Windows system tool from its own directory, returning its output or a classified
+ * failure. The executable path is absolute and the working directory holds no repository, so
+ * neither the search path nor a checked-out binary can be chosen by a repository.
+ *
+ * A timeout is kept distinct from every other failure: the old implementation returned `null`
+ * for both, so a slow runner was indistinguishable from an ACL that genuinely cannot be read.
+ * Both still refuse approval.
+ */
+function runWindowsTool(executable: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): WindowsToolRun {
+  const timeoutMs = windowsToolTimeoutMs()
   try {
-    return execFileSync(executable, args, {
+    const output = execFileSync(executable, args, {
       encoding: 'utf8',
       windowsHide: true,
-      timeout: 20_000,
+      timeout: timeoutMs,
       cwd: dirname(executable),
       env: { ...process.env, ...extraEnv },
     })
-  } catch {
-    return null
+    return { ok: true, output, timeoutMs }
+  } catch (cause) {
+    return { ok: false, timedOut: (cause as NodeJS.ErrnoException).code === 'ETIMEDOUT', timeoutMs }
   }
 }
 
@@ -546,25 +583,27 @@ interface WindowsAcl {
   allow: string[]
 }
 
-/** The current user, owner and allow SIDs of one object, or null when they cannot be read. */
-function readWindowsAcl(path: string): WindowsAcl | null {
+/** The current user, owner and allow SIDs of one object, or why they could not be read. */
+type WindowsAclRead = { ok: true; acl: WindowsAcl } | { ok: false; timedOut: boolean; timeoutMs: number }
+
+function readWindowsAcl(path: string): WindowsAclRead {
   const shell = windowsPowerShell()
-  if (shell === null) return null
-  const output = runWindowsTool(
+  if (shell === null) return { ok: false, timedOut: false, timeoutMs: windowsToolTimeoutMs() }
+  const run = runWindowsTool(
     shell,
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', WINDOWS_ACL_SCRIPT],
     { ANVIL_APPROVAL_ACL_PATH: path },
   )
-  if (output === null) return null
+  if (!run.ok) return run
   const acl: WindowsAcl = { self: '', owner: '', allow: [] }
-  for (const rawLine of output.split(/\r?\n/)) {
+  for (const rawLine of run.output.split(/\r?\n/)) {
     const line = rawLine.trim()
     if (line.startsWith('S:')) acl.self = line.slice(2)
     else if (line.startsWith('O:')) acl.owner = line.slice(2)
     else if (line.startsWith('A:Allow:')) acl.allow.push(line.slice('A:Allow:'.length))
   }
-  if (acl.self === '' || acl.owner === '') return null
-  return acl
+  if (acl.self === '' || acl.owner === '') return { ok: false, timedOut: false, timeoutMs: run.timeoutMs }
+  return { ok: true, acl }
 }
 
 /**
@@ -584,8 +623,15 @@ const WINDOWS_TRUSTED_SIDS = new Set(['S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-
  * keeps the check fail-closed.
  */
 function windowsProtectionProblem(path: string, kind: 'directory' | 'file'): string | null {
-  const acl = readWindowsAcl(path)
-  if (acl === null) return `The approval ${kind} access control list cannot be read.`
+  const read = readWindowsAcl(path)
+  if (!read.ok) {
+    // A timeout is still a refusal: an ACL that could not be read in time might name any
+    // principal. Saying so separately keeps a slow host from looking like a broken store.
+    return read.timedOut
+      ? `The approval ${kind} access control list could not be read within ${read.timeoutMs} ms; it is refused rather than trusted.`
+      : `The approval ${kind} access control list cannot be read.`
+  }
+  const acl = read.acl
   if (acl.owner !== acl.self && !WINDOWS_TRUSTED_SIDS.has(acl.owner)) {
     return `The approval ${kind} is owned by ${acl.owner}.`
   }
@@ -603,8 +649,12 @@ function hardenWindowsStore(storeDir: string): string | null {
   if (principal === null) return 'The current Windows user cannot be identified.'
   const icacls = windowsSystemExecutable('icacls.exe')
   if (icacls === null) return 'The Windows icacls tool cannot be located.'
-  const output = runWindowsTool(icacls, [storeDir, '/inheritance:r', '/grant:r', `${principal}:(OI)(CI)F`])
-  if (output === null) return 'The approval store access control list could not be restricted.'
+  const run = runWindowsTool(icacls, [storeDir, '/inheritance:r', '/grant:r', `${principal}:(OI)(CI)F`])
+  if (!run.ok) {
+    return run.timedOut
+      ? `The approval store access control list could not be restricted within ${run.timeoutMs} ms.`
+      : 'The approval store access control list could not be restricted.'
+  }
   return null
 }
 
@@ -653,9 +703,9 @@ function assertStoreOutsideRepository(storeDir: string, repositoryRoot: string):
   }
 }
 
-type LocatedStore = { dir: string } | 'unsafe' | null
+type LocatedStore = { dir: string } | { unsafe: string } | null
 
-/** Locate the store without creating it. `'unsafe'` means it exists but is not usable authority. */
+/** Locate the store without creating it. A non-`dir` object means it exists but is not usable authority. */
 function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
   const dir = approvalStoreDir(env)
   let stat: ReturnType<typeof lstatSync>
@@ -664,9 +714,10 @@ function locateStore(env: NodeJS.ProcessEnv | undefined): LocatedStore {
   } catch {
     return null
   }
-  if (!stat.isDirectory() || stat.isSymbolicLink()) return 'unsafe'
-  if (ancestorLinkProblem(dir) !== null) return 'unsafe'
-  return protectionProblem(dir, 'directory') === null ? { dir } : 'unsafe'
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return { unsafe: 'it is not a real directory.' }
+  if (ancestorLinkProblem(dir) !== null) return { unsafe: 'it is reached through a link or junction.' }
+  const problem = protectionProblem(dir, 'directory')
+  return problem === null ? { dir } : { unsafe: problem }
 }
 
 /**
@@ -777,8 +828,12 @@ export function readSetupApprovalGrant(
   assertGrantId(id)
   const located = locateStore(options.env)
   if (located === null) return { ok: false, status: 'invalid', reason: 'No such approval grant.' }
-  if (located === 'unsafe') {
-    return { ok: false, status: 'unknown', reason: 'The approval store is not a private, user-owned directory.' }
+  if ('unsafe' in located) {
+    return {
+      ok: false,
+      status: 'unknown',
+      reason: `The approval store is not a private, user-owned directory: ${located.unsafe}`,
+    }
   }
   const dir = join(located.dir, id)
   let stat: ReturnType<typeof lstatSync>

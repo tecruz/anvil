@@ -424,6 +424,60 @@ describe('setup approval grants', () => {
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'unknown')
   })
 
+  test('a Windows ACL read that exceeds its bound is refused as a timeout, not as unreadable', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows access control lists only')
+      return
+    }
+    const { repo, env } = fixture()
+    const plan = planFor(repo)
+    const at = new Date(T0.getTime() + 1000)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'active')
+
+    const previous = process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS
+    process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS = '1'
+    try {
+      const record = inspectSetupApproval(ID, repository(repo), { env, now: at })
+      // The timeout is still a refusal: a bound that fired must not become `active`.
+      assert.equal(record.status, 'unknown')
+      assert.match(record.reason, /could not be read within 1 ms/)
+      assert.doesNotMatch(record.reason, /cannot be read/)
+    } finally {
+      if (previous === undefined) delete process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS
+      else process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS = previous
+    }
+    // Once the tool can finish, the same store is authority again: the timeout was reported,
+    // not written down as a permanent verdict about the store.
+    assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'active')
+  })
+
+  test('a Windows store hardening timeout removes what it created and refuses', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('Windows access control lists only')
+      return
+    }
+    const repo = scratch('anvil-approval-repo-')
+    const store = join(scratch('anvil-approval-parent-'), 'store')
+    const plan = planFor(repo)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+
+    const previous = process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS
+    process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS = '1'
+    try {
+      assert.throws(
+        () => saveSetupApprovalGrant(grant, { env: { ANVIL_APPROVAL_HOME: store } }),
+        /could not be restricted within 1 ms/,
+      )
+    } finally {
+      if (previous === undefined) delete process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS
+      else process.env.ANVIL_APPROVAL_TOOL_TIMEOUT_MS = previous
+    }
+    // A harden that timed out is a refusal, and the directory this call created is removed
+    // rather than left behind with the inherited ACL.
+    assert.equal(existsSync(store), false)
+  })
+
   test('a linked Windows store is refused without modifying its target', (t) => {
     if (process.platform !== 'win32') {
       t.skip('Windows junctions only')
