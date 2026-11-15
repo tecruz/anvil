@@ -107,7 +107,7 @@ published — the profile, the report, the plan, the brief, the envelope — car
 | `ProjectProfile` | `packages/profile/src/types.ts` | the repository as facts: languages, modules, stacks, commands, tooling, docs, risk paths, instruction files, and `diagnostics` for scan completeness |
 | `Finding` | `packages/audit/src/types.ts` | one rule's verdict: `pass`, `warn`, `fail` or `na`, a severity, evidence, and a fix |
 | `Plan` | `packages/playbooks/src/plan.ts` | ranked suggestions in three tiers, with the satisfied ones counted and left out |
-| `Brief` | `packages/derive/src/brief.ts` | verified facts and the `gaps` that keep generated guidance honest |
+| `Brief` | `packages/derive/src/brief.ts` | verified facts, the `gaps` that keep generated guidance honest, the evidence-use rules, and the context questions anvil did not answer |
 | `ReadyReport` | `packages/derive/src/ready.ts` | what an AI needs and whether it is here: commands, tools, environment, services, references, credentials, access, hardware, context, and the setup actions proposed (never run) |
 | `Ticket` | `packages/tickets/src/index.ts` | the canonical ticket: the provider's own `state`, a normalized one, and the raw payload |
 | `Envelope` | `packages/core/src/output.ts` | the `--json` shape: `{ schemaVersion, ok, command, data \| error }` |

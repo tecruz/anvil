@@ -33,6 +33,7 @@ import {
   readRepoFile,
   readStaged,
   renderUnifiedDiff,
+  repoFileIdentity,
   summarize,
   validateAll,
   writeStaging,
@@ -175,6 +176,7 @@ export const briefCommand: Command = {
       matches,
       target: target as BriefTarget,
       read: (rel) => readRepoFile(root, rel),
+      identify: (rel) => repoFileIdentity(root, rel),
       ...(declared === undefined ? {} : { declared }),
       live,
       warnings: liveWarnings,
@@ -195,6 +197,11 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
   if (brief.repo.monorepo !== null) {
     out.push(`  monorepo   ${brief.repo.monorepo.tool}: ${brief.repo.monorepo.members.join(', ')}`)
   }
+  out.push('')
+  out.push(s.bold('Evidence use'))
+  out.push('  source code   implementation evidence, not the product spec')
+  out.push('  references    pointers; their contents are not copied or summarized here')
+  out.push('  business      not assessed')
   out.push('')
   out.push(s.bold('Commands'))
   out.push(
@@ -220,6 +227,19 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
     out.push('')
     out.push(s.bold('High-risk paths'))
     for (const r of brief.risk.filter((x) => x.level === 'high')) out.push(`  ${r.glob} ${s.dim(r.reason)}`)
+  }
+  out.push('')
+  out.push(s.bold('Questions to resolve'))
+  if (brief.questions.length === 0) {
+    out.push(s.dim('  (none)'))
+  } else {
+    for (const q of brief.questions) {
+      out.push(`  - ${q.prompt}`)
+      out.push(`    ${s.dim(q.reason)}`)
+      if (q.referenceIds.length > 0) {
+        out.push(`    ${s.dim(`approved references: ${q.referenceIds.join(', ')} (pointers; contents not copied)`)}`)
+      }
+    }
   }
   out.push('')
   out.push(s.bold('Gaps the generated guidance must not contradict'))

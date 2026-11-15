@@ -444,7 +444,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
 | `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan, its single-use approval grant, and one journaled application. |
-| `anvil brief` | Emit verified facts for an LLM step. `--for agents\|commands\|skills\|all`. |
+| `anvil brief` | Emit verified facts for an LLM step, with the `gaps`, evidence-use rules and open context questions kept explicit. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. |
 | `anvil crew` | `up`, `status`, `verify` — several tickets at once. |
@@ -537,7 +537,15 @@ Two layers, repo-local wins:
   true. `path` must be repo-relative and may not contain `..` or name an absolute path, and a
   `url` key is rejected: anvil points at approved local documents and does not fetch remote
   material. Only existence is checked, never the contents. Approved references are also
-  listed by path and scope in `anvil brief`, so an agent knows what to read.
+  listed by path and scope in `anvil brief`, so an agent knows what to read. They are
+  pointers: `anvil brief` never copies, excerpts or summarizes a referenced document. A
+  reference to a file on the brief's manifest-excerpt allowlist (such as `README.md`) leaves
+  that file out of the excerpts; one that reaches such a file through a symlink or hard link
+  does too, with a warning. A reference does not hide a file from anvil's normal scan: if it
+  is one of the files read for documented commands (such as `README.md`, `CONTRIBUTING.md`,
+  `AGENTS.md`, `CLAUDE.md` or `Makefile`), commands found there are still
+  reported with their `file:line` evidence, and `anvil init` still diffs a generated file such
+  as `AGENTS.md` against the existing one, so you can see what `--apply` would replace.
 - `project.credentials` — credentials the project needs, checked by `anvil ready --check`
   against environment variable names only. Each entry is `{ "id": "...", "env":
   ["NPM_TOKEN"], "grantedBy": "...", "reason": "...", "required": true }`. `env` is a

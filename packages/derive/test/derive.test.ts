@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import {
   copyFileSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -19,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { audit } from '@anvil/audit'
 import {
   applyStaging,
+  briefQuestions,
   buildBrief,
   checkApplyPreconditions,
   clearStaging,
@@ -27,10 +29,13 @@ import {
   generateReviewCommand,
   generateVerifySkill,
   hashInputs,
+  INTENDED_BEHAVIOR_QUESTION,
+  INTENDED_BEHAVIOR_QUESTION_ID,
   inspectStaging,
   readManifest,
   readRepoFile,
   readStaged,
+  repoFileIdentity,
   sha256,
   validateAll,
   validateArtifact,
@@ -38,6 +43,7 @@ import {
 } from '@anvil/derive'
 import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
 import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { excerptKey } from '../src/brief.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(here, '..', '..', '..')
@@ -1021,6 +1027,29 @@ describe('generated AGENTS.md contains only verifiable claims', () => {
     assert.match(artifact.content, /inferred from ecosystem convention/)
   })
 
+  test('keeps business expectations open and source code as implementation evidence', () => {
+    const dir = materialize('go-module')
+    const profile = profileIn(dir)
+    const matches = matchesFor(profile)
+
+    const agents = generateAgentsFile({ profile, matches }).content
+    assert.match(agents, /## Product expectations/)
+    assert.match(agents, /Business expectations were not assessed/)
+    assert.match(agents, /evidence of the current implementation/)
+    assert.ok(
+      agents.includes('not by themselves the definition of correct product behavior'),
+      'source code and tests are explicitly not the definition of correct behavior',
+    )
+    assert.ok(agents.includes(INTENDED_BEHAVIOR_QUESTION), 'the generated file asks the same question as the brief')
+
+    const review = generateReviewCommand({ profile, matches })
+    assert.ok(review !== null)
+    assert.match(review.content, /evidence of the current implementation/)
+    assert.match(review.content, /it does not by\s+itself define intended product behavior/)
+    assert.match(review.content, /instead of inventing an answer/)
+    assert.ok(review.content.includes(INTENDED_BEHAVIOR_QUESTION))
+  })
+
   test('includes the module map for a monorepo', () => {
     const dir = materialize('node-workspace')
     const profile = profileIn(dir)
@@ -1333,4 +1362,188 @@ describe('brief', () => {
     })
     assert.deepEqual(brief.warnings, ['discovery cache for node is stale; its entries were ignored'])
   })
+
+  test('states how evidence may be used and leaves business intent open', () => {
+    // "The code does this" is a fact about the implementation. It is not the product spec,
+    // and a brief that blurred the two invited a model to promote observed behavior into an
+    // invented business requirement.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'agents',
+      read: () => null,
+    })
+
+    assert.equal(brief.schemaVersion, 2)
+    assert.deepEqual(brief.contextPolicy, {
+      sourceCode: 'implementation-evidence-not-product-spec',
+      references: 'pointers-only',
+      businessExpectations: 'not-assessed',
+    })
+    assert.deepEqual(
+      brief.questions.map((q) => q.id),
+      [INTENDED_BEHAVIOR_QUESTION_ID],
+    )
+    assert.equal(brief.questions[0]?.prompt, INTENDED_BEHAVIOR_QUESTION)
+    assert.deepEqual(brief.questions[0]?.referenceIds, [])
+    assert.match(brief.questions[0]?.reason ?? '', /not assessed/)
+  })
+
+  test('a requirements reference is attached to the question, never treated as its answer', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const readPaths: string[] = []
+    const readme = 'PRIVATE-README-CONTENT'
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: (path) => {
+        readPaths.push(path)
+        return path === 'README.md' ? readme : `content of ${path}`
+      },
+      declared: {
+        commands: [],
+        tools: [],
+        env: [],
+        services: [],
+        credentials: [],
+        access: [],
+        hardware: [],
+        references: [
+          { id: 'prd', path: 'docs/prd.md', scope: 'requirements' },
+          { id: 'adr', path: 'README.md', scope: 'architecture' },
+          // No scope means `other`, not `requirements`: it must not be attached to the question.
+          { id: 'notes', path: 'docs/notes.md' },
+        ],
+      },
+    })
+
+    // The question survives an approved requirements document. Approval means "this may help
+    // a reader answer it", not "anvil read this, so the answer is known".
+    assert.equal(brief.questions.length, 1)
+    assert.deepEqual(brief.questions[0]?.referenceIds, ['prd'])
+    assert.deepEqual(
+      brief.references.map((r) => r.id),
+      ['prd', 'adr', 'notes'],
+    )
+
+    // Pointer-only wins over the excerpt allowlist: README.md is safe to excerpt in general,
+    // but here the owner approved it as a reference and the contents are not anvil's to copy.
+    assert.equal(readPaths.includes('README.md'), false, 'a referenced document must not be read')
+    assert.ok(readPaths.includes('package.json'), 'an unrelated allowlisted manifest is still read')
+    assert.equal(
+      brief.excerpts.some((e) => e.path === 'README.md'),
+      false,
+    )
+    assert.ok(brief.excerpts.some((e) => e.path === 'package.json'))
+    assert.ok(!JSON.stringify(brief).includes(readme), 'referenced contents must not reach the brief')
+    // A direct reference is what the owner asked for, so it is not worth a warning on every run.
+    assert.deepEqual(brief.warnings, [])
+  })
+
+  test('a reference id is listed once on the question', () => {
+    assert.deepEqual(
+      briefQuestions({
+        ...emptyDeclared(),
+        references: [
+          { id: 'prd', path: 'docs/prd.md', scope: 'requirements' },
+          { id: 'prd', path: 'docs/prd-v2.md', scope: 'requirements' },
+        ],
+      })[0]?.referenceIds,
+      ['prd'],
+    )
+  })
+
+  test('reference paths compare case-insensitively, with backslashes as slashes and trimmed', () => {
+    assert.equal(excerptKey('README.md'), 'readme.md')
+    assert.equal(excerptKey('  README.md\t'), 'readme.md')
+    assert.equal(excerptKey('docs\\PRD.md'), 'docs/prd.md')
+
+    // The same rules, through the brief: a differently cased, padded reference still names README.md.
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const readPaths: string[] = []
+    const brief = buildBrief({
+      profile,
+      report: audit(profile),
+      matches: matchesFor(profile),
+      target: 'all',
+      read: (path) => {
+        readPaths.push(path)
+        return `content of ${path}`
+      },
+      declared: { ...emptyDeclared(), references: [{ id: 'readme', path: ' readme.MD ', scope: 'standards' }] },
+    })
+    assert.equal(readPaths.includes('README.md'), false)
+    assert.equal(
+      brief.excerpts.some((e) => e.path === 'README.md'),
+      false,
+    )
+  })
+
+  for (const kind of ['symlink', 'hard link'] as const) {
+    test(`a reference that is a ${kind} to README.md is recognized as README.md`, (t) => {
+      const dir = materialize('node-npm')
+      const profile = profileIn(dir)
+      mkdirSync(join(dir, 'docs'), { recursive: true })
+      try {
+        if (kind === 'symlink') symlinkSync(join('..', 'README.md'), join(dir, 'docs', 'prd.md'), 'file')
+        else linkSync(join(dir, 'README.md'), join(dir, 'docs', 'prd.md'))
+      } catch (error) {
+        t.skip(`${kind}s are unavailable here: ${String(error)}`)
+        return
+      }
+      const readPaths: string[] = []
+      const options = {
+        profile,
+        report: audit(profile),
+        matches: matchesFor(profile),
+        target: 'all' as const,
+        read: (path: string) => {
+          readPaths.push(path)
+          return `content of ${path}`
+        },
+        declared: {
+          ...emptyDeclared(),
+          references: [{ id: 'prd', path: 'docs/prd.md', scope: 'requirements' as const }],
+        },
+      }
+
+      // By path alone the alias is invisible, which is why the CLI passes `identify`.
+      assert.ok(buildBrief(options).excerpts.some((e) => e.path === 'README.md'))
+
+      readPaths.length = 0
+      const brief = buildBrief({ ...options, identify: (rel) => repoFileIdentity(dir, rel) })
+      assert.equal(readPaths.includes('README.md'), false, 'an aliased reference must not be read')
+      assert.equal(
+        brief.excerpts.some((e) => e.path === 'README.md'),
+        false,
+      )
+      assert.ok(
+        brief.excerpts.some((e) => e.path === 'package.json'),
+        'other manifests are unaffected',
+      )
+      assert.deepEqual(brief.warnings, [
+        'approved context reference docs/prd.md resolves to README.md; its contents were not copied into this brief.',
+      ])
+    })
+  }
+
+  test('a file identity names the file, not the path, and is null for anything else', () => {
+    const dir = materialize('node-npm')
+    assert.equal(repoFileIdentity(dir, 'README.md'), repoFileIdentity(dir, 'README.md'))
+    assert.notEqual(repoFileIdentity(dir, 'README.md'), repoFileIdentity(dir, 'package.json'))
+    assert.equal(repoFileIdentity(dir, 'missing.md'), null)
+    mkdirSync(join(dir, 'docs'), { recursive: true })
+    assert.equal(repoFileIdentity(dir, 'docs'), null, 'a directory is not a referenced file')
+  })
 })
+
+function emptyDeclared() {
+  return { commands: [], tools: [], env: [], services: [], credentials: [], access: [], hardware: [], references: [] }
+}

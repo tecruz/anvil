@@ -1099,6 +1099,96 @@ describe('declared capabilities reach the brief', () => {
       ['docs/adr/0001.md'],
     )
   })
+
+  test('the brief keeps business intent as a question and treats references as pointers', () => {
+    const dir = tempDir('anvil-brief-question-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    mkdirSync(join(dir, 'docs'), { recursive: true })
+    writeFileSync(join(dir, 'docs', 'prd.md'), 'PRD-CONTENT-MUST-NOT-APPEAR')
+    writeFileSync(
+      join(dir, 'anvil.config.json'),
+      JSON.stringify({
+        project: { references: [{ id: 'prd', path: 'docs/prd.md', scope: 'requirements' }] },
+      }),
+    )
+
+    const res = runAnvil(['brief', '--json', '--offline'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const data = JSON.parse(res.stdout) as {
+      ok: boolean
+      data: {
+        schemaVersion: number
+        contextPolicy: Record<string, string>
+        questions: Array<{ prompt: string; referenceIds: string[] }>
+        references: Array<{ path: string }>
+      }
+    }
+    assert.equal(data.ok, true)
+    assert.equal(data.data.schemaVersion, 2)
+    assert.equal(data.data.contextPolicy.sourceCode, 'implementation-evidence-not-product-spec')
+    assert.equal(data.data.contextPolicy.references, 'pointers-only')
+    assert.equal(data.data.contextPolicy.businessExpectations, 'not-assessed')
+    assert.equal(data.data.questions.length, 1)
+    assert.match(data.data.questions[0]?.prompt ?? '', /intended product behavior/)
+    assert.deepEqual(data.data.questions[0]?.referenceIds, ['prd'])
+    assert.deepEqual(
+      data.data.references.map((r) => r.path),
+      ['docs/prd.md'],
+    )
+    assert.ok(!res.stdout.includes('PRD-CONTENT-MUST-NOT-APPEAR'), 'a pointer is not its contents')
+
+    const text = runAnvil(['brief', '--offline'], { cwd: dir })
+    assert.match(text.stdout, /Evidence use/)
+    assert.ok(
+      text.stdout.includes('source code   implementation evidence, not the product spec'),
+      'the text output says source code is evidence, not the spec',
+    )
+    assert.ok(text.stdout.includes('references    pointers; their contents are not copied or summarized here'))
+    assert.match(text.stdout, /Questions to resolve/)
+    assert.ok(
+      text.stdout.includes('  - What intended product behavior and acceptance criteria should guide changes?'),
+      'the text output asks the question',
+    )
+    assert.ok(
+      text.stdout.includes('Business expectations were not assessed from this repository.'),
+      'the text output says why the question is open',
+    )
+    assert.match(text.stdout, /approved references: prd \(pointers; contents not copied\)/)
+  })
+
+  test('a reference that is a symlink to README.md keeps README.md out of the brief', (t) => {
+    const dir = tempDir('anvil-brief-alias-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(join(dir, 'README.md'), '# Demo\n\nREADME-CONTENT-MUST-NOT-APPEAR\n')
+    mkdirSync(join(dir, 'docs'), { recursive: true })
+    try {
+      symlinkSync(join('..', 'README.md'), join(dir, 'docs', 'prd.md'), 'file')
+    } catch (error) {
+      t.skip(`symlinks are unavailable here: ${String(error)}`)
+      return
+    }
+    writeFileSync(
+      join(dir, 'anvil.config.json'),
+      JSON.stringify({
+        project: { references: [{ id: 'prd', path: 'docs/prd.md', scope: 'requirements' }] },
+      }),
+    )
+
+    const res = runAnvil(['brief', '--json', '--offline'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    assert.ok(!res.stdout.includes('README-CONTENT-MUST-NOT-APPEAR'), 'an aliased reference is still a pointer')
+    const data = JSON.parse(res.stdout) as { data: { excerpts: Array<{ path: string }>; warnings: string[] } }
+    assert.equal(
+      data.data.excerpts.some((e) => e.path === 'README.md'),
+      false,
+    )
+    assert.ok(
+      data.data.warnings.includes(
+        'approved context reference docs/prd.md resolves to README.md; its contents were not copied into this brief.',
+      ),
+      data.data.warnings.join('; '),
+    )
+  })
 })
 
 describe('per-command help', () => {

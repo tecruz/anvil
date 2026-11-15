@@ -277,12 +277,24 @@ be inferred entirely from source code.
 
 - [x] Context retains its source and scope, and missing references are reported. Approved
   references carry their scope and path, and a missing required document is a blocker.
-- [ ] Undocumented business expectations remain questions, not generated facts. _Partial:
-  a reference is a pointer, not a claim; nothing about its contents is generated._
-- [x] Sensitive context is not uploaded merely because a reference exists. Anvil checks the
-  path exists and never opens, copies or summarizes the document.
-- [ ] Source code is treated as evidence of implementation, not automatically as the
-  definition of correct product behavior.
+- [x] Undocumented business expectations remain questions, not generated facts. The brief
+  (schema v2) records `contextPolicy.businessExpectations: not-assessed` and one open
+  `intended-product-behavior` question; approved `requirements` references are attached to it
+  by id as places a reader may find the answer, never as an answer anvil read. Generated
+  `AGENTS.md` and the generated review command ask the same question instead of stating
+  expectations. Anvil generates no business expectation from code or from a reference.
+  Covered by `packages/derive/test/derive.test.ts` and `packages/cli/test/cli.test.ts`.
+- [x] Sensitive context is not uploaded merely because a reference exists. `anvil ready`
+  checks the path exists without opening it, and `anvil brief` never copies, excerpts or
+  summarizes a referenced document, including one reached through a symlink or hard link.
+  A reference does not hide a file from anvil's normal scan: a referenced `README.md`,
+  `CONTRIBUTING.md`, `AGENTS.md` or `CLAUDE.md` is still read for documented commands, which
+  are reported with their `file:line` evidence, as they are for any repository.
+- [x] Source code is treated as evidence of implementation, not automatically as the
+  definition of correct product behavior. The brief records
+  `contextPolicy.sourceCode: implementation-evidence-not-product-spec` and says so in its text
+  output; generated `AGENTS.md` and review guidance say that source code and tests are not by
+  themselves the definition of correct product behavior. Covered by the same tests.
 
 ## 5. Evidence that Anvil helps
 
