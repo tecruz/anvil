@@ -538,8 +538,14 @@ Two layers, repo-local wins:
   `url` key is rejected: anvil points at approved local documents and does not fetch remote
   material. Only existence is checked, never the contents. Approved references are also
   listed by path and scope in `anvil brief`, so an agent knows what to read. They are
-  pointers: a referenced document is never summarized, and a reference that overlaps the
-  brief's manifest-excerpt allowlist is excluded from those excerpts too.
+  pointers: `anvil brief` never copies, excerpts or summarizes a referenced document. A
+  reference to a file on the brief's manifest-excerpt allowlist (such as `README.md`) leaves
+  that file out of the excerpts; one that reaches such a file through a symlink or hard link
+  does too, with a warning. A reference does not hide a file from anvil's normal scan: if it
+  is one of the files read for documented commands (such as `README.md`, `CONTRIBUTING.md`,
+  `AGENTS.md`, `CLAUDE.md` or `Makefile`), commands found there are still
+  reported with their `file:line` evidence, and `anvil init` still diffs a generated file such
+  as `AGENTS.md` against the existing one, so you can see what `--apply` would replace.
 - `project.credentials` — credentials the project needs, checked by `anvil ready --check`
   against environment variable names only. Each entry is `{ "id": "...", "env":
   ["NPM_TOKEN"], "grantedBy": "...", "reason": "...", "required": true }`. `env` is a

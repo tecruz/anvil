@@ -177,6 +177,7 @@ export {
   readManifest,
   readRepoFile,
   readStaged,
+  repoFileIdentity,
   type StagedFile,
   type StagingManifest,
   type StagingState,

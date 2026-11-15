@@ -33,6 +33,7 @@ import {
   readRepoFile,
   readStaged,
   renderUnifiedDiff,
+  repoFileIdentity,
   summarize,
   validateAll,
   writeStaging,
@@ -175,6 +176,7 @@ export const briefCommand: Command = {
       matches,
       target: target as BriefTarget,
       read: (rel) => readRepoFile(root, rel),
+      identify: (rel) => repoFileIdentity(root, rel),
       ...(declared === undefined ? {} : { declared }),
       live,
       warnings: liveWarnings,
@@ -198,7 +200,7 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
   out.push('')
   out.push(s.bold('Evidence use'))
   out.push('  source code   implementation evidence, not the product spec')
-  out.push('  references    pointers only; their contents were not read')
+  out.push('  references    pointers; their contents are not copied or summarized here')
   out.push('  business      not assessed')
   out.push('')
   out.push(s.bold('Commands'))
@@ -235,7 +237,7 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
       out.push(`  - ${q.prompt}`)
       out.push(`    ${s.dim(q.reason)}`)
       if (q.referenceIds.length > 0) {
-        out.push(`    ${s.dim(`approved references: ${q.referenceIds.join(', ')} (paths only; not read)`)}`)
+        out.push(`    ${s.dim(`approved references: ${q.referenceIds.join(', ')} (pointers; contents not copied)`)}`)
       }
     }
   }

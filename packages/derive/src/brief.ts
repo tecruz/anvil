@@ -236,6 +236,13 @@ export interface BuildBriefOptions {
   target: BriefTarget
   /** Reads a repo-relative file. Injected so tests do not need a real repo. */
   read: (relPath: string) => string | null
+  /**
+   * Names the file a repo-relative path resolves to (device and inode), without opening it,
+   * or `null` when it names no file. Injected like `read`. With it, a reference that reaches
+   * an allowlisted file through a symlink or hard link is recognized as that file; without
+   * it, references are compared by path only.
+   */
+  identify?: (relPath: string) => string | null
   /** Owner-declared capabilities, carried so an unrecognized technology is still described. */
   declared?: ProjectConfig
   /** Findings to omit, so a `brief --for agents` is not swamped by unrelated rules. */
@@ -346,11 +353,29 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   // An approved reference is a pointer, and pointer-only treatment wins over the general
   // excerpt allowlist. Otherwise approving `README.md` as context would be the way to get its
   // contents copied into the brief, which is exactly what the approval did not grant.
-  const referenced = new Set((options.declared?.references ?? []).map((r) => excerptKey(r.path)))
+  //
+  // A reference that names an allowlisted file directly is skipped silently: the owner asked
+  // for exactly that, and the reference is listed in `references`. A reference that reaches
+  // the same file under another name (a symlink or hard link) is skipped too, with a warning,
+  // because nothing in the path says it is the same document.
+  const references = options.declared?.references ?? []
+  const referencedPaths = new Set(references.map((r) => excerptKey(r.path)))
+  const referencedFiles = new Map<string, string>()
+  if (options.identify !== undefined) {
+    for (const r of references) {
+      const file = options.identify(r.path)
+      if (file !== null && !referencedFiles.has(file)) referencedFiles.set(file, r.path)
+    }
+  }
   for (const { path, maxBytes } of EXCERPT_ALLOW) {
     if (!profile.files.includes(path)) continue
-    if (referenced.has(excerptKey(path))) {
-      warnings.push(`${path} is an approved context reference; its contents were not copied into this brief.`)
+    if (referencedPaths.has(excerptKey(path))) continue
+    const file = options.identify?.(path) ?? null
+    const alias = file === null ? undefined : referencedFiles.get(file)
+    if (alias !== undefined) {
+      warnings.push(
+        `approved context reference ${alias} resolves to ${path}; its contents were not copied into this brief.`,
+      )
       continue
     }
     const content = read(path)
@@ -419,14 +444,17 @@ export function buildBrief(options: BuildBriefOptions): Brief {
   }
 }
 
-/** Compare excerpt and reference paths the way the two filesystems do. */
-function excerptKey(path: string): string {
-  return path
-    .trim()
-    .replace(/\\/g, '/')
-    .replace(/^\.\//, '')
-    .replace(/\/{2,}/g, '/')
-    .toLowerCase()
+/**
+ * Compare an excerpt path with a reference path as text.
+ *
+ * Case-insensitive, because on Windows and default macOS volumes `readme.md` is `README.md`;
+ * on a case-sensitive volume this can only withhold an excerpt, never copy one. Backslashes
+ * become slashes so a Windows-style reference compares like its POSIX spelling. There is no
+ * `./` or `//` handling: `project.references` rejects `.` and empty segments, and the allowlist
+ * names top-level files. Any other alias is caught by file identity, not by this key.
+ */
+export function excerptKey(path: string): string {
+  return path.trim().replace(/\\/g, '/').toLowerCase()
 }
 
 function flattenGuidance(
