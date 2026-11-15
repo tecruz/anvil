@@ -16,9 +16,11 @@ import {
   type EvalRunRecordResult,
   type EvalScenario,
   type EvalVerifierScenario,
+  FAKE_AGENT_MODEL,
   hashDirectory,
   hashScenario,
   hashScenarioSource,
+  hermeticEvidenceProblems,
   latestAttemptState,
   parseBaseline,
   parseLatest,
@@ -432,6 +434,46 @@ describe('versioned eval evidence', () => {
     const dir = temp('anvil-eval-unknown-version-')
     writeFileSync(join(dir, 'unknown.json'), JSON.stringify({ ...runRecord().results[0], schemaVersion: 4 }))
     assert.match(readCheckpointDirectory(dir).rejected.join('\n'), /checkpoint schemaVersion must be 1, 2 or 3/)
+  })
+})
+
+describe('hermetic evidence', () => {
+  test('fake-agent summaries and run records are accepted', () => {
+    const record = runRecord()
+    assert.equal(FAKE_AGENT_MODEL, 'fake-agent')
+    assert.deepEqual(hermeticEvidenceProblems({ results: record.results }, record), [])
+    assert.deepEqual(hermeticEvidenceProblems({ results: record.results }, null), [])
+  })
+
+  test('a real-agent or unrecorded model is refused in the summary and in the run record', () => {
+    const record = runRecord()
+    const realResults = record.results.map((result) => ({ ...result, model: 'opencode/real-model' }))
+    const problems = hermeticEvidenceProblems(
+      { results: [realResults[0]!, { ...record.results[1]!, model: null }] },
+      { ...record, models: [{ id: 'opencode/real-model', role: 'small' }], results: realResults },
+    )
+    assert.deepEqual(problems, [
+      'latest summary result tiny-code-change/bare/opencode/real-model/0 is not a fake-agent result',
+      'latest summary result tiny-code-change/anvil/unknown/0 is not a fake-agent result',
+      'run run-1 declares model opencode/real-model, not fake-agent',
+      'run run-1 result tiny-code-change/bare/opencode/real-model/0 is not a fake-agent result',
+      'run run-1 result tiny-code-change/anvil/opencode/real-model/0 is not a fake-agent result',
+    ])
+  })
+})
+
+describe('run record durations', () => {
+  test('a missing or non-finite duration stays unknown instead of becoming zero', () => {
+    const record = runRecord()
+    const [first, second] = record.results
+    const parsed = parseRunRecord({
+      ...record,
+      results: [without(first!, ['durationMs']), { ...second!, durationMs: 'slow' }],
+    }) as EvalRunRecord
+    assert.equal(typeof parsed, 'object')
+    assert.equal(parsed.results[0]!.durationMs, null)
+    assert.equal(parsed.results[1]!.durationMs, null)
+    assert.equal((parseRunRecord(record) as EvalRunRecord).results[0]!.durationMs, 1000)
   })
 })
 
