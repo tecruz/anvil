@@ -289,19 +289,33 @@ be inferred entirely from source code.
 
 ### Acceptance
 
-- [ ] Real-agent results are clearly separated from synthetic harness checks.
-- [ ] Reports distinguish measured improvement, regression and insufficient evidence.
-- [ ] Unknown measurements remain unknown, and failures are not rerun selectively
-  until a favorable comparison appears.
-- [ ] Claims of effectiveness identify the tested technologies and conditions rather
-  than implying universal coverage.
+- [x] Real-agent results are clearly separated from synthetic harness checks. The console
+  report prints an `Evidence source` line (`synthetic harness check (fake-agent)` or
+  `real-agent results`), and [eval-results/README.md](../eval-results/README.md) documents that
+  `latest.json`/`baseline.json` are hermetic checks while `eval-results/pilots/` holds
+  real-agent records. `scripts/test/eval-paired-report.test.ts` asserts the synthetic and
+  real labels, including a mixed report.
+- [x] Reports distinguish measured improvement, regression and insufficient evidence.
+  `classifyPairedResult` and the `Verdict` lines report `measured improvement`,
+  `measured regression` or `insufficient evidence` from the paired task-success counts, with
+  the reason; fewer than five complete pairs or a tie is insufficient evidence.
+- [x] Unknown measurements remain unknown, and failures are not rerun selectively until a
+  favorable comparison appears. Cost stays `null` unless the host ledger reports it, an
+  incomplete pair is not a zero, and the harness records every attempt instead of retrying a
+  completed key. The hermetic summary omits cost; the pilot says cost and skill access are
+  unknown.
+- [x] Claims of effectiveness identify the tested technologies and conditions rather than
+  implying universal coverage. Each group prints its scenario as the scope, the source line
+  names the evidence kind, and the only retained real-agent record remains one tiny
+  JavaScript scenario and one free model. No broader claim is made.
 
 As of this plan's preparation, the latest committed summary in
 [eval-results/latest.json](../eval-results/latest.json) uses `fake-agent`. It checks
 evaluation machinery; it is not evidence of real-AI effectiveness across technologies.
 The separate [2026-11-14 pilot](evidence/2026-11-14-skill-guidance.md) retains real-agent
 outcomes without replacing that hermetic summary: task success tied in all three pairs,
-and cost and skill access remained unknown.
+and cost and skill access remained unknown. Its 3 tied pairs are `insufficient evidence`
+under the same five-pair rule, not an improvement or regression.
 
 ## Delivery order
 

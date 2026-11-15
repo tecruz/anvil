@@ -133,6 +133,21 @@ The harness now records `skillAccessReason` beside `skillAccess` — `no-tool-ev
 summary, and the gate refuses a reason that argues against its verdict. No new model calls
 were made. The original verdicts, cost and the no-benefit conclusion are unchanged.
 
+## Reporting status (2026-11-15)
+
+No new model calls were made for this update; the retained run record is unchanged.
+
+The harness now labels the evidence source in its paired report. A `fake-agent` result prints
+`synthetic harness check (fake-agent)` and says it is not real-agent evidence. This pilot
+remains a real-agent record in `eval-results/pilots/`, separate from the hermetic
+`eval-results/latest.json`; see [`eval-results/README.md`](../../eval-results/README.md).
+
+Under the report's current five-pair rule, this pilot's result is **insufficient evidence**,
+not an improvement or a regression: all three pairs tied on task success, and three pairs are
+below the minimum needed to call a direction. The slower mean duration is descriptive, not a
+verdict, and cost and skill access stay unknown. This does not change the original conclusion
+or justify a rerun.
+
 ## Interpretation and next decision
 
 This is an exploratory three-pair measurement on one tiny JavaScript scenario and one

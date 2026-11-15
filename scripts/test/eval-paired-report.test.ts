@@ -4,6 +4,7 @@ import { describe, test } from 'node:test'
 import type { EvalModel, EvalScenario } from '../../packages/cli/src/eval-gate.ts'
 import {
   buildPreflight,
+  classifyPairedResult,
   formatPairedSummary,
   formatPreflight,
   type ScenarioResult,
@@ -126,9 +127,12 @@ describe('paired comparison', () => {
     assert.match(formatPairedSummary(summary).join('\n'), /installed 2.*access observed 1.*unknown 1/)
   })
 
-  test('each comparison is labelled exploratory on its own pair count', () => {
+  test('each comparison is labelled by its own pair count, not the run total', () => {
     const small = summarizePairs([result({ variant: 'bare' }), result({ variant: 'anvil' })])
-    assert.match(formatPairedSummary(small).join('\n'), /1 pair does not support a significance claim/)
+    assert.match(
+      formatPairedSummary(small).join('\n'),
+      /verdict\s+insufficient evidence: 1 complete pair is below the 5 needed to call a direction/,
+    )
 
     // Six scenarios with one repetition each are six one-pair measurements. Summing them
     // into "six pairs" must not make the warning disappear.
@@ -140,7 +144,11 @@ describe('paired comparison', () => {
     )
     assert.equal(oneEach.totals.pairs, 6)
     const oneEachText = formatPairedSummary(oneEach).join('\n')
-    assert.equal((oneEachText.match(/does not support a significance claim/g) ?? []).length, 6)
+    assert.equal(
+      (oneEachText.match(/insufficient evidence: 1 complete pair is below the 5/g) ?? []).length,
+      6,
+      'each group keeps its own verdict',
+    )
 
     const large = summarizePairs(
       Array.from({ length: 5 }, (_, repetition) => [
@@ -149,7 +157,81 @@ describe('paired comparison', () => {
       ]).flat(),
     )
     assert.equal(large.totals.pairs, 5)
-    assert.doesNotMatch(formatPairedSummary(large).join('\n'), /does not support a significance claim/)
+    const largeText = formatPairedSummary(large).join('\n')
+    assert.match(largeText, /insufficient evidence: neither variant uniquely succeeded in any of 5 complete pairs/)
+    assert.doesNotMatch(largeText, /is below the 5 needed/)
+  })
+
+  test('a directional count needs five pairs before it is called improvement or regression', () => {
+    const pairs = (wins: 'anvil' | 'bare', count: number, total = 5) =>
+      Array.from({ length: total }, (_, repetition) => {
+        const winner: 'anvil' | 'bare' | null = repetition < count ? wins : null
+        return [
+          result({ variant: 'bare', repetition, verified: winner !== 'anvil' }),
+          result({ variant: 'anvil', repetition, verified: winner !== 'bare' }),
+        ]
+      }).flat()
+
+    const improvement = summarizePairs(pairs('anvil', 3))
+    assert.equal(improvement.totals.onlyAnvil, 3)
+    assert.deepEqual(classifyPairedResult(improvement.totals), {
+      verdict: 'measured-improvement',
+      reason: 'anvil succeeded where bare did not in 3 pairs; the reverse happened in 0',
+    })
+    assert.match(formatPairedSummary(improvement).join('\n'), /verdict\s+measured improvement:/)
+
+    const regression = summarizePairs(pairs('bare', 3))
+    assert.equal(regression.totals.onlyBare, 3)
+    assert.equal(classifyPairedResult(regression.totals).verdict, 'measured-regression')
+    assert.match(formatPairedSummary(regression).join('\n'), /verdict\s+measured regression:/)
+
+    // Four directional wins are still too few: the same result at n=4 says nothing.
+    const tooFew = summarizePairs(pairs('anvil', 3, 4))
+    assert.equal(tooFew.totals.onlyAnvil, 3)
+    assert.equal(classifyPairedResult(tooFew.totals).verdict, 'insufficient-evidence')
+    assert.match(formatPairedSummary(tooFew).join('\n'), /4 complete pairs is below the 5 needed to call a direction/)
+  })
+
+  test('synthetic fake-agent checks are never presented as real-agent evidence', () => {
+    const synthetic = summarizePairs([
+      result({ variant: 'bare', model: 'fake-agent', modelRole: null }),
+      result({ variant: 'anvil', model: 'fake-agent', modelRole: null }),
+    ])
+    const syntheticText = formatPairedSummary(synthetic).join('\n')
+    assert.match(syntheticText, /Evidence source: synthetic harness check \(fake-agent\)/)
+    assert.match(syntheticText, /This is not real-agent evidence/)
+    assert.match(syntheticText, /evidence\s+synthetic fake-agent check/)
+
+    const real = summarizePairs([result({ variant: 'bare' }), result({ variant: 'anvil' })])
+    const realText = formatPairedSummary(real).join('\n')
+    assert.match(realText, /Evidence source: real-agent results/)
+    assert.doesNotMatch(realText, /synthetic harness check/)
+
+    const mixed = summarizePairs([
+      result({ variant: 'bare', scenario: 'synthetic', model: 'fake-agent' }),
+      result({ variant: 'anvil', scenario: 'synthetic', model: 'fake-agent' }),
+      result({ variant: 'bare', scenario: 'real' }),
+      result({ variant: 'anvil', scenario: 'real' }),
+    ])
+    assert.match(
+      formatPairedSummary(mixed).join('\n'),
+      /Evidence source: mixed \(1 synthetic, 1 real-agent group\(s\)\)/,
+    )
+  })
+
+  test('a verdict does not turn unknown cost into a measured value', () => {
+    const summary = summarizePairs(
+      Array.from({ length: 5 }, (_, repetition) => [
+        result({ variant: 'bare', repetition, costUsd: null }),
+        result({ variant: 'anvil', repetition, costUsd: null }),
+      ]).flat(),
+    )
+    const text = formatPairedSummary(summary).join('\n')
+    assert.equal(summary.totals.successfulCostUsd.bare, null)
+    assert.equal(summary.totals.successfulCostUsd.anvil, null)
+    assert.match(text, /successful cost\s+unknown/)
+    assert.match(text, /Unknown cost stays unknown rather than becoming zero/)
+    assert.match(text, /Verdict \(all repetitions\): insufficient evidence:/)
   })
 })
 

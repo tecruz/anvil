@@ -108,6 +108,14 @@ const baselinePath = join(resultsDir, 'baseline.json')
 const runRecordPath = join(resultsDir, 'run.json')
 const runArchiveDir = join(resultsDir, 'runs')
 const checkpointsDir = join(resultsDir, 'checkpoints')
+/** The fewest complete pairs before the report calls a direction instead of "not enough". */
+export const MIN_PAIRS_FOR_DIRECTION = 5
+
+const VERDICT_LABEL: Record<PairedVerdict, string> = {
+  'measured-improvement': 'measured improvement',
+  'measured-regression': 'measured regression',
+  'insufficient-evidence': 'insufficient evidence',
+}
 
 /** Transcript publication policy.
  *
@@ -2287,6 +2295,82 @@ function plural(count: number, singular: string): string {
   return count === 1 ? singular : `${singular}s`
 }
 
+export type PairedVerdict = 'measured-improvement' | 'measured-regression' | 'insufficient-evidence'
+
+export interface PairedVerdictSummary {
+  verdict: PairedVerdict
+  reason: string
+}
+
+/**
+ * Turn paired task-success counts into a directional verdict.
+ *
+ * This is a count of observed pairs, not a significance test: five pairs are enough to say
+ * which side won more often in this sample, never enough to claim the effect generalizes.
+ * Duration and cost do not enter the verdict, because a difference in either is descriptive
+ * and may be unknown. An incomplete pair, or a ledger price the run did not record, is left
+ * out rather than guessed.
+ */
+export function classifyPairedResult(
+  counts: Pick<PairedCounts, 'pairs' | 'incomplete' | 'bothSucceeded' | 'onlyAnvil' | 'onlyBare' | 'neither'>,
+): PairedVerdictSummary {
+  if (counts.pairs === 0) {
+    return {
+      verdict: 'insufficient-evidence',
+      reason: `no complete ${plural(counts.incomplete, 'pair')} to compare (${counts.incomplete} incomplete)`,
+    }
+  }
+  if (counts.pairs < MIN_PAIRS_FOR_DIRECTION) {
+    return {
+      verdict: 'insufficient-evidence',
+      reason: `${counts.pairs} complete ${plural(counts.pairs, 'pair')} is below the ${MIN_PAIRS_FOR_DIRECTION} needed to call a direction`,
+    }
+  }
+  if (counts.onlyAnvil > counts.onlyBare) {
+    return {
+      verdict: 'measured-improvement',
+      reason: `anvil succeeded where bare did not in ${counts.onlyAnvil} ${plural(counts.onlyAnvil, 'pair')}; the reverse happened in ${counts.onlyBare}`,
+    }
+  }
+  if (counts.onlyBare > counts.onlyAnvil) {
+    return {
+      verdict: 'measured-regression',
+      reason: `bare succeeded where anvil did not in ${counts.onlyBare} ${plural(counts.onlyBare, 'pair')}; the reverse happened in ${counts.onlyAnvil}`,
+    }
+  }
+  return {
+    verdict: 'insufficient-evidence',
+    reason:
+      counts.onlyAnvil === 0
+        ? `neither variant uniquely succeeded in any of ${counts.pairs} complete ${plural(counts.pairs, 'pair')}`
+        : `${counts.onlyAnvil} ${plural(counts.onlyAnvil, 'pair')} went each way; the pairs do not separate the variants`,
+  }
+}
+
+/** Whether a model id is the canned fake agent, and therefore not real-agent evidence. */
+function isSyntheticModel(model: string | null): boolean {
+  return model === 'fake-agent'
+}
+
+/**
+ * One line naming what produced the comparison.
+ *
+ * The distinction matters more than the wording: the checked-in `latest.json` is a hermetic
+ * harness check, and a real-agent pilot is a separate record with its own scope. A report that
+ * blended them would let a canned answer stand in for a model.
+ */
+function evidenceSourceLine(summary: PairedSummary): string {
+  const synthetic = summary.groups.filter((group) => isSyntheticModel(group.model)).length
+  const real = summary.groups.length - synthetic
+  if (synthetic > 0 && real === 0) {
+    return 'Evidence source: synthetic harness check (fake-agent); a canned answer was used, no model was called. This is not real-agent evidence.'
+  }
+  if (real > 0 && synthetic === 0) {
+    return 'Evidence source: real-agent results. A claim covers only the scenarios, model and conditions recorded in the run record.'
+  }
+  return `Evidence source: mixed (${synthetic} synthetic, ${real} real-agent group(s)). Read each group's evidence line before comparing them.`
+}
+
 /**
  * Render the paired comparison as console lines.
  *
@@ -2299,13 +2383,20 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
     lines.push('No results to pair.')
     return lines
   }
+  lines.push(evidenceSourceLine(summary))
   for (const group of summary.groups) {
+    const verdict = classifyPairedResult(group)
     lines.push(group.model === null ? group.scenario : `${group.scenario} [${group.model}]`)
+    lines.push(
+      `  evidence         ${isSyntheticModel(group.model) ? 'synthetic fake-agent check' : 'real-agent record'}`,
+    )
     lines.push(`  repetitions      ${group.pairs} complete, ${group.incomplete} incomplete`)
     lines.push(
       `  task success     both ${group.bothSucceeded}, anvil only ${group.onlyAnvil}, bare only ${group.onlyBare}, neither ${group.neither}`,
     )
     lines.push(`  run errors       bare ${group.runErrors.bare}, anvil ${group.runErrors.anvil}`)
+    lines.push(`  verdict          ${VERDICT_LABEL[verdict.verdict]}: ${verdict.reason}`)
+    lines.push(`  scope            ${group.scenario} only; no claim beyond these pairs and conditions`)
     if (group.successfulDurationMs.pairs === 0) {
       lines.push('  successful time  no pair succeeded in both variants')
     } else {
@@ -2334,22 +2425,19 @@ export function formatPairedSummary(summary: PairedSummary): string[] {
         `  skill            installed ${group.skill.installed}, failed ${group.skill.installFailed}, unrecorded ${group.skill.installUnrecorded}; access observed ${group.skill.access.observed}, not-observed ${group.skill.access.notObserved}, unknown ${group.skill.access.unknown}`,
       )
     }
-    // The claim is about this comparison, not the run: six scenarios with one repetition each
-    // are six separate one-pair measurements, and a larger total must not silence that.
-    if (group.pairs > 0 && group.pairs < 5) {
-      const verb = group.pairs === 1 ? 'does' : 'do'
-      lines.push(
-        `  evidence         ${group.pairs} ${plural(group.pairs, 'pair')} ${verb} not support a significance claim; treat this as an exploratory measurement.`,
-      )
-    }
   }
   const totals = summary.totals
+  const totalsVerdict = classifyPairedResult(totals)
   lines.push('')
   lines.push(
     `All repetitions: ${totals.pairs} complete, ${totals.incomplete} incomplete; both ${totals.bothSucceeded}, anvil only ${totals.onlyAnvil}, bare only ${totals.onlyBare}, neither ${totals.neither}.`,
   )
+  lines.push(`Verdict (all repetitions): ${VERDICT_LABEL[totalsVerdict.verdict]}: ${totalsVerdict.reason}.`)
   lines.push(
     'Task success means the verifier passed and any declared hidden verifier passed; only pairs where both variants succeeded contribute to the time and cost means.',
+  )
+  lines.push(
+    'A verdict counts observed pairs; it is not a significance test, and time or cost differences do not change it. Unknown cost stays unknown rather than becoming zero.',
   )
   lines.push(
     'Run errors are not attributed to the agent: they include agent timeouts or exits and harness setup failures, such as a failed skill installation.',
