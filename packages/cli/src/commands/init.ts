@@ -85,11 +85,18 @@ async function loadAll(ctx: CommandContext, target: string | undefined): Promise
   // The declared capabilities live beside the profile they describe, so `--profile` and the
   // config layer cannot disagree about which project is being derived.
   const config = loadConfig({ repoRoot: root }).config
-  // Any declared capability counts, not just commands and tools: a references-only or
-  // services-only config is still an owner declaration the brief must carry.
-  const { commands, tools, env, services, references } = config.project
+  // Any declared capability counts, not just commands and tools: a references-only,
+  // credential-only or hardware-only config is still an owner declaration the brief must carry.
+  const { commands, tools, env, services, references, credentials, access, hardware } = config.project
   const declared =
-    commands.length > 0 || tools.length > 0 || env.length > 0 || services.length > 0 || references.length > 0
+    commands.length > 0 ||
+    tools.length > 0 ||
+    env.length > 0 ||
+    services.length > 0 ||
+    references.length > 0 ||
+    credentials.length > 0 ||
+    access.length > 0 ||
+    hardware.length > 0
       ? config.project
       : undefined
   return {

@@ -264,6 +264,13 @@ describe('the starter config is a config anvil accepts', () => {
     assert.doesNotThrow(() => mergeConfig(defaultConfig(), parsed, 'starter'))
   })
 
+  test('the starter file carries the new declaration arrays, empty', () => {
+    const parsed = JSON.parse(starterConfigJson()) as { project: Record<string, unknown> }
+    assert.deepEqual(parsed.project.credentials, [])
+    assert.deepEqual(parsed.project.access, [])
+    assert.deepEqual(parsed.project.hardware, [])
+  })
+
   test('a hand-added $schema is tolerated, because editors add it', () => {
     const layer = {
       $schema: 'https://example.test/schema.json',
@@ -564,6 +571,206 @@ describe('project: owner-declared capabilities', () => {
     const global = mergeConfig(defaultConfig(), { project: { tools: [{ id: 'make' }] } }, 'global')
     const repo = mergeConfig(global, { project: { commands: [{ kind: 'test', cmd: 'make check' }] } }, 'repo')
     assert.deepEqual(repo.project.tools, [{ id: 'make' }])
+  })
+
+  test('accepts declared credentials, access and hardware', () => {
+    const next = mergeConfig(
+      defaultConfig(),
+      {
+        project: {
+          credentials: [
+            {
+              id: 'registry-token',
+              env: ['NPM_TOKEN', 'NODE_AUTH_TOKEN'],
+              grantedBy: 'the platform team',
+              reason: 'private registry',
+            },
+            { id: 'ops-only' },
+          ],
+          access: [
+            { id: 'vpn', kind: 'vpn', target: 'corp-vpn', env: ['VPN_UP'], grantedBy: 'IT' },
+            { id: 'sso', kind: 'sso', required: false },
+          ],
+          hardware: [
+            {
+              id: 'training-box',
+              platform: ['linux', 'darwin'],
+              arch: ['x64', 'arm64'],
+              minCpus: 8,
+              minMemoryGiB: 16,
+              gpu: { vendor: 'nvidia' },
+              devices: ['/dev/nvidia0'],
+              reason: 'training',
+              required: false,
+            },
+            { id: 'any-gpu', gpu: {} },
+          ],
+        },
+      },
+      'cfg',
+    )
+    assert.deepEqual(next.project.credentials, [
+      {
+        id: 'registry-token',
+        env: ['NPM_TOKEN', 'NODE_AUTH_TOKEN'],
+        grantedBy: 'the platform team',
+        reason: 'private registry',
+      },
+      { id: 'ops-only' },
+    ])
+    assert.deepEqual(next.project.access, [
+      { id: 'vpn', kind: 'vpn', target: 'corp-vpn', env: ['VPN_UP'], grantedBy: 'IT' },
+      { id: 'sso', kind: 'sso', required: false },
+    ])
+    assert.deepEqual(next.project.hardware, [
+      {
+        id: 'training-box',
+        platform: ['linux', 'darwin'],
+        arch: ['x64', 'arm64'],
+        minCpus: 8,
+        minMemoryGiB: 16,
+        gpu: { vendor: 'nvidia' },
+        devices: ['/dev/nvidia0'],
+        reason: 'training',
+        required: false,
+      },
+      { id: 'any-gpu', gpu: {} },
+    ])
+  })
+
+  test('a legacy config file without the new keys still loads and defaults them to empty arrays', () => {
+    const home = tempDir()
+    writeFileSync(join(home, 'anvil.config.json'), JSON.stringify({ project: { tools: [{ id: 'make' }] } }))
+    const resolved = loadConfig({ env: { ANVIL_CONFIG_HOME: home } })
+    assert.deepEqual(resolved.config.project.credentials, [])
+    assert.deepEqual(resolved.config.project.access, [])
+    assert.deepEqual(resolved.config.project.hardware, [])
+  })
+
+  test('rejects a value, token, url or command key in the new declarations', () => {
+    for (const [section, entry] of [
+      ['credentials', { id: 'x', value: 'secret' }],
+      ['credentials', { id: 'x', token: 'secret' }],
+      ['access', { id: 'x', kind: 'vpn', url: 'https://vpn.example' }],
+      ['access', { id: 'x', kind: 'sso', command: 'open a browser' }],
+      ['hardware', { id: 'x', command: 'install a gpu' }],
+    ] as const) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { [section]: [entry] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, new RegExp(`project\\.${section}\\[0\\]\\.(value|token|url|command): unknown`))
+          return true
+        },
+        `${section} ${JSON.stringify(entry)}`,
+      )
+    }
+  })
+
+  test('rejects a bad or empty evidence list and a missing access kind', () => {
+    for (const env of [['not a name'], [], 'API_TOKEN']) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { credentials: [{ id: 'x', env }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.credentials\[0\]\.env/)
+          return true
+        },
+        JSON.stringify(env),
+      )
+    }
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { project: { access: [{ id: 'vpn' }] } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /project\.access\[0\]\.kind: expected one of: vpn, sso, registry, network, other/)
+        return true
+      },
+    )
+  })
+
+  test('rejects a hardware entry with no constraint and out-of-range limits', () => {
+    for (const entry of [
+      { id: 'empty' },
+      { id: 'reason-only', reason: 'nothing observed' },
+      { id: 'zero-cpus', minCpus: 0 },
+      { id: 'half-cpu', minCpus: 1.5 },
+      { id: 'too-many-cpus', minCpus: 5000 },
+      { id: 'zero-memory', minMemoryGiB: 0 },
+      { id: 'negative-memory', minMemoryGiB: -1 },
+      { id: 'too-much-memory', minMemoryGiB: 70000 },
+    ]) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { hardware: [entry] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(
+            err.message,
+            entry.id === 'empty' || entry.id === 'reason-only'
+              ? /project\.hardware\[0\]: expected at least one hardware constraint/
+              : /project\.hardware\[0\]\.(minCpus|minMemoryGiB): expected/,
+          )
+          return true
+        },
+        JSON.stringify(entry),
+      )
+    }
+  })
+
+  test('rejects a declared device that is not a POSIX /dev node', () => {
+    for (const device of [
+      '/etc/passwd',
+      '/dev/../etc',
+      '\\\\server\\share',
+      'C:\\x',
+      'relative',
+      '/dev//sda',
+      '/dev/sda/',
+      '/dev/./sda',
+      '/dev/',
+      // These alias a process's open files, so /dev/fd/<n>/package.json reaches the repository.
+      '/dev/fd',
+      '/dev/fd/3',
+      '/dev/fd/3/package.json',
+      '/dev/FD/3',
+      '/dev/stdin',
+      '/dev/stdout',
+      '/dev/stderr',
+      '/dev/StdErr',
+    ]) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { hardware: [{ id: 'x', devices: [device] }] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, /project\.hardware\[0\]\.devices\[0\]: expected an absolute \/dev device path/)
+          return true
+        },
+        device,
+      )
+    }
+  })
+
+  test('accepts plain /dev device paths, including names that only start like fd', () => {
+    for (const device of ['/dev/kvm', '/dev/nvidia0', '/dev/dri/renderD128', '/dev/fd0', '/dev/fdx/a']) {
+      const merged = mergeConfig(defaultConfig(), { project: { hardware: [{ id: 'x', devices: [device] }] } }, 'cfg')
+      assert.deepEqual(merged.project.hardware?.[0]?.devices, [device], device)
+    }
+  })
+
+  test('rejects duplicate ids within one declaration array', () => {
+    for (const section of ['credentials', 'access', 'hardware'] as const) {
+      const entry =
+        section === 'access' ? { id: 'x', kind: 'vpn' } : section === 'hardware' ? { id: 'x', gpu: {} } : { id: 'x' }
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project: { [section]: [entry, entry] } }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.match(err.message, new RegExp(`project\\.${section}\\[1\\]\\.id: duplicate id "x"`))
+          return true
+        },
+        section,
+      )
+    }
   })
 })
 

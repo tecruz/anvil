@@ -364,6 +364,45 @@ reports three states and never guesses between them.
   containment cannot be established is `unknown` rather than `missing` or a pass: containment
   is decided before existence, so an absent file behind an external link is not a false
   `restore`. The check is repository-local, so it runs whether or not `--check` is given.
+- **Credentials** — credentials the owner declared in `project.credentials`, each naming the
+  environment variables that carry it in `env` (any one present is enough). A required
+  credential whose evidence is missing or empty is `blocked` and proposes a `request:`
+  action; present evidence is `declared`, never `verified`, because presence is not
+  authorization and anvil cannot tell a valid credential from an exported placeholder. A
+  credential with no `env` is documentation only and can never block. `grantedBy` is text a
+  person reads, never an account anvil contacts. A required credential or access need that
+  is `declared` still proposes its `request:` action, so the route to a grant stays visible,
+  and it keeps the report at best `unknown`: a report that depends on one is never
+  `verified`. Without `--check` every credential is `unknown`. These sections are additive
+  fields of the `--json` report, which stays at `schemaVersion: 1`.
+- **Access** — restricted access the owner declared in `project.access`, with a `kind`
+  (`vpn`, `sso`, `registry`, `network`, `other`) and an optional `target` label. It is
+  checked exactly like a credential: by the presence of its `env` names, never by resolving
+  or contacting `target`, so nothing touches the network. A required one with missing
+  evidence is `blocked` and proposes a `request:` action; a present one is `declared`, never
+  verified.
+- **Hardware** — hardware the owner declared in `project.hardware`, compared against a
+  snapshot of *this process* rather than the physical host: `platform`, `arch`, `minCpus`,
+  `minMemoryGiB` (total memory, capped by the container limit — not free memory), declared
+  `/dev` device nodes (existence only, POSIX only; Windows is always `unknown`), and a GPU
+  requirement that is always `unknown` because anvil never observes GPUs. A mismatch in
+  platform, architecture, CPU count, memory or a device makes that entry `unsatisfied`; only
+  a required entry (the default) then blocks the report, and an unmet `"required": false`
+  entry is reported without blocking. A process architecture that differs from the OS
+  machine type (for example 32-bit Node on a 64-bit OS) or a machine type anvil cannot map,
+  an unreadable fact, or an absent `--check` is `unknown`. A device check is a best-effort
+  existence check: the path is walked with `lstat`, one component at a time, and is never
+  opened or read. A symbolic link anywhere on it is `unknown`, so paths that are usually
+  links — `/dev/disk/by-id/*`, `/dev/serial/by-id/*`, `/dev/char/*`, `/dev/core`,
+  `/dev/log`, and often `/dev/rtc` and `/dev/cdrom` — report `unknown` rather than
+  `present`. Any non-link node at the end counts as present, including a directory or a
+  regular file. Because each step re-resolves the path, a directory on it could be swapped
+  for a link between two `lstat` calls by anyone who can write to it. So every directory on
+  the walk, `/dev` included, must be owned by root (uid 0) and be neither group-writable,
+  world-writable nor sticky; a directory that is not (such as `/dev/shm` or `/dev/mqueue`),
+  or whose owner or mode cannot be read, makes the device `unknown`. Only root can then
+  change the directories on the path while it is walked. Nothing is spawned and no network
+  is touched. Without `--check` every hardware check is `unknown`.
 - **Context** — what the agent reads first. A global instruction file is not repository
   context, so a global-only setup is `unknown`, not `verified`.
 
@@ -499,9 +538,37 @@ Two layers, repo-local wins:
   `url` key is rejected: anvil points at approved local documents and does not fetch remote
   material. Only existence is checked, never the contents. Approved references are also
   listed by path and scope in `anvil brief`, so an agent knows what to read.
+- `project.credentials` — credentials the project needs, checked by `anvil ready --check`
+  against environment variable names only. Each entry is `{ "id": "...", "env":
+  ["NPM_TOKEN"], "grantedBy": "...", "reason": "...", "required": true }`. `env` is a
+  non-empty list of names; any one present is enough. `required` defaults to true. A
+  `value` or `token` key is a config error: anvil never stores, reads or prints a secret.
+  `grantedBy` is shown in the proposed action and never acted on. A credential with no
+  `env` is allowed and can never block.
+- `project.access` — restricted access the project needs. Each entry is `{ "id": "...",
+  "kind": "vpn" | "sso" | "registry" | "network" | "other", "target": "...", "env": [...],
+  "grantedBy": "...", "reason": "...", "required": true }`. `kind` is mandatory and
+  `required` defaults to true. `target` is a label: anvil never resolves, contacts or
+  validates it, and `url`/`command` keys are rejected. Evidence is checked exactly like a
+  credential.
+- `project.hardware` — hardware constraints, compared against a snapshot of the process.
+  Each entry is `{ "id": "...", "platform": ["linux"], "arch": ["x64"], "minCpus": 8,
+  "minMemoryGiB": 16, "gpu": { "vendor": "nvidia" }, "devices": ["/dev/nvidia0"],
+  "reason": "...", "required": true }`. At least one constraint is required. `platform`
+  and `arch` are non-empty any-of lists; `minCpus` is an integer 1..4096; `minMemoryGiB`
+  is greater than 0 and at most 65536. `gpu` accepts only `vendor` (`nvidia`, `amd`,
+  `apple`, `intel`, `any`, default `any`) and is never observed. `devices` are POSIX
+  `/dev` paths, existence only: paths outside `/dev`, paths with an empty, `.` or `..`
+  segment (including `//` and a trailing `/`), `/dev/fd`, anything under `/dev/fd/`,
+  `/dev/std*` (they alias a process's open files, not devices), and Windows/UNC paths are
+  rejected. `required` defaults to true. Checks run only with
+  `--check`.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
-`provider.default` should fail on day one rather than silently do nothing for a year.
+`provider.default` should fail on day one rather than silently do nothing for a year. That
+also means an older anvil rejects a config that uses `project.credentials`,
+`project.access` or `project.hardware`: the keys are not silently ignored by a version
+that cannot understand them.
 
 ```bash
 anvil config show    # the resolved configuration and where each layer came from

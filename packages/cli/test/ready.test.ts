@@ -229,6 +229,58 @@ describe('anvil ready', () => {
     assert.equal(action?.command, null, 'no restore command is fabricated')
   })
 
+  test('a credential and an impossible platform both gate CI, and no value is printed', () => {
+    const platforms = (['linux', 'darwin', 'win32'] as const).filter((platform) => platform !== process.platform)
+    const dir = repo({
+      'AGENTS.md': '# Notes\n\nNothing to run yet.\n',
+      'anvil.config.json': JSON.stringify({
+        project: {
+          credentials: [
+            {
+              id: 'corp-token',
+              env: ['ANVIL_READY_CREDENTIAL'],
+              grantedBy: 'the platform team',
+              reason: 'the private registry',
+            },
+          ],
+          access: [{ id: 'vpn', kind: 'vpn', target: 'corp-vpn' }],
+          hardware: [{ id: 'wrong-platform', platform: platforms, reason: 'a native build' }],
+        },
+      }),
+    })
+
+    const blocked = runReady(dir, ['--json', '--check', '--fail-on-blocked'])
+    assert.equal(blocked.code, 6, blocked.stderr)
+    const envelope = JSON.parse(blocked.stdout) as {
+      ok: boolean
+      data: {
+        credentials: Array<{ status: string }>
+        access: Array<{ kind: string; target: string; status: string }>
+        hardware: Array<{ status: string }>
+      }
+      error: { details: { blocked: string[] } }
+    }
+    assert.equal(envelope.ok, false)
+    assert.equal(envelope.data.credentials[0]?.status, 'missing')
+    assert.equal(envelope.data.hardware[0]?.status, 'unsatisfied')
+    assert.equal(envelope.data.access[0]?.kind, 'vpn')
+    assert.equal(envelope.data.access[0]?.target, 'corp-vpn')
+    assert.equal(envelope.data.access[0]?.status, 'declared')
+    assert.ok(envelope.error.details.blocked.includes('corp-token'))
+    assert.ok(envelope.error.details.blocked.includes('wrong-platform'))
+
+    const sentinel = 'credential-value-must-not-appear'
+    const present = runReady(dir, ['--check'], { ANVIL_READY_CREDENTIAL: sentinel })
+    assert.equal(present.code, 0, present.stderr)
+    assert.match(present.stdout, /Credentials/)
+    assert.match(present.stdout, /Access/)
+    assert.match(present.stdout, /Hardware/)
+    assert.match(present.stdout, /corp-token\s+declared /)
+    assert.match(present.stdout, /wrong-platform\s+unsatisfied/)
+    assert.ok(!present.stdout.includes(sentinel), 'the value must not be copied into the report')
+    assert.ok(!present.stderr.includes(sentinel), 'the value must not be copied into the error output')
+  })
+
   test('a declared install command is proposed, never run', () => {
     const dir = repo({
       'AGENTS.md': '# Notes\n\nNothing to run yet.\n',

@@ -30,8 +30,12 @@ export const readyCommand: Command = {
     'compared with the reported version. Declared environment variables are checked for',
     'presence by name only -- a value is never read into the report. Declared services are',
     'checked with a bounded loopback TCP connect, which sends no data. Approved context',
-    'references are checked for existence only; the document is never read. The repository',
-    'is never built or tested, and no setup action is run.',
+    'references are checked for existence only; the document is never read. Declared',
+    'credentials and corporate access are checked by env var name only and are never',
+    'verified: presence is not authorization, and nothing is contacted. Hardware is',
+    'compared against a snapshot of this process (platform, architecture, CPUs, total',
+    'memory capped by the container limit, /dev device existence); GPUs are never',
+    'observed. The repository is never built or tested, and no setup action is run.',
     '',
     '--check             probe the environment (opt-in; the only mode that spawns)',
     '--fail-on-blocked   exit 6 when the report is blocked, for a CI gate',
@@ -75,6 +79,11 @@ export const readyCommand: Command = {
         ...report.env.filter((e) => e.required && (e.status === 'missing' || e.status === 'empty')).map((e) => e.name),
         ...report.services.filter((s) => s.required && s.status === 'unreachable').map((s) => s.id),
         ...report.references.filter((r) => r.required && r.status === 'missing').map((r) => r.id),
+        ...report.credentials
+          .filter((c) => c.required && (c.status === 'missing' || c.status === 'empty'))
+          .map((c) => c.id),
+        ...report.access.filter((a) => a.required && (a.status === 'missing' || a.status === 'empty')).map((a) => a.id),
+        ...report.hardware.filter((h) => h.required && h.status === 'unsatisfied').map((h) => h.id),
         ...report.context.filter((c) => c.status === 'blocked').map((c) => c.id),
       ]
       const err = new AnvilError(
@@ -106,12 +115,18 @@ function statusTag(status: string, style: Style): string {
       return style.green(status === 'available' ? 'available' : 'verified ')
     case 'present':
       return style.green('present  ')
+    case 'satisfied':
+      return style.green('satisfied')
+    case 'declared':
+      return style.yellow('declared ')
     case 'reachable':
       return style.green('reachable')
     case 'unreachable':
       return style.red('refused  ')
     case 'empty':
       return style.red('empty    ')
+    case 'unsatisfied':
+      return style.red('unsatisfied')
     case 'blocked':
     case 'missing':
     case 'unavailable':
@@ -227,6 +242,61 @@ function renderReady(report: ReadyReport, style: Style): string {
             const req = r.required ? s.yellow('required') : s.dim('optional')
             const reason = r.reason === null ? '' : s.dim(` -- ${r.reason}`)
             return `  ${r.path.padEnd(32)} ${statusTag(r.status, s)} ${req} ${s.dim(r.scope)}${reason}`
+          })
+          .join('\n'),
+  )
+
+  out.push('')
+  out.push(s.bold('Credentials'))
+  out.push(
+    report.credentials.length === 0
+      ? s.dim('  (none declared)')
+      : report.credentials
+          .map((c) => {
+            const req = c.required ? s.yellow('required') : s.dim('optional')
+            const evidence =
+              c.env.length === 0 ? '' : s.dim(` ${c.env.map((e) => `${e.name}(${e.status})`).join(', ')}`)
+            const grantedBy = c.grantedBy === null ? '' : s.dim(` granted by ${c.grantedBy}`)
+            const reason = c.reason === null ? '' : s.dim(` -- ${c.reason}`)
+            return `  ${c.id.padEnd(20)} ${statusTag(c.status, s)} ${req}${evidence}${grantedBy}${reason}`
+          })
+          .join('\n'),
+  )
+
+  out.push('')
+  out.push(s.bold('Access'))
+  out.push(
+    report.access.length === 0
+      ? s.dim('  (none declared)')
+      : report.access
+          .map((a) => {
+            const req = a.required ? s.yellow('required') : s.dim('optional')
+            const target = a.target === null ? '' : s.dim(` ${a.target}`)
+            const evidence =
+              a.env.length === 0 ? '' : s.dim(` ${a.env.map((e) => `${e.name}(${e.status})`).join(', ')}`)
+            const grantedBy = a.grantedBy === null ? '' : s.dim(` granted by ${a.grantedBy}`)
+            const reason = a.reason === null ? '' : s.dim(` -- ${a.reason}`)
+            return `  ${a.id.padEnd(20)} ${statusTag(a.status, s)} ${req} ${s.dim(a.kind)}${target}${evidence}${grantedBy}${reason}`
+          })
+          .join('\n'),
+  )
+
+  out.push('')
+  out.push(s.bold('Hardware'))
+  out.push(
+    report.hardware.length === 0
+      ? s.dim('  (none declared)')
+      : report.hardware
+          .map((h) => {
+            const req = h.required ? s.yellow('required') : s.dim('optional')
+            const reason = h.reason === null ? '' : s.dim(` -- ${h.reason}`)
+            const lines = [`  ${h.id.padEnd(20)} ${statusTag(h.status, s)} ${req}${reason}`]
+            for (const check of h.checks) {
+              lines.push(
+                `    ${check.constraint.padEnd(9)} expected=${check.expected} observed=${check.observed ?? 'unknown'} ${statusTag(check.status, s)}`,
+              )
+            }
+            return lines.join('\n')
           })
           .join('\n'),
   )

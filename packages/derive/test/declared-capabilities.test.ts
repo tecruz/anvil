@@ -31,6 +31,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `mystery-cli check` _\(declared\)_ \(from `engine\/`\)/)
@@ -47,6 +50,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     assert.ok(artifact, 'a declared test command is enough to generate the skill')
@@ -73,6 +79,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     assert.ok(artifact)
@@ -89,6 +98,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     assert.match(artifact.content, /- \*\*Test:\*\* `node root-check\.js` _\(declared\)_ \(from the repository root\)/)
@@ -106,6 +118,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     assert.ok(artifact)
@@ -130,6 +145,9 @@ describe('declared capabilities reach generated context', () => {
         env: [],
         services: [],
         references: [],
+        credentials: [],
+        access: [],
+        hardware: [],
       },
     })
     const declared = brief.commands.find((c) => c.source === 'declared')

@@ -132,6 +132,89 @@ export interface DeclaredReference {
 }
 
 /**
+ * A credential the project needs, named by the environment variables that carry it.
+ *
+ * Only variable names are recorded. Anvil never reads, stores or prints a value, and a
+ * present variable is not proof that the credential is valid or authorized for use. A
+ * credential declared without `env` is allowed for documentation: it can then never be
+ * blocked, because there is no local evidence to check.
+ */
+export interface DeclaredCredential {
+  /** Stable name, used in the report and proposed actions. */
+  id: string
+  /** Env var NAMES that are local evidence; any one present satisfies it. Never values. */
+  env?: string[]
+  /** Who grants it / how to request it. Plain text, shown in the action, never acted on. */
+  grantedBy?: string
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/** How the project reaches a resource it needs. The kind is a label, never an action. */
+export type DeclaredAccessKind = 'vpn' | 'sso' | 'registry' | 'network' | 'other'
+
+/**
+ * A restricted resource the project needs access to.
+ *
+ * Nothing here is resolved, contacted or validated: `target` is a label for a reader, not a
+ * host anvil will reach, and the report only checks the named environment variables.
+ */
+export interface DeclaredAccess {
+  /** Stable name, used in the report and proposed actions. */
+  id: string
+  /** What kind of access it is. Mandatory, so the blocker names the thing needed. */
+  kind: DeclaredAccessKind
+  /** Label only. Never resolved, contacted or validated. */
+  target?: string
+  /** Env var NAMES that are local evidence; any one present satisfies it. Never values. */
+  env?: string[]
+  /** Who grants it / how to request it. Plain text, shown in the action, never acted on. */
+  grantedBy?: string
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/** A platform anvil compares against the running process. Never detected from the project. */
+export type DeclaredPlatform = 'linux' | 'darwin' | 'win32'
+export type DeclaredArch = 'x64' | 'arm64' | 'ia32' | 'arm'
+export type DeclaredGpuVendor = 'nvidia' | 'amd' | 'apple' | 'intel' | 'any'
+
+/**
+ * A hardware constraint the project needs.
+ *
+ * Compared against a snapshot of the process environment, not the physical host: a
+ * container or a VM can report less than the machine it runs on. GPU capability is never
+ * observed at all, so a declared GPU stays `unknown`.
+ */
+export interface DeclaredHardware {
+  /** Stable name, used in the report and proposed actions. */
+  id: string
+  /** Accepted platforms, any-of. Non-empty when present. */
+  platform?: DeclaredPlatform[]
+  /** Accepted architectures, any-of. Non-empty when present. */
+  arch?: DeclaredArch[]
+  /** Minimum CPU count, 1..4096. */
+  minCpus?: number
+  /** Minimum memory in GiB, greater than 0 and at most 65536. */
+  minMemoryGiB?: number
+  /** GPU vendor requirement. Only `vendor` is accepted; default `any`. Never observed. */
+  gpu?: { vendor?: DeclaredGpuVendor }
+  /**
+   * POSIX device nodes, existence only. Each must match `^/dev/[A-Za-z0-9._/-]+$`, contain
+   * no empty, `.` or `..` segment, and must not be `/dev/fd`, under `/dev/fd/` or `/dev/std*`.
+   */
+  devices?: string[]
+  /** Why the project needs it. */
+  reason?: string
+  /** True when the project cannot be verified without it. Defaults to true. */
+  required?: boolean
+}
+
+/**
  * What the project owner says the project needs, for the parts anvil cannot detect.
  *
  * The detected profile stays the only source of *detected* facts. This section is the
@@ -150,6 +233,12 @@ export interface ProjectConfig {
   services: DeclaredService[]
   /** Owner-approved context documents, checked for existence by path. */
   references: DeclaredReference[]
+  /** Owner-declared credentials, checked only by the presence of their env var names. */
+  credentials: DeclaredCredential[]
+  /** Owner-declared restricted access, never contacted or validated. */
+  access: DeclaredAccess[]
+  /** Owner-declared hardware constraints, compared against a process snapshot. */
+  hardware: DeclaredHardware[]
 }
 
 export interface AnvilConfig {
@@ -197,7 +286,16 @@ export function defaultConfig(): AnvilConfig {
     provider: { default: 'local' },
     output: { color: 'auto' },
     features: { probeCommands: false },
-    project: { commands: [], tools: [], env: [], services: [], references: [] },
+    project: {
+      commands: [],
+      tools: [],
+      env: [],
+      services: [],
+      references: [],
+      credentials: [],
+      access: [],
+      hardware: [],
+    },
   }
 }
 
@@ -539,6 +637,314 @@ function parseDeclaredReferences(
   return out
 }
 
+/** Validate a list of env var names used as local evidence. Names only, never values. */
+function parseEvidenceNames(value: unknown, path: string, issues: ValidationIssue[]): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    issues.push({ path, message: 'expected a non-empty array of environment variable names' })
+    return undefined
+  }
+  const out: string[] = []
+  value.forEach((name, index) => {
+    if (typeof name !== 'string' || !ENV_NAME.test(name)) {
+      issues.push({ path: `${path}[${index}]`, message: 'expected an environment variable name like "DATABASE_URL"' })
+      return
+    }
+    out.push(name)
+  })
+  return out.length === value.length ? out : undefined
+}
+
+/** Read an id and reject a duplicate within one array, so two needs cannot share a blocker name. */
+function readId(
+  entry: Record<string, unknown>,
+  seen: ReadonlySet<string>,
+  at: string,
+  issues: ValidationIssue[],
+): string | undefined {
+  if (typeof entry.id !== 'string' || entry.id.trim() === '') {
+    issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
+    return undefined
+  }
+  if (seen.has(entry.id)) {
+    issues.push({ path: `${at}.id`, message: `duplicate id "${entry.id}"` })
+    return undefined
+  }
+  return entry.id
+}
+
+/** Validate `project.credentials`. Env var names only; a credential with no env is allowed. */
+function parseDeclaredCredentials(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+): DeclaredCredential[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredCredential[] = []
+  const seen = new Set<string>()
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'env', 'grantedBy', 'reason', 'required'], at, issues)
+    const id = readId(entry, seen, at, issues)
+    if (id === undefined) return
+    const credential: DeclaredCredential = { id }
+    if (entry.env !== undefined) {
+      const names = parseEvidenceNames(entry.env, `${at}.env`, issues)
+      if (names === undefined) return
+      credential.env = names
+    }
+    for (const key of ['grantedBy', 'reason'] as const) {
+      if (entry[key] === undefined) continue
+      if (typeof entry[key] !== 'string') {
+        issues.push({ path: `${at}.${key}`, message: 'expected a string' })
+        return
+      }
+      credential[key] = entry[key]
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      credential.required = entry.required
+    }
+    seen.add(id)
+    out.push(credential)
+  })
+  return out
+}
+
+const ACCESS_KINDS: readonly DeclaredAccessKind[] = ['vpn', 'sso', 'registry', 'network', 'other']
+
+/** Validate `project.access`. The kind is mandatory; `target` is a label, never contacted. */
+function parseDeclaredAccess(value: unknown, path: string, issues: ValidationIssue[]): DeclaredAccess[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredAccess[] = []
+  const seen = new Set<string>()
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(entry, ['id', 'kind', 'target', 'env', 'grantedBy', 'reason', 'required'], at, issues)
+    const id = readId(entry, seen, at, issues)
+    if (id === undefined) return
+    const kind = expectEnum(entry.kind, `${at}.kind`, ACCESS_KINDS, issues)
+    if (kind === undefined) return
+    const access: DeclaredAccess = { id, kind }
+    if (entry.target !== undefined) {
+      if (typeof entry.target !== 'string') {
+        issues.push({ path: `${at}.target`, message: 'expected a string' })
+        return
+      }
+      access.target = entry.target
+    }
+    if (entry.env !== undefined) {
+      const names = parseEvidenceNames(entry.env, `${at}.env`, issues)
+      if (names === undefined) return
+      access.env = names
+    }
+    for (const key of ['grantedBy', 'reason'] as const) {
+      if (entry[key] === undefined) continue
+      if (typeof entry[key] !== 'string') {
+        issues.push({ path: `${at}.${key}`, message: 'expected a string' })
+        return
+      }
+      access[key] = entry[key]
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      access.required = entry.required
+    }
+    seen.add(id)
+    out.push(access)
+  })
+  return out
+}
+
+const PLATFORMS: readonly DeclaredPlatform[] = ['linux', 'darwin', 'win32']
+const ARCHES: readonly DeclaredArch[] = ['x64', 'arm64', 'ia32', 'arm']
+const GPU_VENDORS: readonly DeclaredGpuVendor[] = ['nvidia', 'amd', 'apple', 'intel', 'any']
+
+/** A POSIX device node a hardware declaration may name. Existence only, never opened. */
+const DEVICE_PATH = /^\/dev\/[A-Za-z0-9._/-]+$/
+
+/**
+ * True when `value` is a plain path to a node under `/dev`.
+ *
+ * Every segment must be a name: no empty segment (`//` or a trailing `/`), no `.` and no
+ * `..`. `/dev/fd`, `/dev/fd/*` and `/dev/std*` are rejected because they alias the files a
+ * process has open rather than naming a device, so `/dev/fd/<n>/package.json` would reach a
+ * repository file. The comparison ignores case so a case-insensitive file system cannot
+ * reopen that door. Shared with the check-time guard in `@anvil/derive`.
+ */
+export function isSafeDevicePath(value: string): boolean {
+  if (!DEVICE_PATH.test(value)) return false
+  const segments = value.split('/').slice(2)
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) return false
+  const first = (segments[0] ?? '').toLowerCase()
+  return first !== 'fd' && !first.startsWith('std')
+}
+
+/** Read an enum array that must be non-empty. A single bad entry drops the whole list. */
+function parseEnumList<T extends string>(
+  value: unknown,
+  path: string,
+  allowed: readonly T[],
+  issues: ValidationIssue[],
+): T[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    issues.push({ path, message: 'expected a non-empty array' })
+    return undefined
+  }
+  const out: T[] = []
+  value.forEach((item, index) => {
+    const parsed = expectEnum(item, `${path}[${index}]`, allowed, issues)
+    if (parsed !== undefined) out.push(parsed)
+  })
+  return out.length === value.length ? out : undefined
+}
+
+/** Validate `project.hardware`. Every entry must declare at least one constraint. */
+function parseDeclaredHardware(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+): DeclaredHardware[] | undefined {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: 'expected an array' })
+    return undefined
+  }
+  const out: DeclaredHardware[] = []
+  const seen = new Set<string>()
+  value.forEach((entry, index) => {
+    const at = `${path}[${index}]`
+    if (!isPlainObject(entry)) {
+      issues.push({ path: at, message: 'expected an object' })
+      return
+    }
+    checkUnknownKeys(
+      entry,
+      ['id', 'platform', 'arch', 'minCpus', 'minMemoryGiB', 'gpu', 'devices', 'reason', 'required'],
+      at,
+      issues,
+    )
+    const id = readId(entry, seen, at, issues)
+    if (id === undefined) return
+    const hardware: DeclaredHardware = { id }
+    if (entry.platform !== undefined) {
+      const platforms = parseEnumList(entry.platform, `${at}.platform`, PLATFORMS, issues)
+      if (platforms === undefined) return
+      hardware.platform = platforms
+    }
+    if (entry.arch !== undefined) {
+      const arches = parseEnumList(entry.arch, `${at}.arch`, ARCHES, issues)
+      if (arches === undefined) return
+      hardware.arch = arches
+    }
+    if (entry.minCpus !== undefined) {
+      if (
+        typeof entry.minCpus !== 'number' ||
+        !Number.isInteger(entry.minCpus) ||
+        entry.minCpus < 1 ||
+        entry.minCpus > 4096
+      ) {
+        issues.push({ path: `${at}.minCpus`, message: 'expected an integer between 1 and 4096' })
+        return
+      }
+      hardware.minCpus = entry.minCpus
+    }
+    if (entry.minMemoryGiB !== undefined) {
+      if (
+        typeof entry.minMemoryGiB !== 'number' ||
+        !Number.isFinite(entry.minMemoryGiB) ||
+        entry.minMemoryGiB <= 0 ||
+        entry.minMemoryGiB > 65536
+      ) {
+        issues.push({ path: `${at}.minMemoryGiB`, message: 'expected a number greater than 0 and at most 65536' })
+        return
+      }
+      hardware.minMemoryGiB = entry.minMemoryGiB
+    }
+    if (entry.gpu !== undefined) {
+      if (!isPlainObject(entry.gpu)) {
+        issues.push({ path: `${at}.gpu`, message: 'expected an object' })
+        return
+      }
+      checkUnknownKeys(entry.gpu, ['vendor'], `${at}.gpu`, issues)
+      const gpu: { vendor?: DeclaredGpuVendor } = {}
+      if (entry.gpu.vendor !== undefined) {
+        const vendor = expectEnum(entry.gpu.vendor, `${at}.gpu.vendor`, GPU_VENDORS, issues)
+        if (vendor === undefined) return
+        gpu.vendor = vendor
+      }
+      hardware.gpu = gpu
+    }
+    if (entry.devices !== undefined) {
+      if (!Array.isArray(entry.devices) || entry.devices.length === 0) {
+        issues.push({ path: `${at}.devices`, message: 'expected a non-empty array of /dev paths' })
+        return
+      }
+      const devices: string[] = []
+      entry.devices.forEach((device, deviceIndex) => {
+        if (typeof device !== 'string' || !isSafeDevicePath(device)) {
+          issues.push({
+            path: `${at}.devices[${deviceIndex}]`,
+            message:
+              'expected an absolute /dev device path with no empty, "." or ".." segment, not /dev/fd or /dev/std*',
+          })
+          return
+        }
+        devices.push(device)
+      })
+      if (devices.length !== entry.devices.length) return
+      hardware.devices = devices
+    }
+    if (
+      hardware.platform === undefined &&
+      hardware.arch === undefined &&
+      hardware.minCpus === undefined &&
+      hardware.minMemoryGiB === undefined &&
+      hardware.gpu === undefined &&
+      hardware.devices === undefined
+    ) {
+      issues.push({ path: at, message: 'expected at least one hardware constraint' })
+      return
+    }
+    for (const key of ['reason'] as const) {
+      if (entry[key] === undefined) continue
+      if (typeof entry[key] !== 'string') {
+        issues.push({ path: `${at}.${key}`, message: 'expected a string' })
+        return
+      }
+      hardware[key] = entry[key]
+    }
+    if (entry.required !== undefined) {
+      if (typeof entry.required !== 'boolean') {
+        issues.push({ path: `${at}.required`, message: 'expected a boolean' })
+        return
+      }
+      hardware.required = entry.required
+    }
+    seen.add(id)
+    out.push(hardware)
+  })
+  return out
+}
+
 /**
  * Validate and merge a config layer onto `base`. Returns a new config; `base` is not
  * mutated. Unknown top-level keys are rejected.
@@ -634,7 +1040,12 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
 
   if (layer.project !== undefined) {
     const project = expectObject(layer.project, 'project', issues)
-    checkUnknownKeys(project, ['commands', 'tools', 'env', 'services', 'references'], 'project', issues)
+    checkUnknownKeys(
+      project,
+      ['commands', 'tools', 'env', 'services', 'references', 'credentials', 'access', 'hardware'],
+      'project',
+      issues,
+    )
     // Each key replaces its array rather than concatenating: a repo layer that declares its
     // own commands is answering the question, not adding to the global answer. Keys the
     // layer is silent about keep the merged value from the layers below.
@@ -657,6 +1068,18 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (project.references !== undefined) {
       const references = parseDeclaredReferences(project.references, 'project.references', issues)
       if (references !== undefined) next.project.references = references
+    }
+    if (project.credentials !== undefined) {
+      const credentials = parseDeclaredCredentials(project.credentials, 'project.credentials', issues)
+      if (credentials !== undefined) next.project.credentials = credentials
+    }
+    if (project.access !== undefined) {
+      const access = parseDeclaredAccess(project.access, 'project.access', issues)
+      if (access !== undefined) next.project.access = access
+    }
+    if (project.hardware !== undefined) {
+      const hardware = parseDeclaredHardware(project.hardware, 'project.hardware', issues)
+      if (hardware !== undefined) next.project.hardware = hardware
     }
   }
 
@@ -746,7 +1169,16 @@ export function starterConfigJson(): string {
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and
     // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
     // write is a claim anvil would be inventing.
-    project: { commands: [], tools: [], env: [], services: [], references: [] },
+    project: {
+      commands: [],
+      tools: [],
+      env: [],
+      services: [],
+      references: [],
+      credentials: [],
+      access: [],
+      hardware: [],
+    },
   }
   if (SCHEMA_URL !== undefined) body.$schema = SCHEMA_URL
   return `${JSON.stringify(body, null, 2)}\n`
