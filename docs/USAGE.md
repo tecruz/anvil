@@ -250,6 +250,17 @@ generated plan. It refuses stale or tampered plans, changed source bytes, a dest
 appeared since planning, and dirty or unknown repository state. Validation is not approval:
 the plan itself always reports `approval: "not-granted"`.
 
+A saved plan goes stale when the repository moves, or when an input that shapes a proposal
+changes: the install commands, a tool's `install` text, or the default working directory.
+Editing a requirement it cannot change — `project.env`, `project.services`,
+`project.references`, `project.credentials`, `project.access` or `project.hardware` — leaves
+an otherwise identical plan current. Upgrading anvil works the same way: a new requirement
+array does not invalidate saved plans. When a check does report `stale`, the reason says so:
+re-run `anvil setup plan` (or `anvil setup plan --adapter local-skill ...`), review the fresh
+proposal and validate that one. A staged `anvil init` bundle follows the same rule; only the
+declarations that can change a generated file, currently `project.commands`, feed its input
+hash.
+
 ### Approving one local-skill plan
 
 Approval is a separate, single-use grant, stored outside the repository:
@@ -564,6 +575,11 @@ Two layers, repo-local wins:
   rejected. `required` defaults to true. Checks run only with
   `--check`.
 
+The three requirement arrays share one id namespace. An id may appear at most once across
+`project.credentials`, `project.access` and `project.hardware`, because each entry becomes a
+named action (`request:<id>` or `provide-hardware:<id>`) and reports its id; a `vpn`
+credential and a `vpn` access entry would name two different needs.
+
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
 `provider.default` should fail on day one rather than silently do nothing for a year. That
 also means an older anvil rejects a config that uses `project.credentials`,
@@ -718,6 +734,11 @@ not be installed, the git in use does not support `extensions.worktreeConfig`.
 
 **`The staging bundle is stale`.** The repository changed between `anvil init` and
 `anvil init --apply`. Re-run `anvil init`, review the new diff, and apply again.
+
+**A setup plan validates as `stale`.** The repository moved, or an install command, tool
+install or working directory changed after the plan was saved. Re-run `anvil setup plan`
+(or the `--adapter local-skill` form), review the fresh proposal and validate that one.
+Requirement declarations such as `project.credentials` do not invalidate a plan.
 
 **A claim was refused.** Every refusal names the reason: a branch that already exists, an
 occupied worktree path, a dirty base branch, or a path over the Windows length budget.

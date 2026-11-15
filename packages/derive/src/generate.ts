@@ -16,6 +16,20 @@ import type { DeclaredCommand, ProjectConfig } from '@anvil/core'
 import type { MatchResult } from '@anvil/playbooks'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
 
+/**
+ * The declarations that can change a generated artifact.
+ *
+ * Every generator in this module reads `commands` and nothing else. Tool, reference,
+ * environment, service, credential, access and hardware declarations describe what a machine
+ * or a reader needs; they never appear in a generated file. A staging bundle hashes its
+ * inputs so a changed repository is caught, not so a declaration that cannot change a byte
+ * invalidates a diff the owner already reviewed — or every bundle in flight when an upgrade
+ * adds a new declaration array.
+ */
+export function generationInputs(declared: ProjectConfig): Pick<ProjectConfig, 'commands'> {
+  return { commands: declared.commands }
+}
+
 export interface GeneratedArtifact {
   path: string
   content: string

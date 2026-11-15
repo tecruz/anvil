@@ -27,6 +27,7 @@ import {
   generateAgentsFile,
   generateReviewCommand,
   generateVerifySkill,
+  generationInputs,
   hashInputs,
   inspectStaging,
   readManifest,
@@ -282,7 +283,7 @@ export const initCommand: Command = {
       profile: { ...profile, files: undefined, root: undefined },
       report: { score: loaded.report.score, findings: loaded.report.findings },
       playbookIds: playbooks.map((p) => p.id),
-      ...(declared === undefined ? {} : { declared }),
+      ...(declared === undefined ? {} : { declared: generationInputs(declared) }),
     })
 
     if (args.values.apply === true)

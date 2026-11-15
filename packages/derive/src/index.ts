@@ -36,6 +36,7 @@ export {
   generateAgentsFile,
   generateReviewCommand,
   generateVerifySkill,
+  generationInputs,
 } from './generate.ts'
 export {
   type BuildReadyOptions,

@@ -772,6 +772,40 @@ describe('project: owner-declared capabilities', () => {
       )
     }
   })
+
+  test('rejects an id shared by two requirement arrays', () => {
+    // A requirement id names an action (`request:vpn`) and appears in the readiness report.
+    // Checking each array separately let a credential and an access entry share one name.
+    const pairs = [
+      {
+        project: { credentials: [{ id: 'vpn' }], access: [{ id: 'vpn', kind: 'vpn' }] },
+        at: 'project.access[0].id',
+        prior: 'project.credentials[0]',
+      },
+      {
+        project: { credentials: [{ id: 'gpu' }], hardware: [{ id: 'gpu', gpu: {} }] },
+        at: 'project.hardware[0].id',
+        prior: 'project.credentials[0]',
+      },
+      {
+        project: { access: [{ id: 'vpn', kind: 'vpn' }], hardware: [{ id: 'vpn', gpu: {} }] },
+        at: 'project.hardware[0].id',
+        prior: 'project.access[0]',
+      },
+    ]
+    for (const { project, at, prior } of pairs) {
+      assert.throws(
+        () => mergeConfig(defaultConfig(), { project }, 'cfg'),
+        (err: unknown) => {
+          assert.ok(err instanceof AnvilError)
+          assert.ok(err.message.includes(`${at}: duplicate id`), err.message)
+          assert.ok(err.message.includes(prior), err.message)
+          return true
+        },
+        JSON.stringify(project),
+      )
+    }
+  })
 })
 
 describe('tokenizeCommand', () => {

@@ -654,10 +654,18 @@ function parseEvidenceNames(value: unknown, path: string, issues: ValidationIssu
   return out.length === value.length ? out : undefined
 }
 
-/** Read an id and reject a duplicate within one array, so two needs cannot share a blocker name. */
+/**
+ * Read a requirement id and reject one that is already declared.
+ *
+ * `seen` is shared by `project.credentials`, `project.access` and `project.hardware`, not
+ * allocated per array. A requirement id becomes an action id (`request:<id>`,
+ * `provide-hardware:<id>`) and appears in the `--fail-on-blocked` list, so a `vpn` credential
+ * and a `vpn` access entry would otherwise produce colliding `request:vpn` actions and two
+ * different needs with one name.
+ */
 function readId(
   entry: Record<string, unknown>,
-  seen: ReadonlySet<string>,
+  seen: ReadonlyMap<string, string>,
   at: string,
   issues: ValidationIssue[],
 ): string | undefined {
@@ -665,8 +673,9 @@ function readId(
     issues.push({ path: `${at}.id`, message: 'expected a non-empty string' })
     return undefined
   }
-  if (seen.has(entry.id)) {
-    issues.push({ path: `${at}.id`, message: `duplicate id "${entry.id}"` })
+  const prior = seen.get(entry.id)
+  if (prior !== undefined) {
+    issues.push({ path: `${at}.id`, message: `duplicate id "${entry.id}"; already declared at ${prior}` })
     return undefined
   }
   return entry.id
@@ -676,6 +685,7 @@ function readId(
 function parseDeclaredCredentials(
   value: unknown,
   path: string,
+  seen: Map<string, string>,
   issues: ValidationIssue[],
 ): DeclaredCredential[] | undefined {
   if (!Array.isArray(value)) {
@@ -683,7 +693,6 @@ function parseDeclaredCredentials(
     return undefined
   }
   const out: DeclaredCredential[] = []
-  const seen = new Set<string>()
   value.forEach((entry, index) => {
     const at = `${path}[${index}]`
     if (!isPlainObject(entry)) {
@@ -714,7 +723,7 @@ function parseDeclaredCredentials(
       }
       credential.required = entry.required
     }
-    seen.add(id)
+    seen.set(id, at)
     out.push(credential)
   })
   return out
@@ -723,13 +732,17 @@ function parseDeclaredCredentials(
 const ACCESS_KINDS: readonly DeclaredAccessKind[] = ['vpn', 'sso', 'registry', 'network', 'other']
 
 /** Validate `project.access`. The kind is mandatory; `target` is a label, never contacted. */
-function parseDeclaredAccess(value: unknown, path: string, issues: ValidationIssue[]): DeclaredAccess[] | undefined {
+function parseDeclaredAccess(
+  value: unknown,
+  path: string,
+  seen: Map<string, string>,
+  issues: ValidationIssue[],
+): DeclaredAccess[] | undefined {
   if (!Array.isArray(value)) {
     issues.push({ path, message: 'expected an array' })
     return undefined
   }
   const out: DeclaredAccess[] = []
-  const seen = new Set<string>()
   value.forEach((entry, index) => {
     const at = `${path}[${index}]`
     if (!isPlainObject(entry)) {
@@ -769,7 +782,7 @@ function parseDeclaredAccess(value: unknown, path: string, issues: ValidationIss
       }
       access.required = entry.required
     }
-    seen.add(id)
+    seen.set(id, at)
     out.push(access)
   })
   return out
@@ -822,6 +835,7 @@ function parseEnumList<T extends string>(
 function parseDeclaredHardware(
   value: unknown,
   path: string,
+  seen: Map<string, string>,
   issues: ValidationIssue[],
 ): DeclaredHardware[] | undefined {
   if (!Array.isArray(value)) {
@@ -829,7 +843,6 @@ function parseDeclaredHardware(
     return undefined
   }
   const out: DeclaredHardware[] = []
-  const seen = new Set<string>()
   value.forEach((entry, index) => {
     const at = `${path}[${index}]`
     if (!isPlainObject(entry)) {
@@ -939,7 +952,7 @@ function parseDeclaredHardware(
       }
       hardware.required = entry.required
     }
-    seen.add(id)
+    seen.set(id, at)
     out.push(hardware)
   })
   return out
@@ -1069,16 +1082,20 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
       const references = parseDeclaredReferences(project.references, 'project.references', issues)
       if (references !== undefined) next.project.references = references
     }
+    // One id namespace for every requirement the machine may have to satisfy. The three
+    // arrays all become named actions (`request:<id>`, `provide-hardware:<id>`), so an id
+    // shared across them would name two different needs.
+    const requirementIds = new Map<string, string>()
     if (project.credentials !== undefined) {
-      const credentials = parseDeclaredCredentials(project.credentials, 'project.credentials', issues)
+      const credentials = parseDeclaredCredentials(project.credentials, 'project.credentials', requirementIds, issues)
       if (credentials !== undefined) next.project.credentials = credentials
     }
     if (project.access !== undefined) {
-      const access = parseDeclaredAccess(project.access, 'project.access', issues)
+      const access = parseDeclaredAccess(project.access, 'project.access', requirementIds, issues)
       if (access !== undefined) next.project.access = access
     }
     if (project.hardware !== undefined) {
-      const hardware = parseDeclaredHardware(project.hardware, 'project.hardware', issues)
+      const hardware = parseDeclaredHardware(project.hardware, 'project.hardware', requirementIds, issues)
       if (hardware !== undefined) next.project.hardware = hardware
     }
   }

@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { audit } from '@anvil/audit'
+import { defaultConfig, type ProjectConfig } from '@anvil/core'
 import {
   applyStaging,
   buildBrief,
@@ -26,6 +27,7 @@ import {
   generateAgentsFile,
   generateReviewCommand,
   generateVerifySkill,
+  generationInputs,
   hashInputs,
   inspectStaging,
   readManifest,
@@ -314,6 +316,39 @@ function hashInputsFrom(dir: string): string {
     playbookIds: playbooks.map((p) => p.id),
   })
 }
+
+/** The staging hash over the same generators inputs, for declaration-projection tests. */
+function stagingHash(project: ProjectConfig): string {
+  return hashInputs({
+    profile: { root: '/repo' },
+    report: { score: 0, findings: [] },
+    playbookIds: [],
+    declared: generationInputs(project),
+  })
+}
+
+test('a declaration the generators never read cannot invalidate a staged bundle', () => {
+  // The generated files depend on declared commands only. A requirement, reference or tool
+  // declaration cannot change a byte, so editing one — or upgrading anvil, which adds a new
+  // requirement array — must not make the owner review an identical diff again.
+  const project = defaultConfig().project
+  const base = stagingHash(project)
+  const requirementOnly: ProjectConfig = {
+    ...project,
+    tools: [{ id: 'node', version: '^22' }],
+    references: [{ id: 'adr', path: 'docs/adr/0001.md' }],
+    env: [{ name: 'DATABASE_URL' }],
+    services: [{ id: 'db', port: 5432 }],
+    credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }],
+    access: [{ id: 'vpn', kind: 'vpn' }],
+    hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' } }],
+  }
+  assert.equal(stagingHash(requirementOnly), base)
+
+  // A changed install command does change the generated context, so it must invalidate.
+  const changedCommand: ProjectConfig = { ...project, commands: [{ kind: 'install', cmd: 'npm ci' }] }
+  assert.notEqual(stagingHash(changedCommand), base)
+})
 
 function stageOnce(dir: string): {
   inputHash: string

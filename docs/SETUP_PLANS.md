@@ -38,7 +38,7 @@ The normal CLI envelope carries a `SetupPlan` in its `data` field:
 | `executed`, `executionSupported` | Both `false` |
 | `approval` | Always `"not-granted"` |
 | `repository` | Physical root, HEAD commit or `null`, and Git worktree state |
-| `inputsDigest` | SHA-256 of effective project declarations and default working directory |
+| `inputsDigest` | SHA-256 of the install commands, tool installs and default working directory that shape the proposal |
 | `actions` | Ordered owner-declared install proposals |
 | `warnings` | Explicit limits and missing knowledge |
 | `digest` | SHA-256 of the canonical payload excluding `digest` itself |
@@ -104,9 +104,11 @@ without regard to case, so a relocated, linked or differently-cased shared index
 hide one. These cases are refused before index-reading commands run.
 
 Validation compares the saved payload with a newly generated plan, not just its claimed
-digest. It refuses changed commands, added fields, forged approval fields, changed effective
-declarations, another repository root, or a different HEAD. Dirty, missing-HEAD, nested
-profile or incomplete repository state cannot validate as current.
+digest. It refuses changed commands, added fields, forged approval fields, changed setup
+inputs, another repository root, or a different HEAD. A requirement declaration such as
+`project.credentials`, `project.access` or `project.hardware` cannot add, remove or alter an
+action, so it is not a setup input; editing one keeps an otherwise identical plan current.
+Dirty, missing-HEAD, nested profile or incomplete repository state cannot validate as current.
 
 The validation payload reports `current`, `stale`, `invalid` or `unknown` and always retains
 `approval: "not-granted"` and `executed: false`. A refusal emits `ok: false` with the payload

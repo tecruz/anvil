@@ -131,17 +131,41 @@ describe('setup proposals', () => {
     }
   })
 
-  test('a moved repository, new HEAD, changed requirements or changed working directory invalidates the plan', () => {
+  test('a moved repository, new HEAD, changed install input or working directory invalidates the plan', () => {
     const declared = config({ tools: [{ id: 'node', install: 'install node', version: '^22' }] })
     const saved = plan(declared)
-    for (const current of [
+    const current = [
       plan(declared, { ...repository, root: '/other-repo' }),
       plan(declared, { ...repository, head: 'b'.repeat(40) }),
       plan(config({ tools: [{ id: 'node', install: 'install node', version: '^24' }] })),
       plan(declared, repository, 'app'),
-      plan({ ...declared, env: [{ name: 'NEW_REQUIREMENT' }] }),
+      plan(config({ commands: [{ kind: 'install', cmd: 'npm ci' }] })),
+    ]
+    for (const candidate of current) {
+      const validation = validateSetupPlan(saved, candidate)
+      assert.equal(validation.status, 'stale')
+      assert.match(validation.reason, /anvil setup plan/, 'a stale plan names the command to re-run')
+    }
+  })
+
+  test('a requirement-only declaration change keeps a reviewed plan current', () => {
+    // A plan is built from install commands, tool installs and the working directory. A
+    // credential, access or hardware entry adds no action, so editing one cannot change the
+    // proposal — and an upgrade that adds a requirement array must not invalidate every
+    // saved plan either.
+    const base = { tools: [{ id: 'node', install: 'install node' }] }
+    const saved = plan(config(base))
+    for (const changed of [
+      config({ ...base, env: [{ name: 'NEW_REQUIREMENT' }] }),
+      config({ ...base, services: [{ id: 'db', port: 5432 }] }),
+      config({ ...base, references: [{ id: 'adr', path: 'docs/adr/0001.md' }] }),
+      config({ ...base, credentials: [{ id: 'npm', env: ['NPM_TOKEN'] }] }),
+      config({ ...base, access: [{ id: 'vpn', kind: 'vpn' }] }),
+      config({ ...base, hardware: [{ id: 'gpu', gpu: { vendor: 'nvidia' } }] }),
     ]) {
-      assert.equal(validateSetupPlan(saved, current).status, 'stale')
+      const candidate = plan(changed)
+      assert.equal(candidate.inputsDigest, saved.inputsDigest)
+      assert.equal(validateSetupPlan(saved, candidate).status, 'current')
     }
   })
 
