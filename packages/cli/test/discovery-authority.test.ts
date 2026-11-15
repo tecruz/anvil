@@ -87,7 +87,10 @@ function isolatedEnv(home: string, gitConfig: string): NodeJS.ProcessEnv {
 }
 
 function git(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=.no-hooks', ...args], {
+  // No signing, no hooks, and no background maintenance or gc that could write into `.git`
+  // while a snapshot is being taken.
+  const isolation = ['commit.gpgsign=false', 'core.hooksPath=.no-hooks', 'maintenance.auto=false', 'gc.auto=0']
+  return execFileSync('git', [...isolation.flatMap((setting) => ['-c', setting]), ...args], {
     cwd,
     env,
     encoding: 'utf8',
@@ -211,7 +214,20 @@ function seedLocalSkill(fx: Fixture): void {
 
 type Tree = Map<string, string>
 
-/** Every entry under `root`, keyed by its slash-separated relative path. */
+/**
+ * Whether a path is part of the snapshot.
+ *
+ * Git's object store, index and lock files change under Git's own housekeeping (macOS runners
+ * run background maintenance after a commit), so inside `.git` only the parts that grant
+ * execution are watched: the config and the hooks. The working tree is watched in full, and
+ * `git status` covers it as well.
+ */
+function watched(key: string): boolean {
+  if (key !== '.git' && !key.startsWith('.git/')) return true
+  return key === '.git' || key === '.git/config' || key === '.git/hooks' || key.startsWith('.git/hooks/')
+}
+
+/** Every watched entry under `root`, keyed by its slash-separated relative path. */
 function treeOf(root: string): Tree {
   const tree: Tree = new Map()
   if (!existsSync(root)) return tree
@@ -219,6 +235,7 @@ function treeOf(root: string): Tree {
     for (const name of readdirSync(dir).sort()) {
       const path = join(dir, name)
       const key = relative(root, path).split(sep).join('/')
+      if (!watched(key)) continue
       const stat = lstatSync(path)
       if (stat.isSymbolicLink()) tree.set(key, `link:${readlinkSync(path)}`)
       else if (stat.isDirectory()) {

@@ -232,21 +232,21 @@ Discover -> inspect -> approve -> install/configure -> verify
 
 ### Acceptance
 
-- [x] Discovering a resource never authorizes installing or executing it, for the commands
-  that exist today. `packages/cli/test/discovery-authority.test.ts` seeds a discovered entry
+- [x] Discovering a resource never authorizes installing or executing it, for the commands that
+  exist today. `packages/cli/test/discovery-authority.test.ts` seeds a discovered entry
   whose install command would write a marker if anything ran it, isolates Git and the home
-  directory, and snapshots the repository (`git status` plus every file's contents), the
-  home, `ANVIL_CONFIG_HOME` and the approval-store parent around each step; the only file
-  allowed to change is the discovery cache. It drives the real CLI for
-  `playbook discover --local-only`, `plan`, `brief`, `setup plan`, `setup validate` and a
-  refused `setup apply`, and runs `refreshLive` and the `plan`/`brief` enrichment
-  (`liveEntriesForPlan`, default and `--refresh`) in-process behind a fake transport. The
-  marker is never written, no approval store is created, `plan` and `brief` show the entry
-  only as `live` guidance (never as a brief command or verification step), and `setup plan`
-  proposes only owner declarations, nothing at all when there are none. _Scope: `playbook
-  discover` over the network is covered through the shared `refreshLive`/`runDiscovery`
-  path, not end to end, because the CLI has no transport seam; a future installer or
-  adapter needs its own proof._
+  directory, and snapshots the repository (`git status`, every working-tree file's contents,
+  and `.git/config` and hooks), the home, `ANVIL_CONFIG_HOME` and the approval-store parent
+  around each step; the only file allowed to change is the discovery cache. It drives the
+  real CLI for `playbook discover --local-only`, `plan`, `brief`, `setup plan`, `setup
+  validate` and a refused `setup apply`, and runs `refreshLive` and the `plan`/`brief`
+  enrichment (`liveEntriesForPlan`, default and `--refresh`) in-process behind a fake
+  transport. The marker is never written, no approval store is created, `plan` and `brief`
+  show the entry only as `live` guidance (never as a brief command or verification step),
+  and `setup plan` proposes only owner declarations, nothing at all when there are none.
+  _Scope: `playbook discover` over the network is covered through the shared
+  `refreshLive`/`runDiscovery` path, not end to end, because the CLI has no transport seam;
+  a future installer or adapter needs its own proof._
 - [x] Approval applies to the reviewed resource and actions, not arbitrary future
   discovery results. A grant binds the full plan digest, repository identity, source hash,
   destination and adapter fingerprint, and is single-use. _Partial: implemented for the
