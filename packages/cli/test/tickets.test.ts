@@ -340,4 +340,54 @@ describe('the claim command, end to end', () => {
     }
     assert.deepEqual(registry.claims[0]?.ticket, { provider: 'github', id: '42', key: 'gh-42', url: ISSUE.url })
   })
+
+  test('anvil crew up --tickets gh-42 claims the issue with a stub gh on PATH', { timeout: 180_000 }, () => {
+    const repo = makeRepo()
+    const stub = ghOnPath()
+    const worktreeRoot = `${repo}-crew-worktrees`
+    temps.push(worktreeRoot)
+    // The crew reads its worktree root from configuration. Point the global config at the
+    // temp directory so the worktrees are created there rather than in a developer's
+    // `~/.anvil`, and keep the repository itself clean.
+    const configHome = temp('anvil-tickets-config-')
+    writeFileSync(
+      join(configHome, 'anvil.config.json'),
+      JSON.stringify({ schemaVersion: 1, git: { worktreeRoot } }),
+      'utf8',
+    )
+
+    const stdout = execFileSync(process.execPath, [CLI_MAIN, 'crew', 'up', '--tickets', 'gh-42', '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: configHome,
+        PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+      },
+    })
+
+    const envelope = JSON.parse(stdout) as {
+      ok: boolean
+      data: { claims: Array<{ key: string; branch: string; worktree: string }>; failures: unknown[] }
+    }
+    assert.equal(envelope.ok, true)
+    assert.deepEqual(envelope.data.failures, [])
+    assert.equal(envelope.data.claims.length, 1)
+    const claim = envelope.data.claims[0]!
+    assert.equal(claim.key, 'gh-42')
+    assert.match(claim.branch, /^feat\/gh-42-login-redirect-drops-the/)
+
+    // The same bundle `claim` writes: a crew claim is not a degraded one.
+    const bundle = readFileSync(join(claim.worktree, CONTEXT_FILE), 'utf8')
+    assert.match(bundle, /Login redirect drops the return path/)
+    assert.match(bundle, /- \[ \] the return path survives the redirect/)
+
+    const registry = JSON.parse(readFileSync(join(repo, '.anvil', 'claims.json'), 'utf8')) as {
+      claims: Array<{ key: string; ticket: { provider: string; id: string; key: string } }>
+    }
+    assert.equal(registry.claims[0]?.ticket.provider, 'github')
+    assert.equal(registry.claims[0]?.ticket.key, 'gh-42')
+  })
 })
