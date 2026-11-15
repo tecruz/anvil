@@ -9,13 +9,19 @@
 export {
   type Brief,
   type BriefCommand,
+  type BriefContextPolicy,
   type BriefFileExcerpt,
   type BriefModule,
+  type BriefQuestion,
   type BriefReference,
   type BriefTarget,
   type BuildBriefOptions,
+  briefContextPolicy,
+  briefQuestions,
   buildBrief,
   computeGaps,
+  INTENDED_BEHAVIOR_QUESTION,
+  INTENDED_BEHAVIOR_QUESTION_ID,
 } from './brief.ts'
 export {
   buildHunks,
@@ -172,6 +178,7 @@ export {
   readManifest,
   readRepoFile,
   readStaged,
+  repoFileIdentity,
   type StagedFile,
   type StagingManifest,
   type StagingState,

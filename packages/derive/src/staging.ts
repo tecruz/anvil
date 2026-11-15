@@ -265,6 +265,23 @@ export function readRepoFile(repoRoot: string, relPath: string): string | null {
   }
 }
 
+/**
+ * The file a repo-relative path resolves to, as `device:inode`, or `null`.
+ *
+ * Follows symlinks and never opens the file, so two names for one document (a symlink, a hard
+ * link, a different case on a case-insensitive volume) compare equal without reading either.
+ * `null` when the path names no regular file or the platform reports no inode.
+ */
+export function repoFileIdentity(repoRoot: string, relPath: string): string | null {
+  try {
+    const stat = statSync(join(repoRoot, relPath), { bigint: true })
+    if (!stat.isFile() || stat.ino === 0n) return null
+    return `${stat.dev}:${stat.ino}`
+  } catch {
+    return null
+  }
+}
+
 export interface StagingState {
   exists: boolean
   manifest: StagingManifest | null
