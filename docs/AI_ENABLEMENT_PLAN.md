@@ -232,7 +232,21 @@ Discover -> inspect -> approve -> install/configure -> verify
 
 ### Acceptance
 
-- [ ] Discovering a resource never authorizes installing or executing it.
+- [x] Discovering a resource never authorizes installing or executing it, for the commands that
+  exist today. `packages/cli/test/discovery-authority.test.ts` seeds a discovered entry
+  whose install command would write a marker if anything ran it, isolates Git and the home
+  directory, and snapshots the repository (`git status`, every working-tree file's contents,
+  and `.git/config` and hooks), the home, `ANVIL_CONFIG_HOME` and the approval-store parent
+  around each step; the only file allowed to change is the discovery cache. It drives the
+  real CLI for `playbook discover --local-only`, `plan`, `brief`, `setup plan`, `setup
+  validate` and a refused `setup apply`, and runs `refreshLive` and the `plan`/`brief`
+  enrichment (`liveEntriesForPlan`, default and `--refresh`) in-process behind a fake
+  transport. The marker is never written, no approval store is created, `plan` and `brief`
+  show the entry only as `live` guidance (never as a brief command or verification step),
+  and `setup plan` proposes only owner declarations, nothing at all when there are none.
+  _Scope: `playbook discover` over the network is covered through the shared
+  `refreshLive`/`runDiscovery` path, not end to end, because the CLI has no transport seam;
+  a future installer or adapter needs its own proof._
 - [x] Approval applies to the reviewed resource and actions, not arbitrary future
   discovery results. A grant binds the full plan digest, repository identity, source hash,
   destination and adapter fingerprint, and is single-use. _Partial: implemented for the
@@ -289,19 +303,46 @@ be inferred entirely from source code.
 
 ### Acceptance
 
-- [ ] Real-agent results are clearly separated from synthetic harness checks.
-- [ ] Reports distinguish measured improvement, regression and insufficient evidence.
-- [ ] Unknown measurements remain unknown, and failures are not rerun selectively
-  until a favorable comparison appears.
-- [ ] Claims of effectiveness identify the tested technologies and conditions rather
-  than implying universal coverage.
+- [x] Real-agent results are clearly separated from synthetic harness checks. The console
+  report prints an `Evidence source` line (`synthetic harness check (fake-agent)`,
+  `real-agent results`, `unknown` when no model was recorded, or `mixed`) and a per-group
+  evidence label. `latest.json` and its run record are fake-agent only, and this is enforced:
+  the harness does not promote a completed run with any other model into `latest.json`, and
+  `npm run eval:check` fails when the summary, the run record or its declared models name
+  anything but `fake-agent`. Real-agent records live under `eval-results/pilots/`; see
+  [eval-results/README.md](../eval-results/README.md). `scripts/test/eval-paired-report.test.ts`
+  covers the labels, `packages/cli/test/eval-gate.test.ts` the guard, and
+  `scripts/test/eval-resume.test.ts` the gate refusing a relabelled run end to end. The
+  promotion refusal itself has no real-agent test, because that would need a model run.
+- [x] Reports distinguish measured improvement, regression and insufficient evidence.
+  `classifyPairedResult` gives each scenario/model group `measured improvement`,
+  `measured regression` or `insufficient evidence`, with the reason. A direction needs five
+  usable pairs (complete, with no run error on either side), at least three pairs where only
+  the winning variant succeeded, and a margin of two such pairs; 3-0 and 3-1 are called,
+  1-0, 2-0, 3-2 and ties are not. Pairs with a run error are excluded and counted. The report
+  never pools groups into an overall verdict; its totals are descriptive. These are
+  thresholds for a small sample, not a significance test.
+- [ ] Unknown measurements remain unknown, and failures are not rerun selectively until a
+  favorable comparison appears. _Partial._ Cost and tokens stay `null` unless the host ledger
+  reports them, a missing duration stays `null`, an incomplete pair is not a zero, and every
+  attempt is kept in the run record. However, `--resume` retries a key whose last attempt
+  failed (an agent timeout or exit), and the retry's outcome replaces the failed one in the
+  results the report and summary use; the failed attempt survives only in the record's
+  attempt history. Until a failed attempt stays a scored outcome, or resume refuses to retry
+  it for a comparison, this item is not met.
+- [x] Claims of effectiveness identify the tested technologies and conditions rather than
+  implying universal coverage. Each group prints its scenario as the scope, the source line
+  names the evidence kind, verdicts are never pooled across scenarios or models, and the only
+  retained real-agent record remains one tiny JavaScript scenario and one free model. No
+  broader claim is made.
 
 As of this plan's preparation, the latest committed summary in
 [eval-results/latest.json](../eval-results/latest.json) uses `fake-agent`. It checks
 evaluation machinery; it is not evidence of real-AI effectiveness across technologies.
 The separate [2026-11-14 pilot](evidence/2026-11-14-skill-guidance.md) retains real-agent
 outcomes without replacing that hermetic summary: task success tied in all three pairs,
-and cost and skill access remained unknown.
+and cost and skill access remained unknown. Its 3 tied pairs are `insufficient evidence`
+under the report's direction rule, not an improvement or regression.
 
 ## Delivery order
 
