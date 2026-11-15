@@ -12,7 +12,7 @@ import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess, tokenizeC
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { GhForgeTransport, GitHubProvider, hostFromRemote, requireCapability } from '@anvil/providers'
-import type { Ticket } from '@anvil/tickets'
+import { parseRef, type Ticket } from '@anvil/tickets'
 import { readClaims } from '@anvil/worktrees'
 import { type ShipResult, ship } from '@anvil/worktrees/ship'
 import { ticketProviderFor } from '../tickets.ts'
@@ -278,15 +278,31 @@ async function mainRootFor(ctx: CommandContext): Promise<string> {
   return (await mainWorktreeRoot(cwd)) ?? cwd
 }
 
-async function loadTicketFor(repoRoot: string, ref: { provider: string; id: string; key: string }): Promise<Ticket> {
-  // The claim records the provider and the key, so the lookup is the same resolution rule
-  // as every other command, with the claim's provider as the explicit selection. A local
-  // ticket is read from `ANVIL_TICKETS_DIR` rather than from a hardcoded default.
+async function loadTicketFor(
+  repoRoot: string,
+  ref: { provider: string; id: string; key: string; url?: string },
+): Promise<Ticket> {
+  // The claim records the provider, the id and the URL, so the lookup is the same
+  // resolution rule as every other command, with the claim's provider as the explicit
+  // selection. The id and URL come from the claim rather than being re-derived from the
+  // key: re-parsing a URL turned `https://github.com/acme/issues/issues/42` into the id
+  // `issues`, and re-parsing a key loses the repository the claim was made against. A
+  // local ticket is read from `ANVIL_TICKETS_DIR`, not from a hardcoded default.
+  const parsed = parseRef(ref.key, ref.provider)
   const resolved = await ticketProviderFor(repoRoot, { ref: ref.key, provider: ref.provider })
   if (resolved.ref === undefined) {
     throw new AnvilError(ErrorCode.Internal, `The claim for ${ref.key} has no ticket reference`, {
       hint: 'This is a bug in anvil: a claim always records the ticket it was made from.',
     })
   }
-  return resolved.provider.fetch(resolved.ref)
+  // The claim is the authority on which issue it names. Keep its id, and keep a hosted
+  // ticket's URL so the provider reads and comments on the right repository.
+  const ticketRef = {
+    ...parsed,
+    ...resolved.ref,
+    id: ref.id === '' ? parsed.id : ref.id,
+    key: ref.key,
+    ...(ref.url === undefined ? {} : { url: ref.url }),
+  }
+  return resolved.provider.fetch(ticketRef)
 }

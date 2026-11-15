@@ -215,10 +215,31 @@ describe('PR body', () => {
   })
 
   test('includes the GitHub closing keyword so the ticket closes on merge', () => {
-    // `Closes #42`, not `Closes gh-42`: GitHub only auto-closes on a reference it can
-    // resolve (#n, owner/repo#n, or a URL). The human key renders as prose and the ticket
-    // stays open after merge, silently.
-    assert.match(renderPrBody({ ...base, ticket: ticket() }), /Closes #42/)
+    // GitHub only auto-closes on a reference it can resolve (#n, owner/repo#n, or a URL).
+    // The ticket URL is used because the ticket may live in a different repository than the
+    // pull request: a bare `#42` would close that repository's issue 42 instead.
+    assert.match(renderPrBody({ ...base, ticket: ticket() }), /Closes https:\/\/github\.com\/acme\/app\/issues\/42/)
+  })
+
+  test('a ticket with no URL closes with the bare issue number', () => {
+    const noUrl = ticket({ ref: { provider: 'github', id: '42', key: 'gh-42' } })
+    assert.match(renderPrBody({ ...base, ticket: noUrl }), /Closes #42/)
+  })
+
+  test('a cross-repository ticket never closes a same-numbered issue here', () => {
+    // The claim was made from another repository's issue. `Closes #42` would close this
+    // repository's issue 42 and leave the real ticket open.
+    const external = ticket({
+      ref: {
+        provider: 'github',
+        id: '42',
+        key: 'gh-42',
+        url: 'https://github.com/acme/tracker/issues/42',
+      },
+    })
+    const body = renderPrBody({ ...base, ticket: external })
+    assert.match(body, /Closes https:\/\/github\.com\/acme\/tracker\/issues\/42/)
+    assert.doesNotMatch(body, /Closes #42/)
   })
 
   test('a local ticket gets no closing keyword, because there is nothing to close', () => {
@@ -758,11 +779,13 @@ describe('GitHub transport', () => {
       () =>
       async (args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
         seen.push(args)
-        return {
-          stdout: '{"number":1,"url":"https://example.test/pull/1","state":"OPEN"}',
-          stderr: '',
-          exitCode: 0,
-        }
+        // `issue list` answers with an array; every other call in this test reads one
+        // object. A single stub answer for both was hiding which shape each call needs.
+        const stdout =
+          args[0] === 'issue' && args[1] === 'list'
+            ? '[{"number":1,"state":"OPEN","labels":[]}]'
+            : '{"number":1,"url":"https://example.test/pull/1","state":"OPEN"}'
+        return { stdout, stderr: '', exitCode: 0 }
       }
     const provider = new GitHubProvider({
       host: 'ghe.acme-corp.com',

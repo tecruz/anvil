@@ -115,6 +115,26 @@ recognised and refused that way rather than parsed as a local ticket.
 | `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | `create`, `list`, `comment`, `transition`, `link` | native `state:` frontmatter |
 | `github` | `gh`, always `execFile` with an argument array | `gh auth login` | yes, through `gh` | `create`, `list`, `comment`, `transition`, `link` | open/closed; `in_progress`, `in_review`, `wontfix` are labels |
 
+Three implementation rules make the GitHub provider honest:
+
+- **A URL names its repository.** `fetch`, `comment` and `transition` pass `--repo
+  <host>/<owner>/<repo>` when the ref carries a ticket URL, so a pasted link is never
+  silently resolved against the checkout anvil happens to run in. A ref whose URL cannot
+  name a repository is refused instead of re-aimed. The URL is parsed once, in
+  `@anvil/tickets`: the issue marker is found from the end of the path, so a repository
+  literally named `issues` or `pull` still yields the issue number. `ship` reuses the id
+  and URL stored in the claim rather than re-deriving them.
+- **An unreadable list is not an empty list.** `list` throws on a non-zero `gh` exit or a
+  body that is not a JSON array. Callers treat empty as "no work", so an error there would
+  otherwise look like a finished backlog. Label-emulated states are filtered client-side
+  from the `state` and `labels` fields, using the same function `fetch` uses, because no
+  `gh` flag can express "open but not `in-review`". Because `gh issue list` has no cursor,
+  a page that is entirely filtered out is retried with a larger limit; stopping at a fixed
+  page size would report no ready work while a ready issue sat just past it.
+- **A transition is the whole state.** After closing or reopening as needed, one `gh issue
+  edit` adds the desired state label and removes the other state labels in the same call,
+  so `in_review → todo` leaves `todo` rather than a stale `in-review`.
+
 Both implement the same `TicketProvider` interface and pass the same contract tests
 (`packages/providers/test/contract.test.ts`), including the same states, comment semantics
 and acceptance-criteria extraction — that is what keeps `local` a real provider rather

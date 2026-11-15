@@ -49,7 +49,9 @@ function localHarness(): Harness {
 }
 
 function githubHarness(): Harness {
-  const fake = fakeGh({ issue: { number: 7, title: 'seeded', body: 'seeded body' } })
+  // An empty store: every ticket this harness reads was created through the provider, so a
+  // contract check cannot pass on state the test seeded out of band.
+  const fake = fakeGh({})
   const provider = new GitHubProvider({ run: fake.run })
   const unauth = fakeGh({ issue: { number: 7, title: 'seeded' }, authenticated: false })
   return {
@@ -138,6 +140,23 @@ function runContract(name: string, make: () => Harness): void {
       assert.equal((await provider.fetch(ref)).normalizedState, 'in_review')
     })
 
+    test('a transition back out of a state leaves that state behind', async () => {
+      // A state is the whole state. Going to `in_progress` and back to `todo` must remove
+      // the label, or a read reports the state the transition was supposed to leave.
+      const { provider, seed } = make()
+      const ref = await seed('Rework target', 'Body.')
+
+      await provider.transition(ref, 'in_progress')
+      assert.equal((await provider.fetch(ref)).normalizedState, 'in_progress')
+
+      await provider.transition(ref, 'todo')
+      assert.equal((await provider.fetch(ref)).normalizedState, 'todo')
+
+      await provider.transition(ref, 'in_review')
+      await provider.transition(ref, 'in_progress')
+      assert.equal((await provider.fetch(ref)).normalizedState, 'in_progress')
+    })
+
     test('a listing includes the ticket that is still in todo', async () => {
       const { provider, seed } = make()
       const ref = await seed('Listed ticket', 'Body.')
@@ -146,6 +165,22 @@ function runContract(name: string, make: () => Harness): void {
         refs.some((r) => r.key === ref.key),
         `expected ${ref.key} in ${refs.map((r) => r.key).join(', ') || '(nothing)'}`,
       )
+    })
+
+    test('a listing excludes the tickets that moved on to another state', async () => {
+      // `crew up` takes its work from `list({ state: 'todo' })`. A ticket already in
+      // progress or in review is not ready work, and must not be claimed a second time.
+      const { provider, seed } = make()
+      const todo = await seed('Still to do', 'Body.')
+      const progress = await seed('Already moving', 'Body.')
+      const review = await seed('Already in review', 'Body.')
+      await provider.transition(progress, 'in_progress')
+      await provider.transition(review, 'in_review')
+
+      const keys = ((await provider.list?.({ state: 'todo' })) ?? []).map((r) => r.key)
+      assert.ok(keys.includes(todo.key), `expected ${todo.key} in ${keys.join(', ') || '(nothing)'}`)
+      assert.ok(!keys.includes(progress.key), `${progress.key} is in progress`)
+      assert.ok(!keys.includes(review.key), `${review.key} is in review`)
     })
 
     test('a link is recorded on the ticket', async () => {
@@ -191,6 +226,158 @@ describe('the github provider never builds a shell string', () => {
       run: async (): Promise<RunResult> => ({ stdout: '', stderr: 'boom', exitCode: 1 }),
     })
     await assert.rejects(() => provider.fetch({ provider: 'github', id: '1', key: 'gh-1' }), /boom/)
+  })
+})
+
+describe('the github provider where the fake is the only witness', () => {
+  test('a failed listing is an error, not an empty backlog', async () => {
+    // `crew up` and `issue list` treat an empty answer as "nothing to do". A 403 or a bad
+    // repository must not be reported as a successful empty list.
+    const fake = fakeGh({
+      issue: { number: 1, title: 't' },
+      listFailure: 'HTTP 403: resource not accessible by integration',
+    })
+    const provider = new GitHubProvider({ run: fake.run })
+    await assert.rejects(() => provider.list({ state: 'todo' }), /403/)
+  })
+
+  test('a listing that is not a JSON array is an error, not an empty backlog', async () => {
+    const provider = new GitHubProvider({
+      run: async (): Promise<RunResult> => ({ stdout: 'not json', stderr: '', exitCode: 0 }),
+    })
+    await assert.rejects(() => provider.list({ state: 'todo' }), /not a list/)
+  })
+
+  test('a listing filters out the issues that are already in progress or in review', async () => {
+    const fake = fakeGh({
+      issue: { number: 1, title: 'todo one' },
+      listIssues: [
+        { number: 1, title: 'todo one' },
+        { number: 2, title: 'moving', labels: [{ name: 'in-progress' }] },
+        { number: 3, title: 'reviewing', labels: [{ name: 'In Review' }] },
+        { number: 4, title: 'closed', state: 'CLOSED' },
+      ],
+    })
+    const provider = new GitHubProvider({ run: fake.run })
+    assert.deepEqual(
+      (await provider.list({ state: 'todo' })).map((r) => r.id),
+      ['1'],
+    )
+    // The label may be spelled differently in a real repository; the read and the listing
+    // use the same matcher, so both see the same state.
+    assert.deepEqual(
+      (await provider.list({ state: 'in_review' })).map((r) => r.id),
+      ['3'],
+    )
+  })
+
+  test('a listing keeps looking past a page that is all filtered out', async () => {
+    // `gh` has no cursor: a page can be entirely consumed by issues the caller did not ask
+    // for, and the ready issue can sit just past it. A fixed over-fetch reported an empty
+    // backlog in exactly this shape.
+    const backlog = Array.from({ length: 120 }, (_, i) => ({
+      number: i + 1,
+      title: `already in review ${i + 1}`,
+      state: 'OPEN' as const,
+      labels: [{ name: 'in-review' }],
+    }))
+    backlog.push({ number: 121, title: 'ready', state: 'OPEN', labels: [] })
+
+    const fake = fakeGh({ listIssues: backlog })
+    const provider = new GitHubProvider({ run: fake.run })
+    assert.deepEqual(
+      (await provider.list({ state: 'todo' })).map((r) => r.id),
+      ['121'],
+    )
+    const limits = fake.calls
+      .filter((args) => args[1] === 'list')
+      .map((args) => Number(args[args.indexOf('--limit') + 1]))
+    assert.ok(limits.length >= 2, `expected a retry with a bigger page, saw ${limits.join(', ')}`)
+    assert.ok((limits.at(-1) ?? 0) > (limits[0] ?? 0), `the retry must ask for more: ${limits.join(', ')}`)
+  })
+
+  test('a full page that satisfies the caller does not fetch again', async () => {
+    const fake = fakeGh({
+      listIssues: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, title: `ready ${i + 1}` })),
+    })
+    const provider = new GitHubProvider({ run: fake.run })
+    assert.equal((await provider.list({ state: 'todo', limit: 2 })).length, 2)
+    assert.equal(fake.calls.filter((args) => args[1] === 'list').length, 1)
+  })
+
+  test('a label filter does not reject the case GitHub matched', async () => {
+    // `--label bug` is matched case-insensitively by GitHub, so an issue labelled `Bug`
+    // can come back. Re-checking it with an exact comparison discarded a valid answer.
+    const fake = fakeGh({ listIssues: [{ number: 5, title: 'labelled', labels: [{ name: 'Bug' }] }] })
+    const provider = new GitHubProvider({ run: fake.run })
+    assert.deepEqual(
+      (await provider.list({ label: 'bug' })).map((r) => r.id),
+      ['5'],
+    )
+  })
+
+  test('a repository literally named issues or pull parses to the issue number', async () => {
+    // The issue marker used to be found from the start of the path, so
+    // `acme/issues/issues/42` yielded the id `issues` and `gh issue view issues` failed.
+    const fake = fakeGh({ issue: { number: 42, title: 't' } })
+    const provider = new GitHubProvider({ run: fake.run })
+    const ticket = await provider.fetch({
+      provider: 'github',
+      id: '42',
+      key: 'gh-42',
+      url: 'https://github.com/acme/issues/issues/42',
+    })
+    assert.equal(ticket.ref.id, '42')
+    const view = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'view')
+    assert.ok(view !== undefined)
+    assert.equal(view[2], '42')
+    assert.equal(view[view.indexOf('--repo') + 1], 'github.com/acme/issues')
+  })
+
+  test('a ticket URL keeps its own repository', async () => {
+    // Without `--repo`, gh resolves the number in the current directory. A pasted URL is
+    // an explicit pointer at a different repository, and a comment must land there.
+    const fake = fakeGh({ issue: { number: 42, title: 'elsewhere' } })
+    const provider = new GitHubProvider({ run: fake.run })
+    const ref = {
+      provider: 'github',
+      id: '42',
+      key: 'gh-42',
+      url: 'https://github.com/acme/other-repo/issues/42',
+    }
+
+    await provider.fetch(ref)
+    await provider.comment(ref, 'hello')
+    await provider.transition(ref, 'in_review')
+
+    const target = 'github.com/acme/other-repo'
+    for (const [name, args] of [
+      ['view', fake.calls.find((a) => a[0] === 'issue' && a[1] === 'view')],
+      ['comment', fake.calls.find((a) => a[0] === 'issue' && a[1] === 'comment')],
+      ['edit', fake.calls.find((a) => a[0] === 'issue' && a[1] === 'edit')],
+    ] as const) {
+      assert.ok(args !== undefined, `issue ${name} was never called`)
+      assert.equal(args[args.indexOf('--repo') + 1], target, `issue ${name} must name the URL's repository`)
+    }
+  })
+
+  test('a bare number leaves the repository to gh', async () => {
+    const fake = fakeGh({ issue: { number: 7, title: 'here' } })
+    const provider = new GitHubProvider({ run: fake.run })
+    await provider.fetch({ provider: 'github', id: '7', key: 'gh-7' })
+    const view = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'view')
+    assert.ok(view !== undefined)
+    assert.equal(view.includes('--repo'), false)
+  })
+
+  test('a URL that cannot name a repository is refused rather than re-aimed', async () => {
+    const fake = fakeGh({ issue: { number: 7, title: 'here' } })
+    const provider = new GitHubProvider({ run: fake.run })
+    await assert.rejects(
+      () => provider.fetch({ provider: 'github', id: '7', key: 'gh-7', url: 'not-a-url' }),
+      /Cannot tell which repository/,
+    )
+    assert.deepEqual(fake.calls, [])
   })
 })
 

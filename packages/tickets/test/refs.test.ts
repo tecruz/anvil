@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
-import { formatRef, parseRef, providerHintFor } from '@anvil/tickets'
+import { formatRef, parseRef, providerHintFor, repositoryOf } from '@anvil/tickets'
 
 const GITHUB_URL = 'https://github.com/acme/widgets/issues/42'
 const GITLAB_URL = 'https://gitlab.com/acme/widgets/-/issues/7'
@@ -70,5 +70,51 @@ describe('parseRef', () => {
   test('formatRef shows the key and the URL when it has one', () => {
     assert.equal(formatRef(parseRef('gh-42')), 'gh-42')
     assert.match(formatRef(parseRef(GITHUB_URL)), /^gh-42 \(https:\/\/github\.com/)
+  })
+
+  test('a repository named issues or pull still parses to the issue number', () => {
+    // The marker was found from the start of the path, so `acme/issues/issues/42` gave the
+    // id `issues`. Scanning from the end finds the marker the number actually follows.
+    assert.deepEqual(parseRef('https://github.com/acme/issues/issues/42'), {
+      provider: 'github',
+      id: '42',
+      key: 'gh-42',
+      url: 'https://github.com/acme/issues/issues/42',
+    })
+    assert.deepEqual(parseRef('https://github.com/acme/pull/pull/7'), {
+      provider: 'github',
+      id: '7',
+      key: 'gh-7',
+      url: 'https://github.com/acme/pull/pull/7',
+    })
+    // A path that only looks like a marker is not a ticket: the number has to follow it.
+    assert.equal(parseRef('https://github.com/acme/issues/issues/not-a-number').provider, 'local')
+  })
+
+  test('a GitLab subgroup keeps the whole repository path', () => {
+    assert.deepEqual(parseRef('https://gitlab.com/grp/sub/proj/-/issues/9'), {
+      provider: 'gitlab',
+      id: '9',
+      key: 'gl-9',
+      url: 'https://gitlab.com/grp/sub/proj/-/issues/9',
+    })
+  })
+})
+
+describe('repositoryOf', () => {
+  test('names the repository a ticket URL points at', () => {
+    assert.deepEqual(repositoryOf(GITHUB_URL), { host: 'github.com', path: 'acme/widgets' })
+    assert.deepEqual(repositoryOf(GITLAB_URL), { host: 'gitlab.com', path: 'acme/widgets' })
+    // An Enterprise host is kept as-is, so a pasted GHE URL is read on its own host.
+    assert.deepEqual(repositoryOf('https://ghe.acme-corp.com/acme/widgets/issues/3'), {
+      host: 'ghe.acme-corp.com',
+      path: 'acme/widgets',
+    })
+  })
+
+  test('a bare key or an unusable URL names no repository', () => {
+    for (const input of [undefined, '', 'gh-42', 'not-a-url', 'https://example.com/docs/42']) {
+      assert.equal(repositoryOf(input), null, `${String(input)} must not name a repository`)
+    }
   })
 })

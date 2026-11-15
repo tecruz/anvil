@@ -242,33 +242,84 @@ function keyPrefix(provider: ProviderId): string {
   return provider
 }
 
-function parseTicketUrl(url: string): TicketRef | null {
+/** The repository a hosted ticket URL points at, independent of the forge. */
+export interface TicketRepository {
+  /** The host, without a scheme or port, e.g. `github.com` or `ghe.acme-corp.com`. */
+  host: string
+  /** `owner/repo` for GitHub, or the full group path for a GitLab subgroup. */
+  path: string
+}
+
+interface TicketAddress {
+  repository: TicketRepository
+  id: string
+}
+
+/**
+ * Split a hosted ticket URL into the repository it names and the issue number.
+ *
+ * The issue marker is found by scanning from the **end** for an `issues`/`pull` segment
+ * followed by a number. Scanning from the start picks the wrong segment whenever the
+ * repository itself is called `issues` or `pull` -- `github.com/acme/issues/issues/42`
+ * used to yield the id `issues`, which then reached `gh issue view issues`. The number is
+ * the last thing in the path that the marker can introduce, so the last match is the
+ * right one.
+ */
+function parseTicketAddress(url: string): TicketAddress | null {
   let parsed: URL
   try {
     parsed = new URL(url)
   } catch {
     return null
   }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
   const host = parsed.hostname.toLowerCase()
   const segments = parsed.pathname.split('/').filter((s) => s !== '')
+  const safe = /^[A-Za-z0-9_.-]+$/
 
-  // github.com/<owner>/<repo>/issues/<n>
-  if (host.includes('github')) {
-    const idx = segments.findIndex((s) => s === 'issues' || s === 'pull')
-    if (idx !== -1 && segments[idx + 1] !== undefined) {
-      const id = segments[idx + 1] as string
-      return { provider: 'github', id, key: `gh-${id}`, url }
-    }
-    return null
+  let marker = -1
+  for (let i = segments.length - 2; i >= 0; i--) {
+    const segment = segments[i] as string
+    if (segment !== 'issues' && segment !== 'pull') continue
+    if (!/^\d+$/.test(segments[i + 1] ?? '')) continue
+    marker = i
+    break
   }
-  // gitlab.com/<group>/<project>/-/issues/<n>
-  if (host.includes('gitlab')) {
-    const idx = segments.indexOf('-')
-    if (idx !== -1 && segments[idx + 1] === 'issues' && segments[idx + 2] !== undefined) {
-      const id = segments[idx + 2] as string
-      return { provider: 'gitlab', id, key: `gl-${id}`, url }
-    }
-    return null
+  if (marker < 2) return null
+
+  // GitLab puts a `-` in front of its issue path (`group/project/-/issues/7`); it is a
+  // separator in the URL, not part of the repository.
+  const parts = segments.slice(0, marker).filter((s) => s !== '-' && s !== '')
+  if (parts.length < 2 || !parts.every((s) => safe.test(s))) return null
+  if (host === '') return null
+
+  return {
+    repository: { host, path: parts.join('/') },
+    id: segments[marker + 1] as string,
+  }
+}
+
+/**
+ * The repository a ticket URL names, or null when the URL does not name one.
+ *
+ * Used to keep a pasted issue URL on its own repository: `gh --repo` for the transport,
+ * and a repository-qualified closing keyword in the pull request body.
+ */
+export function repositoryOf(url: string | undefined): TicketRepository | null {
+  if (url === undefined || url === '') return null
+  return parseTicketAddress(url)?.repository ?? null
+}
+
+function parseTicketUrl(url: string): TicketRef | null {
+  const address = parseTicketAddress(url)
+  if (address === null) return null
+  // The provider is decided by the host, so a GHE URL still names no provider rather than
+  // being read as GitHub against the public host.
+  if (address.repository.host.includes('github')) {
+    return { provider: 'github', id: address.id, key: `gh-${address.id}`, url }
+  }
+  if (address.repository.host.includes('gitlab')) {
+    return { provider: 'gitlab', id: address.id, key: `gl-${address.id}`, url }
   }
   return null
 }

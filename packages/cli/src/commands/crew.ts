@@ -118,7 +118,9 @@ async function crewUpFlow(
         hint: 'Name them explicitly with --tickets 1,2,3, or create one with `anvil issue create`.',
       })
     }
-    refs.push(...all.slice(0, limit).map((r) => r.id))
+    // The key, not the bare id: it names the provider it came from, so a listing cannot be
+    // re-read as a local ticket with the same number.
+    refs.push(...all.slice(0, limit).map((r) => r.key))
   }
 
   const tickets: Ticket[] = []

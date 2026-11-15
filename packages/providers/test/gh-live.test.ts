@@ -57,6 +57,10 @@ describe('the gh flag contract (live)', {
       // short-circuited by an early throw before their argv is recorded. `gh issue create`
       // has no --json, so it is the one that answers with a printed URL, like the real one.
       if (args[0] === 'pr' && args[1] === 'view') return { stdout: '', stderr: 'no PR', exitCode: 1 }
+      if (args[0] === 'issue' && args[1] === 'list') {
+        // `issue list` parses an array; a single object is a failed call, not one row.
+        return { stdout: '[{"number":1,"state":"OPEN","labels":[]}]', stderr: '', exitCode: 0 }
+      }
       if (args[0] === 'issue' && args[1] === 'create') {
         return {
           stdout: 'https://github.com/example/app/issues/1\n',

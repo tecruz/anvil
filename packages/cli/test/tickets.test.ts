@@ -97,22 +97,31 @@ async function claimFrom(repo: string, ref: string, run: (args: string[]) => Pro
  * quoting rules for a body full of parentheses and quotes. The script only prints the issue
  * it was built with; nothing here reaches the network.
  */
-function ghOnPath(issue: typeof ISSUE = ISSUE): string {
+function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = []): string {
   const dir = temp('anvil-gh-stub-')
   writeFileSync(join(dir, 'issue.json'), JSON.stringify(issue), 'utf8')
+  writeFileSync(join(dir, 'list.json'), JSON.stringify(list), 'utf8')
   writeFileSync(
     join(dir, 'gh.cjs'),
     [
       "const fs = require('node:fs')",
       "const path = require('node:path')",
       "const issue = fs.readFileSync(path.join(__dirname, 'issue.json'), 'utf8')",
+      "const list = fs.readFileSync(path.join(__dirname, 'list.json'), 'utf8')",
       'const args = process.argv.slice(2)',
       "if (args[0] === 'auth') {",
       "  process.stdout.write('Logged in to github.com account octocat\\n')",
       '  process.exit(0)',
       '}',
-      "if (args[0] === 'issue') {",
-      '  process.stdout.write(issue + "\\n")',
+      "if (args[0] === 'issue' && args[1] === 'list') {",
+      '  process.stdout.write(list + "\\n")',
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'issue' && args[1] === 'view') {",
+      // Answer for the number asked for, the way gh does. A stub that always replays one
+      // issue makes separate claims collide on one branch.
+      '  const wanted = JSON.parse(list).find((entry) => String(entry.number) === String(args[2]))',
+      '  process.stdout.write((wanted === undefined ? issue : JSON.stringify(wanted)) + "\\n")',
       '  process.exit(0)',
       '}',
       "process.stderr.write('stub gh does not implement: ' + args.join(' ') + '\\n')",
@@ -297,6 +306,115 @@ describe('local tickets still work with no account and no gh', () => {
       if (previous === undefined) delete process.env.ANVIL_TICKETS_DIR
       else process.env.ANVIL_TICKETS_DIR = previous
     }
+  })
+})
+
+describe('a listing decides the work, so its failures are not empty answers', () => {
+  test('a failed GitHub listing fails issue list instead of reporting no tickets', { timeout: 180_000 }, () => {
+    // `issue list` and `crew up` both read "no tickets" as "nothing to do". A 403 is not
+    // an empty backlog, and must reach the caller as a failure with the transport's words.
+    const repo = makeRepo()
+    const stub = temp('anvil-gh-failing-')
+    writeFileSync(
+      join(stub, 'gh.cjs'),
+      [
+        'const args = process.argv.slice(2)',
+        "if (args[0] === 'auth') {",
+        "  process.stdout.write('Logged in to github.com account octocat\\n')",
+        '  process.exit(0)',
+        '}',
+        "process.stderr.write('HTTP 403: resource not accessible by integration\\n')",
+        'process.exit(1)',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    if (process.platform === 'win32') {
+      writeFileSync(join(stub, 'gh.cmd'), '@echo off\r\nnode "%~dp0gh.cjs" %*\r\n', 'utf8')
+    } else {
+      const shim = join(stub, 'gh')
+      writeFileSync(shim, '#!/bin/sh\nexec node "$(dirname "$0")/gh.cjs" "$@"\n', 'utf8')
+      chmodSync(shim, 0o755)
+    }
+
+    let failure: { status: number; stdout: string; stderr: string } | null = null
+    try {
+      execFileSync(process.execPath, [CLI_MAIN, 'issue', 'list', '--provider', 'github', '--json'], {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+          PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+        },
+      })
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string }
+      failure = { status: e.status ?? -1, stdout: e.stdout ?? '', stderr: e.stderr ?? '' }
+    }
+
+    assert.ok(failure !== null, 'a failed listing must exit non-zero')
+    assert.notEqual(failure.status, 0)
+    const envelope = JSON.parse(failure.stdout) as { ok: boolean; error?: { message?: string } }
+    assert.equal(envelope.ok, false)
+    assert.match(envelope.error?.message ?? '', /403/)
+  })
+
+  test('crew up claims only the tickets still in todo', { timeout: 180_000 }, () => {
+    // A ticket already in review is not ready work. The crew takes its list from the
+    // provider, so the provider's answer -- not just its --state flag -- has to exclude it.
+    const repo = makeRepo()
+    const todo = { ...ISSUE, number: 42, title: 'Login redirect drops the return path' }
+    const alsoTodo = {
+      ...ISSUE,
+      number: 44,
+      title: 'Expired sessions skip the audit log',
+      url: 'https://github.com/acme/widgets/issues/44',
+    }
+    const reviewing = {
+      ...ISSUE,
+      number: 43,
+      title: 'Already in review',
+      url: 'https://github.com/acme/widgets/issues/43',
+      labels: [{ name: 'in-review' }],
+    }
+    // The stub answers every `issue list` with all three, regardless of flags, the way a
+    // server cannot express "open but not in-review". Filtering is the provider's job.
+    const stub = ghOnPath(todo, [todo, reviewing, alsoTodo])
+    const worktreeRoot = `${repo}-crew-worktrees`
+    temps.push(worktreeRoot)
+    const configHome = temp('anvil-tickets-config-')
+    writeFileSync(
+      join(configHome, 'anvil.config.json'),
+      JSON.stringify({ schemaVersion: 1, git: { worktreeRoot } }),
+      'utf8',
+    )
+
+    const stdout = execFileSync(process.execPath, [CLI_MAIN, 'crew', 'up', '--provider', 'github', '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: configHome,
+        PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+      },
+    })
+
+    const envelope = JSON.parse(stdout) as {
+      ok: boolean
+      data: { claims: Array<{ key: string; branch: string }>; failures: unknown[] }
+    }
+    assert.equal(envelope.ok, true)
+    assert.deepEqual(envelope.data.failures, [])
+    // Only the two todo issues may become claims; the in-review issue is not ready work.
+    assert.deepEqual(
+      envelope.data.claims.map((c) => c.key),
+      ['gh-42', 'gh-44'],
+    )
   })
 })
 

@@ -28,6 +28,7 @@ import type {
   TicketRef,
   Transition,
 } from '@anvil/tickets'
+import { repositoryOf } from '@anvil/tickets'
 import type { ForgeTransport } from '@anvil/worktrees/ship'
 
 export interface RunResult {
@@ -77,21 +78,91 @@ function authHostArgs(host: string | undefined): string[] {
 }
 
 /**
+ * `--repo` for the repository a ref's URL names, or nothing for a bare number.
+ *
+ * A pasted URL points at a *specific* issue, not only at a number. Without `--repo`, `gh`
+ * resolves that number against whichever repository anvil happens to be standing in, so
+ * commenting on another repository's issue URL would comment on an unrelated issue that
+ * happens to share the number.
+ *
+ * A ref with a URL that cannot name a repository is refused rather than silently read
+ * against the current directory: the whole point of the URL is that it names the issue.
+ * The URL is parsed by `@anvil/tickets`, so the transport and the pull-request body agree
+ * on which repository a ticket belongs to.
+ */
+function repoArgs(ref: TicketRef): string[] {
+  const hasUrl = ref.url !== undefined && ref.url !== ''
+  if (!hasUrl) return []
+  const repository = repositoryOf(ref.url)
+  if (repository === null) {
+    throw new AnvilError(ErrorCode.Usage, `Cannot tell which repository "${ref.url}" points at`, {
+      hint: 'Use an issue URL shaped like https://github.com/<owner>/<repo>/issues/<number>, or pass a bare issue number.',
+      details: { url: ref.url },
+    })
+  }
+  return ['--repo', `${repository.host}/${repository.path}`]
+}
+
+/**
  * Flags that narrow `gh issue list` to a normalized state.
  *
- * `done`/`wontfix` are the only real issue states on GitHub (open/closed); the rest are
- * label-emulated, so a query for them has to filter by label or the caller silently gets
- * the wrong set back.
+ * `done`/`wontfix` are the only real issue states on GitHub (open/closed), so that is the
+ * only narrowing worth asking the server for. The label-emulated states are *not* passed
+ * as `--label`: a repository may spell the label `In Review`, which the server would not
+ * match against `in-review`, and `todo` has to exclude label-carrying issues, which no
+ * `gh` flag can express. `list` therefore filters every answer by normalized state.
  */
 function stateFilterArgs(state: NormalizedState | undefined, label: string | undefined): string[] {
   const out: string[] = []
   if (state === 'done' || state === 'wontfix') out.push('--state', 'closed')
-  else if (state === 'todo' || state === 'in_progress' || state === 'in_review') out.push('--state', 'open')
-  if (state === 'in_progress' && label === undefined) out.push('--label', 'in-progress')
-  if (state === 'in_review' && label === undefined) out.push('--label', 'in-review')
-  if (state === 'wontfix' && label === undefined) out.push('--label', 'wontfix')
+  else if (state !== undefined && state !== 'unknown') out.push('--state', 'open')
   if (label !== undefined) out.push('--label', label)
   return out
+}
+
+/** A state label anvil emulates on GitHub, in the spelling it adds by default. */
+const STATE_LABELS = ['in-progress', 'in-review', 'wontfix'] as const
+type StateLabel = (typeof STATE_LABELS)[number]
+
+/**
+ * The emulated state a label stands for.
+ *
+ * Repositories write these labels in different cases and spellings (`In Review`,
+ * `in progress`), so the same pattern that parses a ticket is used to decide which
+ * existing label a transition has to remove. Adding a second `in-review` beside an
+ * existing `In Review` would leave the issue in two states at once.
+ */
+function stateLabelOf(label: string): StateLabel | null {
+  if (/wont.?fix/i.test(label)) return 'wontfix'
+  if (/in.?review/i.test(label)) return 'in-review'
+  if (/in.?progress/i.test(label)) return 'in-progress'
+  return null
+}
+
+/** The state labels an issue should carry after a transition. */
+function desiredStateLabels(to: NormalizedState): StateLabel[] {
+  if (to === 'in_progress') return ['in-progress']
+  if (to === 'in_review') return ['in-review']
+  if (to === 'wontfix') return ['wontfix']
+  return []
+}
+
+/**
+ * The canonical state of a GitHub issue, from its open/closed flag and labels.
+ *
+ * One function for `fetch` and `list`, so a listing and a single read cannot disagree
+ * about what state an issue is in.
+ */
+function normalizedStateFor(state: string | undefined, labels: string[]): NormalizedState {
+  const closed = (state ?? '').toUpperCase() === 'CLOSED'
+  // A closed issue carrying the wontfix label is `wontfix`, not `done`: the label is the
+  // only way to tell "we will not do this" from "we did it".
+  if (labels.some((l) => /wont.?fix/i.test(l))) return 'wontfix'
+  if (!closed) {
+    if (labels.some((l) => /in.?review/i.test(l))) return 'in_review'
+    if (labels.some((l) => /in.?progress/i.test(l))) return 'in_progress'
+  }
+  return closed ? 'done' : 'todo'
 }
 
 export class GitHubProvider implements TicketProvider {
@@ -151,7 +222,14 @@ export class GitHubProvider implements TicketProvider {
 
   async fetch(ref: TicketRef): Promise<Ticket> {
     const run = runner(this.options)
-    const args = ['issue', 'view', ref.id, '--json', 'number,title,body,state,labels,assignees,url,milestone,comments']
+    const args = [
+      'issue',
+      'view',
+      ref.id,
+      '--json',
+      'number,title,body,state,labels,assignees,url,milestone,comments',
+      ...repoArgs(ref),
+    ]
     const res = await run(args, '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Usage, `gh issue view ${ref.id} failed: ${res.stderr.trim()}`, {
@@ -161,26 +239,80 @@ export class GitHubProvider implements TicketProvider {
     return parseGhIssue(res.stdout, ref)
   }
 
+  /**
+   * Issues in `query.state`, as refs.
+   *
+   * A failed call throws. Returning an empty list instead would tell `crew up` and
+   * `issue list` that the tracker has no work, when the truth is that `gh` could not
+   * answer -- a 403 or a typo in the host must not look like an empty backlog.
+   *
+   * The server-side filter is an optimization, not the answer: `gh issue list` cannot
+   * exclude the state labels a normalized state also implies, so `todo` would otherwise
+   * include everything already in progress or in review. The returned issues are filtered
+   * by the same normalized state `fetch` reports.
+   *
+   * Because that filtering happens here, a page of results can be entirely consumed by
+   * issues the caller did not ask for. `gh issue list` has no cursor, so the only way to
+   * see past a truncated page is to ask for a larger one. The fetch therefore retries with
+   * a bigger limit while the answer looks truncated and the wanted matches are short -- a
+   * fixed over-fetch would report "no ready work" while the ready issue sat just past it.
+   */
   async list(query: TicketQuery = {}): Promise<TicketRef[]> {
     const run = runner(this.options)
-    const args = [
-      'issue',
-      'list',
-      '--json',
-      'number,title,state,labels',
-      '--limit',
-      String(query.limit ?? 30),
-      ...stateFilterArgs(query.state, query.label),
-    ]
-    const res = await run(args, '.')
-    if (res.exitCode !== 0) return []
-    const parsed: unknown = JSON.parse(res.stdout || '[]')
-    if (!Array.isArray(parsed)) return []
-    return parsed.map((issue) => {
-      const n = (issue as { number?: number }).number
-      const id = String(n ?? '')
-      return { provider: this.id, id, key: `gh-${id}` }
-    })
+    const limit = query.limit ?? 30
+    // `gh` refuses a limit above 1000; asking for more is clamped.
+    const pageCap = 1000
+    let request = Math.min(Math.max(limit * 4, 100), pageCap)
+
+    for (;;) {
+      const res = await run(
+        [
+          'issue',
+          'list',
+          '--json',
+          'number,title,state,labels',
+          '--limit',
+          String(request),
+          ...stateFilterArgs(query.state, query.label),
+        ],
+        '.',
+      )
+      if (res.exitCode !== 0) {
+        throw new AnvilError(ErrorCode.Usage, `gh issue list failed: ${res.stderr.trim()}`, {
+          hint: 'Check that gh is authenticated to this host, and that the repository has a remote.',
+        })
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(res.stdout || '[]')
+      } catch {
+        parsed = null
+      }
+      if (!Array.isArray(parsed)) {
+        throw new AnvilError(ErrorCode.Internal, 'gh issue list returned something that is not a list', {
+          hint: `Expected a JSON array, got: ${res.stdout.trim().slice(0, 200)}`,
+        })
+      }
+
+      const out: TicketRef[] = []
+      for (const issue of parsed) {
+        const entry = issue as { number?: number; state?: string; labels?: Array<{ name?: string }> }
+        const id = String(entry.number ?? '')
+        if (id === '') continue
+        const labels = (entry.labels ?? []).map((l) => l.name ?? '').filter((l) => l !== '')
+        // `gh` already filtered by label, case-insensitively; comparing again here with
+        // `includes` rejected an issue labelled `Bug` for a `bug` query.
+        if (query.state !== undefined && normalizedStateFor(entry.state, labels) !== query.state) continue
+        out.push({ provider: this.id, id, key: `gh-${id}` })
+        if (out.length >= limit) return out
+      }
+
+      // A short page is the whole backlog, so nothing further can match. A full page may
+      // be truncated, which is the only case worth a bigger request.
+      const truncated = parsed.length >= request
+      if (!truncated || request >= pageCap) return out
+      request = Math.min(request * 2, pageCap)
+    }
   }
 
   async create(draft: TicketDraft): Promise<TicketRef> {
@@ -217,7 +349,7 @@ export class GitHubProvider implements TicketProvider {
 
   async comment(ref: TicketRef, body: string): Promise<void> {
     const run = runner(this.options)
-    const res = await run(['issue', 'comment', ref.id, '--body', body], '.')
+    const res = await run(['issue', 'comment', ref.id, '--body', body, ...repoArgs(ref)], '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Internal, `gh issue comment failed: ${res.stderr.trim()}`)
     }
@@ -233,49 +365,73 @@ export class GitHubProvider implements TicketProvider {
     const ticket = await this.fetch(ref)
     const out: Transition[] = []
     if (ticket.normalizedState !== 'done') out.push({ to: 'done', name: 'close' })
-    if (ticket.normalizedState === 'done') out.push({ to: 'todo', name: 'reopen' })
-    out.push({ to: 'in_review', name: 'label: in-review' })
+    if (ticket.normalizedState !== 'todo') out.push({ to: 'todo', name: 'reopen' })
+    if (ticket.normalizedState !== 'in_progress') out.push({ to: 'in_progress', name: 'label: in-progress' })
+    if (ticket.normalizedState !== 'in_review') out.push({ to: 'in_review', name: 'label: in-review' })
     return out
   }
 
+  /**
+   * Move an issue to a normalized state.
+   *
+   * The state is the *whole* state, not a label to add: going from `in_review` to `todo`
+   * has to remove the `in-review` label, and going from `todo` to `in_progress` has to
+   * remove the labels the earlier state implied. Adding without removing reported a
+   * transition the issue never made, because `fetch` reads the label back as the state.
+   */
   async transition(ref: TicketRef, to: NormalizedState): Promise<void> {
+    if (to === 'unknown') {
+      throw new AnvilError(ErrorCode.Usage, 'Cannot move a GitHub issue to "unknown"', {
+        hint: 'Supported: todo, in_progress, in_review, done, wontfix.',
+      })
+    }
     const run = runner(this.options)
-    if (to === 'done' || to === 'wontfix') {
-      const res = await run(['issue', 'close', ref.id], '.')
+    const desired = desiredStateLabels(to)
+    const current = await this.fetch(ref)
+
+    // `done` and `wontfix` are closed; every other state is open.
+    const wantsClosed = to === 'done' || to === 'wontfix'
+    const isClosed = (current.state ?? '').toUpperCase() === 'CLOSED'
+    if (wantsClosed && !isClosed) {
+      const res = await run(['issue', 'close', ref.id, ...repoArgs(ref)], '.')
       if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue close failed: ${res.stderr.trim()}`)
-      return
+    } else if (!wantsClosed && isClosed) {
+      // Reopening an open issue is an error ("issue is already open"), so this runs only
+      // when the issue is actually closed.
+      const res = await run(['issue', 'reopen', ref.id, ...repoArgs(ref)], '.')
+      if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue reopen failed: ${res.stderr.trim()}`)
     }
-    if (to === 'todo' || to === 'in_progress') {
-      // Reopening is what actually moves the issue out of `done`, so it is only needed --
-      // and only correct -- when the issue is currently closed. Running `gh issue reopen`
-      // on an open issue is an error ("issue is already open"), so gating on the current
-      // state is what keeps `transition(in_progress)` working on the common case of an
-      // open issue.
-      const current = await this.fetch(ref).catch(() => null)
-      if (current !== null && current.normalizedState === 'done') {
-        const res = await run(['issue', 'reopen', ref.id], '.')
-        if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue reopen failed: ${res.stderr.trim()}`)
-      }
-      if (to === 'in_progress') {
-        await this.addLabel(ref, 'in-progress')
-      }
-      return
-    }
-    if (to === 'in_review') {
-      await this.addLabel(ref, 'in-review')
-      return
-    }
-    throw new AnvilError(ErrorCode.Usage, `Cannot move a GitHub issue to "${to}"`, {
-      hint: 'GitHub issues are open/closed; other states are emulated with labels. Supported: todo, in_progress, in_review, done, wontfix.',
+
+    const existing = current.labels ?? []
+    const remove = existing.filter((label) => {
+      const kind = stateLabelOf(label)
+      return kind !== null && !desired.includes(kind)
     })
+    const present = existing.map((label) => stateLabelOf(label)).filter((kind): kind is StateLabel => kind !== null)
+    const add = desired.filter((kind) => !present.includes(kind))
+    if (remove.length > 0 || add.length > 0) {
+      await this.editLabels(ref, add, remove)
+    }
   }
 
-  private async addLabel(ref: TicketRef, label: string): Promise<void> {
+  /** Add and remove labels in one call, so the issue never stops between two states. */
+  private async editLabels(ref: TicketRef, add: string[], remove: string[]): Promise<void> {
     const run = runner(this.options)
-    const res = await run(['issue', 'edit', ref.id, '--add-label', label], '.')
+    const res = await run(
+      [
+        'issue',
+        'edit',
+        ref.id,
+        ...(add.length === 0 ? [] : ['--add-label', add.join(',')]),
+        ...(remove.length === 0 ? [] : ['--remove-label', remove.join(',')]),
+        ...repoArgs(ref),
+      ],
+      '.',
+    )
     if (res.exitCode !== 0) {
-      throw new AnvilError(ErrorCode.Internal, `gh issue edit --add-label ${label} failed: ${res.stderr.trim()}`, {
-        hint: `The label "${label}" may not exist in this repository. Create it, or pick a state that needs no label.`,
+      const labels = [...add, ...remove].join(', ')
+      throw new AnvilError(ErrorCode.Internal, `gh issue edit ${ref.id} failed: ${res.stderr.trim()}`, {
+        hint: `The labels "${labels}" may not exist in this repository. Create them, or pick a state that needs no label.`,
       })
     }
   }
@@ -323,7 +479,6 @@ export function parseGhIssue(json: string, ref: TicketRef): Ticket {
   }
 
   const id = String(raw.number ?? ref.id)
-  const isClosed = (raw.state ?? '').toUpperCase() === 'CLOSED'
   const labels = (raw.labels ?? []).map((l) => l.name ?? '').filter((l) => l !== '')
   const comments = (raw.comments ?? []).map((c) => ({
     author: c.author?.login ?? 'unknown',
@@ -332,14 +487,9 @@ export function parseGhIssue(json: string, ref: TicketRef): Ticket {
     ...(c.url === undefined ? {} : { url: c.url }),
   }))
 
-  // `in_review` is inferred from a label, because GitHub has no such state. Documented
-  // here because the canonical model would otherwise look like it is inventing a state.
-  let normalizedState: Ticket['normalizedState'] = isClosed ? 'done' : 'todo'
-  if (!isClosed) {
-    if (labels.some((l) => /wont.?fix/i.test(l))) normalizedState = 'wontfix'
-    else if (labels.some((l) => /in.?review/i.test(l))) normalizedState = 'in_review'
-    else if (labels.some((l) => /in.?progress/i.test(l))) normalizedState = 'in_progress'
-  }
+  // `in_review` and `in_progress` are inferred from a label, because GitHub has no such
+  // state. Shared with `list` so a listing and a read cannot disagree.
+  const normalizedState = normalizedStateFor(raw.state, labels)
 
   return {
     ref: {

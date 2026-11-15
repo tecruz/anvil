@@ -200,6 +200,28 @@ what a subcommand asks fails naming the missing capability (`create`, `list`, `c
 `transition`, `link`), rather than with a transport error from deep inside the call. The
 list is part of the provider contract, so a future provider has to declare it.
 
+A pasted issue URL keeps the repository it names: `anvil claim
+https://github.com/acme/widgets/issues/42` reads, comments on and transitions issue 42 in
+`acme/widgets`, not the same-numbered issue in whatever repository you are standing in. A
+bare number (`gh-42`) is deliberately different — it means "issue 42 here". The pull request
+anvil opens closes a ticket with that ticket's URL (`Closes
+https://github.com/acme/widgets/issues/42`), so a ticket from another repository is closed
+there rather than closing this repository's issue 42.
+
+A listing that failed is a failure, not an empty backlog. `anvil issue list --provider
+github` and the automatic work selection in `anvil crew up` both report the `gh` error
+(for example a 403) and exit non-zero, instead of printing "no tickets" when the tracker
+could not be read. `crew up` also claims only issues whose normalized state is `todo`: an
+issue already labelled `in-progress` or `in-review` is not ready work. Because that filter
+runs after `gh` answers, a page made up entirely of filtered-out issues is fetched again
+with a larger limit rather than reported as an empty backlog.
+
+A GitHub transition sets the whole state, not just the label it adds. Moving an issue out
+of `in_review` (by `issue set-state`, `issue sync` or `ship`) removes the `in-review`
+label, and `set-state` refuses `unknown`. Label spellings are matched case-insensitively
+and with either separator, so a repository's existing `In Review` label is recognised,
+reused and removed rather than duplicated.
+
 What each step does:
 
 - **`issue create`** writes a ticket to `.anvil/tickets/` in the main worktree with the
