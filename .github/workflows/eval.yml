@@ -9,9 +9,13 @@
 # which is the cheapest signal that can still detect a regression. A manual dispatch can
 # run the frontier model when the spend is intended.
 #
-# `eval:check` is the verdict. The harness exits 0 even when a scenario fails, because a
-# failed run is a measurement; the gate is what turns a missed baseline expectation or a
-# recorded agent error into a red job. A run that nobody reads is not a benchmark.
+# `eval:check` is the verdict for the committed hermetic evidence. A real-agent run is
+# deliberately never promoted into that summary, so this workflow gates its own run with
+# `--check-run <runId>`: the same expectations and provenance checks, against the record
+# this invocation produced, writing `benchmark-summary.json` instead of `latest.json`. The
+# harness exits 0 even when a scenario fails, because a failed run is a measurement; both
+# gates, not the harness, turn a missed baseline expectation or a recorded agent error into
+# a red job. A run that nobody reads is not a benchmark.
 #
 # SECRETS: configure `OPENCODE_API_KEY` for the small (Zen) model and/or
 # `OPENROUTER_API_KEY` for the frontier model as repository secrets, or on the `eval`
@@ -115,36 +119,66 @@ jobs:
         shell: bash
         run: npm run eval -- --models "$MODELS"
 
-      # The harness itself always exits 0. The gate is the pass/fail verdict: every
-      # scenario must meet its baseline expectation, and any recorded agent error fails.
-      - name: gate the run against the baseline
-        run: npm run eval:check
+      # Bind the gate to this invocation. `run.json` is the only run record this checkout
+      # produced; naming its id means a leftover record from another run cannot pass as this
+      # one's evidence.
+      - name: identify the run
+        id: matrix
+        run: |
+          if [ ! -f eval-results/run.json ]; then
+            echo '::error::the benchmark harness wrote no run record.'
+            exit 1
+          fi
+          RUN_ID=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('eval-results/run.json','utf8')).runId ?? '')")
+          if [ -z "$RUN_ID" ]; then
+            echo '::error::the benchmark run record names no run.'
+            exit 1
+          fi
+          echo "runId=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Benchmark run id: $RUN_ID"
 
-      # The record has to outlive the runner. The full summary goes to the run page; the
-      # job log keeps the matrix table the harness printed.
+      # The real-agent gate. `eval:check` compares the committed fake-agent summary with the
+      # baseline, and the harness never promotes a real-agent run into that file. `--check-run`
+      # validates the run named above against the same baseline expectations and provenance
+      # checks, and writes a separate benchmark summary. Every failure is blocking.
+      - name: gate the real-agent run against the baseline
+        env:
+          MODELS: ${{ inputs.models || 'small' }}
+          RUN_ID: ${{ steps.matrix.outputs.runId }}
+        run: |
+          if [ -z "$RUN_ID" ]; then
+            echo '::error::the benchmark run wrote no run record, so there is no evidence to gate.'
+            exit 1
+          fi
+          npm run eval -- --check-run "$RUN_ID" --models "$MODELS"
+
+      # Report the run the gate validated, not the checked-out hermetic summary. On a failed
+      # gate no validated summary exists, and this says so instead of presenting stale evidence.
       - name: publish the summary
         if: always()
         run: |
           {
-            echo '## Real-model eval'
+            echo '## Real-agent eval'
             echo '```json'
-            if test -f eval-results/latest.json; then
-              cat eval-results/latest.json
+            if test -f eval-results/benchmark-summary.json; then
+              cat eval-results/benchmark-summary.json
             else
-              echo '{"error":"the harness wrote no summary"}'
+              echo '{"error":"the benchmark gate validated no run; see the gate step"}'
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Retain benchmark artifacts even after failure: checkpoints, the run record, the
-      # promoted-record archive, and the raw transcripts. `latest.json` is deliberately not
-      # uploaded -- it is the checked-in hermetic evidence, not per-run output.
+      # promoted-record archive, the raw reports and the validated benchmark summary.
+      # `latest.json` is deliberately not uploaded -- it is the checked-in hermetic evidence,
+      # not per-run output.
       - name: upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.3
         with:
           name: eval-artifacts-${{ github.run_id }}-attempt${{ github.run_attempt }}
           path: |
+            eval-results/benchmark-summary.json
             eval-results/run.json
             eval-results/runs/**/*.json
             eval-results/checkpoints/**/*.json

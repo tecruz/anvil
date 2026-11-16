@@ -20,6 +20,23 @@ This directory holds two different kinds of evidence, and they must not be mixed
 record with `latest.json`. A real-agent run still writes its run record to `run.json` and
 `runs/` while it runs; move it under `pilots/` rather than committing it here.
 
+## The two gates
+
+The harness has one gate per evidence channel, and they are not interchangeable:
+
+- **Hermetic gate:** `npm run eval:check` (`npm run eval -- --check`). It reads
+  `latest.json` and the run record it names, refuses any model other than `fake-agent`, and
+  compares the summary with `baseline.json`. CI runs this on every leg.
+- **Benchmark gate:** `npm run eval -- --check-run <runId>`. It validates the real-agent
+  run this invocation produced: the record must name that exact run id, come from the same
+  commit, declare the requested matrix, and pass the same baseline, provenance and verifier
+  checks. It refuses a fake-agent record and never reads or writes `latest.json`. On success
+  it writes `benchmark-summary.json` beside the run record, labelled `evidence: "real-agent"`.
+  The scheduled `Eval benchmark` workflow runs it instead of `eval:check`.
+
+A benchmark summary is per-run output and is ignored by Git. It is not promoted evidence; to
+retain a real-agent run, move its record and summary under `pilots/<runId>/` deliberately.
+
 ## Real-agent records
 
 - `pilots/<runId>/` holds an explicitly approved real-agent run: its run record and the

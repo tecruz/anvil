@@ -246,6 +246,14 @@ checkpoints live under `eval-results/checkpoints/` and raw output under
 `eval-results/raw/`; both are ignored and uploaded only as bounded CI artifacts. Promoted
 run records are committed with the summary.
 
+The committed summary is hermetic (`fake-agent`) evidence only, so a real-agent benchmark
+is gated by a separate command. `npm run eval -- --check-run <runId>` validates the named
+run record against the same baseline and provenance checks, refuses a `fake-agent` record,
+and writes `eval-results/benchmark-summary.json`, which is labelled `real-agent` and
+ignored by Git. It never reads or writes `latest.json`. The scheduled `Eval benchmark`
+workflow uses this gate, and normal CI keeps using `eval:check`; a record cannot be
+validated by the other channel's gate.
+
 The summary records a hash of the anvil sources that produced it, so a stale run cannot
 vouch for a newer implementation. The run record also records the harness digest, Node and
 OpenCode versions, transcript policy, model set, and whether the run was a subset.

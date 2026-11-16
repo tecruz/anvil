@@ -21,11 +21,12 @@
  * Both halves matter, because context that helps a model write code can still fail to
  * help it understand a repository it is only reading.
  *
- * A real run is behind `ANVIL_EVAL=1`, because it spends tokens. Three modes are not:
- * `--list` prints the matrix, `--dry-run` prints what a run would do, and `--check`
- * compares the latest summary with the checked-in baseline. `--fake-agent` is the
- * hermetic path: it applies a canned answer instead of calling a model, which is how the
- * harness and the gate are tested without a network or a quota.
+ * A real run is behind `ANVIL_EVAL=1`, because it spends tokens. Modes that cost nothing:
+ * `--list` prints the matrix, `--dry-run` prints what a run would do, `--check` compares the
+ * committed hermetic summary with the checked-in baseline, and `--check-run <runId>`
+ * validates one real-agent run against the same expectations without touching `latest.json`.
+ * `--fake-agent` is the hermetic path: it applies a canned answer instead of calling a model,
+ * which is how the harness and the gate are tested without a network or a quota.
  *
  * Run with: `ANVIL_EVAL=1 npm run eval`
  */
@@ -55,6 +56,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
   allDeclaredCompleted,
+  buildBenchmarkSummary,
+  checkBenchmarkRun,
   checkEvalGate,
   checkpointFileName,
   checkRunRecord,
@@ -62,6 +65,7 @@ import {
   EVAL_SCHEMA_VERSION,
   type EvalBaseline,
   type EvalBaselineScenario,
+  type EvalBenchmarkSummary,
   type EvalLatest,
   type EvalModel,
   type EvalModelRole,
@@ -108,6 +112,7 @@ const rawDir = join(resultsDir, 'raw')
 const latestPath = join(resultsDir, 'latest.json')
 const baselinePath = join(resultsDir, 'baseline.json')
 const runRecordPath = join(resultsDir, 'run.json')
+const benchmarkSummaryPath = join(resultsDir, 'benchmark-summary.json')
 const runArchiveDir = join(resultsDir, 'runs')
 const checkpointsDir = join(resultsDir, 'checkpoints')
 /**
@@ -314,6 +319,7 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run')
   const listOnly = args.includes('--list')
   const checkOnly = args.includes('--check')
+  const benchmarkRunId = flagValue('--check-run', args)
   const fakeAgent = args.includes('--fake-agent')
   const writeBaselineAfterRun = args.includes('--write-baseline')
   const resume = args.includes('--resume')
@@ -354,6 +360,20 @@ async function main(): Promise<void> {
   }
   const suite = suiteRaw as 'smoke' | 'extended' | 'all'
 
+  if (benchmarkRunId !== null && benchmarkRunId.trim() === '') {
+    console.error('--check-run needs the run id the benchmark produced')
+    process.exit(1)
+  }
+  if (
+    benchmarkRunId !== null &&
+    (dryRun || listOnly || checkOnly || writeBaselineAfterRun || fakeAgent || only !== null)
+  ) {
+    console.error(
+      '--check-run validates one real-agent run; it cannot be combined with a run selection (--scenario), --dry-run, --list, --check, --fake-agent or --write-baseline',
+    )
+    process.exit(1)
+  }
+
   if (writeBaselineAfterRun && (dryRun || listOnly || checkOnly)) {
     console.error(
       '--write-baseline writes the result of a run; it cannot be combined with --dry-run, --list or --check',
@@ -363,12 +383,13 @@ async function main(): Promise<void> {
 
   // A dry run, a listing, a gate check and the fake agent cost no tokens. Everything that
   // can spend money stays opt-in.
-  if (!enabled && !dryRun && !listOnly && !checkOnly && !fakeAgent) {
+  if (!enabled && !dryRun && !listOnly && !checkOnly && benchmarkRunId === null && !fakeAgent) {
     console.log('The eval harness is opt-in: it runs an agent against a model.')
     console.log('Run it with: ANVIL_EVAL=1 npm run eval')
     console.log('Preview what it would do with: npm run eval -- --dry-run')
     console.log('List the matrix with: npm run eval -- --list')
     console.log('Check the last run with: npm run eval:check')
+    console.log('Gate one real-agent run with: npm run eval -- --check-run <runId>')
     process.exit(0)
   }
 
@@ -398,6 +419,10 @@ async function main(): Promise<void> {
   if (listOnly) {
     printScenarios(selectedScenarios, models)
     process.exit(0)
+  }
+
+  if (benchmarkRunId !== null) {
+    process.exit(runBenchmarkCheck(benchmarkRunId, selectedScenarios, models, repetitions, order, isSubset))
   }
 
   if (dryRun) {
@@ -755,7 +780,7 @@ async function main(): Promise<void> {
     console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
   }
 
-  printSummary(results)
+  printSummary(results, runId)
   if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(selectedScenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
@@ -2601,7 +2626,7 @@ export function formatPreflight(preflight: EvalPreflight): string[] {
   return lines
 }
 
-function printSummary(results: ScenarioResult[]): void {
+function printSummary(results: ScenarioResult[], runId: string): void {
   console.log('')
   console.log('scenario              model                             variant  verified  hidden  cost      time')
   console.log('--------------------  --------------------------------  -------  --------  ------  --------  ------')
@@ -2627,7 +2652,11 @@ function printSummary(results: ScenarioResult[]): void {
   for (const line of formatPairedSummary(summarizePairs(results))) console.log(line)
   console.log('')
   console.log('Skill access is observation, not proof that the skill was used.')
-  console.log('Run `npm run eval:check` to compare this run with the baseline.')
+  console.log(
+    results.every((result) => result.model === FAKE_AGENT_MODEL)
+      ? 'Run `npm run eval:check` to compare this run with the baseline.'
+      : `Run \`npm run eval -- --check-run ${runId}\` to gate this real-agent run; it is not promoted to latest.json.`,
+  )
 }
 
 function printScenarios(scenarios: readonly EvalScenario[], models: readonly EvalModel[]): void {
@@ -2663,19 +2692,36 @@ function printScenarios(scenarios: readonly EvalScenario[], models: readonly Eva
  * reads that first and falls back to `run.json` only when it is the same run.
  */
 function loadRunRecordForLatest(latest: EvalLatest): EvalRunRecord | null {
-  const read = (path: string): EvalRunRecord | null => {
-    if (!existsSync(path)) return null
-    const parsed = parseRunRecord(readJsonFile(path))
-    return typeof parsed === 'string' ? null : parsed
-  }
-
-  if (latest.runId === undefined) return read(runRecordPath)
+  if (latest.runId === undefined) return readRunRecord(runRecordPath)
   if (isSafeRunId(latest.runId)) {
-    const archived = read(join(runArchiveDir, `${latest.runId}.json`))
+    const archived = readRunRecord(join(runArchiveDir, `${latest.runId}.json`))
     if (archived !== null && archived.runId === latest.runId) return archived
   }
-  const current = read(runRecordPath)
+  const current = readRunRecord(runRecordPath)
   if (current !== null && current.runId === latest.runId) return current
+  return null
+}
+
+/** Read and parse one run record, or null when it is absent or malformed. */
+function readRunRecord(path: string): EvalRunRecord | null {
+  if (!existsSync(path)) return null
+  const parsed = parseRunRecord(readJsonFile(path))
+  return typeof parsed === 'string' ? null : parsed
+}
+
+/**
+ * Find the record for one run id, preferring the archived copy.
+ *
+ * The benchmark gate is told which run the invocation produced. Reading only that id is what
+ * refuses a leftover `run.json` from another run: a mismatched id is not evidence for this one.
+ */
+function loadRunRecordForId(runId: string): EvalRunRecord | null {
+  if (isSafeRunId(runId)) {
+    const archived = readRunRecord(join(runArchiveDir, `${runId}.json`))
+    if (archived !== null && archived.runId === runId) return archived
+  }
+  const current = readRunRecord(runRecordPath)
+  if (current !== null && current.runId === runId) return current
   return null
 }
 
@@ -2737,6 +2783,116 @@ function runCheck(scenarios: readonly EvalScenario[]): number {
     return 1
   }
   console.log(gate.message)
+  return 0
+}
+
+/** Write the per-run summary. It is not `latest.json` and is never promoted there. */
+function writeBenchmarkSummary(summary: EvalBenchmarkSummary): void {
+  atomicWriteJson(benchmarkSummaryPath, summary)
+  console.log(`Benchmark summary written to ${benchmarkSummaryPath}`)
+}
+
+/** Print the same run the gate validated, so the log and the summary cannot disagree. */
+function printBenchmarkReport(summary: EvalBenchmarkSummary, gate: { message: string }): void {
+  console.log(gate.message)
+  console.log('')
+  console.log(`Benchmark run ${summary.runId} (real-agent evidence)`)
+  console.log(`  commit          ${summary.commitSha ?? 'unknown'}`)
+  console.log(
+    `  models          ${summary.models.map((model) => `${model.id} (${model.role})`).join(', ') || 'unknown'}`,
+  )
+  console.log(`  generated       ${summary.generatedAt}`)
+  console.log('')
+  console.log('scenario              model                             variant  verified  hidden  cost      time')
+  console.log('--------------------  --------------------------------  -------  --------  ------  --------  ------')
+  for (const result of summary.results) {
+    const cost = result.costUsd === null ? '-' : `$${result.costUsd.toFixed(2)}`
+    console.log(
+      [
+        result.scenario.padEnd(20),
+        (result.model ?? '-').padEnd(32),
+        result.variant.padEnd(7),
+        (result.verified ? 'yes' : 'no').padEnd(8),
+        (result.hiddenVerified === null ? '-' : result.hiddenVerified ? 'yes' : 'no').padEnd(6),
+        cost.padEnd(8),
+        result.durationMs === null ? '-' : `${Math.round(result.durationMs / 1000)}s`,
+      ].join('  '),
+    )
+    if (result.error !== undefined) console.log(`  error: ${result.error}`)
+  }
+  console.log('')
+  console.log('This run is evidence only for the scenarios, model and conditions named above.')
+  console.log('Cost, tokens and duration stay unknown when the host ledger did not measure them.')
+}
+
+/**
+ * Validate the real-agent run this invocation produced.
+ *
+ * The scheduled benchmark cannot use `eval:check`: that gate reads the committed fake-agent
+ * summary, and a real run is deliberately never promoted there. This path validates the run's
+ * own record against the baseline and the matrix the invocation asked for, then writes a
+ * separate, run-identified summary. Nothing here reads or writes `latest.json`, so the two
+ * evidence channels stay separate.
+ */
+function runBenchmarkCheck(
+  runId: string,
+  scenarios: readonly EvalScenario[],
+  models: readonly EvalModel[],
+  repetitions: number,
+  order: string,
+  subset: boolean,
+): number {
+  if (subset) {
+    console.error(
+      'The benchmark gate validates the complete smoke matrix; a subset run (--scenario, or --suite extended/all) keeps its record but is not gated as complete evidence.',
+    )
+    return 1
+  }
+  if (!existsSync(baselinePath)) {
+    console.error('No eval baseline exists; the benchmark gate has no scenario expectations to validate against.')
+    return 1
+  }
+  const baselineRaw = readJsonFile(baselinePath)
+  const baseline = parseBaseline(baselineRaw)
+  if (typeof baseline === 'string') {
+    console.error(baseline)
+    return 1
+  }
+  const current: EvalBaselineScenario[] = scenarios.map((scenario) => ({
+    id: scenario.id,
+    size: scenario.size,
+    kind: scenario.kind,
+    scenarioHash: hashScenario(scenario),
+    sourceHash: hashScenarioSource(repoRoot, scenario),
+    verify: scenario.verify,
+    hiddenVerify: scenario.hiddenVerify ?? [],
+    ...(scenario.skill === undefined ? {} : { skill: scenario.skill }),
+    expect: scenario.expect,
+  }))
+  const record = loadRunRecordForId(runId)
+  const requiredKeys = plannedRuns(scenarios, models, repetitions, order, new Set()).map((entry) => entry.key)
+  const gate = checkBenchmarkRun({
+    expectedRunId: runId,
+    record,
+    requiredKeys,
+    baseline,
+    current,
+    implementation: hashImplementation(repoRoot),
+    harnessDigest: hashHarness(),
+    commitSha: readCommitSha(),
+  })
+  if (!gate.ok) {
+    console.error(gate.message)
+    return 1
+  }
+  if (record === null) {
+    // checkBenchmarkRun refuses a missing record above; this keeps the type narrow.
+    console.error(`No run record exists for run ${runId}`)
+    return 1
+  }
+  const summary = buildBenchmarkSummary(record, current)
+  writeBenchmarkSummary(summary)
+  printBenchmarkReport(summary, gate)
   return 0
 }
 

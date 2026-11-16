@@ -1954,18 +1954,23 @@ export function checkEvalGate(
       failures.push(`${scenario.id}: no result in the latest run`)
       continue
     }
-    // For repetition runs, every repetition must have both variants.
+    // For repetition runs, every repetition must have both variants for every model that ran
+    // the scenario. Counting variants alone would reject a valid two-model run.
     if (latest.repetitions !== undefined && latest.repetitions > 1) {
-      const expectedResultCount = latest.repetitions * 2
+      const models = new Set(results.map((result) => result.model ?? 'unknown'))
+      const expectedPerRepetition = 2 * models.size
+      const expectedResultCount = latest.repetitions * expectedPerRepetition
       if (results.length !== expectedResultCount) {
         failures.push(
-          `${scenario.id}: expected ${expectedResultCount} results (${latest.repetitions} repetitions × 2 variants) but found ${results.length}`,
+          `${scenario.id}: expected ${expectedResultCount} results (${latest.repetitions} repetitions × 2 variants × ${models.size} models) but found ${results.length}`,
         )
       }
       for (let repetition = 0; repetition < latest.repetitions; repetition += 1) {
         const repResults = results.filter((r) => r.repetition === repetition)
-        if (repResults.length !== 2) {
-          failures.push(`${scenario.id}: repetition ${repetition} expected 2 results but found ${repResults.length}`)
+        if (repResults.length !== expectedPerRepetition) {
+          failures.push(
+            `${scenario.id}: repetition ${repetition} expected ${expectedPerRepetition} results but found ${repResults.length}`,
+          )
           continue
         }
         const repVariants = new Set(repResults.map((r) => r.variant))
@@ -2008,4 +2013,220 @@ export function checkEvalGate(
     }
   }
   return { ok: true, message: 'eval gate passed: every scenario met its baseline.' }
+}
+
+/** One result in a real-agent benchmark summary, with measurements kept apart from verdicts. */
+export interface EvalBenchmarkResultSummary extends EvalResultSummary {
+  /** What the work cost when the host ledger reports it; null stays unknown, never zero. */
+  costUsd: number | null
+  tokens: number | null
+  /** Wall-clock time of the attempt, or null when the record measured none. */
+  durationMs: number | null
+}
+
+/**
+ * The per-invocation summary of a real-agent benchmark run.
+ *
+ * This is deliberately a different file and shape from `latest.json`. `latest.json` is the
+ * committed synthetic harness check; this summary names the run the benchmark gate validated,
+ * is written under the run's own identity, and is never promoted into the hermetic evidence.
+ */
+export interface EvalBenchmarkSummary {
+  schemaVersion: EvalSchemaVersion
+  evidence: 'real-agent'
+  generatedAt: string
+  runId: string
+  commitSha: string | null
+  implementation: string
+  harnessDigest: string | null
+  models: Array<{ id: string; role: string }>
+  opencodeVersion: string | null
+  nodeVersion: string | null
+  repetitions: number
+  seed: string | null
+  order: string | null
+  results: EvalBenchmarkResultSummary[]
+}
+
+/**
+ * Build the benchmark summary from a run record.
+ *
+ * Size and kind come from the current matrix because a run record stores results, not
+ * scenario definitions. Every measurement is copied as recorded: a missing cost, token count
+ * or duration remains `null` rather than becoming a zero the report could average.
+ */
+export function buildBenchmarkSummary(
+  record: EvalRunRecord,
+  scenarios: readonly Pick<EvalBaselineScenario, 'id' | 'size' | 'kind'>[],
+): EvalBenchmarkSummary {
+  const byId = new Map(scenarios.map((scenario) => [scenario.id, scenario]))
+  return {
+    schemaVersion: record.schemaVersion,
+    evidence: 'real-agent',
+    generatedAt: record.completedAt ?? record.startedAt,
+    runId: record.runId,
+    commitSha: record.commitSha,
+    implementation: record.implementation,
+    harnessDigest: record.harnessDigest,
+    models: record.models.map((model) => ({ ...model })),
+    opencodeVersion: record.opencodeVersion,
+    nodeVersion: record.nodeVersion,
+    repetitions: record.repetitions,
+    seed: record.seed,
+    order: record.order,
+    results: record.results.map((result) => {
+      const scenario = byId.get(result.scenario)
+      return {
+        scenario: result.scenario,
+        size: scenario?.size ?? 'tiny',
+        kind: scenario?.kind ?? 'code-change',
+        variant: result.variant,
+        model: result.model,
+        modelRole: result.modelRole as EvalModelRole | null,
+        opencodeVersion: record.opencodeVersion,
+        scenarioHash: result.scenarioHash,
+        sourceHash: result.sourceHash,
+        verifyCount: result.verifyCount,
+        hiddenVerifyCount: result.hiddenVerifyCount,
+        verified: result.verified,
+        hiddenVerified: result.hiddenVerified,
+        verifyExitCodes: [...result.verifyExitCodes],
+        repetition: result.repetition,
+        costUsd: result.costUsd,
+        tokens: result.tokens,
+        durationMs: result.durationMs,
+        ...(result.error === undefined ? {} : { error: result.error }),
+        ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
+        ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
+        ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
+      }
+    }),
+  }
+}
+
+/**
+ * Why a run is not real-agent benchmark evidence.
+ *
+ * The benchmark gate is the mirror of the hermetic gate: the hermetic files must be
+ * `fake-agent` only, and the benchmark must be a real model. Running the canned agent through
+ * the benchmark gate would check the machinery it already checks while presenting it as
+ * effectiveness evidence, so a synthetic record is refused.
+ */
+export function benchmarkEvidenceProblems(record: Pick<EvalRunRecord, 'runId' | 'models' | 'results'>): string[] {
+  const problems: string[] = []
+  if (record.models.length === 0) {
+    problems.push(`run ${record.runId} declares no model; it cannot be real-agent evidence`)
+  }
+  for (const model of record.models) {
+    if (model.id === FAKE_AGENT_MODEL) {
+      problems.push(
+        `run ${record.runId} declares ${FAKE_AGENT_MODEL}; the benchmark gate validates real-agent evidence`,
+      )
+    }
+  }
+  for (const result of record.results) {
+    if (result.model === FAKE_AGENT_MODEL) {
+      problems.push(`run ${record.runId} result ${resultKey(result)} is a ${FAKE_AGENT_MODEL} result`)
+    }
+  }
+  return problems
+}
+
+/** The summary a run record implies, for the existing gate checks. Not the hermetic one. */
+function latestFromRecord(
+  record: EvalRunRecord,
+  scenarios: readonly Pick<EvalBaselineScenario, 'id' | 'size' | 'kind'>[],
+): EvalLatest {
+  const summary = buildBenchmarkSummary(record, scenarios)
+  return {
+    schemaVersion: summary.schemaVersion,
+    generatedAt: summary.generatedAt,
+    implementation: summary.implementation,
+    runId: summary.runId,
+    repetitions: summary.repetitions,
+    seed: summary.seed,
+    order: summary.order,
+    results: summary.results,
+  }
+}
+
+/** Everything the benchmark gate needs, so a caller cannot forget an input. */
+export interface EvalBenchmarkCheckInput {
+  /** The run the current invocation produced; another run's record is not authority. */
+  expectedRunId: string
+  record: EvalRunRecord | null
+  /** The scenario/variant/model/repetition keys the requested matrix declares. */
+  requiredKeys: readonly string[]
+  baseline: EvalBaseline
+  current: readonly EvalBaselineScenario[]
+  implementation: string
+  harnessDigest: string | null
+  /** HEAD of the checkout the gate runs in, or null when git cannot report it. */
+  commitSha: string | null
+}
+
+/**
+ * Validate a real-agent benchmark run against the baseline and its own declared matrix.
+ *
+ * This is the real-model counterpart of `checkEvalGate`: it refuses a run that is incomplete,
+ * provenance-mismatched, carrying an error, failing an expectation, or not the run the caller
+ * asked to validate. It never reads or writes `latest.json`, so the hermetic evidence and the
+ * benchmark evidence stay separate.
+ */
+export function checkBenchmarkRun(input: EvalBenchmarkCheckInput): EvalGateResult {
+  if (input.record === null) {
+    return {
+      ok: false,
+      message: `no run record exists for run ${input.expectedRunId}; the benchmark has no evidence to validate`,
+    }
+  }
+  const record = input.record
+  if (record.runId !== input.expectedRunId) {
+    return {
+      ok: false,
+      message: `the benchmark asked to validate run ${input.expectedRunId} but the record is run ${record.runId}; another run's evidence is not authority`,
+    }
+  }
+  if (record.commitSha !== null && input.commitSha !== null && record.commitSha !== input.commitSha) {
+    return {
+      ok: false,
+      message: `run ${record.runId} was executed at commit ${record.commitSha.slice(0, 12)} but the checkout is at ${input.commitSha.slice(0, 12)}; the evidence is not from this checkout`,
+    }
+  }
+  const evidence = benchmarkEvidenceProblems(record)
+  if (evidence.length > 0) {
+    return {
+      ok: false,
+      message: `the benchmark gate validates real-agent evidence, not the hermetic harness check:\n  - ${evidence.join('\n  - ')}`,
+    }
+  }
+  // The run must have produced exactly the matrix the invocation asked for. `checkRunRecord`
+  // also checks implementation, harness and fixture provenance, and verifier/skill evidence.
+  const recordCheck = checkRunRecord(
+    record,
+    input.implementation,
+    [...input.requiredKeys],
+    input.harnessDigest,
+    input.current,
+  )
+  if (!recordCheck.ok) return recordCheck
+  // The captured fixture set must be exactly the matrix this gate validated. Results alone
+  // would not catch a record that also captured fixtures for a different selection.
+  const validated = new Set(input.current.map((scenario) => scenario.id))
+  for (const id of Object.keys(record.scenarioHashes ?? {})) {
+    if (!validated.has(id)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} captured fixtures for ${id}, which is not part of the matrix this gate validated; the evidence is from a different selection`,
+      }
+    }
+  }
+  return checkEvalGate(
+    input.baseline,
+    latestFromRecord(record, input.current),
+    input.current,
+    input.implementation,
+    record,
+    input.harnessDigest,
+  )
 }
