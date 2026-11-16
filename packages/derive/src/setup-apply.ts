@@ -29,6 +29,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
 import { digestJson } from './canonical.ts'
 import type { SetupRepositoryState } from './setup.ts'
+import { resolveSetupPlan } from './setup-adapters.ts'
 import {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
@@ -46,7 +47,6 @@ import {
   isSafeSetupExecutionPath,
   LOCAL_SKILL_ADAPTER,
   MAX_SOURCE_BYTES,
-  resolveSetupExecutionPlan,
   SETUP_EXECUTION_PLAN_KIND,
   type SetupExecutionPlan,
 } from './setup-execution.ts'
@@ -924,7 +924,7 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
   // Refuse a stale, tampered or unsafe plan without waiting for the lock and without
   // touching the grant. A refusal here leaves the single attempt unused.
   flow.hooks?.beforeResolve?.()
-  const first = resolveSetupExecutionPlan(flow.saved, flow.repository)
+  const first = resolveSetupPlan(flow.saved, flow.repository)
   if (first.validation.status !== 'current' || first.plan === null) {
     // A concurrent application can make this same saved plan look stale: it writes the
     // destination and its journal before releasing the lock. Re-read the journal and the
@@ -968,7 +968,7 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
 
     // The repository may have moved while this process waited for the lock.
     const fresh = await flow.refresh()
-    const second = resolveSetupExecutionPlan(flow.saved, fresh)
+    const second = resolveSetupPlan(flow.saved, fresh)
     if (second.validation.status !== 'current' || second.plan === null) {
       return refusal(second.validation.reason, second.plan, grant)
     }

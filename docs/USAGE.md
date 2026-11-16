@@ -594,7 +594,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
-| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan, its single-use approval grant, and one journaled application. |
+| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan from the closed adapter registry, its single-use approval grant, and one journaled application. |
 | `anvil brief` | Emit verified facts for an LLM step, with the `gaps`, evidence-use rules and open context questions kept explicit. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. `--provider local\|github`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. `--provider local\|github`. |
