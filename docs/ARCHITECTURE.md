@@ -154,6 +154,15 @@ no account, no network and no GitHub CLI keeps the whole ticket workflow. Detect
 audit and `doctor` do not build a provider at all, so they gained no network call from
 this.
 
+A separate read-only detector in `packages/profile/src/trackers.ts` reports *candidates*
+for a tracker from local files: issue templates, contributor/security/README text, issue-key
+conventions and the remote host. It cannot prove a server-side fact such as "Issues
+enabled", so its contract is a candidate set with `file:line` evidence and a confidence,
+never a verdict; two plausible kinds are `unconfirmed`, and no evidence is `na`. `doctor`
+prints that set as information and carries it in `data.tracker`. Nothing writes it to
+configuration, and provider resolution never reads it: only `provider.default`, the flag
+and the reference decide which provider runs.
+
 ## The contracts
 
 Everything that crosses a package boundary is a typed object, and every payload that is

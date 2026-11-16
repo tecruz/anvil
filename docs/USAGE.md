@@ -237,6 +237,40 @@ label, and `set-state` refuses `unknown`. Label spellings are matched case-insen
 and with either separator, so a repository's existing `In Review` label is recognised,
 reused and removed rather than duplicated.
 
+### What can and cannot be concluded locally
+
+`anvil doctor` reads the clone and reports **tracker candidates**, because most tracker
+usage is not locally provable. Each candidate has a kind (`github`, `gitlab`, `jira`,
+`linear` or `unknown`), a confidence (`documented`, `detected` or `inferred`) and
+`file:line` evidence with a short excerpt. The section is informational: it never changes
+the score, the grade, a `--fail-on` threshold or the exit code.
+
+What a local read **can** show:
+
+- an issue template exists (`.github/ISSUE_TEMPLATE/*` for GitHub,
+  `.gitlab/issue_templates/*` for GitLab) — `detected`;
+- a README, CONTRIBUTING or SECURITY document names a tracker or links to its issues page —
+  `documented`;
+- an issue-key convention such as `PROJ-123` appears in a template or document — `inferred`,
+  and explicitly labelled a guess;
+- the clone's remote host, which is only corroboration. A GitHub remote alone is **not**
+  evidence that GitHub Issues is used, so a repository with nothing else reports `na`
+  rather than defaulting to GitHub.
+
+What it **cannot** show:
+
+- whether GitHub Issues is enabled on the server, whether a Jira project key is real, or
+  whether anyone reads the tracker;
+- which of two plausible trackers a repository actually uses. Two or more kinds produce an
+  `unconfirmed` state with every candidate listed and no winner chosen.
+
+Detection never writes configuration, never contacts a tracker, and grants no authority to
+create, comment on or transition an issue. Confirmation is a separate, deliberate act: set
+`provider.default` in `anvil.config.json` (or pass `--provider`). Provider resolution reads
+only that value, the flag and the ticket reference; it never consults detection, so a
+repository whose files mention Jira or GitLab still resolves `local` until you say
+otherwise.
+
 What each step does:
 
 - **`issue create`** writes a ticket to `.anvil/tickets/` in the main worktree with the

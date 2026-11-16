@@ -68,6 +68,16 @@ export {
   readJsonc,
 } from './manifest.ts'
 export {
+  detectTrackerCandidates,
+  TRACKER_LIMITS,
+  type TrackerCandidate,
+  type TrackerConfidence,
+  type TrackerDetection,
+  type TrackerEvidence,
+  type TrackerKind,
+  type TrackerState,
+} from './trackers.ts'
+export {
   type CommandEntry,
   type CommandKind,
   type CommandSource,
