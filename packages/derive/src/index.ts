@@ -127,6 +127,7 @@ export {
   readSetupApprovalGrant,
   readSetupApprovalTransition,
   replaceGrantRecord,
+  reservationCollisionRecord,
   revokeSetupApproval,
   SETUP_APPROVAL_GRANT_KIND,
   SETUP_APPROVAL_KIND,
