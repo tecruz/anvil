@@ -29,6 +29,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0018](0018-approved-local-skill-installation.md) | Approved local skill installation starts with one create-only adapter | accepted |
 | [0019](0019-approval-authority-is-a-user-owned-store.md) | Approval authority is a user-owned store, not a plan digest | accepted, superseded on application support by [0020](0020-application-is-a-journaled-transition.md) |
 | [0020](0020-application-is-a-journaled-transition.md) | Application is a journaled, create-only transition after consumption | accepted |
+| [0021](0021-setup-adapters-are-a-registry.md) | Setup adapters are a closed registry, and they never write | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

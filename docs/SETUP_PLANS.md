@@ -121,6 +121,12 @@ files, credentials, system configuration, installed binaries, network resources 
 machine's environment. An unchanged plan is not an approval record, proof of safety,
 successful setup, or an operating-system sandbox.
 
+Executable setup adapters are a closed registry. An adapter validates its bounded inputs,
+builds an inspect-only plan and describes declarative operations; it never writes, and the
+framework owns locking, grant consumption, journaling and verification. Only a plan whose
+adapter is registered can be validated, approved or applied ([ADR-0021](adr/0021-setup-adapters-are-a-registry.md)).
+`local-skill/v1` is the only registered adapter in this document's slice.
+
 ## Execution-plan contract: `local-skill/v1`
 
 The first bounded execution adapter plans the installation of one agent skill already in the

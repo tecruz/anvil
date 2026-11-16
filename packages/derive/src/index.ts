@@ -91,6 +91,15 @@ export {
   validateSetupPlan,
 } from './setup.ts'
 export {
+  findSetupAdapterForPlan,
+  resolveSetupAdapter,
+  resolveSetupPlan,
+  SETUP_ADAPTERS,
+  type SetupAdapterDefinition,
+  type SetupAdapterName,
+  setupAdapterList,
+} from './setup-adapters.ts'
+export {
   applySetupPlan,
   type InstalledLocalSkill,
   readSetupApplicationJournal,

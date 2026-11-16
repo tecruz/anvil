@@ -512,8 +512,8 @@ describe('discovery cannot install, execute or grant approval', () => {
     assert.equal(validation.approval, 'not-granted')
     assert.equal(validation.executed, false)
 
-    // An owner-command proposal cannot be applied at all: only a reviewed local-skill plan
-    // is an application input, so a discovered install has no route through apply either.
+    // An owner-command proposal cannot be applied at all: only a reviewed registered-adapter
+    // plan is an application input, so a discovered install has no route through apply either.
     const before = snapshot(fx)
     const applied = runAnvil(
       fx.repo,
@@ -521,7 +521,7 @@ describe('discovery cannot install, execute or grant approval', () => {
       fx.env,
     )
     assert.notEqual(applied.code, 0)
-    assert.match(`${applied.stdout}\n${applied.stderr}`, /Only a local-skill execution plan can be applied/)
+    assert.match(`${applied.stdout}\n${applied.stderr}`, /Only a registered setup execution plan can be applied/)
     assertOnlyCacheChanged(fx, before, 'setup apply')
   })
 

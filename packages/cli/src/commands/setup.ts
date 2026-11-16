@@ -5,11 +5,11 @@ import { AnvilError, ErrorCode, loadConfig, parseCliArgs } from '@anvil/core'
 import {
   applySetupPlan,
   buildSetupApprovalGrant,
-  buildSetupExecutionPlan,
   buildSetupPlan,
   inspectSetupApproval,
   isSetupExecutionPlan,
-  resolveSetupExecutionPlan,
+  resolveSetupAdapter,
+  resolveSetupPlan,
   revokeSetupApproval,
   type SetupApplicationRecord,
   type SetupApprovalRecord,
@@ -18,6 +18,7 @@ import {
   type SetupPlan,
   type SetupRepositoryState,
   saveSetupApprovalGrant,
+  setupAdapterList,
   validateSetupPlan,
 } from '@anvil/derive'
 import { git, normalizeGitPath, probePromisorRemote, type RunResult, readOnlyGitEnv, withRepoLock } from '@anvil/git'
@@ -200,23 +201,24 @@ export const setupCommand: Command = {
   name: 'setup',
   summary: 'Generate, validate, approve, apply or revoke a setup plan; application is create-only and single-use.',
   usage:
-    'anvil setup <plan|validate|approve|approval|revoke|apply> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter local-skill --source <file> --name <name>]',
+    'anvil setup <plan|validate|approve|approval|revoke|apply> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter <adapter> --source <file> --name <name>]',
   details: [
-    'plan       Describe owner-declared install commands, or plan one local-skill installation.',
+    'plan       Describe owner-declared install commands, or plan one registered adapter installation.',
     'validate   Compare saved plan JSON with fresh inputs; requires --plan <file>.',
-    'approve    Grant one application of a current local-skill plan; requires --plan <file> and a typed confirmation.',
+    'approve    Grant one application of a current execution plan; requires --plan <file> and a typed confirmation.',
     'approval   Inspect a stored grant; requires --grant <id>.',
     'revoke     Withdraw a stored grant; requires --grant <id>.',
-    'apply      Apply an approved local-skill plan once; requires --plan <file> and --grant <id>.',
+    'apply      Apply an approved execution plan once; requires --plan <file> and --grant <id>.',
     '',
     'plan --adapter local-skill --source <repo-relative-file> --name <name>',
     '           Build an execution plan for one repository-local SKILL.md.',
     '',
     'No install commands, version probes, service connections or network fetches are performed.',
-    'Only Git metadata commands and the create-only writes of an approved local-skill plan run.',
+    "Only Git metadata commands and the create-only writes of an approved adapter's plan run.",
     'Approval grants are stored outside the repository.',
     'Opaque owner-declared install commands remain proposal-only and cannot be approved or applied.',
     'A local-skill plan is create-only; apply refuses an existing destination and never overwrites.',
+    'Only a plan emitted by a registered setup adapter can be approved or applied.',
     "Save the JSON envelope's data object outside the worktree (or in an ignored file).",
     'Application consumes the grant before its first write, journals the outcome and verifies the result.',
   ].join('\n'),
@@ -266,21 +268,9 @@ export const setupCommand: Command = {
         throw usage('--source and --name require --adapter local-skill', 'Choose an explicit adapter.')
       }
       if (adapter !== undefined) {
-        if (adapter !== 'local-skill') {
-          throw usage('Unsupported setup adapter', 'Use --adapter local-skill; no other adapter is implemented.')
-        }
-        if (source === undefined || source === '') {
-          throw usage(
-            '--adapter local-skill requires --source <repo-relative-file>',
-            'The source must be a file inside this repository.',
-          )
-        }
-        if (name === undefined || name === '') {
-          throw usage(
-            '--adapter local-skill requires --name <skill-name>',
-            'The name must match the skill name in its frontmatter.',
-          )
-        }
+        // Adapter-specific flags are validated by the adapter itself, so a new adapter cannot
+        // be wired into planning without also declaring its bounded inputs.
+        resolveSetupAdapter(adapter).parseRequest({ source, name })
       }
     } else if (sub === 'apply') {
       if (adapter !== undefined || source !== undefined || name !== undefined) {
@@ -344,7 +334,8 @@ export const setupCommand: Command = {
         const plan = buildSetupPlan({ repository, declared, projectDir: profile.projectDir })
         ctx.out(plan, () => renderPlan(plan))
       } else {
-        const plan = buildSetupExecutionPlan({ repository, sourcePath: source as string, name: name as string })
+        const definition = resolveSetupAdapter(adapter)
+        const plan = definition.build(repository, definition.parseRequest({ source, name }))
         ctx.out(plan, () => renderExecutionPlan(plan))
       }
       return
@@ -354,8 +345,8 @@ export const setupCommand: Command = {
 
     if (sub === 'apply') {
       if (!isSetupExecutionPlan(saved)) {
-        throw new AnvilError(ErrorCode.PreflightFailed, 'Only a local-skill execution plan can be applied.', {
-          hint: 'Owner-command proposals remain inspect-only; use setup plan --adapter local-skill.',
+        throw new AnvilError(ErrorCode.PreflightFailed, 'Only a registered setup execution plan can be applied.', {
+          hint: `Owner-command proposals remain inspect-only; use setup plan --adapter ${setupAdapterList()}.`,
         })
       }
       const record = await applySetupPlan({
@@ -378,8 +369,8 @@ export const setupCommand: Command = {
 
     if (sub === 'approve') {
       if (!isSetupExecutionPlan(saved)) {
-        throw new AnvilError(ErrorCode.PreflightFailed, 'Only a local-skill execution plan can be approved.', {
-          hint: 'Owner-command proposals remain inspect-only; use setup plan --adapter local-skill.',
+        throw new AnvilError(ErrorCode.PreflightFailed, 'Only a registered setup execution plan can be approved.', {
+          hint: `Owner-command proposals remain inspect-only; use setup plan --adapter ${setupAdapterList()}.`,
         })
       }
       try {
@@ -401,7 +392,7 @@ export const setupCommand: Command = {
     }
 
     const validation = isSetupExecutionPlan(saved)
-      ? resolveSetupExecutionPlan(saved, repository).validation
+      ? resolveSetupPlan(saved, repository).validation
       : validateSetupPlan(
           saved,
           buildSetupPlan({
@@ -464,7 +455,7 @@ export class SetupApprovalRefusal extends AnvilError {
  */
 export async function approveSetupPlan(flow: SetupApprovalFlow): Promise<SetupApprovalRecord> {
   const storeOptions = flow.env === undefined ? {} : { env: flow.env }
-  const first = resolveSetupExecutionPlan(flow.saved, flow.repository)
+  const first = resolveSetupPlan(flow.saved, flow.repository)
   if (first.validation.status !== 'current' || first.plan === null) {
     throw new SetupApprovalRefusal(
       first.validation,
@@ -479,7 +470,7 @@ export async function approveSetupPlan(flow: SetupApprovalFlow): Promise<SetupAp
   }
   // The repository may have moved while the reviewer read; revalidate after confirming.
   const revalidated = await flow.refresh()
-  const second = resolveSetupExecutionPlan(flow.saved, revalidated)
+  const second = resolveSetupPlan(flow.saved, revalidated)
   if (second.validation.status !== 'current' || second.plan === null) {
     throw new SetupApprovalRefusal(
       second.validation,
