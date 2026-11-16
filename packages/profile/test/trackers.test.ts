@@ -337,6 +337,7 @@ describe('symlinks cannot escape the repository', () => {
     const detection = detectTrackerCandidates(dir, null)
     assert.ok(evidenceFiles(detection).includes('.github/ISSUE_TEMPLATE/real.md'))
     assert.ok(!evidenceFiles(detection).includes('.github/ISSUE_TEMPLATE/link.md'))
+    assert.match(detection.reason, /not read .*ISSUE_TEMPLATE\/link\.md/)
   })
 })
 
