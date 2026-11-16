@@ -75,8 +75,9 @@ What it cannot show: the old `runWindowsTool` discarded the error (`setup-approv
 at `f0c28c9`), so there is no recorded `ETIMEDOUT`, exit code or subprocess timing, and even a
 confirmed timeout would not say whether PowerShell start-up or the ACL query itself was slow.
 The conclusion is therefore "most likely a timeout of that single ACL read", not a proven
-cause. The code that replaced it (#57, #62) reports a timeout as "could not be read within
-N ms", so a recurrence will name itself and settle the question.
+cause, and nothing recorded later can prove what that historical call did. The code that
+replaced it (#57, #62) reports a timeout as "could not be read within N ms", so a future
+failure of this kind will at least say which kind it is.
 
 How long the affected test normally takes: in the 26 green Windows jobs below, "applies a
 current plan once…" took 10.4–20.4 s (median 14.5 s) for the whole test,
@@ -84,9 +85,11 @@ which starts PowerShell for each ACL read and `icacls.exe` for each hardening.
 
 ## Stability since the fix
 
-Every run of the CI workflow since `465c1ce` (the 60-second bound) merged, oldest first,
-taken from the GitHub Actions run list and job logs. Every one is on a commit that contains
-`465c1ce`, and there is no other CI run in that window (no failure, cancellation or re-run).
+Every run of the CI workflow (`ci.yml`) from `465c1ce` (the 60-second bound) merging on
+2026-11-15 16:48 UTC up to this record, oldest first. The inventory comes from
+`gh run list --workflow ci.yml`, which lists exactly these 13 runs in that window, each
+`completed`, `success` and attempt 1 (no re-run, failure or cancellation); the per-job data
+comes from each job's log. Every run is on a commit that contains `465c1ce`.
 Each cell is the job id, its conclusion, the affected test's duration and the full suite's
 `ℹ tests` and `ℹ fail` totals from that job's log.
 
@@ -118,5 +121,8 @@ Unchanged. A timeout is `unknown`, never `active`; a store or record whose prote
 be confirmed in time is refused, and nothing is repaired. On 2026-11-16 one more path was
 aligned: when a reservation loses a race to another transition, `consumeSetupApproval`
 re-reads the winner's record and, if that read times out or cannot be inspected, now reports
-`unknown` with the reason instead of "This grant has already been used." Both refused the
-attempt (`reserved: false`); only the message changed.
+status `unknown` with the reason instead of status `consumed` and "This grant has already been
+used." Both refuse the attempt (`reserved: false`). The visible difference is in reporting:
+with no application journal, `anvil setup apply` now returns a refusal naming the inspection
+problem rather than `interrupted` ("already reserved"), because nothing shows the attempt
+was reserved. No path gains authority and nothing is repaired.
