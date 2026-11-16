@@ -22,7 +22,7 @@ explaining is a tool people route around.
 | --- | --- | --- |
 | Node.js **22.18+** | the install-time build, and every command | the install fails; the bundle itself targets Node 22 |
 | `git` | `claim`, `crew`, `ship`, `status` | `doctor`, `plan` and `profile` still work — they only read files |
-| `gh` (GitHub CLI) | `anvil ship` (opening the pull request), `anvil auth github` | tickets still work through the local markdown provider; `ship` cannot open a pull request without it |
+| `gh` (GitHub CLI) | `anvil ship` (opening the pull request), `anvil auth github`, and the `github` ticket provider | tickets still work through the local markdown provider; `ship` cannot open a pull request without it |
 | `opencode` | `anvil crew up --launch` (the default agent runner) | everything else; pass `--runner <name>` to launch a different agent |
 | `ccusage` | `anvil crew status --cost` | the cost report says so instead of failing |
 
@@ -167,12 +167,131 @@ anvil ship local-1                             # verify, push, open the PR, upda
 anvil release local-1                           # tear the worktree down
 ```
 
+The same loop against GitHub Issues:
+
+```bash
+anvil issue create "Fix the login redirect" --provider github
+anvil claim gh-42                               # or the full issue URL
+anvil crew up --tickets gh-42,gh-43 --provider github
+```
+
+### Which provider runs
+
+Every command that reads or writes a ticket resolves one provider, in this order:
+
+1. `--provider local|github` on the command;
+2. `provider.default` in `anvil.config.json`;
+3. the reference itself — a ticket URL, or a `gh-42` key;
+4. `local`.
+
+`ship` and `issue sync` are the exception to that command-level ordering: they update a
+claimed ticket through the provider recorded in the claim. `ship` has no `--provider` flag;
+it uses the claim's recorded provider (and, for a hosted ticket, its recorded URL).
+
+`local` stays the built-in default: it needs no account, no network and no `gh`. That is
+what makes the tool evaluable in a company that blocks API egress
+([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)). Detection, audit and
+`doctor` never construct a provider and never gained a network call; the only commands that
+contact a tracker are the ones whose whole job is a ticket.
+
+| Provider | Transport | Account | Network | `create` | `list` | `comment` | `transition` | `link` | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | yes | yes | yes | yes | yes | the default and the offline escape hatch |
+| `github` | the `gh` CLI, argument arrays only | `gh auth login` | yes (via `gh`) | yes | yes | yes | yes, open/close plus labels | yes | `in_progress`/`in_review`/`wontfix` are labels, because GitHub issues have no state machine |
+
+An unknown provider is refused with the list of supported ones. A provider that cannot do
+what a subcommand asks fails naming the missing capability (`create`, `list`, `comment`,
+`transition`, `link`), rather than with a transport error from deep inside the call. The
+list is part of the provider contract, so a future provider has to declare it.
+
+A pasted issue URL keeps the repository it names: `anvil claim
+https://github.com/acme/widgets/issues/42` reads, comments on and transitions issue 42 in
+`acme/widgets`, not the same-numbered issue in whatever repository you are standing in. A
+bare number (`gh-42`) is deliberately different — it means "issue 42 here". The pull request
+anvil opens closes a ticket with that ticket's URL (`Closes
+https://github.com/acme/widgets/issues/42`), so a ticket from another repository is closed
+there rather than closing this repository's issue 42.
+
+A URL names GitHub only in GitHub's own shape, `https://<host>/<owner>/<repo>/issues/<n>`
+(or `/pull/<n>`), on `github.com`-style hosts or on a host anvil already knows is this
+checkout's GitHub host (`origin`, or `GH_HOST`). A GitLab-style `/-/issues/` URL is never
+read as a GitHub issue, even on that host, and with `--provider github` a URL in any other
+shape is refused rather than turned into an issue number in a guessed repository.
+
+A listing that failed is a failure, not an empty backlog. `anvil issue list --provider
+github` and the automatic work selection in `anvil crew up` both report the `gh` error
+(for example a 403) and exit non-zero, instead of printing "no tickets" when the tracker
+could not be read. Automatic `crew up` selection claims only issues whose normalized state
+is `todo`: an issue already labelled `in-progress` or `in-review` is not ready work. An
+explicit `--tickets` list bypasses that state filter, because naming a ticket is a
+decision. Because the filter runs after `gh` answers, a page made up entirely of
+filtered-out issues is fetched again with a larger limit rather than reported as an empty
+backlog. `gh issue list` refuses a limit above 1,000; if that maximum page is still full
+and the wanted matches are short, the listing is reported as **incomplete** rather than
+returning a filtered subset as though it were the whole backlog. `crew up --limit N` asks
+for exactly N ready issues, so a small crew can start from a large backlog.
+
+A GitHub transition sets the whole state, not just the label it adds. Moving an issue out
+of `in_review` (by `issue set-state`, `issue sync` or `ship`) removes the `in-review`
+label, and `set-state` refuses `unknown`. Label spellings are matched case-insensitively
+and with either separator, so a repository's existing `In Review` label is recognised,
+reused and removed rather than duplicated.
+
+### What can and cannot be concluded locally
+
+`anvil doctor` reads the clone and reports **tracker candidates**, because most tracker
+usage is not locally provable. Each candidate has a kind (`github`, `gitlab`, `jira`,
+`linear` or `unknown`), a confidence (`documented`, `detected` or `inferred`) and
+`file:line` evidence with a short excerpt. The section is informational: it never changes
+the score, the grade, a `--fail-on` threshold or the exit code.
+
+What a local read **can** show:
+
+- an issue template exists (`.github/ISSUE_TEMPLATE/*` for GitHub,
+  `.gitlab/issue_templates/*` for GitLab) — `detected`. The template text is read too, so a
+  `config.yml` whose contact links send issues to another tracker adds that tracker, and the
+  result is `unconfirmed` rather than GitHub;
+- a README, CONTRIBUTING, SECURITY or ARCHITECTURE document, or a template, links to a
+  tracker's issue page (a GitHub or GitLab issues page, including one on the remote's own
+  Enterprise host, a Jira `browse` URL, a Linear workspace URL) — `documented`;
+- a document merely names a product ("we do not use Jira") — `inferred`, labelled as a
+  mention rather than proof of use;
+- an issue-key convention such as `PROJ-123` appears in a template or document — `inferred`,
+  and explicitly labelled a guess;
+- the clone's remote host, which is only corroboration. A GitHub remote alone is **not**
+  evidence that GitHub Issues is used, so a repository with nothing else reports `na`
+  rather than defaulting to GitHub.
+
+The read is bounded: at most 20 template files per directory (in sorted order), files up to
+128 KiB, and a few citations per candidate, keeping the strongest. A symlinked, hard-linked,
+oversized, binary or unreadable file is not read, and the reason says the scan was partial
+and names it. URL credentials (`user:token@`) are replaced with `***` before anything is
+quoted.
+
+What it **cannot** show:
+
+- whether GitHub Issues is enabled on the server, whether a Jira project key is real, or
+  whether anyone reads the tracker;
+- which of two plausible trackers a repository actually uses. Two or more kinds produce an
+  `unconfirmed` state with every candidate listed and no winner chosen.
+
+Detection never writes configuration, never contacts a tracker, and grants no authority to
+create, comment on or transition an issue; tests check that a detection run makes no write,
+network or process call. Confirmation is a separate, deliberate act: set
+`provider.default` in `anvil.config.json` (or pass `--provider`). Only a provider anvil has
+(`local`, `github`) can be confirmed; a Jira, GitLab or Linear candidate is information
+about the project, not something anvil can act on yet. Provider resolution reads
+only that value, the flag and the ticket reference; it never consults detection, so a
+repository whose files mention Jira or GitLab still resolves `local` until you say
+otherwise.
+
 What each step does:
 
-- **`issue create`** writes a ticket to `.anvil/tickets/` in the main worktree. The local
-  markdown provider is deliberate: it is the escape hatch for a company that blocks API
-  egress, and it needs no account and no network. A ticket reference can be `3`, `#3`,
-  `local-3`, `PROJ-123`, or a full ticket URL.
+- **`issue create`** writes a ticket to `.anvil/tickets/` in the main worktree with the
+  local provider, or opens an issue with `--provider github`. The local markdown provider
+  is deliberate: it is the escape hatch for a company that blocks API egress, and it needs
+  no account and no network. A ticket reference can be `3`, `#3`, `local-3`, `gh-42`,
+  `PROJ-123`, or a full ticket URL for a hosted tracker.
 - **`claim`** creates a branch (`feat/local-1-fix-the-login-redirect` by default) and a
   worktree *outside* the repository, in a short sibling directory so Windows path lengths
   stay inside the budget. The worktree comes warm: the ticket, the acceptance criteria,
@@ -182,7 +301,9 @@ What each step does:
   override the repository's `AGENTS.md`. Lines that look like instructions are quoted in
   the bundle and reported by `claim` and `issue pull` rather than silently removed. A
   claim that cannot succeed is refused before anything is created — a colliding branch,
-  an occupied path, a dirty base or a path over the Windows budget all stop it.
+  an occupied path, a dirty base or a path over the Windows budget all stop it. A GitHub
+  claim runs `gh auth status` first, so an unauthenticated machine is refused before the
+  branch exists.
 - **The claim installs a `pre-push` hook** in its worktree that refuses every push unless
   `ANVIL_SHIP=1`, which only `anvil ship` sets. This is what makes "agents commit, humans
   ship" a control rather than a request: the hook is per worktree, so the main worktree is
@@ -202,7 +323,9 @@ What each step does:
   request, ticket. The stages that could lose work or leave debris on the remote run
   last, so a failed verification means nothing reached the remote at all. It refuses
   before pushing when the worktree has uncommitted changes or the branch has no commits
-  beyond its base. `ship` needs `gh` and a GitHub remote.
+  beyond its base. `ship` needs `gh` and a GitHub remote for the pull request; the ticket
+  update goes back to the provider the claim came from, so a local ticket is advanced
+  locally instead of being looked for on GitHub.
 - **`release`** removes the worktree, and refuses to remove one holding uncommitted
   changes or unpushed commits unless `--force` is passed — and says which of the two it
   found.
@@ -473,9 +596,9 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
 | `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan from the closed adapter registry, its single-use approval grant, and one journaled application. |
 | `anvil brief` | Emit verified facts for an LLM step, with the `gaps`, evidence-use rules and open context questions kept explicit. `--for agents\|commands\|skills\|all`. |
-| `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. |
-| `anvil claim` | Branch, worktree and context bundle for one ticket. |
-| `anvil crew` | `up`, `status`, `verify` — several tickets at once. |
+| `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. `--provider local\|github`. |
+| `anvil claim` | Branch, worktree and context bundle for one ticket. `--provider local\|github`. |
+| `anvil crew` | `up`, `status`, `verify` — several tickets at once. `up` takes `--provider local\|github`. |
 | `anvil status` | Every claim, and what would be lost if it were released. |
 | `anvil ship` | Verify, push, open the pull request, update the ticket. |
 | `anvil release` | Tear down a claim's worktree, and optionally its branch. |
@@ -515,7 +638,7 @@ Two layers, repo-local wins:
 {
   "schemaVersion": 1,
   "git": { "defaultBaseBranch": null, "worktreeRoot": null },
-  "provider": { "default": "local" },
+  "provider": { "default": null },
   "output": { "color": "auto" },
   "features": { "probeCommands": false },
   "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
@@ -526,7 +649,12 @@ Two layers, repo-local wins:
   one. `null` means the repository's default branch.
 - `git.worktreeRoot` — where worktrees are created. `null` means
   `<repoParent>/<repoName>-worktrees`.
-- `provider.default` — the ticket provider used when a reference carries none.
+- `provider.default` — the ticket provider every ticket command uses when no `--provider`
+  flag is given. `null` (the default) means "infer it": a `gh-42` reference or a ticket URL
+  names its own provider, and `local` is the fallback. Set `"local"` or `"github"` to make
+  one tracker the repository's choice; that value then wins over the reference, which is
+  what a repository that only uses one tracker wants. See
+  [which provider runs](#which-provider-runs).
 - `output.color` — `auto`, `always` or `never`.
 - `features.probeCommands` — run the project's verify commands during `ship`.
 - `project.commands` — commands the owner declares for a project anvil cannot detect on
@@ -611,10 +739,13 @@ references and environment variables are separate namespaces, so `--fail-on-bloc
 still list one name under two kinds; the readiness report says which.
 
 Only these keys are accepted. An unknown key is an error, not a warning: a typo in
-`provider.default` should fail on day one rather than silently do nothing for a year. That
-also means an older anvil rejects a config that uses `project.credentials`,
-`project.access` or `project.hardware`: the keys are not silently ignored by a version
-that cannot understand them.
+`provider.default` should fail on day one rather than silently do nothing for a year. The
+value of `provider.default` is checked when a ticket command resolves a provider, so a
+supported ticket command names the provider it does not know and lists the ones it does,
+while `doctor` and `profile` still load a config that only the ticket workflow has an
+opinion about. That also means an older anvil rejects a config that uses
+`project.credentials`, `project.access` or `project.hardware`: the keys are not silently
+ignored by a version that cannot understand them.
 
 ```bash
 anvil config show    # the resolved configuration and where each layer came from
@@ -628,7 +759,7 @@ anvil config init    # write a starter repo-local config (refuses to overwrite)
 | --- | --- |
 | `ANVIL_CONFIG_HOME` | Where the global config and caches live. Defaults to `~/.anvil`. |
 | `ANVIL_PLAYBOOKS` | A directory of playbook YAML files, merged over the built-in registry. |
-| `ANVIL_TICKETS_DIR` | Where local tickets live. Defaults to `.anvil/tickets` in the main worktree. |
+| `ANVIL_TICKETS_DIR` | Where local tickets live. Defaults to `.anvil/tickets` in the main worktree; a relative value resolves against the main worktree, not the directory the command runs in. Read by `issue`, `claim`, `crew up` and `ship` alike. |
 | `NO_COLOR` | Disables ANSI colour. `--no-color` does the same for one command. |
 
 The opencode plugin forwards these four into the shell it hands to the agent, so a
@@ -752,6 +883,15 @@ cause is Node older than 22.18.
 **`No ticket directory yet`.** There is no `.anvil/tickets/` in the main worktree.
 Create a ticket with `anvil issue create "<title>"`, or point `ANVIL_TICKETS_DIR` at a
 directory that already has one.
+
+**`Unsupported ticket provider: gitlab`.** The reference named a tracker anvil has no
+transport for. The hint lists the ones it has (`local`, `github`); pass `--provider local`
+to read the reference as a local ticket instead.
+
+**`The github provider cannot create a ticket: missing the "create" capability`.** The
+provider cannot do what the subcommand asked. The error names the capability and the ones
+the provider does support, and the same check runs for `list`, `comment`, `transition` and
+`link` — no command fails with a transport error where a missing capability is the reason.
 
 **`Cannot ship: gh is not authenticated`.** `ship` needs the GitHub CLI. `anvil auth
 github` prints the exact login command for the host your remote actually points at,

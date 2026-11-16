@@ -1263,6 +1263,30 @@ export function revokeSetupApproval(id: string, options: SetupApprovalStoreOptio
 }
 
 /**
+ * Report a reservation that lost to a transition written after the pre-check.
+ *
+ * The winner's record is re-read so the refusal names what actually happened. A record that
+ * cannot be inspected (including a protection check that timed out) stays `unknown` with its
+ * own reason, never "already used": both refuse the attempt, but only one is true.
+ */
+export function reservationCollisionRecord(
+  id: string,
+  after: SetupApprovalTransitionInspection,
+  grant: SetupApprovalGrant,
+): SetupApprovalRecord {
+  if (after.state === 'revoked') {
+    return approvalRecord(id, 'revoked', 'The grant was revoked before the attempt could be reserved.', grant)
+  }
+  if (after.state === 'consumed') return approvalRecord(id, 'consumed', 'This grant has already been used.', grant)
+  return approvalRecord(
+    id,
+    'unknown',
+    after.reason ?? 'The grant state record cannot be inspected after a competing write.',
+    grant,
+  )
+}
+
+/**
  * Reserve the single application attempt. Application code must call this after full
  * revalidation and *before* its first repository mutation, so a crash or failure burns the
  * attempt and cannot be retried without fresh approval. The state is written as a single
@@ -1303,14 +1327,7 @@ export function consumeSetupApproval(
     throw new AnvilError(ErrorCode.PreflightFailed, 'Could not reserve the application attempt.', { cause })
   }
   if (written === 'exists') {
-    const after = readSetupApprovalTransition(dir)
-    if (after === 'revoked') {
-      return {
-        record: approvalRecord(id, 'revoked', 'The grant was revoked before the attempt could be reserved.', grant),
-        reserved: false,
-      }
-    }
-    return { record: approvalRecord(id, 'consumed', 'This grant has already been used.', grant), reserved: false }
+    return { record: reservationCollisionRecord(id, inspectSetupApprovalTransition(dir), grant), reserved: false }
   }
   return {
     record: approvalRecord(

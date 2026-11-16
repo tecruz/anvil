@@ -53,14 +53,14 @@ describe('mergeConfig', () => {
   test('does not mutate the base config', () => {
     const base = defaultConfig()
     const next = mergeConfig(base, { provider: { default: 'github' } }, 'test')
-    assert.equal(base.provider.default, 'local')
+    assert.equal(base.provider.default, null)
     assert.equal(next.provider.default, 'github')
   })
 
   test('overrides only the keys present in the layer', () => {
     const next = mergeConfig(defaultConfig(), { output: { color: 'never' } }, 'test')
     assert.equal(next.output.color, 'never')
-    assert.equal(next.provider.default, 'local')
+    assert.equal(next.provider.default, null)
   })
 
   test('a layer that sets one key does not require its siblings', () => {
@@ -157,7 +157,7 @@ describe('mergeConfig', () => {
     // A typo in one key must not leave the others half-merged.
     assert.throws(() => mergeConfig(defaultConfig(), { provider: { default: 'github' }, git: { bad: 1 } }, 'cfg'))
     const fresh = defaultConfig()
-    assert.equal(fresh.provider.default, 'local')
+    assert.equal(fresh.provider.default, null)
   })
 })
 
@@ -197,6 +197,20 @@ describe('loadConfig', () => {
     })
     assert.equal(resolved.config.provider.default, 'local', 'repo should win')
     assert.equal(resolved.config.output.color, 'always', 'global should survive where repo is silent')
+  })
+
+  test('a repo layer can clear a global provider.default back to inference', () => {
+    const home = tempDir()
+    const repo = tempDir()
+
+    writeFileSync(join(home, 'anvil.config.json'), JSON.stringify({ provider: { default: 'github' } }))
+    writeFileSync(join(repo, 'anvil.config.json'), JSON.stringify({ provider: { default: null } }))
+
+    const resolved = loadConfig({
+      repoRoot: repo,
+      env: { ANVIL_CONFIG_HOME: home },
+    })
+    assert.equal(resolved.config.provider.default, null, 'null means infer it, and must not be skipped')
   })
 
   test('records which files were present', () => {

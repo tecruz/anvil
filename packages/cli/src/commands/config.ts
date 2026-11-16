@@ -25,7 +25,7 @@ function describe(config: AnvilConfig): Array<[string, string]> {
     ['schemaVersion', String(config.schemaVersion)],
     ['git.defaultBaseBranch', opt(config.git.defaultBaseBranch)],
     ['git.worktreeRoot', opt(config.git.worktreeRoot)],
-    ['provider.default', config.provider.default],
+    ['provider.default', opt(config.provider.default)],
     ['output.color', config.output.color],
     ['features.probeCommands', String(config.features.probeCommands)],
     ['project.commands', String(config.project.commands.length)],
