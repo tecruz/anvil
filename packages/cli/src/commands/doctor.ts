@@ -21,7 +21,15 @@ import {
 import { AnvilError, ErrorCode, parseCliArgs, renderTable, type Style } from '@anvil/core'
 import { discoverRepo } from '@anvil/git'
 import { loadPlaybooks, matchPlaybooks } from '@anvil/playbooks'
-import { buildProfile, type CommandEntry, type ProjectProfile, profileWarnings, type VcsHost } from '@anvil/profile'
+import {
+  buildProfile,
+  type CommandEntry,
+  detectTrackerCandidates,
+  type ProjectProfile,
+  profileWarnings,
+  type TrackerDetection,
+  type VcsHost,
+} from '@anvil/profile'
 import { toPlaybookMatchInfo } from './matches.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -275,9 +283,12 @@ export const doctorCommand: Command = {
 
     const failOn = parseSeverity(args.values['fail-on']) ?? (args.values.strict === true ? 'high' : null)
     const runners = runnersOf(profile)
+    // Advisory only: the candidate set is read-only evidence and is deliberately not a
+    // Finding. It never enters the score, the grade, the threshold or the exit code.
+    const tracker = detectTrackerCandidates(profile.root, profile.vcs.remote)
     // Additive to the readiness report, not a new contract: a caller that only knows the
     // report fields is unaffected, and a caller that wants the candidates now gets them.
-    const payload = { ...report, runners }
+    const payload = { ...report, runners, tracker }
     const breach =
       failOn === null
         ? null
@@ -302,7 +313,11 @@ export const doctorCommand: Command = {
       // branching on `ok` is the documented contract, and this is the only payload-bearing
       // failure that was still reporting success. The report travels as the failure's payload,
       // so a consumer parsing the envelope still gets the full findings either way.
-      ctx.outFailure(payload, err, () => `${renderReport(ctx, report, runners)}\n\n${renderErrorText(err, ctx.style)}`)
+      ctx.outFailure(
+        payload,
+        err,
+        () => `${renderReport(ctx, report, runners, tracker)}\n\n${renderErrorText(err, ctx.style)}`,
+      )
       return err.exitCode
     }
 
@@ -319,12 +334,16 @@ export const doctorCommand: Command = {
           details: { degraded: reasons, score: report.score, grade: report.grade },
         },
       )
-      ctx.outFailure(payload, err, () => `${renderReport(ctx, report, runners)}\n\n${renderErrorText(err, ctx.style)}`)
+      ctx.outFailure(
+        payload,
+        err,
+        () => `${renderReport(ctx, report, runners, tracker)}\n\n${renderErrorText(err, ctx.style)}`,
+      )
       return err.exitCode
     }
 
     // The report is the answer; the exit code is the verdict.
-    ctx.out(payload, () => renderReport(ctx, report, runners))
+    ctx.out(payload, () => renderReport(ctx, report, runners, tracker))
     return undefined
   },
 }
@@ -400,7 +419,12 @@ function barFor(score: number, s: Style): string {
   return score >= 70 ? s.green(bar) : score >= 40 ? s.yellow(bar) : s.red(bar)
 }
 
-function renderReport(ctx: CommandContext, report: ReadinessReport, runners: readonly RunnerSummary[] = []): string {
+function renderReport(
+  ctx: CommandContext,
+  report: ReadinessReport,
+  runners: readonly RunnerSummary[] = [],
+  tracker: TrackerDetection | null = null,
+): string {
   const s = ctx.style
   const out: string[] = []
 
@@ -446,6 +470,8 @@ function renderReport(ctx: CommandContext, report: ReadinessReport, runners: rea
     }
   }
 
+  if (tracker !== null) out.push('', renderTracker(ctx, tracker))
+
   const withFix = report.findings.filter((f) => f.fix !== null && f.status !== 'pass')
   if (withFix.length > 0) {
     out.push('')
@@ -470,6 +496,27 @@ function renderReport(ctx: CommandContext, report: ReadinessReport, runners: rea
     for (const d of report.degraded) out.push(`  ${d.reason}`)
   }
 
+  return out.join('\n')
+}
+
+/**
+ * The tracker candidate section.
+ *
+ * This is informational prose, not a finding: a repository may use no tracker at all, and
+ * `local` remains a supported answer. The section never uses a status word such as `FAIL`
+ * and never contributes to the score or the threshold.
+ */
+function renderTracker(ctx: CommandContext, tracker: TrackerDetection): string {
+  const s = ctx.style
+  const out: string[] = [s.bold('Ticket tracker (informational)'), `  ${s.dim('state')}   ${tracker.state}`]
+  out.push(`  ${s.dim('reason')}  ${tracker.reason}`)
+  for (const candidate of tracker.candidates) {
+    out.push(`  ${candidate.kind.padEnd(8)} ${candidate.confidence}`)
+    for (const evidence of candidate.evidence) {
+      const where = evidence.line === 0 ? evidence.file : `${evidence.file}:${String(evidence.line)}`
+      out.push(`    ${where.padEnd(48)} ${s.dim(evidence.excerpt)}`)
+    }
+  }
   return out.join('\n')
 }
 
