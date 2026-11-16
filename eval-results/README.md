@@ -43,10 +43,12 @@ A dispatch of the `Eval benchmark` workflow with `rehearse_failure: true` skips 
 job and runs a separate hermetic rehearsal instead. It calls no model and receives no provider
 keys. The rehearsal runs `--fake-agent`, confirms the committed gate passes, tampers with one
 visible result, asserts that the gate rejects the tampered summary, then fails on purpose.
-The `upload rehearsal artifacts` step is `if: always()` and retains only
+Required artifacts are validated before the deliberate failure, and the
+`upload rehearsal artifacts` step is `if: always()` and retains only
 `failure-rehearsal.json`, `gate-rejection.log`, `run.json`, the run archive and checkpoints for
-30 days. The tampered summary is never promoted to `latest.json`; none of this is product
-effectiveness evidence. The run id and retained-artifact evidence are recorded in
+30 days. The job summary reports the actual step outcomes and claims retention only after a
+successful upload. The tampered summary is never promoted to `latest.json`; none of this is
+product effectiveness evidence. The run id and retained-artifact evidence are recorded in
 [IMPROVEMENT_PLAN.md](../docs/IMPROVEMENT_PLAN.md#phase-1--preserve-evidence-and-survive-interrupted-runs)
 after an approved dispatch.
 

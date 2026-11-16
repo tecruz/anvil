@@ -244,9 +244,11 @@ jobs:
         run: npm run eval -- --fake-agent --repetitions 1 --order alternate
 
       - name: confirm the healthy gate passes
+        id: healthy_gate
         run: npm run eval:check
 
       - name: tamper with hermetic evidence and write the rehearsal record
+        id: tamper
         env:
           REHEARSAL_RUN_ID: ${{ github.run_id }}
         run: |
@@ -276,35 +278,72 @@ jobs:
           fs.writeFileSync('eval-results/failure-rehearsal.json', `${JSON.stringify(record, null, 2)}\n`)
           NODE
 
-      # A blocking assertion: if the gate accepts the tampered summary, the rehearsal fails
-      # here and the record is wrong. A rejected gate is the expected outcome.
+      # A blocking assertion: a crash, a missing command or any other non-zero exit is not
+      # proof that the gate rejected the tampering. Require its normal failure code and the
+      # diagnostic for the result we changed.
       - name: assert the gate rejects the tampered evidence
+        id: gate_assertion
         run: |
           if npm run eval:check > eval-results/gate-rejection.log 2>&1; then
+            status=0
+          else
+            status=$?
+          fi
+          if [ "$status" -ne 1 ]; then
             cat eval-results/gate-rejection.log
-            echo '::error::the hermetic gate accepted tampered evidence.'
+            echo "::error::expected the hermetic gate to exit 1 for tampered evidence, got $status."
             exit 1
           fi
-          echo 'The hermetic gate rejected the tampered evidence, as expected.'
-          cat eval-results/gate-rejection.log
+          if ! grep -F 'did not pass the visible verifier' eval-results/gate-rejection.log; then
+            echo '::error::the gate failed without the expected tampered-evidence diagnostic.'
+            exit 1
+          fi
+          echo 'The hermetic gate rejected the tampered evidence with the expected diagnostic.'
+
+      # Verify every file the retention claim depends on before the deliberate failure.
+      # upload-artifact's if-no-files-found only catches the case where no file matches.
+      - name: validate required rehearsal artifacts
+        id: validate_artifacts
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const required = [
+            'eval-results/failure-rehearsal.json',
+            'eval-results/gate-rejection.log',
+            'eval-results/run.json',
+          ]
+          for (const file of required) {
+            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+              throw new Error(`missing or empty required artifact: ${file}`)
+            }
+          }
+          const rehearsal = JSON.parse(fs.readFileSync(required[0], 'utf8'))
+          const run = JSON.parse(fs.readFileSync(required[2], 'utf8'))
+          if (rehearsal.expectedGate !== 'reject' || rehearsal.runId !== run.runId) {
+            throw new Error('rehearsal record does not describe this run')
+          }
+          const archive = path.join('eval-results', 'runs', `${run.runId}.json`)
+          if (!fs.existsSync(archive)) throw new Error(`missing run archive: ${archive}`)
+          const archived = JSON.parse(fs.readFileSync(archive, 'utf8'))
+          if (archived.runId !== run.runId) throw new Error('run archive names another run')
+          const checkpointDir = path.join('eval-results', 'checkpoints', run.runId)
+          if (!fs.existsSync(checkpointDir)) throw new Error(`missing checkpoints: ${checkpointDir}`)
+          const checkpoints = fs.readdirSync(checkpointDir).filter((entry) => entry.endsWith('.json'))
+          if (checkpoints.length !== run.runKeys.length) {
+            throw new Error(`expected ${run.runKeys.length} checkpoints, found ${checkpoints.length}`)
+          }
+          console.log(`Validated ${required.length} files, the run archive and ${checkpoints.length} checkpoints.`)
+          NODE
 
       - name: fail the rehearsal on purpose
+        id: intentional_failure
         run: |
           echo '::error::synthetic failure rehearsal; the allowlisted artifacts must be retained.'
           exit 1
 
-      - name: publish rehearsal summary
-        if: always()
-        run: |
-          {
-            echo '## Hermetic failure rehearsal'
-            echo ''
-            echo 'This job failed on purpose after writing bounded evidence.'
-            echo 'The hermetic gate was asserted to reject tampered evidence.'
-            echo 'Retained: failure-rehearsal.json, gate-rejection.log, run.json, runs/ and checkpoints/.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: upload rehearsal artifacts
+        id: upload
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -317,3 +356,36 @@ jobs:
             eval-results/checkpoints/**/*.json
           if-no-files-found: error
           retention-days: 30
+
+      # Runs after the upload so its outcome can support an honest retention claim.
+      - name: publish rehearsal summary
+        if: always()
+        env:
+          HEALTHY_GATE: ${{ steps.healthy_gate.outcome }}
+          TAMPER: ${{ steps.tamper.outcome }}
+          GATE_ASSERTION: ${{ steps.gate_assertion.outcome }}
+          VALIDATE_ARTIFACTS: ${{ steps.validate_artifacts.outcome }}
+          INTENTIONAL_FAILURE: ${{ steps.intentional_failure.outcome }}
+          UPLOAD: ${{ steps.upload.outcome }}
+        run: |
+          {
+            echo '## Hermetic failure rehearsal'
+            echo ''
+            echo '| Step | Outcome |'
+            echo '| --- | --- |'
+            echo "| Healthy gate | $HEALTHY_GATE |"
+            echo "| Tamper and record | $TAMPER |"
+            echo "| Gate rejection assertion | $GATE_ASSERTION |"
+            echo "| Artifact validation | $VALIDATE_ARTIFACTS |"
+            echo "| Intentional failure | $INTENTIONAL_FAILURE |"
+            echo "| Artifact upload | $UPLOAD |"
+            echo ''
+            if [ "$HEALTHY_GATE" = success ] && [ "$TAMPER" = success ] &&
+               [ "$GATE_ASSERTION" = success ] && [ "$VALIDATE_ARTIFACTS" = success ] &&
+               [ "$INTENTIONAL_FAILURE" = failure ] && [ "$UPLOAD" = success ]; then
+              echo 'The rehearsal failed on purpose as designed, and the bounded artifacts were retained.'
+              echo 'Retained: failure-rehearsal.json, gate-rejection.log, run.json, runs/ and checkpoints/.'
+            else
+              echo 'The rehearsal did not complete as designed. No artifact-retention claim is made.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
