@@ -15,7 +15,6 @@
 
 import { lstatSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { detectDocs } from './general.ts'
 import type { CommandSource } from './types.ts'
 import { readText } from './walk.ts'
 
@@ -544,6 +543,41 @@ function finalize(draft: DetectionDraft, remote: string | null): TrackerDetectio
 }
 
 /**
+ * The documents scanned, in the same preference order as the profile's own doc detection.
+ *
+ * Probed through {@link safePath} rather than `existsSync`, because `existsSync` reports a
+ * permission error as "missing": an unreadable `docs/` would then hide its documents with
+ * no partial-scan notice.
+ */
+const DOC_CANDIDATES: readonly (readonly string[])[] = [
+  ['README.md', 'README.rst', 'README.txt', 'README', 'readme.md', 'docs/README.md'],
+  ['CONTRIBUTING.md', 'CONTRIBUTING', 'docs/CONTRIBUTING.md', '.github/CONTRIBUTING.md'],
+  ['SECURITY.md', 'docs/SECURITY.md', '.github/SECURITY.md'],
+  [
+    'ARCHITECTURE.md',
+    'docs/ARCHITECTURE.md',
+    'docs/architecture.md',
+    'architecture.md',
+    'docs/architecture/README.md',
+    'doc/architecture.md',
+  ],
+]
+
+/** The first document of a group that exists; an inaccessible one is recorded and skipped. */
+function firstDoc(root: string, candidates: readonly string[], draft: DetectionDraft): string | null {
+  for (const rel of candidates) {
+    const resolved = safePath(root, rel, 'file')
+    if (resolved === null) continue
+    if ('skipped' in resolved) {
+      if (!draft.skipped.includes(rel)) draft.skipped.push(rel)
+      continue
+    }
+    return rel
+  }
+  return null
+}
+
+/**
  * Detect ticket-tracker candidates from local files.
  *
  * `remote` is the repository's `origin` URL when the caller already has it; it is only a
@@ -573,8 +607,8 @@ export function detectTrackerCandidates(root: string, remote: string | null): Tr
       scanTemplate(root, rel, 'gitlab', draft)
     }
 
-    const docs = detectDocs(root)
-    for (const rel of [docs.readme, docs.contributing, docs.security, docs.architecture]) {
+    for (const group of DOC_CANDIDATES) {
+      const rel = firstDoc(root, group, draft)
       if (rel === null) continue
       const text = readRepoText(root, rel, draft)
       if (text !== null) scanText(text, rel, draft)

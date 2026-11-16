@@ -464,6 +464,23 @@ describe('review regressions', () => {
     }
   })
 
+  test('an unreadable docs directory makes the scan partial, not silent', (t) => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
+      t.skip('POSIX permissions are not enforced here')
+      return
+    }
+    const dir = repo({ 'docs/CONTRIBUTING.md': 'https://acme.atlassian.net/browse/X\n' })
+    const docs = join(dir, 'docs')
+    chmodSync(docs, 0o000)
+    try {
+      const detection = detectTrackerCandidates(dir, null)
+      assert.equal(detection.state, 'na')
+      assert.match(detection.reason, /partial: not read .*docs\//)
+    } finally {
+      chmodSync(docs, 0o755)
+    }
+  })
+
   test('a stronger citation replaces a weaker one when a file has used its allowance', () => {
     const lines = ['KEY-1', 'KEY-2', 'KEY-3', 'KEY-4', 'Tracker: https://acme.atlassian.net/browse/KEY']
     const detection = detectTrackerCandidates(repo({ 'CONTRIBUTING.md': `${lines.join('\n')}\n` }), null)
