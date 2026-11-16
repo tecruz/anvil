@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  chmodSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -431,6 +432,47 @@ describe('review regressions', () => {
     }
   })
 
+  test('scheme-relative and @-containing credentials are redacted in full', () => {
+    const dir = repo({
+      'CONTRIBUTING.md': [
+        'See //alice:SECRET@acme.atlassian.net/browse/PROJ-1',
+        'Or https://alice:p@SECRET2@acme.atlassian.net/browse/PROJ-2',
+      ].join('\n'),
+    })
+    assert.doesNotMatch(JSON.stringify(detectTrackerCandidates(dir, null)), /SECRET|alice/)
+  })
+
+  test('a Jira-looking path in prose is not a documented tracker URL', () => {
+    const detection = detectTrackerCandidates(repo({ 'README.md': 'Code lives in src/jira/software today.\n' }), null)
+    const jira = detection.candidates.find((candidate) => candidate.kind === 'jira')
+    assert.notEqual(jira?.confidence, 'documented')
+  })
+
+  test('an unreadable template directory makes the scan partial, not silent', (t) => {
+    if (process.platform === 'win32' || process.getuid?.() === 0) {
+      t.skip('POSIX permissions are not enforced here')
+      return
+    }
+    const dir = repo({ '.github/ISSUE_TEMPLATE/bug.md': 'Bug\n', 'README.md': 'nothing\n' })
+    const github = join(dir, '.github')
+    chmodSync(github, 0o000)
+    try {
+      const detection = detectTrackerCandidates(dir, null)
+      assert.match(detection.reason, /partial: not read .*\.github/)
+    } finally {
+      chmodSync(github, 0o755)
+    }
+  })
+
+  test('a stronger citation replaces a weaker one when a file has used its allowance', () => {
+    const lines = ['KEY-1', 'KEY-2', 'KEY-3', 'KEY-4', 'Tracker: https://acme.atlassian.net/browse/KEY']
+    const detection = detectTrackerCandidates(repo({ 'CONTRIBUTING.md': `${lines.join('\n')}\n` }), null)
+    const jira = detection.candidates.find((candidate) => candidate.kind === 'jira')
+    assert.equal(jira?.confidence, 'documented')
+    assert.ok(jira?.evidence.some((entry) => /atlassian\.net\/browse/.test(entry.excerpt)))
+    assert.ok((jira?.evidence.length ?? 0) <= TRACKER_LIMITS.maxEvidencePerFile)
+  })
+
   test('advice never suggests confirming a provider anvil does not have', () => {
     const jira = detectTrackerCandidates(repo({ 'README.md': 'https://acme.atlassian.net/browse/X\n' }), null)
     assert.match(jira.reason, /no jira provider/)
@@ -473,9 +515,10 @@ describe('detection is read-only and offline', () => {
     // Spy on the CommonJS builtins and push the spies into the ESM bindings, so any module
     // the detector reaches -- not just trackers.ts -- is covered for the whole call.
     const require = createRequire(import.meta.url)
-    const targets: Array<[string, string[]]> = [
+    const targets: Array<[Record<string, unknown>, string, string[]]> = [
       [
-        'node:fs',
+        require('node:fs'),
+        'fs',
         [
           'writeFileSync',
           'appendFileSync',
@@ -483,21 +526,58 @@ describe('detection is read-only and offline', () => {
           'mkdtempSync',
           'renameSync',
           'rmSync',
+          'rmdirSync',
           'unlinkSync',
           'copyFileSync',
+          'cpSync',
           'symlinkSync',
           'linkSync',
           'writeSync',
           'truncateSync',
+          'ftruncateSync',
           'utimesSync',
           'chmodSync',
+          'chownSync',
+          'createWriteStream',
+          'writeFile',
+          'appendFile',
+          'mkdir',
+          'rm',
+          'unlink',
+          'rename',
+          'open',
+          'write',
         ],
       ],
-      ['node:child_process', ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']],
-      ['node:net', ['connect', 'createConnection']],
-      ['node:http', ['request', 'get']],
-      ['node:https', ['request', 'get']],
-      ['node:dns', ['lookup', 'resolve']],
+      [
+        require('node:fs').promises,
+        'fs.promises',
+        [
+          'writeFile',
+          'appendFile',
+          'mkdir',
+          'rm',
+          'unlink',
+          'rename',
+          'open',
+          'copyFile',
+          'cp',
+          'symlink',
+          'link',
+          'truncate',
+        ],
+      ],
+      [
+        require('node:child_process'),
+        'child_process',
+        ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'],
+      ],
+      [require('node:net'), 'net', ['connect', 'createConnection']],
+      [require('node:tls'), 'tls', ['connect']],
+      [require('node:http'), 'http', ['request', 'get']],
+      [require('node:https'), 'https', ['request', 'get']],
+      [require('node:http2'), 'http2', ['connect']],
+      [require('node:dns'), 'dns', ['lookup', 'resolve']],
     ]
     const dir = repo({
       '.github/ISSUE_TEMPLATE/bug.md': 'name: Bug\n',
@@ -505,13 +585,28 @@ describe('detection is read-only and offline', () => {
     })
     const calls: string[] = []
     const restore: Array<() => void> = []
-    for (const [name, fns] of targets) {
-      const mod = require(name) as Record<string, unknown>
+    // openSync is only a write when its flags ask for one; reads go through it too.
+    const fsModule = require('node:fs') as Record<string, unknown>
+    const openSync = fsModule.openSync as (path: unknown, flags?: unknown, mode?: unknown) => number
+    fsModule.openSync = (path: unknown, flags?: unknown, mode?: unknown) => {
+      if (flags !== undefined && flags !== 'r' && flags !== 0) {
+        calls.push('fs.openSync(write)')
+        throw new Error('write forbidden during detection')
+      }
+      return openSync(path, flags, mode)
+    }
+    restore.push(() => {
+      fsModule.openSync = openSync
+    })
+    for (const [mod, name, fns] of targets) {
       for (const fn of fns) {
         const original = mod[fn]
-        mod[fn] = (...args: unknown[]) => {
+        if (typeof original !== 'function') continue
+        // Record and refuse: the real call never runs, so a regression cannot have a side
+        // effect before the assertion reports it.
+        mod[fn] = () => {
           calls.push(`${name}.${fn}`)
-          return (original as (...a: unknown[]) => unknown)(...args)
+          throw new Error(`${name}.${fn} forbidden during detection`)
         }
         restore.push(() => {
           mod[fn] = original
@@ -537,6 +632,8 @@ describe('detection is read-only and offline', () => {
       join(root, 'packages', 'cli', 'src', 'tickets.ts'),
       join(root, 'packages', 'cli', 'src', 'commands', 'work.ts'),
       join(root, 'packages', 'cli', 'src', 'commands', 'crew.ts'),
+      join(root, 'packages', 'cli', 'src', 'commands', 'ship.ts'),
+      join(root, 'packages', 'worktrees', 'src', 'ship.ts'),
     ].filter((path) => path.endsWith('.ts'))
     assert.ok(sources.length > 3)
     for (const path of sources) {

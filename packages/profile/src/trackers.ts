@@ -157,7 +157,7 @@ const DOC_PATTERNS: ReadonlyArray<{ kind: TrackerKind; re: RegExp; confidence: T
   },
   {
     kind: 'jira',
-    re: /\/(?:browse\/[A-Z][A-Z0-9]+-\d+|secure\/RapidBoard|jira\/software)\b/,
+    re: /\bhttps?:\/\/[^\s/]+\/(?:browse\/[A-Z][A-Z0-9]+-\d+|secure\/RapidBoard|jira\/software)\b/,
     confidence: 'documented',
     suffix: '',
   },
@@ -220,8 +220,11 @@ function safePath(root: string, relPath: string, want: 'file' | 'directory'): Sa
     let stat: ReturnType<typeof lstatSync>
     try {
       stat = lstatSync(current)
-    } catch {
-      return null
+    } catch (err) {
+      // Missing is "not there"; anything else (EACCES, EPERM, ...) is a file that exists
+      // but could not be checked, which the result must disclose as a partial scan.
+      const code = (err as NodeJS.ErrnoException).code
+      return code === 'ENOENT' || code === 'ENOTDIR' ? null : { skipped: true }
     }
     if (stat.isSymbolicLink()) return { skipped: true }
     const last = index === segments.length - 1
@@ -256,7 +259,9 @@ function readRepoText(root: string, relPath: string, draft: DetectionDraft): str
  * evidence is printed and put in JSON, so the credential part is replaced, never repeated.
  */
 export function redactRemoteUserinfo(text: string): string {
-  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^@/\s]+@/gi, '$1***@')
+  // Scheme-relative `//user@host` too, and up to the *last* `@` before the host, so a
+  // password that itself contains `@` is not half-quoted.
+  return text.replace(/((?:[a-z][a-z0-9+.-]*:)?\/\/)[^/\s]*@/gi, '$1***@')
 }
 
 function shortExcerpt(line: string, suffix = '', prefix = ''): string {
@@ -287,12 +292,31 @@ function addEvidence(
   evidence: TrackerEvidence,
 ): void {
   const candidate = accumulator(draft, kind)
-  const perFile = candidate.perFile.get(evidence.file) ?? 0
-  if (perFile >= TRACKER_LIMITS.maxEvidencePerFile) return
   const key = `${evidence.file}:${evidence.line}:${evidence.excerpt}`
   if (candidate.seen.has(key)) return
+  const perFile = candidate.perFile.get(evidence.file) ?? 0
+  if (perFile >= TRACKER_LIMITS.maxEvidencePerFile) {
+    // The file's allowance is spent: a stronger citation replaces its weakest one, so three
+    // early key guesses cannot crowd out an explicit tracker URL further down.
+    let weakest = -1
+    for (const [index, kept] of candidate.evidence.entries()) {
+      if (kept.file !== evidence.file) continue
+      if (CONFIDENCE_RANK[kept.confidence] >= CONFIDENCE_RANK[confidence]) continue
+      const current = candidate.evidence[weakest]
+      if (
+        weakest < 0 ||
+        (current !== undefined && CONFIDENCE_RANK[kept.confidence] < CONFIDENCE_RANK[current.confidence])
+      ) {
+        weakest = index
+      }
+    }
+    if (weakest < 0) return
+    const [dropped] = candidate.evidence.splice(weakest, 1)
+    if (dropped !== undefined) candidate.seen.delete(`${dropped.file}:${dropped.line}:${dropped.excerpt}`)
+  } else {
+    candidate.perFile.set(evidence.file, perFile + 1)
+  }
   candidate.seen.add(key)
-  candidate.perFile.set(evidence.file, perFile + 1)
   candidate.evidence.push({ ...evidence, confidence })
   // Confidence only rises with a citation that is actually kept, so a published
   // confidence always has at least one citation of that strength behind it.
