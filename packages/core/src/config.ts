@@ -250,8 +250,13 @@ export interface AnvilConfig {
     worktreeRoot: string | null
   }
   provider: {
-    /** Provider used when a ticket ref carries no explicit provider. */
-    default: string
+    /**
+     * Provider used when a ticket ref carries no explicit provider. `null` means "infer
+     * it": a `gh-42` key or a ticket URL names its own provider, and `local` is the
+     * built-in fallback. A value here wins over the reference, which is what makes a repo
+     * that always uses one tracker configurable.
+     */
+    default: string | null
   }
   output: {
     color: 'auto' | 'always' | 'never'
@@ -283,7 +288,7 @@ export function defaultConfig(): AnvilConfig {
   return {
     schemaVersion: 1,
     git: { defaultBaseBranch: null, worktreeRoot: null },
-    provider: { default: 'local' },
+    provider: { default: null },
     output: { color: 'auto' },
     features: { probeCommands: false },
     project: {
@@ -1007,6 +1012,10 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
   }
 
   if (layer.provider !== undefined) {
+    // The *value* is not restricted to a fixed list here. Naming a provider anvil does not
+    // implement is a ticket-command error, not a reason for `doctor` and `profile` to
+    // refuse to load the config; the resolver rejects it with the list of supported ones
+    // at the point a provider would actually be built.
     const provider = expectObject(layer.provider, 'provider', issues)
     for (const key of Object.keys(provider)) {
       if (key !== 'default')
@@ -1016,8 +1025,8 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
         })
     }
     if (provider.default !== undefined) {
-      if (typeof provider.default === 'string') next.provider.default = provider.default
-      else issues.push({ path: 'provider.default', message: 'expected a string' })
+      const value = expectStringOrNull(provider.default, 'provider.default', issues)
+      if (value !== undefined) next.provider.default = value
     }
   }
 
@@ -1218,7 +1227,7 @@ export function starterConfigJson(): string {
       defaultBaseBranch: null,
       worktreeRoot: null,
     },
-    provider: { default: 'local' },
+    provider: { default: null },
     output: { color: 'auto' },
     features: { probeCommands: false },
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and

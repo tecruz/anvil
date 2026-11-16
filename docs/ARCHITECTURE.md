@@ -72,8 +72,8 @@ own. The import graph below is the real one, read from the source.
 | `packages/discovery` | What the ecosystem published that the curated registry does not know, and the skills already installed on this machine | `core`, `playbooks` |
 | `packages/derive` | The LLM seam: brief, generate, validate, diff, staging | `core`, `profile`, `audit`, `playbooks` |
 | `packages/git` | Git operations, worktree preflight, path normalisation | `core` |
-| `packages/tickets` | The canonical ticket model and the provider interface | `profile` |
-| `packages/providers` | The `gh` and local-markdown providers | `core`, `tickets`, `worktrees` |
+| `packages/tickets` | The canonical ticket model, reference parsing, and the provider interface | `core`, `profile` |
+| `packages/providers` | The `gh` and local-markdown providers, the shared contract tests, and the one place a command resolves which provider to use | `core`, `tickets`, `worktrees` |
 | `packages/pr` | Pull request construction: title, body, risk checklist, reviewers | `profile`, `tickets` |
 | `packages/worktrees` | Claims, the crew, the ship pipeline | `core`, `git`, `pr`, `profile`, `tickets` |
 | `packages/cli` | The command surface: parsing, help, output, exit codes, and the stdio MCP server | all of the above |
@@ -95,6 +95,64 @@ Two consequences worth knowing:
   three read-only commands — `doctor`, `plan` and `crew status` — by running the CLI and
   returning its envelope, so an MCP client and a shell cannot disagree about what the
   tool said.
+
+## Tickets and providers
+
+A ticket command resolves its provider once, in `packages/providers/src/resolve.ts`, from:
+
+1. `--provider local|github` on the command,
+2. `provider.default` from the resolved configuration,
+3. the reference's own provider — a ticket URL, or a `gh-42` key,
+4. `local`.
+
+The reference is parsed against the selected provider, and the claim registry records the
+provider that was actually used, so `ship` and `issue sync` never have to guess. An
+unknown provider is refused with the list of the supported ones; a GitLab URL is
+recognised and refused that way rather than parsed as a local ticket.
+
+| Provider | Transport | Account | Network | Capabilities | State mapping |
+| --- | --- | --- | --- | --- | --- |
+| `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | `create`, `list`, `comment`, `transition`, `link` | native `state:` frontmatter |
+| `github` | `gh`, always `execFile` with an argument array | `gh auth login` | yes, through `gh` | `create`, `list`, `comment`, `transition`, `link` | open/closed; `in_progress`, `in_review`, `wontfix` are labels |
+
+Three implementation rules make the GitHub provider honest:
+
+- **A URL names its repository.** `fetch`, `comment` and `transition` pass `--repo
+  <host>/<owner>/<repo>` when the ref carries a ticket URL, so a pasted link is never
+  silently resolved against the checkout anvil happens to run in. A ref whose URL cannot
+  name a repository is refused instead of re-aimed. The URL is parsed once, in
+  `@anvil/tickets`: the issue marker is found from the end of the path, so a repository
+  literally named `issues` or `pull` still yields the issue number. `ship` reuses the id
+  and URL stored in the claim rather than re-deriving them.
+- **An unreadable list is not an empty list.** `list` throws on a non-zero `gh` exit or a
+  body that is not a JSON array. Callers treat empty as "no work", so an error there would
+  otherwise look like a finished backlog. Label-emulated states are filtered client-side
+  from the `state` and `labels` fields, using the same function `fetch` uses, because no
+  `gh` flag can express "open but not `in-review`". Because `gh issue list` has no cursor,
+  a page that is entirely filtered out is retried with a larger limit; stopping at a fixed
+  page size would report no ready work while a ready issue sat just past it. `gh` caps that
+  limit at 1,000, so when the maximum page is still full and no wanted match has appeared,
+  `list` reports an incomplete result instead of returning the filtered subset as final.
+- **A transition is the whole state.** After closing or reopening as needed, one `gh issue
+  edit` adds the desired state label and removes the other state labels in the same call,
+  so `in_review → todo` leaves `todo` rather than a stale `in-review`.
+
+Both implement the same `TicketProvider` interface and pass the same contract tests
+(`packages/providers/test/contract.test.ts`), including the same states and comment
+semantics — that is what keeps `local` a real provider rather than a test double
+([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)). Acceptance extraction is
+provider-specific rather than identical: local reads unchecked checklist entries
+(`packages/providers/src/local.ts`), while GitHub also reads checked entries and headed
+sections (`packages/providers/src/github.ts`).
+
+`ProviderCapabilities` is the contract commands check before acting. A missing capability
+fails the command with the capability named (`cannot create a ticket: missing the "create"
+capability`), never with a transport error from inside the provider.
+
+Resolution itself does no I/O, and `local` is built without touching `gh`: a machine with
+no account, no network and no GitHub CLI keeps the whole ticket workflow. Detection,
+audit and `doctor` do not build a provider at all, so they gained no network call from
+this.
 
 ## The contracts
 

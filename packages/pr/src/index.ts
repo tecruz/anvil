@@ -300,14 +300,20 @@ export function renderPrBody(input: PrBodyInput): string {
  * GitHub and GitLab only auto-close an issue when the reference resolves: `#42`,
  * `owner/repo#42`, or a full issue URL. The human key anvil mints (`gh-42`, `gl-42`) is
  * *not* one of those forms -- `Closes gh-42` renders as ordinary prose and the ticket
- * stays open after merge, silently. So the provider-native id is used, with the `#` the
- * forges require.
+ * stays open after merge, silently.
+ *
+ * A bare `#42` is only correct when the ticket lives in the repository the pull request
+ * is opened against. A pasted ticket URL may name a different repository, and `Closes #42`
+ * would then close that repository's issue 42 instead -- leaving the real ticket open and
+ * closing an unrelated one. So a ticket with a URL closes by URL, which the forge resolves
+ * in either repository; the bare `#` form is used only when there is no URL to be precise
+ * with.
  */
 export function closingKeyword(ticket: Ticket): string {
   switch (ticket.ref.provider) {
     case 'github':
     case 'gitlab':
-      return `Closes #${ticket.ref.id}`
+      return `Closes ${ticket.ref.url ?? `#${ticket.ref.id}`}`
     case 'local':
       // A local ticket is not on a forge, so there is nothing to close. Say where the
       // ticket is instead of emitting a keyword that would do nothing.
