@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -19,6 +20,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -294,6 +296,34 @@ describe('symlinks cannot escape the repository', () => {
     assert.deepEqual(detection.candidates, [])
   })
 
+  test('a symlinked document is reported as not read', (t) => {
+    const outside = temp('anvil-trackers-outside-')
+    writeFileSync(join(outside, 'secret.md'), 'nothing here\n', 'utf8')
+    const dir = repo({ 'package.json': '{"name":"safe"}\n' })
+    if (!tryLink(join(outside, 'secret.md'), join(dir, 'CONTRIBUTING.md'), 'file')) {
+      t.skip('file symlinks are unavailable here')
+      return
+    }
+    const detection = detectTrackerCandidates(dir, null)
+    assert.equal(detection.state, 'na')
+    assert.match(detection.reason, /partial: not read .*CONTRIBUTING\.md/)
+  })
+
+  test('a hard-linked document is not read, because it may name a file outside the tree', (t) => {
+    const outside = temp('anvil-trackers-outside-')
+    writeFileSync(join(outside, 'secret.md'), 'https://github.com/evil/evil/issues\n', 'utf8')
+    const dir = repo({ 'package.json': '{"name":"safe"}\n' })
+    try {
+      linkSync(join(outside, 'secret.md'), join(dir, 'README.md'))
+    } catch {
+      t.skip('hard links are unavailable here')
+      return
+    }
+    const detection = detectTrackerCandidates(dir, null)
+    assert.equal(detection.state, 'na')
+    assert.match(detection.reason, /not read .*README\.md/)
+  })
+
   test('a symlinked template file is ignored by the walk', (t) => {
     const outside = temp('anvil-trackers-outside-')
     writeFileSync(join(outside, 'secret.md'), 'name: Bug\n', 'utf8')
@@ -306,6 +336,107 @@ describe('symlinks cannot escape the repository', () => {
     const detection = detectTrackerCandidates(dir, null)
     assert.ok(evidenceFiles(detection).includes('.github/ISSUE_TEMPLATE/real.md'))
     assert.ok(!evidenceFiles(detection).includes('.github/ISSUE_TEMPLATE/link.md'))
+  })
+})
+
+describe('review regressions', () => {
+  test('a credential in a documented link or template is never quoted', () => {
+    const dir = repo({
+      'CONTRIBUTING.md': 'File bugs at https://alice:SECRET@acme.atlassian.net/browse/PROJ-1\n',
+      '.github/ISSUE_TEMPLATE/config.yml': 'contact_links:\n  - url: https://bob:TOKEN@linear.app/acme/team\n',
+    })
+    const text = JSON.stringify(detectTrackerCandidates(dir, null))
+    assert.doesNotMatch(text, /SECRET|TOKEN|alice|bob/)
+    assert.match(text, /\*\*\*@acme\.atlassian\.net/)
+  })
+
+  test('a template config that routes issues elsewhere is unconfirmed, not GitHub', () => {
+    const dir = repo({
+      '.github/ISSUE_TEMPLATE/config.yml': [
+        'blank_issues_enabled: false',
+        'contact_links:',
+        '  - name: Report a bug',
+        '    url: https://linear.app/acme/team/ENG',
+      ].join('\n'),
+    })
+    const detection = detectTrackerCandidates(dir, GITHUB_REMOTE)
+    assert.equal(detection.state, 'unconfirmed')
+    assert.deepEqual(kinds(detection), ['github', 'linear'])
+    assert.equal(detection.candidates[1]?.confidence, 'documented')
+  })
+
+  test('a bare product name is a labelled mention, and a Confluence link is not Jira', () => {
+    const mention = detectTrackerCandidates(repo({ 'README.md': 'We do not use Jira.\n' }), null)
+    assert.deepEqual(kinds(mention), ['jira'])
+    assert.equal(mention.candidates[0]?.confidence, 'inferred')
+    assert.match(mention.candidates[0]?.evidence[0]?.excerpt ?? '', /a mention, not proof of use/)
+    const wiki = detectTrackerCandidates(
+      repo({ 'README.md': 'See https://acme.atlassian.net/wiki/spaces/ENG\n' }),
+      null,
+    )
+    assert.equal(wiki.state, 'na')
+  })
+
+  test('the template bound is applied after sorting, and a partial scan says so', () => {
+    const files: Record<string, string> = {}
+    for (let i = 0; i < TRACKER_LIMITS.maxTemplateFiles + 5; i++) {
+      files[`.github/ISSUE_TEMPLATE/t${String(i).padStart(2, '0')}.md`] = 'name: T\n'
+    }
+    // Only in a file past the bound in sorted order: never read, whatever readdir returns.
+    files['.github/ISSUE_TEMPLATE/zz-last.md'] = 'Tracked as PROJ-9\n'
+    const detection = detectTrackerCandidates(repo(files), null)
+    assert.deepEqual(kinds(detection), ['github'])
+    assert.match(detection.reason, new RegExp(`only the first ${String(TRACKER_LIMITS.maxTemplateFiles)} files`))
+  })
+
+  test('a documented candidate keeps the citation that made it documented', () => {
+    const files: Record<string, string> = {}
+    for (let i = 0; i < TRACKER_LIMITS.maxEvidencePerCandidate + 2; i++) {
+      files[`.github/ISSUE_TEMPLATE/a${String(i)}.md`] = `Seen as KEY-${String(i + 1)}\n`
+    }
+    files['SECURITY.md'] = 'Report at https://acme.atlassian.net/browse/SEC\n'
+    const detection = detectTrackerCandidates(repo(files), null)
+    const jira = detection.candidates.find((candidate) => candidate.kind === 'jira')
+    assert.equal(jira?.confidence, 'documented')
+    assert.ok(jira?.evidence.some((entry) => entry.file === 'SECURITY.md'))
+    assert.ok((jira?.evidence.length ?? 0) <= TRACKER_LIMITS.maxEvidencePerCandidate)
+  })
+
+  test("an issues link on the remote's own Enterprise host is GitHub evidence", () => {
+    const dir = repo({ 'CONTRIBUTING.md': 'Issues: https://github.acme.com/acme/widgets/issues\n' })
+    const detection = detectTrackerCandidates(dir, 'git@github.acme.com:acme/widgets.git')
+    assert.deepEqual(kinds(detection), ['github'])
+    assert.equal(detection.candidates[0]?.confidence, 'documented')
+    // A host that is not this repository's remote is not trusted the same way.
+    assert.equal(detectTrackerCandidates(dir, null).state, 'na')
+  })
+
+  test('github in a remote path or userinfo is not a GitHub host', () => {
+    const files = { '.gitlab/issue_templates/bug.md': 'Bug\n', '.github/ISSUE_TEMPLATE/bug.md': 'Bug\n' }
+    for (const remote of [
+      'https://git.example.com/mirror/github.com/x.git',
+      'https://github.x:pw@git.example.com/a/b.git',
+    ]) {
+      const github = detectTrackerCandidates(repo(files), remote).candidates.find((c) => c.kind === 'github')
+      assert.ok(!(github?.evidence ?? []).some((entry) => entry.file === '.git/config'), remote)
+    }
+  })
+
+  test('the remote citation stays inside the excerpt bound', () => {
+    const remote = `https://github.com/acme/${'w'.repeat(400)}.git`
+    const dir = repo({ '.github/ISSUE_TEMPLATE/bug.md': 'Bug\n' })
+    const github = detectTrackerCandidates(dir, remote).candidates[0]
+    for (const entry of github?.evidence ?? []) {
+      assert.ok(entry.excerpt.length <= TRACKER_LIMITS.maxExcerptChars, entry.excerpt)
+    }
+  })
+
+  test('advice never suggests confirming a provider anvil does not have', () => {
+    const jira = detectTrackerCandidates(repo({ 'README.md': 'https://acme.atlassian.net/browse/X\n' }), null)
+    assert.match(jira.reason, /no jira provider/)
+    assert.doesNotMatch(jira.reason, /provider\.default: "jira"/)
+    const github = detectTrackerCandidates(repo({ 'README.md': 'https://github.com/a/b/issues\n' }), null)
+    assert.match(github.reason, /provider\.default: "github"/)
   })
 })
 
@@ -336,6 +467,81 @@ describe('detection is read-only and offline', () => {
       globalThis.fetch = original
     }
     assert.equal(calls, 0)
+  })
+
+  test('no write, network or process call happens during detection', () => {
+    // Spy on the CommonJS builtins and push the spies into the ESM bindings, so any module
+    // the detector reaches -- not just trackers.ts -- is covered for the whole call.
+    const require = createRequire(import.meta.url)
+    const targets: Array<[string, string[]]> = [
+      [
+        'node:fs',
+        [
+          'writeFileSync',
+          'appendFileSync',
+          'mkdirSync',
+          'mkdtempSync',
+          'renameSync',
+          'rmSync',
+          'unlinkSync',
+          'copyFileSync',
+          'symlinkSync',
+          'linkSync',
+          'writeSync',
+          'truncateSync',
+          'utimesSync',
+          'chmodSync',
+        ],
+      ],
+      ['node:child_process', ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']],
+      ['node:net', ['connect', 'createConnection']],
+      ['node:http', ['request', 'get']],
+      ['node:https', ['request', 'get']],
+      ['node:dns', ['lookup', 'resolve']],
+    ]
+    const dir = repo({
+      '.github/ISSUE_TEMPLATE/bug.md': 'name: Bug\n',
+      'CONTRIBUTING.md': 'https://acme.atlassian.net/browse/PROJ-1 and https://github.com/acme/widgets/issues\n',
+    })
+    const calls: string[] = []
+    const restore: Array<() => void> = []
+    for (const [name, fns] of targets) {
+      const mod = require(name) as Record<string, unknown>
+      for (const fn of fns) {
+        const original = mod[fn]
+        mod[fn] = (...args: unknown[]) => {
+          calls.push(`${name}.${fn}`)
+          return (original as (...a: unknown[]) => unknown)(...args)
+        }
+        restore.push(() => {
+          mod[fn] = original
+        })
+      }
+    }
+    syncBuiltinESMExports()
+    try {
+      detectTrackerCandidates(dir, GITHUB_REMOTE)
+    } finally {
+      for (const undo of restore) undo()
+      syncBuiltinESMExports()
+    }
+    assert.deepEqual(calls, [])
+  })
+
+  test('provider resolution and the ticket commands never import the detector', () => {
+    const root = join(import.meta.dirname, '..', '..', '..')
+    const sources = [
+      ...readdirSync(join(root, 'packages', 'providers', 'src')).map((f) =>
+        join(root, 'packages', 'providers', 'src', f),
+      ),
+      join(root, 'packages', 'cli', 'src', 'tickets.ts'),
+      join(root, 'packages', 'cli', 'src', 'commands', 'work.ts'),
+      join(root, 'packages', 'cli', 'src', 'commands', 'crew.ts'),
+    ].filter((path) => path.endsWith('.ts'))
+    assert.ok(sources.length > 3)
+    for (const path of sources) {
+      assert.doesNotMatch(readFileSync(path, 'utf8'), /detectTrackerCandidates|trackers\.ts/, path)
+    }
   })
 
   test('the module imports no network or process-launching builtin', () => {

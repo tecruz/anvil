@@ -248,14 +248,25 @@ the score, the grade, a `--fail-on` threshold or the exit code.
 What a local read **can** show:
 
 - an issue template exists (`.github/ISSUE_TEMPLATE/*` for GitHub,
-  `.gitlab/issue_templates/*` for GitLab) — `detected`;
-- a README, CONTRIBUTING or SECURITY document names a tracker or links to its issues page —
-  `documented`;
+  `.gitlab/issue_templates/*` for GitLab) — `detected`. The template text is read too, so a
+  `config.yml` whose contact links send issues to another tracker adds that tracker, and the
+  result is `unconfirmed` rather than GitHub;
+- a README, CONTRIBUTING, SECURITY or ARCHITECTURE document, or a template, links to a
+  tracker's issue page (a GitHub or GitLab issues page, including one on the remote's own
+  Enterprise host, a Jira `browse` URL, a Linear workspace URL) — `documented`;
+- a document merely names a product ("we do not use Jira") — `inferred`, labelled as a
+  mention rather than proof of use;
 - an issue-key convention such as `PROJ-123` appears in a template or document — `inferred`,
   and explicitly labelled a guess;
 - the clone's remote host, which is only corroboration. A GitHub remote alone is **not**
   evidence that GitHub Issues is used, so a repository with nothing else reports `na`
   rather than defaulting to GitHub.
+
+The read is bounded: at most 20 template files per directory (in sorted order), files up to
+128 KiB, and a few citations per candidate, keeping the strongest. A symlinked, hard-linked,
+oversized, binary or unreadable file is not read, and the reason says the scan was partial
+and names it. URL credentials (`user:token@`) are replaced with `***` before anything is
+quoted.
 
 What it **cannot** show:
 
@@ -265,8 +276,11 @@ What it **cannot** show:
   `unconfirmed` state with every candidate listed and no winner chosen.
 
 Detection never writes configuration, never contacts a tracker, and grants no authority to
-create, comment on or transition an issue. Confirmation is a separate, deliberate act: set
-`provider.default` in `anvil.config.json` (or pass `--provider`). Provider resolution reads
+create, comment on or transition an issue; tests check that a detection run makes no write,
+network or process call. Confirmation is a separate, deliberate act: set
+`provider.default` in `anvil.config.json` (or pass `--provider`). Only a provider anvil has
+(`local`, `github`) can be confirmed; a Jira, GitLab or Linear candidate is information
+about the project, not something anvil can act on yet. Provider resolution reads
 only that value, the flag and the ticket reference; it never consults detection, so a
 repository whose files mention Jira or GitLab still resolves `local` until you say
 otherwise.
