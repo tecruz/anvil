@@ -20,6 +20,9 @@ eval-results/raw/
 # eval harness per-run checkpoints (regenerated each run)
 eval-results/checkpoints/
 
+# eval harness per-run real-agent summary (written by --check-run, never committed)
+eval-results/benchmark-summary.json
+
 # editor
 .vscode/
 .idea/

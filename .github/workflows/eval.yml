@@ -9,9 +9,13 @@
 # which is the cheapest signal that can still detect a regression. A manual dispatch can
 # run the frontier model when the spend is intended.
 #
-# `eval:check` is the verdict. The harness exits 0 even when a scenario fails, because a
-# failed run is a measurement; the gate is what turns a missed baseline expectation or a
-# recorded agent error into a red job. A run that nobody reads is not a benchmark.
+# `eval:check` is the verdict for the committed hermetic evidence. A real-agent run is
+# deliberately never promoted into that summary, so this workflow gates its own run with
+# `--check-run <runId>`: the same expectations and provenance checks, against the record
+# this invocation produced, writing `benchmark-summary.json` instead of `latest.json`. The
+# harness exits 0 even when a scenario fails, because a failed run is a measurement; both
+# gates, not the harness, turn a missed baseline expectation or a recorded agent error into
+# a red job. A run that nobody reads is not a benchmark.
 #
 # SECRETS: configure `OPENCODE_API_KEY` for the small (Zen) model and/or
 # `OPENROUTER_API_KEY` for the frontier model as repository secrets, or on the `eval`
@@ -58,6 +62,8 @@ jobs:
     environment: eval
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # The checked-in summary, run record, and promoted-record archive describe an earlier,
       # hermetic run. Remove them before any setup step can fail, so the always() upload
@@ -87,17 +93,20 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
+          # Match the CLI's role selection, including a comma-separated pair. The comma
+          # delimiters keep "small" from matching the "all" role as a substring.
+          ROLES=",$(printf '%s' "$MODELS" | tr -d '[:space:]'),"
           missing=0
-          case "$MODELS" in
-            small|all)
+          case "$ROLES" in
+            *,small,*|*,all,*)
               if [ -z "$OPENCODE_API_KEY" ]; then
                 echo '::error::OPENCODE_API_KEY is required for the small (Zen) model.'
                 missing=1
               fi
               ;;
           esac
-          case "$MODELS" in
-            frontier|all)
+          case "$ROLES" in
+            *,frontier,*|*,all,*)
               if [ -z "$OPENROUTER_API_KEY" ]; then
                 echo '::error::OPENROUTER_API_KEY is required for the frontier model.'
                 missing=1
@@ -106,6 +115,8 @@ jobs:
           esac
           exit "$missing"
 
+      # The harness copies its environment to the agent under test. Hand it only the key the
+      # selected role needs, and never the job token; checkout no longer persists it either.
       - name: run the matrix
         env:
           ANVIL_EVAL: '1'
@@ -113,38 +124,79 @@ jobs:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           MODELS: ${{ inputs.models || 'small' }}
         shell: bash
-        run: npm run eval -- --models "$MODELS"
+        run: |
+          ROLES=",$(printf '%s' "$MODELS" | tr -d '[:space:]'),"
+          case "$ROLES" in
+            *,frontier,*|*,all,*) ;; # the frontier role needs the OpenRouter key
+            *) unset OPENROUTER_API_KEY ;;
+          esac
+          case "$ROLES" in
+            *,small,*|*,all,*) ;; # the small role needs the OpenCode key
+            *) unset OPENCODE_API_KEY ;;
+          esac
+          unset GITHUB_TOKEN ROLES
+          npm run eval -- --models "$MODELS" --repetitions 1 --order alternate
 
-      # The harness itself always exits 0. The gate is the pass/fail verdict: every
-      # scenario must meet its baseline expectation, and any recorded agent error fails.
-      - name: gate the run against the baseline
-        run: npm run eval:check
+      # Bind the gate to this invocation. `run.json` is the only run record this checkout
+      # produced; naming its id means a leftover record from another run cannot pass as this
+      # one's evidence.
+      - name: identify the run
+        id: matrix
+        run: |
+          if [ ! -f eval-results/run.json ]; then
+            echo '::error::the benchmark harness wrote no run record.'
+            exit 1
+          fi
+          # A single-line UUID is the only safe value for $GITHUB_OUTPUT and the step log.
+          if ! RUN_ID=$(node -e "const id=JSON.parse(require('node:fs').readFileSync('eval-results/run.json','utf8')).runId; if (typeof id!=='string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) process.exit(2); process.stdout.write(id)"); then
+            echo '::error::the benchmark run record names no UUID run id.'
+            exit 1
+          fi
+          echo "runId=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Benchmark run id: $RUN_ID"
 
-      # The record has to outlive the runner. The full summary goes to the run page; the
-      # job log keeps the matrix table the harness printed.
+      # The real-agent gate. `eval:check` compares the committed fake-agent summary with the
+      # baseline, and the harness never promotes a real-agent run into that file. `--check-run`
+      # validates the run named above against the same baseline expectations and provenance
+      # checks, and writes a separate benchmark summary. Every failure is blocking.
+      - name: gate the real-agent run against the baseline
+        env:
+          MODELS: ${{ inputs.models || 'small' }}
+          RUN_ID: ${{ steps.matrix.outputs.runId }}
+        run: |
+          if [ -z "$RUN_ID" ]; then
+            echo '::error::the benchmark run wrote no run record, so there is no evidence to gate.'
+            exit 1
+          fi
+          npm run eval -- --check-run "$RUN_ID" --models "$MODELS" --repetitions 1 --order alternate
+
+      # Report the run the gate validated, not the checked-out hermetic summary. On a failed
+      # gate no validated summary exists, and this says so instead of presenting stale evidence.
       - name: publish the summary
         if: always()
         run: |
           {
-            echo '## Real-model eval'
+            echo '## Real-agent eval'
             echo '```json'
-            if test -f eval-results/latest.json; then
-              cat eval-results/latest.json
+            if test -f eval-results/benchmark-summary.json; then
+              node -e 'const fs=require("node:fs"); const tick=String.fromCharCode(96); const fence=tick.repeat(3); const gap=tick+" "+tick+" "+tick; process.stdout.write(fs.readFileSync("eval-results/benchmark-summary.json","utf8").split(fence).join(gap))'
             else
-              echo '{"error":"the harness wrote no summary"}'
+              echo '{"error":"the benchmark gate validated no run; see the gate step"}'
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Retain benchmark artifacts even after failure: checkpoints, the run record, the
-      # promoted-record archive, and the raw transcripts. `latest.json` is deliberately not
-      # uploaded -- it is the checked-in hermetic evidence, not per-run output.
+      # Retain benchmark artifacts even after failure: the run record and checkpoints, plus
+      # benchmark-summary.json when the gate passes. A real-agent run does not write the raw
+      # reports or the promoted-record archive; those belong to hermetic promotion only.
+      # `latest.json` is deliberately not uploaded -- it is the checked-in hermetic evidence.
       - name: upload benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.4.3
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: eval-artifacts-${{ github.run_id }}-attempt${{ github.run_attempt }}
           path: |
+            eval-results/benchmark-summary.json
             eval-results/run.json
             eval-results/runs/**/*.json
             eval-results/checkpoints/**/*.json
