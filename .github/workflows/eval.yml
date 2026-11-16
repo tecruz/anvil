@@ -279,100 +279,17 @@ jobs:
           NODE
 
       # A blocking assertion: a crash, a missing command or any other non-zero exit is not
-      # proof that the gate rejected the tampering. Require its normal failure code and the
-      # diagnostic for the result we changed.
+      # proof that the gate rejected the tampering. The script requires its normal failure
+      # code and the diagnostic for the result we changed.
       - name: assert the gate rejects the tampered evidence
         id: gate_assertion
-        run: |
-          if npm run eval:check > eval-results/gate-rejection.log 2>&1; then
-            status=0
-          else
-            status=$?
-          fi
-          if [ "$status" -ne 1 ]; then
-            cat eval-results/gate-rejection.log
-            echo "::error::expected the hermetic gate to exit 1 for tampered evidence, got $status."
-            exit 1
-          fi
-          if ! grep -F 'tiny-code-change: a run did not pass the visible verifier' eval-results/gate-rejection.log; then
-            echo '::error::the gate failed without the expected tampered-evidence diagnostic.'
-            exit 1
-          fi
-          echo 'The hermetic gate rejected the tampered evidence with the expected diagnostic.'
+        run: node scripts/eval-rehearsal.ts assert-gate
 
       # Verify every file the retention claim depends on before the deliberate failure.
       # upload-artifact's if-no-files-found only catches the case where no file matches.
       - name: validate required rehearsal artifacts
         id: validate_artifacts
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs')
-          const path = require('node:path')
-          const required = [
-            'eval-results/failure-rehearsal.json',
-            'eval-results/gate-rejection.log',
-            'eval-results/run.json',
-          ]
-          for (const file of required) {
-            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
-              throw new Error(`missing or empty required artifact: ${file}`)
-            }
-          }
-          const rehearsal = JSON.parse(fs.readFileSync(required[0], 'utf8'))
-          const run = JSON.parse(fs.readFileSync(required[2], 'utf8'))
-          if (rehearsal.expectedGate !== 'reject' || rehearsal.runId !== run.runId) {
-            throw new Error('rehearsal record does not describe this run')
-          }
-          const archive = path.join('eval-results', 'runs', `${run.runId}.json`)
-          if (!fs.existsSync(archive)) throw new Error(`missing run archive: ${archive}`)
-          const archived = JSON.parse(fs.readFileSync(archive, 'utf8'))
-          if (archived.runId !== run.runId) throw new Error('run archive names another run')
-          const checkpointDir = path.join('eval-results', 'checkpoints', run.runId)
-          if (!fs.existsSync(checkpointDir)) throw new Error(`missing checkpoints: ${checkpointDir}`)
-          const checkpoints = fs.readdirSync(checkpointDir).filter((entry) => entry.endsWith('.json'))
-          if (checkpoints.length !== run.runKeys.length) {
-            throw new Error(`expected ${run.runKeys.length} checkpoints, found ${checkpoints.length}`)
-          }
-          if (run.results.length !== run.runKeys.length) {
-            throw new Error(`run record has ${run.results.length} results for ${run.runKeys.length} run keys`)
-          }
-          const resultKeys = run.results
-            .map((result) => `${result.scenario}/${result.variant}/${result.model}/${result.repetition}`)
-            .sort()
-          const declaredKeys = [...run.runKeys].sort()
-          if (resultKeys.some((key, index) => key !== declaredKeys[index])) {
-            throw new Error('run record results do not cover the declared run keys')
-          }
-          // A count only proves that some files exist. Each one has to be a parseable
-          // checkpoint that names the result at the path the harness uses for it.
-          const expected = new Set()
-          for (const result of run.results) {
-            const name =
-              [result.scenario, result.variant, result.model ?? 'unknown', String(result.repetition)]
-                .map((part) => encodeURIComponent(part))
-                .join('--') + '.json'
-            if (expected.has(name)) throw new Error(`duplicate run result for checkpoint ${name}`)
-            expected.add(name)
-            const file = path.join(checkpointDir, name)
-            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
-              throw new Error(`missing or empty checkpoint: ${file}`)
-            }
-            const checkpoint = JSON.parse(fs.readFileSync(file, 'utf8'))
-            if (
-              checkpoint.schemaVersion !== run.schemaVersion ||
-              checkpoint.scenario !== result.scenario ||
-              checkpoint.variant !== result.variant ||
-              (checkpoint.model ?? null) !== (result.model ?? null) ||
-              checkpoint.repetition !== result.repetition
-            ) {
-              throw new Error(`checkpoint ${file} does not describe the run result it names`)
-            }
-          }
-          for (const name of checkpoints) {
-            if (!expected.has(name)) throw new Error(`unexpected checkpoint: ${path.join(checkpointDir, name)}`)
-          }
-          console.log(`Validated ${required.length} files, the run archive and ${checkpoints.length} checkpoints.`)
-          NODE
+        run: node scripts/eval-rehearsal.ts validate-artifacts
 
       - name: fail the rehearsal on purpose
         id: intentional_failure

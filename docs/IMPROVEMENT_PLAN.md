@@ -176,8 +176,10 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
   purpose. An `if: always()` upload retains only `failure-rehearsal.json`,
   `gate-rejection.log`, `run.json`, the run archive and checkpoints for 30 days. The real-model
   job is skipped for that dispatch, so no provider keys or model spend are involved. The
-  dispatch run id and the retained artifact evidence will be recorded here after Tiago
-  approves and runs it.
+  rehearsal checks live in `scripts/eval-rehearsal.ts` and are covered by
+  `scripts/test/eval-rehearsal.test.ts`, so a regression is caught by the normal suite rather
+  than only by a dispatch. The dispatch run id and the retained artifact evidence will be
+  recorded here after Tiago approves and runs it.
 
 ## Phase 2 — Measure whether derived context actually helps
 
