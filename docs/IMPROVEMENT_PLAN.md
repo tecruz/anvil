@@ -170,10 +170,14 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
   `scripts/test/eval-transcript.test.ts` covers OpenAI, OpenRouter and both GitHub token
   shapes, and `sanitizes errors, verifier output, and transcripts before persistence`.
 - [ ] A maintainer-approved synthetic CI run demonstrates artifact retention after failure.
-  **Open.** `eval.yml` uploads with `if: always()` and 30-day retention, but no synthetic
-  failure-retention demonstration is recorded. Its current dispatch runs real models; a
-  hermetic failure-rehearsal path could test retention without provider credentials or
-  model spending.
+  **Implementation ready for an approved dispatch.** A `rehearse_failure: true` dispatch of
+  `eval.yml` runs a separate hermetic job: it uses `--fake-agent`, confirms the healthy gate
+  passes, tampers with one visible result, asserts that the gate rejects it, then fails on
+  purpose. An `if: always()` upload retains only `failure-rehearsal.json`,
+  `gate-rejection.log`, `run.json`, the run archive and checkpoints for 30 days. The real-model
+  job is skipped for that dispatch, so no provider keys or model spend are involved. The
+  dispatch run id and the retained artifact evidence will be recorded here after Tiago
+  approves and runs it.
 
 ## Phase 2 — Measure whether derived context actually helps
 
