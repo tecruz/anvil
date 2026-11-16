@@ -48,59 +48,75 @@ timeout message and not the unreadable message, then that the same store becomes
 again once the bound is restored. The hardening test asserts the refusal and that the store
 directory created by the attempt is removed.
 
-## Root cause: the 20-second tool bound, not an unreadable ACL
+## Most likely cause: the 20-second tool bound
 
-Recorded 2026-11-16 from the original job log and every `windows-latest` CI job since the
-fix merged. No run was triggered or re-run for this record; every row below is an ordinary
-pull-request or `main` run.
+Recorded 2026-11-16 from the original job log and every CI run since the fix merged. No run
+was triggered or re-run for this record; every run below is an ordinary pull-request or
+`main` run, attempt 1.
 
-The original failure is a timeout. The stack in job 132586862144 shows the refusal came
-from the test fixture's first approval-store setup (`setup-apply.test.ts:69` →
-`prepareSetupApprovalStore` → `ensureStoreRoot` at `setup-approval.ts:749`, the protection
-read right after the store was created and hardened). The whole test, fixture included,
-took 20,053 ms; the per-call bound was `timeout: 20_000` (`setup-approval.ts:514` at
-`f0c28c9`). So the failing ACL read itself ran for roughly 20 seconds, and all other work
-in the test fit in the remaining ~53 ms. A genuinely unreadable ACL makes PowerShell exit
-with an error when it reaches the read, at whatever time its start-up took; ending 53 ms
-after the kill deadline would be a coincidence, while a kill at the deadline is expected.
-The read was killed by the bound on a slow runner, and the old `runWindowsTool` reported the
-kill as "cannot be read". This is an inference from timing and the call stack, because the
-old code discarded the error; the code that replaced it (#57, #62) now reports a timeout
-as "could not be read within N ms" so a recurrence names itself.
+The evidence points to the 20-second bound, but it cannot prove it. What the log shows:
 
-How long the test normally takes: in the 24 green `windows-latest` jobs below, "applies a
-current plan once…" took 10.4–20.4 s (median about 14.4 s) for the whole test, which runs
-several PowerShell ACL reads and hardenings, each a cold PowerShell start. On a loaded
-two-core runner one such start reaching 20 s is plausible, and that is the failure seen.
+- The refusal came from the test fixture's first approval-store call
+  (`setup-apply.test.ts:69` → `prepareSetupApprovalStore` → `ensureStoreRoot`, refusing at
+  `setup-approval.ts:749` at `f0c28c9`). The fixture creates the store directory with
+  `mkdtempSync` before that call, so `ensureStoreRoot` skipped hardening and the refusal is
+  the first protection read of an existing directory: one PowerShell invocation
+  (`readWindowsAcl`). No other Windows tool had been started in that test.
+- The whole test took 20,053 ms, and the per-call bound was `timeout: 20_000`
+  (`setup-approval.ts:514` at `f0c28c9`). That is a whole-test duration, not a measured
+  subprocess duration, but the only work before the refusal was file-system set-up and
+  that one call, so the call itself most likely ran for close to 20 seconds.
+- A read that fails for another reason (PowerShell exits with an error, or prints output
+  `readWindowsAcl` cannot use) ends whenever PowerShell finishes; ending this close to the
+  kill deadline would be a coincidence. A kill at the deadline is the expected outcome of
+  a slow start or a stalled query.
+
+What it cannot show: the old `runWindowsTool` discarded the error (`setup-approval.ts:509-520`
+at `f0c28c9`), so there is no recorded `ETIMEDOUT`, exit code or subprocess timing, and even a
+confirmed timeout would not say whether PowerShell start-up or the ACL query itself was slow.
+The conclusion is therefore "most likely a timeout of that single ACL read", not a proven
+cause. The code that replaced it (#57, #62) reports a timeout as "could not be read within
+N ms", so a recurrence will name itself and settle the question.
+
+How long the affected test normally takes: in the 26 green Windows jobs below, "applies a
+current plan once…" took 10.4–20.4 s (median 14.5 s) for the whole test,
+which starts PowerShell for each ACL read and `icacls.exe` for each hardening.
 
 ## Stability since the fix
 
-Every CI run on a commit containing `465c1ce` (the 60-second bound), oldest first. Both
-Windows legs passed in each; the duration is the test above.
+Every run of the CI workflow since `465c1ce` (the 60-second bound) merged, oldest first,
+taken from the GitHub Actions run list and job logs. Every one is on a commit that contains
+`465c1ce`, and there is no other CI run in that window (no failure, cancellation or re-run).
+Each cell is the job id, its conclusion, the affected test's duration and the full suite's
+`ℹ tests` and `ℹ fail` totals from that job's log.
 
 | Run | Commit | Branch | `windows-latest` | `windows-latest (Node LTS)` |
 |---|---|---|---|---|
-| 43737538331 | `465c1ce` | main | 10.9 s | 12.9 s |
-| 43742764097 | `29d4bde` | feat/42-context-questions | 13.2 s | 16.4 s |
-| 43748807543 | `01bb28a` | main | 15.0 s | 17.8 s |
-| 43749095812 | `5ed3ea4` | fix/ready-requirement-ids | 12.9 s | 11.0 s |
-| 43751638005 | `3c5ebf2` | fix/ready-requirement-ids | 20.4 s | 15.7 s |
-| 43752856882 | `b1bfe0d` | fix/ready-requirement-ids | 15.2 s | 14.3 s |
-| 43756505868 | `fdb240e` | main | 14.6 s | 13.2 s |
-| 43763421018 | `1cd5f49` | feat/github-issues-selection | 10.4 s | 17.8 s |
-| 43765514563 | `84b3b7c` | fix/60-acl-timeout-reasons | 11.7 s | 12.3 s |
-| 43772328231 | `6c6db17` | fix/60-acl-timeout-reasons | 16.5 s | 16.6 s |
-| 43773323490 | `79b7acd` | main | 14.5 s | 16.1 s |
-| 43779655744 | `d0b9065` | feat/github-issues-selection | 11.9 s | 13.9 s |
+| 43737538331 | `465c1ce` | main | 132883346806: success, 10.9 s, 1884 tests, 0 failed | 132883346767: success, 12.9 s, 1884 tests, 0 failed |
+| 43742764097 | `29d4bde` | feat/42-context-questions | 132899336195: success, 13.2 s, 1894 tests, 0 failed | 132899336286: success, 16.4 s, 1894 tests, 0 failed |
+| 43748807543 | `01bb28a` | main | 132917953050: success, 15.0 s, 1894 tests, 0 failed | 132917953001: success, 17.8 s, 1894 tests, 0 failed |
+| 43749095812 | `5ed3ea4` | fix/ready-requirement-ids | 132918830665: success, 12.9 s, 1898 tests, 0 failed | 132918830816: success, 11.0 s, 1898 tests, 0 failed |
+| 43751638005 | `3c5ebf2` | fix/ready-requirement-ids | 132926680571: success, 20.4 s, 1911 tests, 0 failed | 132926680357: success, 15.7 s, 1911 tests, 0 failed |
+| 43752856882 | `b1bfe0d` | fix/ready-requirement-ids | 132930439770: success, 15.2 s, 1911 tests, 0 failed | 132930439718: success, 14.3 s, 1911 tests, 0 failed |
+| 43756505868 | `fdb240e` | main | 132941658568: success, 14.6 s, 1911 tests, 0 failed | 132941658507: success, 13.2 s, 1911 tests, 0 failed |
+| 43763421018 | `1cd5f49` | feat/github-issues-selection | 132963059895: success, 10.4 s, 1972 tests, 0 failed | 132963059883: success, 17.8 s, 1972 tests, 0 failed |
+| 43765514563 | `84b3b7c` | fix/60-acl-timeout-reasons | 132969591598: success, 11.7 s, 1914 tests, 0 failed | 132969591585: success, 12.3 s, 1914 tests, 0 failed |
+| 43772328231 | `6c6db17` | fix/60-acl-timeout-reasons | 132990800620: success, 16.5 s, 1914 tests, 0 failed | 132990800604: success, 16.6 s, 1914 tests, 0 failed |
+| 43773323490 | `79b7acd` | main | 132993875504: success, 14.5 s, 1914 tests, 0 failed | 132993875555: success, 16.1 s, 1914 tests, 0 failed |
+| 43779655744 | `d0b9065` | feat/github-issues-selection | 133013725365: success, 11.9 s, 1997 tests, 0 failed | 133013725153: success, 13.9 s, 1997 tests, 0 failed |
+| 43785562890 | `5e3cb6d` | docs/45-windows-acl-evidence | 133032285378: success, 14.5 s, 1914 tests, 0 failed | 133032285534: success, 16.6 s, 1914 tests, 0 failed |
 
-That is 12 consecutive runs and 24 consecutive Windows jobs, with no failure of any
-setup-approval or setup-apply test and no timeout message. It is evidence of stability on
-the runners this repository actually uses, not proof that a slower host can never reach 60
-seconds; a host that does is refused with the timeout named, and
-`ANVIL_APPROVAL_TOOL_TIMEOUT_MS` raises the bound for it.
+That is 13 consecutive CI runs and 26 consecutive Windows jobs, each with zero failed tests
+and no "could not be read within" or "could not be restricted within" message in its log.
+It is evidence of stability on the runners this repository actually uses, not proof that a
+slower host can never reach 60 seconds; a host that does is refused with the timeout named,
+and `ANVIL_APPROVAL_TOOL_TIMEOUT_MS` raises the bound for it.
 
 ## Fail-closed behaviour
 
-Unchanged. A timeout is still `unknown`, never `active`; a store or record whose protection
-cannot be confirmed in time is refused, and nothing is repaired. Only the bound and the
-message changed.
+Unchanged. A timeout is `unknown`, never `active`; a store or record whose protection cannot
+be confirmed in time is refused, and nothing is repaired. On 2026-11-16 one more path was
+aligned: when a reservation loses a race to another transition, `consumeSetupApproval`
+re-reads the winner's record and, if that read times out or cannot be inspected, now reports
+`unknown` with the reason instead of "This grant has already been used." Both refused the
+attempt (`reserved: false`); only the message changed.
