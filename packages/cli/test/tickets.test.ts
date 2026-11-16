@@ -663,6 +663,13 @@ describe('ship resolves the claim provider at the CLI boundary', () => {
     return repo
   }
 
+  // On Windows the stub `gh` is a `.cmd` shim, and anvil refuses by design to pass a
+  // multi-line pull request body through cmd (packages/core/src/exec.ts, assertSafeArgument).
+  // A real `gh.exe` is not a shim, so this is a limit of the stub, not of ship: the claim and
+  // provider resolution these tests pin are platform-independent and run on Linux and macOS.
+  const shipSkip =
+    process.platform === 'win32' ? 'the stub gh is a .cmd shim, which ship refuses for a multi-line body' : false
+
   function runCli(cwd: string, stub: string, args: string[], env: NodeJS.ProcessEnv): string {
     return execFileSync(process.execPath, [CLI_MAIN, ...args], {
       cwd,
@@ -686,6 +693,7 @@ describe('ship resolves the claim provider at the CLI boundary', () => {
 
   test('a local claim uses ANVIL_TICKETS_DIR relative to the main worktree, from a worktree', {
     timeout: 180_000,
+    skip: shipSkip,
   }, async () => {
     const repo = repoWithRemote()
     const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
@@ -722,7 +730,10 @@ describe('ship resolves the claim provider at the CLI boundary', () => {
     )
   })
 
-  test('a GitHub claim keeps its URL, so ship updates the claimed repository', { timeout: 180_000 }, () => {
+  test('a GitHub claim keeps its URL, so ship updates the claimed repository', {
+    timeout: 180_000,
+    skip: shipSkip,
+  }, () => {
     const repo = repoWithRemote()
     const issue = { ...ISSUE, url: 'https://github.com/acme/other-repo/issues/42' }
     const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
