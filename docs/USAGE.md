@@ -388,6 +388,35 @@ A `local-skill` execution plan does not read those declarations at all. It goes 
 the repository moves, when its source file's bytes change or disappear, or when its
 destination appears; re-run the same `anvil setup plan --adapter local-skill ...` command.
 
+### Installing a skill pinned to a commit
+
+A second adapter installs one `SKILL.md` from another GitHub repository. The remote bytes are
+fetched by an explicit command, so planning, validation, approval and application stay
+offline:
+
+```bash
+anvil setup fetch --adapter pinned-skill --repo owner/name --ref main --path skills/x/SKILL.md --name x
+anvil setup fetch --adapter pinned-skill --repo owner/name --commit <40-hex> --path skills/x/SKILL.md --name x --json
+anvil setup plan --adapter pinned-skill --repo owner/name --commit <40-hex> --path skills/x/SKILL.md --name x --json
+```
+
+`fetch` resolves `--ref` to a full commit, downloads that one file at that commit, and freezes
+it in the protected cache. `--commit` skips resolution; passing both is allowed only when they
+agree. Planning takes only a commit, never a ref, and reads the cache instead of the network.
+`--host` defaults to `github.com` and is the only supported host in v1. `fetch` requires `gh`,
+resolved to an absolute path outside this repository; a repository-local `gh` is refused.
+
+The cache keeps content and origin apart: bytes are stored under their SHA-256, and an
+immutable origin record names the host, repository, commit, path, hash, size, fetch time and
+requested ref. Records are written without replacement. A commit cannot change its content, so
+a refetch that produces different bytes is a conflict rather than an update, and refetching
+identical bytes is a no-op. A corrupt cache record is refused instead of becoming a plan.
+
+A pinned plan goes stale when the repository moves, when the destination appears, or when the
+frozen bytes no longer match their origin record. It cannot exist without a fetch, and it never
+downloads anything itself. A commit pins bytes; it does not establish authorship, review,
+licensing, safety or intent, and the plan says so.
+
 A staged `anvil init` bundle follows the same rule as an owner-command plan: only the
 declarations that can change a generated file, currently `project.commands`, feed its input
 hash. A config with no declared commands hashes exactly like no config, so adding the first
@@ -401,7 +430,7 @@ no declarations keeps its hash. Nothing is applied in either case. Re-run `anvil
 or `anvil init`, review the result, and continue from the fresh plan or bundle. `local-skill`
 execution plans are unaffected.
 
-### Approving one local-skill plan
+### Approving one plan
 
 Approval is a separate, single-use grant, stored outside the repository:
 
@@ -411,18 +440,25 @@ anvil setup approval --grant <id>
 anvil setup revoke --grant <id>
 ```
 
-`approve` rebuilds the plan, requires it to be current, shows it, and then asks you to
-**type the plan digest on an interactive terminal**. A digest passed as a flag is not consent,
-so there is no `--yes`, and piped input is refused because it is not a review. The plan is
-revalidated after you confirm — a repository that moved while you were reading is caught — and
-again before the grant is read back. A grant authorizes one application attempt, for that
-plan, that repository, that source hash and that adapter behaviour, and expires after ten
-minutes. Grants live under `~/.anvil/approvals/setup/v1/`; `ANVIL_APPROVAL_HOME` overrides the
-location. The store must be a real, private directory owned by you, not writable by group or
-other (on Windows, owned by you with no other principal in its access control list), reached
-without passing through a link, and outside the repository, or it is refused. `approval` prints `active`, `expired`, `revoked`, `consumed`, `stale`, `invalid` or
-`unknown`, and exits non-zero for anything but `active`. `revoke` is terminal, and a revoked
-grant stays inspectable even after its repository is gone.
+`approve` rebuilds the plan through its registered adapter, requires it to be current, shows
+it, and then asks you to **type the plan digest on an interactive terminal**. A digest passed
+as a flag is not consent, so there is no `--yes`, and piped input is refused because it is not
+a review. The plan is revalidated after you confirm — a repository that moved while you were
+reading is caught — and again before the grant is read back. A grant authorizes one application
+attempt, for that plan, that repository, that source hash and that adapter behaviour, and
+expires after ten minutes. Grants live under `~/.anvil/approvals/setup/v1/`;
+`ANVIL_APPROVAL_HOME` overrides the location. The store must be a real, private directory
+owned by you, not writable by group or other (on Windows, owned by you with no other principal
+in its access control list), reached without passing through a link, and outside the
+repository, or it is refused. `approval` prints `active`, `expired`, `revoked`, `consumed`,
+`stale`, `invalid` or `unknown`, and exits non-zero for anything but `active`. `revoke` is
+terminal, and a revoked grant stays inspectable even after its repository is gone.
+
+`local-skill/v1` keeps the shipped v1 grant, byte-identical. `pinned-skill/v1` writes a v2
+grant, which duplicates the adapter's `bindings` — the origin block, the frozen content hash
+and size, and the destination — and binds them with a `bindingsDigest` instead of naming a
+local source path. Both shapes name the plan digest, adapter fingerprint, repository, clean
+HEAD, operations digest and expiry, and both are graded field by field against a rebuilt plan.
 
 ### Applying an approved plan
 
@@ -442,7 +478,11 @@ and the skill metadata. Only a verified install is reported as `applied`.
 
 A journal beside the grant records the outcome as `started`, `succeeded`, `failed` or
 `partial`, along with the operations and the verification. It lives outside the repository,
-so the repository cannot edit its own record. A `started` journal is re-read under the
+so the repository cannot edit its own record. A v2 journal records the attempt's `subject`
+(the installed skill name and destination) instead of the v1 `skill` block, and persists each
+operation as `attempting` before its syscall: an exception after that point is `partial`, and
+`failed` means no mutation happened. `local-skill/v1` keeps its v1 journal and shipped
+classification. A `started` journal is re-read under the
 repository lock: a live run is waited for, and only an attempt that is still `started` once
 the lock is held is reported as `interrupted`. A consumed grant whose journal has not been
 published yet gets the same wait and re-read, including a fresh read of the grant and store,
@@ -594,7 +634,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
-| `anvil setup` | `plan`, `validate`, `approve`, `approval`, `revoke`, `apply` — inspect-only owner-command proposals, one create-only `local-skill` execution plan from the closed adapter registry, its single-use approval grant, and one journaled application. |
+| `anvil setup` | `plan`, `fetch`, `validate`, `approve`, `approval`, `revoke`, `apply` - inspect-only owner-command proposals, one create-only execution plan from the closed adapter registry (`local-skill`, and `pinned-skill` after an explicit `fetch`), its single-use approval grant, and one journaled application. |
 | `anvil brief` | Emit verified facts for an LLM step, with the `gaps`, evidence-use rules and open context questions kept explicit. `--for agents\|commands\|skills\|all`. |
 | `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. `--provider local\|github`. |
 | `anvil claim` | Branch, worktree and context bundle for one ticket. `--provider local\|github`. |
@@ -907,12 +947,15 @@ not be installed, the git in use does not support `extensions.worktreeConfig`.
 one-time staleness note under setup plans). Re-run `anvil init`, review the new diff, and
 apply again.
 
-**A setup plan validates as `stale`.** For an owner-command plan: the repository moved, an
+**A `local-skill` plan validates as `stale`.** For an owner-command plan: the repository moved, an
 install command, a tool install or the working directory changed, or the plan was saved by an
 earlier anvil. Re-run `anvil setup plan`, review the fresh proposal and validate that one.
 Requirement declarations such as `project.credentials`, test commands and tools without an
 install do not invalidate it. For a `local-skill` plan: the repository moved, or the source
-file or destination changed; re-run the same `--adapter local-skill` command.
+file or destination changed; re-run the same `--adapter local-skill` command. For a
+`pinned-skill` plan: the repository or destination moved, or the frozen cache no longer matches
+its origin record; if the cache itself is missing, run `anvil setup fetch` again and plan from
+the commit it reports.
 
 **A claim was refused.** Every refusal names the reason: a branch that already exists, an
 occupied worktree path, a dirty base branch, or a path over the Windows length budget.

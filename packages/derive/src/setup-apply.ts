@@ -1,11 +1,16 @@
 /**
- * Apply one approved `local-skill/v1` execution plan, exactly once.
+ * Apply one approved execution plan from a registered adapter, exactly once.
  *
  * Approval and application are separate authority. This module consumes the grant's single
  * attempt before its first repository mutation, writes the reviewed bytes with no-replace
  * semantics, records a journal beside the grant, and independently verifies the installed
  * artifact. A crash, a partial write or a failed verification is recorded and reported as
  * such; nothing is retried automatically and nothing is deleted.
+ *
+ * `local-skill/v1` keeps journal v1 and its shipped failure classification. Every other
+ * adapter uses journal v2, which records the artifact as `subject` and marks each operation
+ * `attempting` before its syscall, so an exception after a possible mutation is `partial`,
+ * never `failed`.
  *
  * The digest is still not authority. Application revalidates the saved plan, the repository,
  * the source and the grant immediately before writing, but filesystem checks are not an
@@ -27,9 +32,9 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
-import { digestJson } from './canonical.ts'
+import { canonicalJson, digestJson } from './canonical.ts'
 import type { SetupRepositoryState } from './setup.ts'
-import { resolveSetupPlan } from './setup-adapters.ts'
+import { findSetupAdapterById, resolveSetupPlan, type SetupPlanSubject } from './setup-adapters.ts'
 import {
   consumeSetupApproval,
   gradeSetupApprovalGrant,
@@ -57,8 +62,8 @@ export const SETUP_APPLICATION_JOURNAL_KIND = 'setup-application-journal'
 /** The journal lives beside the grant, inside the protected user-owned store. */
 export const SETUP_APPLICATION_JOURNAL_FILE = 'application.json'
 
-const VERIFICATION_ID = 'local-skill-installed/v1' as const
-const VERIFICATION_PROVES =
+const DEFAULT_VERIFICATION_ID = 'local-skill-installed/v1'
+const DEFAULT_VERIFICATION_PROVES =
   'Only that the reviewed SKILL.md bytes are present at the destination with valid skill metadata. It does not prove that an agent loaded, followed, trusted or successfully used the skill.'
 
 /**
@@ -78,7 +83,8 @@ export interface SetupApplyVerificationCheck {
 }
 
 export interface SetupApplyVerification {
-  id: typeof VERIFICATION_ID
+  /** The verifier that ran, for example `local-skill-installed/v1`. */
+  id: string
   scope: 'artifact-installed'
   ok: boolean
   checks: SetupApplyVerificationCheck[]
@@ -89,10 +95,12 @@ export interface SetupApplicationOperationRecord {
   id: string
   kind: 'ensure-directory' | 'create-directory' | 'write-file'
   path: string
-  status: 'pending' | 'done' | 'failed'
+  /** Journal v2 marks an operation `attempting` before its syscall. */
+  status: 'pending' | 'attempting' | 'done' | 'failed'
 }
 
-export interface SetupApplicationJournal {
+/** Journal v1: the shipped local-skill record. Kept readable forever. */
+export interface SetupApplicationJournalV1 {
   schemaVersion: 1
   kind: typeof SETUP_APPLICATION_JOURNAL_KIND
   grantId: string
@@ -109,6 +117,26 @@ export interface SetupApplicationJournal {
   reason: string
 }
 
+/** Journal v2: any registered adapter; `subject` is the artifact the attempt targets. */
+export interface SetupApplicationJournalV2 {
+  schemaVersion: 2
+  kind: typeof SETUP_APPLICATION_JOURNAL_KIND
+  grantId: string
+  planDigest: string
+  adapter: string
+  adapterFingerprint: string
+  repository: { root: string; head: string }
+  subject: { kind: 'skill'; id: string; destination: string }
+  startedAt: string
+  updatedAt: string
+  status: SetupApplicationJournalStatus
+  operations: SetupApplicationOperationRecord[]
+  verification: SetupApplyVerification | null
+  reason: string
+}
+
+export type SetupApplicationJournal = SetupApplicationJournalV1 | SetupApplicationJournalV2
+
 export interface SetupApplicationRecord {
   schemaVersion: 1
   kind: typeof SETUP_APPLICATION_KIND
@@ -121,6 +149,10 @@ export interface SetupApplicationRecord {
   alreadyApplied: boolean
   reason: string
   planDigest: string | null
+  /** Present for journal v2 adapters; v1 local-skill records omit it. */
+  adapter?: string
+  /** The artifact this attempt targets. Present for journal v2 adapters. */
+  subject?: SetupPlanSubject
   grant: SetupApprovalGrant | null
   repository: { root: string; head: string | null } | null
   destination: string | null
@@ -181,11 +213,29 @@ const JOURNAL_KEYS = [
   'updatedAt',
   'verification',
 ] as const
+const JOURNAL_V2_KEYS = [
+  'adapter',
+  'adapterFingerprint',
+  'grantId',
+  'kind',
+  'operations',
+  'planDigest',
+  'reason',
+  'repository',
+  'schemaVersion',
+  'startedAt',
+  'status',
+  'subject',
+  'updatedAt',
+  'verification',
+] as const
 const OPERATION_KEYS = ['id', 'kind', 'path', 'status'] as const
 const REPOSITORY_KEYS = ['head', 'root'] as const
 const SKILL_KEYS = ['destination', 'name'] as const
+const SUBJECT_KEYS = ['destination', 'id', 'kind'] as const
 const VERIFICATION_KEYS = ['checks', 'id', 'ok', 'proves', 'scope'] as const
 const CHECK_KEYS = ['detail', 'name', 'ok'] as const
+const VERIFICATION_ID_PATTERN = /^[a-z][a-z0-9-]*\/v[0-9]+$/
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
@@ -266,25 +316,47 @@ function savedPlanBinding(
   ) {
     return { ok: false, reason: 'The saved plan names a different repository or commit than the grant.' }
   }
-  const skill = saved.skill
-  if (!isPlainObject(skill) || skill.name !== grant.skill.name || skill.destination !== grant.skill.destination) {
-    return { ok: false, reason: 'The saved plan names a different skill destination.' }
+  if (grant.schemaVersion === 1) {
+    const skill = saved.skill
+    if (!isPlainObject(skill) || skill.name !== grant.skill.name || skill.destination !== grant.skill.destination) {
+      return { ok: false, reason: 'The saved plan names a different skill destination.' }
+    }
+    const source = saved.source
+    if (
+      !isPlainObject(source) ||
+      source.path !== grant.source.path ||
+      source.sha256 !== grant.source.sha256 ||
+      source.bytes !== grant.source.bytes
+    ) {
+      return { ok: false, reason: 'The saved plan names a different source file or source bytes.' }
+    }
+    return { ok: true }
   }
-  const source = saved.source
-  if (
-    !isPlainObject(source) ||
-    source.path !== grant.source.path ||
-    source.sha256 !== grant.source.sha256 ||
-    source.bytes !== grant.source.bytes
-  ) {
-    return { ok: false, reason: 'The saved plan names a different source file or source bytes.' }
+
+  // Grant v2 is adapter-agnostic: compare the adapter's canonical binding for this saved
+  // plan with the approved bindings. A saved plan that cannot even produce bindings is not
+  // the approved plan.
+  const adapter = findSetupAdapterById(grant.adapter)
+  if (adapter === null) return { ok: false, reason: 'The grant names an unregistered adapter.' }
+  const approved = adapter.parseBindings(grant.bindings)
+  if (approved === null) return { ok: false, reason: 'The grant bindings are malformed.' }
+  let savedBindings: Record<string, unknown>
+  try {
+    savedBindings = adapter.bindings(saved as unknown as SetupExecutionPlan)
+  } catch {
+    return { ok: false, reason: 'The saved plan does not carry the approved binding fields.' }
+  }
+  if (canonicalJson(savedBindings) !== canonicalJson(approved)) {
+    return { ok: false, reason: 'The saved plan does not match the plan this grant approved.' }
   }
   return { ok: true }
 }
 
-function parseVerification(value: unknown): SetupApplyVerification | null {
+function parseVerification(value: unknown, expectedId: string | null): SetupApplyVerification | null {
   if (!isPlainObject(value) || !hasExactKeys(value, VERIFICATION_KEYS)) return null
-  if (value.id !== VERIFICATION_ID || value.scope !== 'artifact-installed' || typeof value.ok !== 'boolean') return null
+  if (typeof value.id !== 'string' || !VERIFICATION_ID_PATTERN.test(value.id)) return null
+  if (expectedId !== null && value.id !== expectedId) return null
+  if (value.scope !== 'artifact-installed' || typeof value.ok !== 'boolean') return null
   if (typeof value.proves !== 'string' || !Array.isArray(value.checks)) return null
   const checks: SetupApplyVerificationCheck[] = []
   for (const check of value.checks) {
@@ -292,23 +364,50 @@ function parseVerification(value: unknown): SetupApplyVerification | null {
     if (typeof check.name !== 'string' || typeof check.ok !== 'boolean' || typeof check.detail !== 'string') return null
     checks.push({ name: check.name, ok: check.ok, detail: check.detail })
   }
-  return { id: VERIFICATION_ID, scope: 'artifact-installed', ok: value.ok, checks, proves: value.proves }
+  return { id: value.id, scope: 'artifact-installed', ok: value.ok, checks, proves: value.proves }
 }
 
-/** Parse an untrusted journal. Unknown fields, a bad status or a bad operation are rejections. */
-function parseJournal(value: unknown): SetupApplicationJournal | null {
-  if (!isPlainObject(value) || !hasExactKeys(value, JOURNAL_KEYS)) return null
-  if (value.schemaVersion !== 1 || value.kind !== SETUP_APPLICATION_JOURNAL_KIND) return null
+const OPERATION_KINDS = ['ensure-directory', 'create-directory', 'write-file'] as const
+const OPERATION_STATUSES = ['pending', 'attempting', 'done', 'failed'] as const
+
+function parseOperations(value: unknown): SetupApplicationOperationRecord[] | null {
+  if (!Array.isArray(value)) return null
+  const operations: SetupApplicationOperationRecord[] = []
+  for (const operation of value) {
+    if (!isPlainObject(operation) || !hasExactKeys(operation, OPERATION_KEYS)) return null
+    if (typeof operation.id !== 'string' || typeof operation.path !== 'string') return null
+    if (!OPERATION_KINDS.includes(operation.kind as (typeof OPERATION_KINDS)[number])) return null
+    if (!OPERATION_STATUSES.includes(operation.status as (typeof OPERATION_STATUSES)[number])) return null
+    operations.push({
+      id: operation.id,
+      kind: operation.kind as SetupApplicationOperationRecord['kind'],
+      path: operation.path,
+      status: operation.status as SetupApplicationOperationRecord['status'],
+    })
+  }
+  return operations
+}
+
+function parseJournalStatus(value: unknown): value is SetupApplicationJournalStatus {
+  return typeof value === 'string' && ['started', 'succeeded', 'failed', 'partial'].includes(value)
+}
+
+function parseJournalCommon(value: Record<string, unknown>): {
+  grantId: string
+  planDigest: string
+  adapterFingerprint: string
+  repository: { root: string; head: string }
+  startedAt: string
+  updatedAt: string
+  status: SetupApplicationJournalStatus
+  operations: SetupApplicationOperationRecord[]
+  verification: SetupApplyVerification | null
+  reason: string
+} | null {
   if (typeof value.grantId !== 'string' || value.grantId === '') return null
   if (typeof value.planDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.planDigest)) return null
-  if (value.adapter !== LOCAL_SKILL_ADAPTER) return null
   if (typeof value.adapterFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.adapterFingerprint)) return null
-  if (
-    !['started', 'succeeded', 'failed', 'partial'].includes(value.status as string) ||
-    typeof value.status !== 'string'
-  ) {
-    return null
-  }
+  if (!parseJournalStatus(value.status)) return null
   if (
     !isIsoDate(value.startedAt) ||
     !isIsoDate(value.updatedAt) ||
@@ -325,41 +424,66 @@ function parseJournal(value: unknown): SetupApplicationJournal | null {
   ) {
     return null
   }
-  if (!isPlainObject(value.skill) || !hasExactKeys(value.skill, SKILL_KEYS)) return null
-  if (typeof value.skill.name !== 'string' || typeof value.skill.destination !== 'string') return null
-  if (value.skill.destination !== `.agents/skills/${value.skill.name}/SKILL.md`) return null
-  if (!Array.isArray(value.operations)) return null
-  const operations: SetupApplicationOperationRecord[] = []
-  for (const operation of value.operations) {
-    if (!isPlainObject(operation) || !hasExactKeys(operation, OPERATION_KEYS)) return null
-    if (typeof operation.id !== 'string' || typeof operation.path !== 'string') return null
-    if (!['ensure-directory', 'create-directory', 'write-file'].includes(operation.kind as string)) return null
-    if (!['pending', 'done', 'failed'].includes(operation.status as string)) return null
-    operations.push({
-      id: operation.id,
-      kind: operation.kind as SetupApplicationOperationRecord['kind'],
-      path: operation.path,
-      status: operation.status as SetupApplicationOperationRecord['status'],
-    })
-  }
+  const operations = parseOperations(value.operations)
+  if (operations === null) return null
   if (typeof value.reason !== 'string') return null
-  const verification = value.verification === null ? null : parseVerification(value.verification)
+  const verification = value.verification === null ? null : parseVerification(value.verification, null)
   if (value.verification !== null && verification === null) return null
   return {
-    schemaVersion: 1,
-    kind: SETUP_APPLICATION_JOURNAL_KIND,
     grantId: value.grantId,
     planDigest: value.planDigest,
-    adapter: LOCAL_SKILL_ADAPTER,
     adapterFingerprint: value.adapterFingerprint,
     repository: { root: value.repository.root, head: value.repository.head },
-    skill: { name: value.skill.name, destination: value.skill.destination },
     startedAt: value.startedAt,
     updatedAt: value.updatedAt,
-    status: value.status as SetupApplicationJournalStatus,
+    status: value.status,
     operations,
     verification,
     reason: value.reason,
+  }
+}
+
+/** Parse an untrusted journal. Unknown fields, a bad status or a bad operation are rejections. */
+function parseJournal(value: unknown): SetupApplicationJournal | null {
+  if (!isPlainObject(value)) return null
+  if (value.schemaVersion === 2) {
+    if (!hasExactKeys(value, JOURNAL_V2_KEYS) || value.kind !== SETUP_APPLICATION_JOURNAL_KIND) return null
+    if (typeof value.adapter !== 'string' || value.adapter === '') return null
+    if (!isPlainObject(value.subject) || !hasExactKeys(value.subject, SUBJECT_KEYS)) return null
+    if (
+      value.subject.kind !== 'skill' ||
+      typeof value.subject.id !== 'string' ||
+      value.subject.id === '' ||
+      typeof value.subject.destination !== 'string' ||
+      value.subject.destination === ''
+    ) {
+      return null
+    }
+    const common = parseJournalCommon(value)
+    if (common === null) return null
+    return {
+      schemaVersion: 2,
+      kind: SETUP_APPLICATION_JOURNAL_KIND,
+      adapter: value.adapter,
+      subject: { kind: 'skill', id: value.subject.id, destination: value.subject.destination },
+      ...common,
+    }
+  }
+  if (!hasExactKeys(value, JOURNAL_KEYS)) return null
+  if (value.schemaVersion !== 1 || value.kind !== SETUP_APPLICATION_JOURNAL_KIND) return null
+  if (value.adapter !== LOCAL_SKILL_ADAPTER) return null
+  const common = parseJournalCommon(value)
+  if (common === null) return null
+  if (common.verification !== null && common.verification.id !== DEFAULT_VERIFICATION_ID) return null
+  if (!isPlainObject(value.skill) || !hasExactKeys(value.skill, SKILL_KEYS)) return null
+  if (typeof value.skill.name !== 'string' || typeof value.skill.destination !== 'string') return null
+  if (value.skill.destination !== `.agents/skills/${value.skill.name}/SKILL.md`) return null
+  return {
+    schemaVersion: 1,
+    kind: SETUP_APPLICATION_JOURNAL_KIND,
+    adapter: LOCAL_SKILL_ADAPTER,
+    skill: { name: value.skill.name, destination: value.skill.destination },
+    ...common,
   }
 }
 
@@ -521,6 +645,10 @@ export interface InstalledLocalSkill {
   destination: string
   sha256: string
   bytes: number
+  /** The verifier id to record; defaults to the shipped `local-skill-installed/v1`. */
+  id?: string
+  /** The narrow claim to record; defaults to the local-skill claim. */
+  proves?: string
 }
 
 /**
@@ -531,13 +659,15 @@ export interface InstalledLocalSkill {
  * followed, trusted or benefited from the skill.
  */
 export function verifyInstalledLocalSkill(target: InstalledLocalSkill): SetupApplyVerification {
+  const id = target.id ?? DEFAULT_VERIFICATION_ID
+  const proves = target.proves ?? DEFAULT_VERIFICATION_PROVES
   const checks: SetupApplyVerificationCheck[] = []
   const finish = (): SetupApplyVerification => ({
-    id: VERIFICATION_ID,
+    id,
     scope: 'artifact-installed',
     ok: checks.every((check) => check.ok),
     checks,
-    proves: VERIFICATION_PROVES,
+    proves,
   })
   const fail = (name: string, detail: string): SetupApplyVerification => {
     checks.push({ name, ok: false, detail })
@@ -659,7 +789,50 @@ export function verifyLocalSkillInstall(
     destination: plan.skill.destination,
     sha256: plan.source.sha256,
     bytes: plan.source.bytes,
+    id: plan.verification.id,
+    proves: plan.verification.proves,
   })
+}
+
+function journalAdapter(journal: SetupApplicationJournal): string {
+  return journal.schemaVersion === 1 ? LOCAL_SKILL_ADAPTER : journal.adapter
+}
+
+function journalSubject(journal: SetupApplicationJournal): SetupPlanSubject {
+  return journal.schemaVersion === 1
+    ? { kind: 'skill', id: journal.skill.name, destination: journal.skill.destination }
+    : journal.subject
+}
+
+/** The approved artifact a grant names, without rebuilding a create-only plan. */
+function grantArtifact(grant: SetupApprovalGrant): {
+  kind: 'skill'
+  id: string
+  destination: string
+  sha256: string
+  bytes: number
+} | null {
+  if (grant.schemaVersion === 1) {
+    return {
+      kind: 'skill',
+      id: grant.skill.name,
+      destination: grant.skill.destination,
+      sha256: grant.source.sha256,
+      bytes: grant.source.bytes,
+    }
+  }
+  const adapter = findSetupAdapterById(grant.adapter)
+  if (adapter === null) return null
+  const bindings = adapter.parseBindings(grant.bindings)
+  if (bindings === null) return null
+  return adapter.approvedArtifact(bindings)
+}
+
+function planSubject(plan: SetupExecutionPlan): SetupPlanSubject {
+  const adapter = findSetupAdapterById(plan.adapter)
+  return adapter === null
+    ? { kind: 'skill', id: plan.skill.name, destination: plan.skill.destination }
+    : adapter.subject(plan)
 }
 
 function applicationRecord(options: {
@@ -674,7 +847,10 @@ function applicationRecord(options: {
   verification?: SetupApplyVerification | null
 }): SetupApplicationRecord {
   const { plan, grant } = options
-  return {
+  const artifact = grant === null || grant === undefined ? null : grantArtifact(grant)
+  const destination = plan?.skill.destination ?? artifact?.destination ?? null
+  const v2 = plan !== undefined && plan !== null ? plan.adapter !== LOCAL_SKILL_ADAPTER : grant?.schemaVersion === 2
+  const record: SetupApplicationRecord = {
     schemaVersion: 1,
     kind: SETUP_APPLICATION_KIND,
     status: options.status,
@@ -690,10 +866,22 @@ function applicationRecord(options: {
         : grant !== null && grant !== undefined
           ? { root: grant.repository.root, head: grant.repository.head }
           : null,
-    destination: plan?.skill.destination ?? grant?.skill.destination ?? null,
+    destination,
     journal: options.journal ?? null,
     verification: options.verification ?? null,
   }
+  if (v2) {
+    const adapter = plan?.adapter ?? (grant?.schemaVersion === 2 ? grant.adapter : undefined)
+    if (adapter !== undefined) record.adapter = adapter
+    const subject =
+      plan !== null && plan !== undefined
+        ? planSubject(plan)
+        : artifact === null
+          ? undefined
+          : { kind: 'skill' as const, id: artifact.id, destination: artifact.destination }
+    if (subject !== undefined) record.subject = subject
+  }
+  return record
 }
 
 function refusal(
@@ -732,13 +920,16 @@ function settleExistingAttempt(
     })
   }
   const journal = read.journal
+  const artifact = grantArtifact(grant)
   const belongs =
+    artifact !== null &&
     journal.grantId === grant.id &&
     journal.planDigest === grant.planDigest &&
     journal.adapterFingerprint === grant.adapterFingerprint &&
     journal.repository.root === grant.repository.root &&
     journal.repository.head === grant.repository.head &&
-    journal.skill.destination === grant.skill.destination
+    journalAdapter(journal) === grant.adapter &&
+    journalSubject(journal).destination === artifact.destination
   if (!belongs) {
     return applicationRecord({
       status: 'interrupted',
@@ -762,13 +953,15 @@ function settleExistingAttempt(
 
   if (journal.status === 'succeeded') {
     const verify = flow.hooks?.verify ?? verifyInstalledLocalSkill
+    const recorded = journal.verification
     let verification: SetupApplyVerification | null = null
     try {
       verification = verify({
         root: grant.repository.root,
-        destination: grant.skill.destination,
-        sha256: grant.source.sha256,
-        bytes: grant.source.bytes,
+        destination: artifact.destination,
+        sha256: artifact.sha256,
+        bytes: artifact.bytes,
+        ...(recorded === null ? {} : { id: recorded.id, proves: recorded.proves }),
       })
     } catch {
       verification = null
@@ -924,7 +1117,7 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
   // Refuse a stale, tampered or unsafe plan without waiting for the lock and without
   // touching the grant. A refusal here leaves the single attempt unused.
   flow.hooks?.beforeResolve?.()
-  const first = resolveSetupPlan(flow.saved, flow.repository)
+  const first = resolveSetupPlan(flow.saved, flow.repository, storeOptions)
   if (first.validation.status !== 'current' || first.plan === null) {
     // A concurrent application can make this same saved plan look stale: it writes the
     // destination and its journal before releasing the lock. Re-read the journal and the
@@ -968,7 +1161,7 @@ export async function applySetupPlan(flow: SetupApplyFlow): Promise<SetupApplica
 
     // The repository may have moved while this process waited for the lock.
     const fresh = await flow.refresh()
-    const second = resolveSetupPlan(flow.saved, fresh)
+    const second = resolveSetupPlan(flow.saved, fresh, storeOptions)
     if (second.validation.status !== 'current' || second.plan === null) {
       return refusal(second.validation.reason, second.plan, grant)
     }
@@ -1002,6 +1195,19 @@ function runApplication(
   flow: SetupApplyFlow,
   now: Date,
 ): SetupApplicationRecord {
+  // `local-skill/v1` keeps journal v1 and its shipped failure classification, so saved
+  // journals and existing behaviour are unchanged. Every other adapter uses journal v2.
+  if (plan.adapter === LOCAL_SKILL_ADAPTER) return runLocalApplication(plan, grant, dir, flow, now)
+  return runRegisteredApplication(plan, grant, dir, flow, now)
+}
+
+function runLocalApplication(
+  plan: SetupExecutionPlan,
+  grant: SetupApprovalGrant,
+  dir: string,
+  flow: SetupApplyFlow,
+  now: Date,
+): SetupApplicationRecord {
   const startedAt = now.toISOString()
   let journal: SetupApplicationJournal = {
     schemaVersion: 1,
@@ -1011,7 +1217,7 @@ function runApplication(
     adapter: LOCAL_SKILL_ADAPTER,
     adapterFingerprint: plan.adapterFingerprint,
     repository: { root: grant.repository.root, head: grant.repository.head },
-    skill: { name: grant.skill.name, destination: grant.skill.destination },
+    skill: { name: plan.skill.name, destination: plan.skill.destination },
     startedAt,
     updatedAt: startedAt,
     status: 'started',
@@ -1141,6 +1347,200 @@ function runApplication(
       : `Application failed before any repository write: ${errorMessage(cause)}`
     try {
       update(status, reason)
+    } catch {
+      // The journal could not record the terminal state; the attempt stays `started`, which
+      // a later read reports as interrupted rather than as success.
+    }
+    return applicationRecord({
+      status: status === 'partial' ? 'partial' : 'failed',
+      executed: mutated,
+      reason,
+      plan,
+      grant,
+      journal,
+      verification: null,
+    })
+  }
+}
+
+/**
+ * Apply any registered non-local adapter with journal v2.
+ *
+ * Before every mutating syscall the operation is persisted as `attempting`. An exception after
+ * that point may have changed the repository, so the outcome floor is `partial`; `failed` is
+ * reserved for a failure with evidence that nothing was mutated (for example, the attempt
+ * journal could not be written, or the very first syscall failed before any effect).
+ */
+function runRegisteredApplication(
+  plan: SetupExecutionPlan,
+  grant: SetupApprovalGrant,
+  dir: string,
+  flow: SetupApplyFlow,
+  now: Date,
+): SetupApplicationRecord {
+  const artifact = grantArtifact(grant)
+  const adapter = findSetupAdapterById(plan.adapter)
+  if (artifact === null || adapter === null) {
+    return applicationRecord({
+      status: 'failed',
+      executed: false,
+      reason: 'The grant does not name a usable artifact for this adapter, so nothing was written.',
+      plan,
+      grant,
+    })
+  }
+  const startedAt = now.toISOString()
+  let journal: SetupApplicationJournalV2 = {
+    schemaVersion: 2,
+    kind: SETUP_APPLICATION_JOURNAL_KIND,
+    grantId: grant.id,
+    planDigest: plan.digest,
+    adapter: plan.adapter,
+    adapterFingerprint: plan.adapterFingerprint,
+    repository: { root: grant.repository.root, head: grant.repository.head },
+    subject: adapter.subject(plan),
+    startedAt,
+    updatedAt: startedAt,
+    status: 'started',
+    operations: plan.operations.map((operation) => ({
+      id: operation.id,
+      kind: operation.kind,
+      path: operation.path,
+      status: 'pending',
+    })),
+    verification: null,
+    reason: "The grant's single attempt is reserved and application has started.",
+  }
+
+  try {
+    const written = writeGrantRecordOnce(dir, SETUP_APPLICATION_JOURNAL_FILE, journal)
+    if (written !== 'written') {
+      return applicationRecord({
+        status: 'failed',
+        executed: false,
+        reason:
+          'An application journal already exists, so this attempt was not started. No automatic retry is allowed.',
+        plan,
+        grant,
+        journal,
+      })
+    }
+  } catch (cause) {
+    return applicationRecord({
+      status: 'failed',
+      executed: false,
+      reason: `The application journal could not be written, so nothing was changed: ${errorMessage(cause)}`,
+      plan,
+      grant,
+      journal,
+    })
+  }
+
+  let mutated = false
+  let uncertain = false
+  let currentOperation: string | null = null
+
+  const setOperation = (id: string, status: SetupApplicationOperationRecord['status']): void => {
+    journal = {
+      ...journal,
+      operations: journal.operations.map((operation) => (operation.id === id ? { ...operation, status } : operation)),
+    }
+  }
+  const persist = (
+    status: SetupApplicationJournalStatus,
+    reason: string,
+    verification: SetupApplyVerification | null = null,
+  ): void => {
+    journal = { ...journal, status, reason, verification, updatedAt: now.toISOString() }
+    replaceGrantRecord(dir, SETUP_APPLICATION_JOURNAL_FILE, journal)
+  }
+  /**
+   * Persist `attempting` before the syscall. Only after that record lands is the outcome
+   * uncertain; a failure to write the marker stops before anything is mutated.
+   */
+  const beginOperation = (id: string): void => {
+    currentOperation = id
+    setOperation(id, 'attempting')
+    journal = { ...journal, updatedAt: now.toISOString() }
+    replaceGrantRecord(dir, SETUP_APPLICATION_JOURNAL_FILE, journal)
+    uncertain = true
+  }
+
+  try {
+    const root = resolvedRepositoryRoot(plan.repository.root)
+    flow.hooks?.beforeWrite?.(plan)
+
+    for (const operation of plan.operations) {
+      if (operation.kind === 'write-file') break
+      beginOperation(operation.id)
+      if (operation.kind === 'ensure-directory') {
+        if (ensureDirectory(root, operation.path)) mutated = true
+      } else {
+        createSkillDirectory(root, operation.path)
+        mutated = true
+      }
+      setOperation(operation.id, 'done')
+      currentOperation = null
+      persist('started', 'Directory operations are in progress.')
+    }
+
+    const destination = join(root, ...artifact.destination.split('/'))
+    assertInsideRepository(root, dirname(destination))
+    const publish =
+      flow.hooks?.publish ??
+      ((target: string, bytes: Buffer) => publishNoReplace(target, bytes, flow.hooks?.duringPublish))
+    const writeOperation = plan.operations.find((operation) => operation.kind === 'write-file')
+    if (writeOperation !== undefined) beginOperation(writeOperation.id)
+    publish(destination, approvedBytes(plan))
+    mutated = true
+    if (writeOperation !== undefined) setOperation(writeOperation.id, 'done')
+    currentOperation = null
+    persist('started', 'The reviewed bytes are installed; verification is pending.')
+
+    const verify = flow.hooks?.verify ?? verifyInstalledLocalSkill
+    const verification = verify({
+      root,
+      destination: artifact.destination,
+      sha256: artifact.sha256,
+      bytes: artifact.bytes,
+      id: plan.verification.id,
+      proves: plan.verification.proves,
+    })
+    if (verification.ok) {
+      const reason =
+        'The reviewed bytes were installed and independently verified at the destination. This proves the artifact is present, not that an agent used it.'
+      persist('succeeded', reason, verification)
+      return applicationRecord({
+        status: 'applied',
+        executed: true,
+        reason,
+        plan,
+        grant,
+        journal,
+        verification,
+      })
+    }
+    const reason =
+      'The destination was written but independent verification failed, so this is not a completed integration.'
+    persist('partial', reason, verification)
+    return applicationRecord({
+      status: 'partial',
+      executed: true,
+      reason,
+      plan,
+      grant,
+      journal,
+      verification,
+    })
+  } catch (cause) {
+    if (currentOperation !== null) setOperation(currentOperation, 'failed')
+    const status: SetupApplicationJournalStatus = uncertain || mutated ? 'partial' : 'failed'
+    const reason =
+      uncertain || mutated
+        ? `Application failed after a mutation was attempted; the repository was not rolled back: ${errorMessage(cause)}`
+        : `Application failed before any repository write: ${errorMessage(cause)}`
+    try {
+      persist(status, reason)
     } catch {
       // The journal could not record the terminal state; the attempt stays `started`, which
       // a later read reports as interrupted rather than as success.

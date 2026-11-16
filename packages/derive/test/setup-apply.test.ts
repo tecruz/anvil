@@ -10,6 +10,7 @@ import {
   buildSetupExecutionPlan,
   consumeSetupApproval,
   inspectSetupApproval,
+  LOCAL_SKILL_ADAPTER,
   prepareSetupApprovalStore,
   readGrantRecord,
   readSetupApprovalGrant,
@@ -99,15 +100,20 @@ function active(fixture: Fixture): string {
 
 /** A journal that claims the attempt started but has no terminal outcome. */
 function startedJournal(fixture: Fixture): SetupApplicationJournal {
+  const plan = fixture.plan
+  const grant = fixture.grant
+  if (plan.adapter !== LOCAL_SKILL_ADAPTER || grant.schemaVersion !== 1) {
+    throw new Error('the fixture is not a local-skill grant')
+  }
   return {
     schemaVersion: 1,
     kind: SETUP_APPLICATION_JOURNAL_KIND,
-    grantId: fixture.grant.id,
-    planDigest: fixture.plan.digest,
-    adapter: fixture.plan.adapter,
-    adapterFingerprint: fixture.plan.adapterFingerprint,
-    repository: fixture.grant.repository,
-    skill: fixture.grant.skill,
+    grantId: grant.id,
+    planDigest: plan.digest,
+    adapter: LOCAL_SKILL_ADAPTER,
+    adapterFingerprint: plan.adapterFingerprint,
+    repository: grant.repository,
+    skill: grant.skill,
     startedAt: T0.toISOString(),
     updatedAt: T0.toISOString(),
     status: 'started',

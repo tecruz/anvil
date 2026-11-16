@@ -1007,6 +1007,73 @@ describe('anvil setup', () => {
     }
   })
 
+  test('pinned-skill planning is offline, and fetch flags are strict', () => {
+    const root = repo()
+    const env = approvalEnv()
+    const commitSha = git(root, 'rev-parse', 'HEAD').trim()
+
+    for (const args of [
+      ['fetch', '--repo', 'owner/name', '--ref', 'main', '--path', 'skills/x/SKILL.md', '--name', 'x'],
+      [
+        'fetch',
+        '--adapter',
+        'local-skill',
+        '--repo',
+        'owner/name',
+        '--ref',
+        'main',
+        '--path',
+        'skills/x/SKILL.md',
+        '--name',
+        'x',
+      ],
+      ['fetch', '--adapter', 'pinned-skill', '--ref', 'main', '--path', 'skills/x/SKILL.md', '--name', 'x'],
+      ['fetch', '--adapter', 'pinned-skill', '--repo', 'owner/name', '--path', 'skills/x/SKILL.md', '--name', 'x'],
+      [
+        'plan',
+        '--adapter',
+        'pinned-skill',
+        '--repo',
+        'owner/name',
+        '--ref',
+        'main',
+        '--path',
+        'skills/x/SKILL.md',
+        '--name',
+        'x',
+      ],
+    ]) {
+      const result = run(root, [...args, '--json'], env)
+      assert.equal(result.code, 2, `${args.join(' ')}: ${result.stdout}${result.stderr ?? ''}`)
+    }
+
+    // A commit that was never fetched is refused, and planning writes nothing: no cache
+    // directory, no destination, no network step hidden inside plan.
+    const planned = run(
+      root,
+      [
+        'plan',
+        '--adapter',
+        'pinned-skill',
+        '--repo',
+        'owner/name',
+        '--commit',
+        commitSha,
+        '--path',
+        'skills/x/SKILL.md',
+        '--name',
+        'x',
+        '--json',
+      ],
+      env,
+    )
+    assert.equal(planned.code, 5, planned.stdout)
+    assert.match(`${planned.stdout}${planned.stderr}`, /setup fetch/)
+    assert.deepEqual(readdirSync(env.ANVIL_APPROVAL_HOME as string), [], 'planning created cache records')
+    assert.equal(existsSync(join(root, '.agents')), false)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+  })
+
   test('invalid names and paths are refused without touching the destination', () => {
     const root = repo()
     writeFileSync(join(root, 'skill.md'), skillContent())

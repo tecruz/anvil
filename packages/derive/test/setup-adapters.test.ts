@@ -52,8 +52,8 @@ const LOCAL_SKILL_GOLDEN_FINGERPRINT = 'ac1833e3296de3741102254ff899e371d89e692d
 
 describe('setup adapter registry', () => {
   test('the registry is a closed list and every entry is internally consistent', () => {
-    assert.deepEqual([...SETUP_ADAPTERS], ['local-skill'])
-    assert.equal(setupAdapterList(), 'local-skill')
+    assert.deepEqual([...SETUP_ADAPTERS], ['local-skill', 'pinned-skill'])
+    assert.equal(setupAdapterList(), 'local-skill, pinned-skill')
     const adapter = resolveSetupAdapter('local-skill')
     assert.equal(adapter.id, LOCAL_SKILL_ADAPTER)
     assert.equal(adapter.cliName, 'local-skill')
@@ -63,12 +63,12 @@ describe('setup adapter registry', () => {
 
   test('an unknown adapter is a usage error that names what is supported', () => {
     assert.throws(
-      () => resolveSetupAdapter('pinned-skill'),
+      () => resolveSetupAdapter('mcp-config'),
       (error: unknown) =>
         error instanceof AnvilError &&
         error.code === ErrorCode.Usage &&
         /Unsupported setup adapter/.test(error.message) &&
-        /local-skill/.test(error.hint ?? ''),
+        /pinned-skill/.test(error.hint ?? ''),
     )
   })
 
