@@ -114,8 +114,12 @@ async function crewUpFlow(
     // No explicit list: take the ready work. A crew is most useful when you do not have to
     // enumerate the tickets yourself.
     requireCapability(base.provider, 'list', 'list tickets')
-    const all = (await base.provider.list?.({ state: 'todo' })) ?? []
-    const limit = (typeof args.values.limit === 'string' ? parsePositiveInt(args.values.limit) : null) ?? all.length
+    // Ask the provider for exactly the requested number of ready tickets: listing more than
+    // that only to slice it would make a large backlog look incomplete for no reason.
+    const requested = typeof args.values.limit === 'string' ? parsePositiveInt(args.values.limit) : null
+    const all =
+      (await base.provider.list?.(requested === null ? { state: 'todo' } : { state: 'todo', limit: requested })) ?? []
+    const limit = requested ?? all.length
     if (all.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'No tickets in state `todo`', {
         hint: 'Name them explicitly with --tickets 1,2,3, or create one with `anvil issue create`.',

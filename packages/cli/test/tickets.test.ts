@@ -124,7 +124,8 @@ function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = [], l
       '  process.exit(0)',
       '}',
       "if (args[0] === 'issue' && args[1] === 'list') {",
-      '  process.stdout.write(list + "\\n")',
+      // Synchronous: a large listing written asynchronously is cut short by process.exit.
+      '  fs.writeSync(1, list + "\\n")',
       '  process.exit(0)',
       '}',
       "if (args[0] === 'issue' && args[1] === 'view') {",
@@ -451,6 +452,53 @@ describe('a listing decides the work, so its failures are not empty answers', ()
     const envelope = JSON.parse(failure.stdout) as { ok: boolean; error?: { message?: string } }
     assert.equal(envelope.ok, false)
     assert.match(envelope.error?.message ?? '', /403/)
+  })
+
+  test('crew up --limit asks the provider for that many, not for a default page', { timeout: 180_000 }, () => {
+    // One ready issue behind a full 1,000-issue page of reviewed work. `--limit 1` is
+    // answerable from that page; listing the default 30 first would report the backlog as
+    // incomplete and refuse to start a crew that `issue list --limit 1` can see.
+    const repo = makeRepo()
+    const reviewing = Array.from({ length: 999 }, (_, i) => ({
+      ...ISSUE,
+      number: i + 1,
+      title: `Reviewed ${i + 1}`,
+      url: `https://github.com/acme/widgets/issues/${i + 1}`,
+      labels: [{ name: 'in-review' }],
+    }))
+    const ready = { ...ISSUE, number: 1000, title: 'Ready', url: 'https://github.com/acme/widgets/issues/1000' }
+    const stub = ghOnPath(ready, [...reviewing, ready])
+    const worktreeRoot = `${repo}-crew-worktrees`
+    temps.push(worktreeRoot)
+    const configHome = temp('anvil-tickets-config-')
+    writeFileSync(
+      join(configHome, 'anvil.config.json'),
+      JSON.stringify({ schemaVersion: 1, git: { worktreeRoot } }),
+      'utf8',
+    )
+
+    const stdout = execFileSync(
+      process.execPath,
+      [CLI_MAIN, 'crew', 'up', '--provider', 'github', '--limit', '1', '--json'],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          ANVIL_CONFIG_HOME: configHome,
+          PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+        },
+      },
+    )
+
+    const envelope = JSON.parse(stdout) as { ok: boolean; data: { claims: Array<{ key: string }> } }
+    assert.equal(envelope.ok, true)
+    assert.deepEqual(
+      envelope.data.claims.map((c) => c.key),
+      ['gh-1000'],
+    )
   })
 
   test('crew up claims only the tickets still in todo', { timeout: 180_000 }, () => {

@@ -193,16 +193,18 @@ export function parseRef(
   // most natural thing a user can do.
   const url = /^(https?:\/\/[^\s]+)$/i.exec(raw)
   if (url !== null) {
-    const parsed = parseTicketUrl(raw, githubHosts)
-    if (parsed !== null) return parsed
-    // An unknown host is not inferred as GitHub. When the caller *explicitly* selected
-    // GitHub, however, that is a decision rather than an inference: read the URL's issue
-    // number instead of treating the whole URL as a ticket id.
+    // When GitHub is *selected* (rather than inferred), the URL must be a GitHub issue URL
+    // whatever its host is called: a `gitlab.*` or unknown host in GitHub's exact shape is
+    // read as that issue, and any other shape is kept verbatim, so the GitHub provider
+    // refuses it instead of turning part of the path into a `--repo`.
     if (defaultProvider === 'github') {
       const address = githubTicketAddress(raw)
       if (address !== null) {
         return { provider: 'github', id: address.id, key: `gh-${address.id}`, url: raw }
       }
+    } else {
+      const parsed = parseTicketUrl(raw, githubHosts)
+      if (parsed !== null) return parsed
     }
   }
 

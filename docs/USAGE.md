@@ -228,7 +228,8 @@ decision. Because the filter runs after `gh` answers, a page made up entirely of
 filtered-out issues is fetched again with a larger limit rather than reported as an empty
 backlog. `gh issue list` refuses a limit above 1,000; if that maximum page is still full
 and the wanted matches are short, the listing is reported as **incomplete** rather than
-returning a filtered subset as though it were the whole backlog.
+returning a filtered subset as though it were the whole backlog. `crew up --limit N` asks
+for exactly N ready issues, so a small crew can start from a large backlog.
 
 A GitHub transition sets the whole state, not just the label it adds. Moving an issue out
 of `in_review` (by `issue set-state`, `issue sync` or `ship`) removes the `in-review`

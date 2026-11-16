@@ -179,6 +179,14 @@ describe('only GitHub-shaped URLs are GitHub issues', () => {
       const ref = parseRef(url, 'github')
       assert.notEqual(ref.id, '42', `${url} must not become issue 42 of some repository`)
     }
+    // A host that merely looks like another forge is no way around the shape check.
+    for (const url of [
+      'https://gitlab.acme.test/acme/widgets/tree/main/issues/42',
+      'https://gitlab.com/acme/widgets/-/issues/42',
+    ]) {
+      const ref = parseRef(url, 'github')
+      assert.notEqual(ref.id, '42', `${url} must not become issue 42 of some repository`)
+    }
     const ok = parseRef('https://code.acme.test/acme/widgets/issues/42', 'github')
     assert.deepEqual([ok.provider, ok.id, ok.key], ['github', '42', 'gh-42'])
   })
