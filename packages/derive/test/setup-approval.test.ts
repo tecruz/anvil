@@ -30,6 +30,7 @@ import {
   readGrantRecord,
   readSetupApprovalGrant,
   readSetupApprovalTransition,
+  reservationCollisionRecord,
   revokeSetupApproval,
   SETUP_APPROVAL_TTL_MS,
   type SetupRepositoryState,
@@ -502,6 +503,66 @@ describe('setup approval grants', () => {
     assert.doesNotMatch(inspection.reason ?? '', /not private/)
     // Fail closed: the state readers still report the record as untrusted.
     assert.equal(readSetupApprovalTransition(dir, io), 'unknown')
+  })
+
+  test('a reservation that loses a race keeps a timed-out state read as unknown, not "already used"', () => {
+    // `consumeSetupApproval` re-reads the transition record after its no-replace write finds
+    // one already there. The re-read can time out like any other; its reason must survive.
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    saveSetupApprovalGrant(grant, { env })
+    const dir = join(store, ID)
+    write(store, `${ID}/transition.json`, JSON.stringify({ schemaVersion: 1, kind: 'consumed', at: T0.toISOString() }))
+    const io = { platform: 'win32' as const, readAcl: () => ({ ok: false as const, timedOut: true, timeoutMs: 250 }) }
+
+    const timedOut = reservationCollisionRecord(ID, inspectSetupApprovalTransition(dir, io), grant)
+    assert.equal(timedOut.status, 'unknown')
+    assert.match(timedOut.reason, /protection check could not be read within 250 ms/)
+    assert.doesNotMatch(timedOut.reason, /already been used/)
+
+    // Without the stub the same record is a readable consumption, reported as such.
+    const consumed = reservationCollisionRecord(ID, inspectSetupApprovalTransition(dir), grant)
+    assert.equal(consumed.status, 'consumed')
+    assert.match(consumed.reason, /already been used/)
+
+    write(store, `${ID}/transition.json`, JSON.stringify({ schemaVersion: 1, kind: 'revoked', at: T0.toISOString() }))
+    const revoked = reservationCollisionRecord(ID, inspectSetupApprovalTransition(dir), grant)
+    assert.equal(revoked.status, 'revoked')
+    assert.match(revoked.reason, /revoked before the attempt could be reserved/)
+
+    // A record that vanished between the write and the re-read is not evidence of either.
+    const vanished = reservationCollisionRecord(ID, { state: 'none', reason: null }, grant)
+    assert.equal(vanished.status, 'unknown')
+  })
+
+  test('consumeSetupApproval reports an uninspectable winner as unknown, not "already used"', () => {
+    // Simulate the race the collision branch exists for: another writer publishes the
+    // transition record after the pre-checks pass and before the no-replace write. The
+    // repository-state object is read only by the final active check, so its getter is the
+    // last moment before the write. The competing record is malformed, so the re-read cannot
+    // inspect it; the refusal must say that rather than claim the grant was used.
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const base = repository(repo)
+    let raced = false
+    const current = {
+      ...base,
+      get root() {
+        if (!raced) {
+          raced = true
+          write(store, `${ID}/transition.json`, '{"not": "a terminal record"}')
+        }
+        return base.root
+      },
+    } as SetupRepositoryState
+    const consumption = consumeSetupApproval(ID, current, { env, now: T0 })
+    assert.equal(raced, true, 'the competing write must have happened')
+    assert.equal(consumption.reserved, false)
+    assert.equal(consumption.record.status, 'unknown')
+    assert.match(consumption.record.reason, /not a valid terminal-state record/)
+    assert.doesNotMatch(consumption.record.reason, /already been used/)
   })
 
   test('a grant-record ACL timeout is reported as a timeout, not as a permissions problem', () => {
