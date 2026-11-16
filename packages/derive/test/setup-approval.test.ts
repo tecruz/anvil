@@ -536,6 +536,35 @@ describe('setup approval grants', () => {
     assert.equal(vanished.status, 'unknown')
   })
 
+  test('consumeSetupApproval reports an uninspectable winner as unknown, not "already used"', () => {
+    // Simulate the race the collision branch exists for: another writer publishes the
+    // transition record after the pre-checks pass and before the no-replace write. The
+    // repository-state object is read only by the final active check, so its getter is the
+    // last moment before the write. The competing record is malformed, so the re-read cannot
+    // inspect it; the refusal must say that rather than claim the grant was used.
+    const { repo, env, store } = fixture()
+    const plan = planFor(repo)
+    saveSetupApprovalGrant(buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID }), { env })
+    const base = repository(repo)
+    let raced = false
+    const current = {
+      ...base,
+      get root() {
+        if (!raced) {
+          raced = true
+          write(store, `${ID}/transition.json`, '{"not": "a terminal record"}')
+        }
+        return base.root
+      },
+    } as SetupRepositoryState
+    const consumption = consumeSetupApproval(ID, current, { env, now: T0 })
+    assert.equal(raced, true, 'the competing write must have happened')
+    assert.equal(consumption.reserved, false)
+    assert.equal(consumption.record.status, 'unknown')
+    assert.match(consumption.record.reason, /not a valid terminal-state record/)
+    assert.doesNotMatch(consumption.record.reason, /already been used/)
+  })
+
   test('a grant-record ACL timeout is reported as a timeout, not as a permissions problem', () => {
     const { repo, env, store } = fixture()
     const plan = planFor(repo)
