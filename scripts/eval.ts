@@ -319,7 +319,8 @@ async function main(): Promise<void> {
   const dryRun = args.includes('--dry-run')
   const listOnly = args.includes('--list')
   const checkOnly = args.includes('--check')
-  const benchmarkRunId = flagValue('--check-run', args)
+  const benchmarkRequested = args.includes('--check-run')
+  const benchmarkRunIdRaw = flagValue('--check-run', args)
   const fakeAgent = args.includes('--fake-agent')
   const writeBaselineAfterRun = args.includes('--write-baseline')
   const resume = args.includes('--resume')
@@ -360,10 +361,16 @@ async function main(): Promise<void> {
   }
   const suite = suiteRaw as 'smoke' | 'extended' | 'all'
 
-  if (benchmarkRunId !== null && benchmarkRunId.trim() === '') {
+  // A bare `--check-run` must fail here. If it fell through, the flag would look absent and the
+  // command would either exit 0 without validating anything or, with ANVIL_EVAL=1, start a run.
+  if (
+    benchmarkRequested &&
+    (benchmarkRunIdRaw === null || benchmarkRunIdRaw.trim() === '' || benchmarkRunIdRaw.startsWith('--'))
+  ) {
     console.error('--check-run needs the run id the benchmark produced')
     process.exit(1)
   }
+  const benchmarkRunId = benchmarkRequested ? benchmarkRunIdRaw : null
   if (
     benchmarkRunId !== null &&
     (dryRun || listOnly || checkOnly || writeBaselineAfterRun || fakeAgent || only !== null)
@@ -780,7 +787,7 @@ async function main(): Promise<void> {
     console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
   }
 
-  printSummary(results, runId)
+  printSummary(results, evalGateHint(results, runId, args, repetitions, order, isSubset))
   if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(selectedScenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
@@ -2626,7 +2633,43 @@ export function formatPreflight(preflight: EvalPreflight): string[] {
   return lines
 }
 
-function printSummary(results: ScenarioResult[], runId: string): void {
+/** A canonical role list, so a run invoked with `--models "small, frontier"` prints a copyable gate command. */
+function normalizedModelRoles(args: readonly string[]): string {
+  const roles = modelRoles(args)
+  if (roles.has('all')) return 'all'
+  return (['small', 'frontier'] as const).filter((role) => roles.has(role)).join(',')
+}
+
+/** The command that gates a run with the same selection the harness just used. */
+export function benchmarkGateCommand(
+  runId: string,
+  args: readonly string[],
+  repetitions: number,
+  order: string,
+): string {
+  const roles = normalizedModelRoles(args)
+  return `npm run eval -- --check-run ${runId} --models ${roles} --repetitions ${repetitions} --order ${order}`
+}
+
+/** Which gate applies to the run just printed, or why none does. */
+export function evalGateHint(
+  results: readonly ScenarioResult[],
+  runId: string,
+  args: readonly string[],
+  repetitions: number,
+  order: string,
+  subset: boolean,
+): string {
+  if (results.every((result) => result.model === FAKE_AGENT_MODEL)) {
+    return 'Run `npm run eval:check` to compare this run with the baseline.'
+  }
+  if (subset) {
+    return 'This is a subset run; the benchmark gate validates only the complete smoke matrix.'
+  }
+  return `Run \`${benchmarkGateCommand(runId, args, repetitions, order)}\` to gate this real-agent run; it is not promoted to latest.json.`
+}
+
+function printSummary(results: ScenarioResult[], gateHint: string): void {
   console.log('')
   console.log('scenario              model                             variant  verified  hidden  cost      time')
   console.log('--------------------  --------------------------------  -------  --------  ------  --------  ------')
@@ -2652,11 +2695,7 @@ function printSummary(results: ScenarioResult[], runId: string): void {
   for (const line of formatPairedSummary(summarizePairs(results))) console.log(line)
   console.log('')
   console.log('Skill access is observation, not proof that the skill was used.')
-  console.log(
-    results.every((result) => result.model === FAKE_AGENT_MODEL)
-      ? 'Run `npm run eval:check` to compare this run with the baseline.'
-      : `Run \`npm run eval -- --check-run ${runId}\` to gate this real-agent run; it is not promoted to latest.json.`,
-  )
+  console.log(gateHint)
 }
 
 function printScenarios(scenarios: readonly EvalScenario[], models: readonly EvalModel[]): void {
@@ -2956,7 +2995,7 @@ function selectedModels(args: string[]): EvalModel[] {
   return models.filter((model) => requested.has('all') || requested.has(model.role))
 }
 
-function modelRoles(args: string[]): Set<EvalModelRole | 'all'> {
+function modelRoles(args: readonly string[]): Set<EvalModelRole | 'all'> {
   const raw = flagValue('--models', args) ?? 'small'
   const out = new Set<EvalModelRole | 'all'>()
   for (const part of raw.split(',').map((p) => p.trim().toLowerCase())) {
@@ -2969,7 +3008,7 @@ function modelRoles(args: string[]): Set<EvalModelRole | 'all'> {
   return out
 }
 
-function flagValue(flag: string, args: string[]): string | null {
+function flagValue(flag: string, args: readonly string[]): string | null {
   const index = args.indexOf(flag)
   if (index === -1) return null
   return args[index + 1] ?? null

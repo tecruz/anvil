@@ -19,6 +19,7 @@ import {
   hashScenario,
   hashScenarioSource,
 } from '../../packages/cli/src/eval-gate.ts'
+import { benchmarkGateCommand, evalGateHint } from '../eval.ts'
 
 const IMPLEMENTATION = 'impl-1'
 const HARNESS = 'harness-1'
@@ -196,6 +197,34 @@ describe('real-agent benchmark gate', () => {
     const gate = check(recordFor(scenarios, []), scenarios)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /declares no model/)
+  })
+
+  test('refuses a declared model that produced no result', () => {
+    const scenarios = [scenario('tiny-code-change')]
+    const record = recordFor(scenarios)
+    record.models = [{ id: 'model-unused', role: 'frontier' }]
+    const gate = check(record, scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /used model model-a, which the run does not declare/)
+    assert.match(gate.message, /declares model model-unused but no result used it/)
+  })
+
+  test('refuses a result whose model role disagrees with the declaration', () => {
+    const scenarios = [scenario('tiny-code-change')]
+    const record = recordFor(scenarios)
+    record.models = [{ id: MODEL.id, role: 'frontier' }]
+    const gate = check(record, scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /records role small but declares frontier/)
+  })
+
+  test('refuses a result with no model', () => {
+    const scenarios = [scenario('tiny-code-change')]
+    const record = recordFor(scenarios)
+    record.results[0] = { ...record.results[0]!, model: null }
+    const gate = check(record, scenarios)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /has no model/)
   })
 
   test('refuses a record that did not execute the requested matrix', () => {
@@ -476,5 +505,63 @@ describe('benchmark gate CLI', () => {
     assert.equal(result.status, 1)
     assert.match(result.output, /implementation changed under the run/)
     assert.equal(existsSync(join(root, 'eval-results', 'benchmark-summary.json')), false)
+  })
+
+  test('refuses --check-run without a run id instead of exiting or starting a run', () => {
+    const root = copyHarness('anvil-benchmark-no-id-')
+    writeRealRun(root, 'opencode/deepseek-v4.1-flash-free')
+    for (const enabled of [false, true]) {
+      const env: NodeJS.ProcessEnv = { ...process.env }
+      if (enabled) env.ANVIL_EVAL = '1'
+      else delete env.ANVIL_EVAL
+      const result = spawnSync(process.execPath, ['scripts/eval.ts', '--check-run'], {
+        cwd: root,
+        env,
+        encoding: 'utf8',
+        timeout: 60_000,
+      })
+      const output = `${result.stdout}\n${result.stderr}`
+      assert.equal(result.status, 1, output)
+      assert.match(output, /--check-run needs the run id/)
+      assert.doesNotMatch(output, /opt-in|Preflight|anvil-eval/)
+    }
+    assert.equal(existsSync(join(root, 'eval-results', 'benchmark-summary.json')), false)
+  })
+})
+
+describe('benchmark gate hint', () => {
+  const realResults = [{ model: 'model-a' }] as unknown as Parameters<typeof evalGateHint>[0]
+  const fakeResults = [{ model: 'fake-agent' }] as unknown as Parameters<typeof evalGateHint>[0]
+
+  test('reproduces the flags the run used', () => {
+    assert.equal(
+      benchmarkGateCommand('run-1', ['--models', 'all', '--repetitions', '2', '--order', 'fixed'], 2, 'fixed'),
+      'npm run eval -- --check-run run-1 --models all --repetitions 2 --order fixed',
+    )
+    const hint = evalGateHint(realResults, 'run-1', ['--models', 'frontier'], 3, 'fixed', false)
+    assert.match(hint, /--models frontier --repetitions 3 --order fixed/)
+  })
+
+  test('uses the defaults when the invocation named none', () => {
+    assert.equal(
+      benchmarkGateCommand('run-1', [], 1, 'alternate'),
+      'npm run eval -- --check-run run-1 --models small --repetitions 1 --order alternate',
+    )
+  })
+
+  test('normalizes spaced role lists so the printed command stays copyable', () => {
+    assert.equal(
+      benchmarkGateCommand('run-1', ['--models', 'frontier, small'], 2, 'fixed'),
+      'npm run eval -- --check-run run-1 --models small,frontier --repetitions 2 --order fixed',
+    )
+    assert.equal(
+      benchmarkGateCommand('run-1', ['--models', 'ALL'], 1, 'alternate'),
+      'npm run eval -- --check-run run-1 --models all --repetitions 1 --order alternate',
+    )
+  })
+
+  test('does not offer the complete-matrix gate for hermetic or subset runs', () => {
+    assert.match(evalGateHint(fakeResults, 'run-1', [], 1, 'alternate', false), /eval:check/)
+    assert.match(evalGateHint(realResults, 'run-1', [], 1, 'alternate', true), /subset run/)
   })
 })

@@ -2117,16 +2117,39 @@ export function benchmarkEvidenceProblems(record: Pick<EvalRunRecord, 'runId' | 
   if (record.models.length === 0) {
     problems.push(`run ${record.runId} declares no model; it cannot be real-agent evidence`)
   }
+  const declaredRoles = new Map<string, string>()
   for (const model of record.models) {
     if (model.id === FAKE_AGENT_MODEL) {
       problems.push(
         `run ${record.runId} declares ${FAKE_AGENT_MODEL}; the benchmark gate validates real-agent evidence`,
       )
     }
+    declaredRoles.set(model.id, model.role)
   }
+  const usedModels = new Set<string>()
   for (const result of record.results) {
+    if (result.model === null) {
+      problems.push(`run ${record.runId} result ${resultKey(result)} has no model; it cannot be real-agent evidence`)
+      continue
+    }
+    usedModels.add(result.model)
     if (result.model === FAKE_AGENT_MODEL) {
       problems.push(`run ${record.runId} result ${resultKey(result)} is a ${FAKE_AGENT_MODEL} result`)
+    }
+    const declaredRole = declaredRoles.get(result.model)
+    if (declaredRole === undefined) {
+      problems.push(
+        `run ${record.runId} result ${resultKey(result)} used model ${result.model}, which the run does not declare`,
+      )
+    } else if (result.modelRole !== declaredRole) {
+      problems.push(
+        `run ${record.runId} result ${resultKey(result)} records role ${result.modelRole ?? 'unknown'} but declares ${declaredRole} for model ${result.model}`,
+      )
+    }
+  }
+  for (const model of record.models) {
+    if (!usedModels.has(model.id)) {
+      problems.push(`run ${record.runId} declares model ${model.id} but no result used it`)
     }
   }
   return problems
