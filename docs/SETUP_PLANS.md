@@ -7,8 +7,10 @@ application of the plan a grant authorizes. Generating, saving or validating a p
 authorizes execution, and approving never writes to the repository.
 
 Two plan formats exist today. The original `SetupPlan` describes owner-declared install
-commands and stays inspect-only. The `SetupExecutionPlan` describes one create-only
-`local-skill/v1` adapter, can be approved, and can be applied once through its grant.
+commands and stays inspect-only. The `SetupExecutionPlan` describes one registered,
+create-only adapter, can be approved, and can be applied once through its grant. Two adapters
+are registered: `local-skill/v1` copies a skill already in the repository, and
+`pinned-skill/v1` installs one `SKILL.md` pinned to a GitHub commit after an explicit fetch.
 
 ## Supported inputs
 
@@ -125,7 +127,10 @@ Executable setup adapters are a closed registry. An adapter validates its bounde
 builds an inspect-only plan and describes declarative operations; it never writes, and the
 framework owns locking, grant consumption, journaling and verification. Only a plan whose
 adapter is registered can be validated, approved or applied ([ADR-0021](adr/0021-setup-adapters-are-a-registry.md)).
-`local-skill/v1` is the only registered adapter in this document's slice.
+The registered adapters are `local-skill/v1` and `pinned-skill/v1`.
+An adapter never opens a network connection. `pinned-skill/v1` gets remote bytes only from a
+separate, explicit `anvil setup fetch`, and plans from the frozen cache
+([ADR-0022](adr/0022-pinned-skills-are-fetched-then-offline.md)).
 
 ## Execution-plan contract: `local-skill/v1`
 
@@ -186,7 +191,72 @@ tampered or forged payload is `invalid`. Unreadable or unresolvable current inpu
 `unknown`. Dirty, missing-HEAD and incomplete repository state cannot validate as `current`.
 The result always retains `approval: "not-granted"` and `executed: false`.
 
-## Approval grants (`local-skill/v1`)
+## Fetching a pinned skill
+
+Remote bytes enter anvil through exactly one command:
+
+```bash
+anvil setup fetch --adapter pinned-skill --repo owner/name --ref <commit-sha|tag|branch> --path skills/x/SKILL.md --name x
+anvil setup fetch --adapter pinned-skill --repo owner/name --commit <40-hex> --path skills/x/SKILL.md --name x --json
+```
+
+`--ref` is resolved to a full 40-hex commit before anything is downloaded; `--commit` skips
+resolution. Passing both is allowed only when they name the same commit. `--adapter` is
+required, and the only supported value is `pinned-skill`; the host is explicit (`--host`,
+default `github.com`), never taken from the repository's remotes, and any other host is
+`UNSUPPORTED_HOST` in v1.
+
+Fetching is never a side effect of `plan`, `validate`, `approve`, `apply`, `brief`, `ready`,
+`doctor` or `discover`. It resolves `gh` to an absolute path and refuses a GitHub CLI whose
+real path is inside the repository the fetch is for, because a committed `gh` shim could be
+the repository's own script. It then reads one regular file at one commit, bounded to 128 KiB
+after decoding, and freezes the bytes in the protected store.
+
+The cache separates content from origin:
+
+| Record | Location | Binds |
+| --- | --- | --- |
+| Blob | `fetched/blobs/<sha256>` | The exact bytes, named by their hash |
+| Origin | `fetched/origins/<id>.json` | Host, repository, commit, path, blob hash, byte count, fetch time and the ref that was requested |
+
+Both records are written no-replace. A commit cannot change its content, so a second fetch of
+the same origin that yields different bytes is a **conflict**: the command refuses and names
+the existing record instead of overwriting it. Re-fetching identical bytes reports `cached`
+and leaves the recorded fetch time untouched, so an approved plan keeps its identity. A
+malformed record, a size mismatch or bytes that do not hash to their address are `invalid`;
+a missing origin or blob is `unknown`. Neither can become a plan.
+
+Planning and validation read only the cache and the destination. An offline machine can plan
+a pinned skill it has already fetched; if it has not, the remedy is one explicit fetch. What a
+fetch establishes is which bytes GitHub serves for that repository, commit and path. It does
+not establish authorship, review, licensing, safety or intent.
+
+## Execution-plan contract: `pinned-skill/v1`
+
+```bash
+anvil setup plan --adapter pinned-skill --repo owner/name --commit <40-hex> --path skills/x/SKILL.md --name x
+anvil setup plan --adapter pinned-skill --repo owner/name --commit <40-hex> --path skills/x/SKILL.md --name x --json
+```
+
+Planning takes only a commit, never a ref: `--ref` is a usage error that points at
+`setup fetch`. `--repo` must be `owner/name`, `--path` must be a safe repository-relative path
+(`isSafeSetupExecutionPath`), and `--name` follows the same rules as `local-skill`, including
+the reserved `verify-change` name that `anvil init` owns. The destination is always
+`.agents/skills/<name>/SKILL.md` and must be absent.
+
+The plan reuses the `local-skill/v1` envelope with two differences: `adapter` is
+`"pinned-skill/v1"` with its own fingerprint, and an `origin` block names the host,
+repository, commit, path and blob URL. `source` carries the frozen bytes' hash, length and
+decoded content, so the reviewer sees exactly what would be installed. The operations,
+effects and verification claims are the same shape: filesystem-only writes with no
+replacement, and a verifier that can prove only that the approved bytes are present with
+valid skill metadata.
+
+Fetched bytes that are not a valid skill, a destination that already exists, or a changed
+cache record make the plan `stale` or `invalid`; an unreadable cache or repository is
+`unknown`. Planning never turns a cache problem into an assumed absence.
+
+## Approval grants
 
 Approval is separate authority, not a property of a plan. A grant authorizes **one
 application attempt of one exact plan**, and it lives outside the repository because a
@@ -199,7 +269,7 @@ anvil setup revoke --grant <id>
 ```
 
 `anvil setup approve` rebuilds the plan from the saved adapter inputs, requires the result to
-be `current`, and refuses anything but a `local-skill` execution plan. It then **shows the
+be `current`, and refuses a plan whose adapter is not registered. It then **shows the
 plan** (on stderr in `--json` mode, so stdout stays one document) and reads the **full plan
 digest typed on an interactive terminal**; a digest passed as a flag is not consent, and piped
 or otherwise non-interactive input is refused. The plan is revalidated after the confirmation,
@@ -208,23 +278,30 @@ read back, so a repository that moved during publication cannot be reported as a
 non-interactive confirmation is a usage error (**2**), as is an empty one; a digest that does
 not match the current plan, or a plan that moved, is a refusal (**5**).
 
-The grant records the plan digest, adapter fingerprint, physical repository root and clean
-HEAD, source path/hash/size, destination, an operations digest, the issue and expiry times,
-and `maxAttempts: 1`. It contains no timestamp of its own beyond those, no environment value
-and no remote URL.
+Two record shapes exist. `local-skill/v1` keeps the shipped **v1** grant, byte-identical, so
+saved plans and in-flight grants stay valid. `pinned-skill/v1` writes a **v2** grant, which
+duplicates the adapter's canonical `bindings` instead of a local `source` path:
 
-| Field | Meaning |
-| --- | --- |
-| `schemaVersion`, `kind` | `1`, `"setup-approval-grant"` |
-| `id` | The grant id, a UUID |
-| `permission` | Always `"apply-local-skill-once"` |
-| `planDigest`, `adapter`, `adapterFingerprint` | The exact plan and adapter behaviour approved |
-| `repository` | Physical root and the clean HEAD the grant was approved against |
-| `source` | Repository-relative path, exact SHA-256 and byte length |
-| `skill` | The approved name and destination |
-| `operationsDigest` | SHA-256 of the ordered operations, including their preconditions |
-| `issuedAt`, `expiresAt` | A short lifetime (ten minutes by default) |
-| `maxAttempts` | Always `1` |
+| Field | v1 (`local-skill/v1`) | v2 (`pinned-skill/v1`) |
+| --- | --- | --- |
+| `schemaVersion`, `kind` | `1`, `"setup-approval-grant"` | `2`, `"setup-approval-grant"` |
+| `permission` | `"apply-local-skill-once"` | `"apply-setup-plan-once"` |
+| `planDigest`, `adapter`, `adapterFingerprint` | The exact plan and adapter behaviour approved | Same |
+| `repository` | Physical root and the clean HEAD the grant was approved against | Same |
+| `source` | Repository-relative path, exact SHA-256 and byte length | Not present |
+| `bindings` | Not present | The origin block, the frozen content hash and size, and the skill name and destination |
+| `bindingsDigest` | Not present | SHA-256 of the canonical `bindings` object |
+| `skill` | The approved name and destination | The approved name and destination, duplicated inside `bindings` |
+| `operationsDigest` | SHA-256 of the ordered operations, including their preconditions | Same |
+| `issuedAt`, `expiresAt` | A short lifetime (ten minutes by default) | Same |
+| `maxAttempts` | Always `1` | Always `1` |
+
+A v2 grant is graded by recomputing `bindingsDigest` and comparing every binding with the
+rebuilt plan. The origin, content hash, size and destination must all agree; a duplicated
+binding that disagrees, an unknown field or a malformed value is `stale` or `invalid`, never
+`active`. Neither shape contains an environment value. A v2 grant names a blob URL, which is
+an origin claim rather than a network requirement: inspecting, approving and applying it stay
+offline.
 
 Grants are stored under a dedicated user-owned directory
 (`~/.anvil/approvals/setup/v1/<id>/grant.json`) and **not** under the configuration home:
@@ -279,7 +356,7 @@ with the record on an `ok: false` envelope.
 no-replace state record, so they cannot both win and the terminal outcome is deterministic.
 There is no automatic retry.
 
-## Application (`local-skill/v1`)
+## Application
 
 `anvil setup apply --plan <file> --grant <id>` applies the one current plan a grant
 authorizes:
@@ -312,7 +389,7 @@ because a concurrent writer already created the destination is settled the same 
 journal and reservation are re-read, and an existing attempt is reported instead of a
 misleading "destination already exists" refusal.
 
-Application is create-only:
+Application is create-only for every registered adapter:
 
 - `.agents` and `.agents/skills` must be real directories or absent; they are created only
   when absent.
@@ -325,8 +402,12 @@ Application is create-only:
 
 Every reserved attempt writes `application.json` beside the grant, in the protected store,
 before the first mutation. It records the grant id, plan digest, adapter fingerprint,
-repository root and HEAD, source hash and size, the ordered operations with their observed
-status, the verification result and one of these states:
+repository root and HEAD, the ordered operations with their observed status, the verification
+result and one of these states. A **v1** journal (`local-skill/v1`) records the approved
+`skill` name and destination. A **v2** journal records a `subject`: the artifact kind, its
+validated name and the exact destination, so an adapter can name what the attempt targets
+without a local source shape. Every v2 operation is persisted as `attempting` before its
+syscall, which is why an exception after a mutation started is `partial` rather than `failed`.
 
 | Journal state | Meaning |
 | --- | --- |

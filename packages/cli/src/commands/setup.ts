@@ -6,8 +6,11 @@ import {
   applySetupPlan,
   buildSetupApprovalGrant,
   buildSetupPlan,
+  fetchPinnedSkill,
   inspectSetupApproval,
   isSetupExecutionPlan,
+  LOCAL_SKILL_ADAPTER,
+  type PinnedSkillFetchResult,
   resolveSetupAdapter,
   resolveSetupPlan,
   revokeSetupApproval,
@@ -201,9 +204,10 @@ export const setupCommand: Command = {
   name: 'setup',
   summary: 'Generate, validate, approve, apply or revoke a setup plan; application is create-only and single-use.',
   usage:
-    'anvil setup <plan|validate|approve|approval|revoke|apply> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter <adapter> --source <file> --name <name>]',
+    'anvil setup <plan|fetch|validate|approve|approval|revoke|apply> [--json] [--profile <dir>] [--max-files <n>] [--plan <file>] [--grant <id>] [--adapter <adapter>] [--source <file>] [--name <name>] [--repo <owner/name>] [--ref <ref>|--commit <sha>] [--path <file>] [--host <host>]',
   details: [
     'plan       Describe owner-declared install commands, or plan one registered adapter installation.',
+    'fetch      Resolve a pinned-skill ref and freeze one SKILL.md in the protected cache; the only network step.',
     'validate   Compare saved plan JSON with fresh inputs; requires --plan <file>.',
     'approve    Grant one application of a current execution plan; requires --plan <file> and a typed confirmation.',
     'approval   Inspect a stored grant; requires --grant <id>.',
@@ -212,6 +216,9 @@ export const setupCommand: Command = {
     '',
     'plan --adapter local-skill --source <repo-relative-file> --name <name>',
     '           Build an execution plan for one repository-local SKILL.md.',
+    'fetch --adapter pinned-skill --repo <owner/name> --ref <ref> --path <repo-file> --name <name>',
+    'plan  --adapter pinned-skill --repo <owner/name> --commit <40-hex> --path <repo-file> --name <name>',
+    '           Fetch once, then plan offline from the frozen bytes.',
     '',
     'No install commands, version probes, service connections or network fetches are performed.',
     "Only Git metadata commands and the create-only writes of an approved adapter's plan run.",
@@ -232,6 +239,11 @@ export const setupCommand: Command = {
     adapter: { type: 'string' },
     source: { type: 'string' },
     name: { type: 'string' },
+    repo: { type: 'string' },
+    ref: { type: 'string' },
+    commit: { type: 'string' },
+    path: { type: 'string' },
+    host: { type: 'string' },
   },
   async run(ctx, rawArgs) {
     const args = parseCliArgs(rawArgs, setupCommand.flags)
@@ -241,22 +253,54 @@ export const setupCommand: Command = {
     const adapter = typeof args.values.adapter === 'string' ? args.values.adapter : undefined
     const source = typeof args.values.source === 'string' ? args.values.source : undefined
     const name = typeof args.values.name === 'string' ? args.values.name : undefined
+    const repo = typeof args.values.repo === 'string' ? args.values.repo : undefined
+    const ref = typeof args.values.ref === 'string' ? args.values.ref : undefined
+    const commit = typeof args.values.commit === 'string' ? args.values.commit : undefined
+    const skillPath = typeof args.values.path === 'string' ? args.values.path : undefined
+    const host = typeof args.values.host === 'string' ? args.values.host : undefined
+    const pinnedFlags = [repo, commit, skillPath, host].some((value) => value !== undefined)
     const usage = (message: string, hint: string) => new AnvilError(ErrorCode.Usage, message, { hint })
 
-    const subcommands = ['plan', 'validate', 'approve', 'approval', 'revoke', 'apply']
+    const subcommands = ['plan', 'fetch', 'validate', 'approve', 'approval', 'revoke', 'apply']
     if (args.positionals.length !== 1 || !subcommands.includes(sub ?? '')) {
       throw usage(
-        'Use setup plan, validate, approve, approval, revoke or apply',
-        'Owner-declared install commands remain proposal-only. Only a local-skill plan can be approved and applied.',
+        'Use setup plan, fetch, validate, approve, approval, revoke or apply',
+        `Registered adapters: ${setupAdapterList()}. Owner-declared install commands remain proposal-only.`,
       )
     }
     if (sub === 'approval' || sub === 'revoke') {
       if (adapter !== undefined || source !== undefined || name !== undefined) {
         throw usage(`setup ${sub} reads the grant id`, `Do not pass --adapter, --source or --name with ${sub}.`)
       }
+      if (pinnedFlags || ref !== undefined) {
+        throw usage(`setup ${sub} does not take pinned-skill flags`, `Use only --grant <id> with ${sub}.`)
+      }
       if (planPath !== undefined) throw usage(`setup ${sub} does not take --plan <file>`, 'Use --grant <id>.')
       if (typeof grantId !== 'string' || grantId === '') {
         throw usage(`setup ${sub} requires --grant <id>`, 'Use the grant id printed by setup approve.')
+      }
+    } else if (sub === 'fetch') {
+      if (planPath !== undefined)
+        throw usage('setup fetch does not take --plan <file>', 'Use setup plan after fetching.')
+      if (grantId !== undefined)
+        throw usage('setup fetch does not take --grant <id>', 'A fetch creates no plan or grant.')
+      if (source !== undefined)
+        throw usage('setup fetch does not take --source', 'Use --repo, --path and --ref or --commit.')
+      if (adapter !== 'pinned-skill') {
+        throw usage(
+          'setup fetch requires --adapter pinned-skill',
+          'Fetching is defined only for the pinned-skill adapter.',
+        )
+      }
+      if (repo === undefined) throw usage('setup fetch requires --repo <owner/name>', 'Pass the GitHub repository.')
+      if (skillPath === undefined)
+        throw usage('setup fetch requires --path <repo-file>', 'Pass the repository-relative file path.')
+      if (name === undefined) throw usage('setup fetch requires --name <skill-name>', 'Pass the installed skill name.')
+      if (ref === undefined && commit === undefined) {
+        throw usage(
+          'setup fetch requires --ref <ref> or --commit <40-hex>',
+          'Resolve a ref, or pass the reviewed commit.',
+        )
       }
     } else if (sub === 'plan') {
       if (planPath !== undefined) {
@@ -264,19 +308,28 @@ export const setupCommand: Command = {
       }
       if (grantId !== undefined)
         throw usage('setup plan does not take --grant <id>', 'Use setup approval --grant <id>.')
-      if (adapter === undefined && (source !== undefined || name !== undefined)) {
-        throw usage('--source and --name require --adapter local-skill', 'Choose an explicit adapter.')
+      if (ref !== undefined) {
+        throw usage('setup plan does not take --ref', 'Run setup fetch --ref first, then plan with --commit.')
+      }
+      if (adapter === undefined && (source !== undefined || name !== undefined || pinnedFlags)) {
+        throw usage('adapter flags require --adapter', 'Choose local-skill or pinned-skill explicitly.')
+      }
+      if (adapter === 'local-skill' && pinnedFlags) {
+        throw usage(
+          '--repo, --commit, --path and --host require --adapter pinned-skill',
+          'Use --source with local-skill.',
+        )
       }
       if (adapter !== undefined) {
         // Adapter-specific flags are validated by the adapter itself, so a new adapter cannot
         // be wired into planning without also declaring its bounded inputs.
-        resolveSetupAdapter(adapter).parseRequest({ source, name })
+        resolveSetupAdapter(adapter).parseRequest({ source, name, repo, commit, path: skillPath, host })
       }
     } else if (sub === 'apply') {
-      if (adapter !== undefined || source !== undefined || name !== undefined) {
+      if (adapter !== undefined || source !== undefined || name !== undefined || pinnedFlags || ref !== undefined) {
         throw usage(
           'setup apply reads adapter inputs from the saved plan',
-          'Do not pass --adapter, --source or --name with apply.',
+          'Do not pass adapter, source, pinned-skill or ref flags with apply.',
         )
       }
       if (typeof planPath !== 'string' || planPath === '') {
@@ -286,10 +339,10 @@ export const setupCommand: Command = {
         throw usage('setup apply requires --grant <id>', 'Apply only the grant you approved, exactly once.')
       }
     } else {
-      if (adapter !== undefined || source !== undefined || name !== undefined) {
+      if (adapter !== undefined || source !== undefined || name !== undefined || pinnedFlags || ref !== undefined) {
         throw usage(
           `setup ${sub} reads adapter inputs from the saved plan`,
-          `Do not pass --adapter, --source or --name with ${sub}.`,
+          `Do not pass adapter, source, pinned-skill or ref flags with ${sub}.`,
         )
       }
       if (typeof planPath !== 'string' || planPath === '') {
@@ -317,6 +370,27 @@ export const setupCommand: Command = {
       return error.exitCode
     }
 
+    // fetch is the only network step; it needs a repository root to keep the store outside it.
+    if (sub === 'fetch') {
+      if (ctx.repoRoot === null) {
+        throw usage(
+          'setup fetch must run inside a Git repository',
+          'The protected cache is checked to stay outside the checkout.',
+        )
+      }
+      const result = await fetchPinnedSkill({
+        repositoryRoot: normalizeGitPath(ctx.repoRoot),
+        ...(host === undefined ? {} : { host }),
+        repo: repo as string,
+        ...(ref === undefined ? {} : { ref }),
+        ...(commit === undefined ? {} : { commit }),
+        path: skillPath as string,
+        name: name as string,
+      })
+      ctx.out(result, () => renderFetch(result))
+      return
+    }
+
     const target = typeof args.values.profile === 'string' ? args.values.profile : undefined
     const profile = await loadProfile(ctx, target, parseMaxFiles(args.values['max-files']))
     const root = normalizeGitPath(profile.root)
@@ -335,7 +409,10 @@ export const setupCommand: Command = {
         ctx.out(plan, () => renderPlan(plan))
       } else {
         const definition = resolveSetupAdapter(adapter)
-        const plan = definition.build(repository, definition.parseRequest({ source, name }))
+        const plan = definition.build(
+          repository,
+          definition.parseRequest({ source, name, repo, commit, path: skillPath, host }),
+        )
         ctx.out(plan, () => renderExecutionPlan(plan))
       }
       return
@@ -557,6 +634,10 @@ function readStdinLine(): Promise<string | null> {
   })
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function renderApproval(record: SetupApprovalRecord): string {
   const lines = [`Approval: ${record.status}`, `reason: ${record.reason}`]
   const grant = record.grant
@@ -566,8 +647,25 @@ function renderApproval(record: SetupApprovalRecord): string {
       `permission: ${grant.permission}`,
       `plan digest: ${grant.planDigest}`,
       `adapter: ${grant.adapter} (fingerprint ${grant.adapterFingerprint})`,
-      `source: ${grant.source.path} (${grant.source.bytes} bytes, sha256 ${grant.source.sha256})`,
-      `destination: ${grant.skill.destination}`,
+    )
+    if (grant.schemaVersion === 1) {
+      lines.push(
+        `source: ${grant.source.path} (${grant.source.bytes} bytes, sha256 ${grant.source.sha256})`,
+        `destination: ${grant.skill.destination}`,
+      )
+    } else {
+      const origin = isRecord(grant.bindings.origin) ? grant.bindings.origin : null
+      const content = isRecord(grant.bindings.content) ? grant.bindings.content : null
+      const skill = isRecord(grant.bindings.skill) ? grant.bindings.skill : null
+      lines.push(`bindings digest: ${grant.bindingsDigest}`)
+      if (origin !== null && typeof origin.url === 'string') lines.push(`origin: ${origin.url}`)
+      if (origin !== null && typeof origin.commit === 'string') lines.push(`commit: ${origin.commit}`)
+      if (content !== null && typeof content.bytes === 'number' && typeof content.sha256 === 'string') {
+        lines.push(`content: ${content.bytes} bytes, sha256 ${content.sha256}`)
+      }
+      if (skill !== null && typeof skill.destination === 'string') lines.push(`destination: ${skill.destination}`)
+    }
+    lines.push(
       `repository: ${grant.repository.root} @ ${grant.repository.head}`,
       `issued: ${grant.issuedAt}`,
       `expires: ${grant.expiresAt}`,
@@ -576,6 +674,20 @@ function renderApproval(record: SetupApprovalRecord): string {
   }
   lines.push('Not applied by this command. Use setup apply with the grant to install the approved plan.')
   return lines.join('\n')
+}
+
+function renderFetch(record: PinnedSkillFetchResult): string {
+  return [
+    `Fetch: ${record.status}${record.wrote ? '' : ' (already cached)'}`,
+    `origin: ${record.origin.url}`,
+    `commit: ${record.origin.commit}`,
+    `path: ${record.origin.path}`,
+    `bytes: ${record.record.bytes} (sha256 ${record.record.blobSha256})`,
+    `requested ref: ${record.record.requestedRef}`,
+    `fetched at: ${record.record.fetchedAt}`,
+    'The bytes are frozen in the protected cache. Planning, validation, approval and application remain offline.',
+    'A commit pins bytes, not authorship, review, licensing or safety.',
+  ].join('\n')
 }
 
 function renderApplication(record: SetupApplicationRecord): string {
@@ -643,7 +755,10 @@ function renderExecutionPlan(plan: SetupExecutionPlan): string {
     `adapter: ${plan.adapter} (fingerprint ${plan.adapterFingerprint})`,
     `root: ${plan.repository.root}`,
     `HEAD: ${plan.repository.head ?? 'unknown'} (${plan.repository.worktree})`,
-    `source: ${plan.source.path} (${plan.source.bytes} bytes, sha256 ${plan.source.sha256})`,
+    plan.adapter === LOCAL_SKILL_ADAPTER
+      ? `source: ${plan.source.path} (${plan.source.bytes} bytes, sha256 ${plan.source.sha256})`
+      : `origin: ${plan.origin.url} (commit ${plan.origin.commit}, path ${plan.origin.path})`,
+    `content: ${plan.source.bytes} bytes, sha256 ${plan.source.sha256}`,
     `destination: ${plan.skill.destination}`,
     'Not approved. Nothing executed. Approval and application are separate commands.',
     '',

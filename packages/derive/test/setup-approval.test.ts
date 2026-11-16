@@ -234,6 +234,7 @@ describe('setup approval grants', () => {
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'stale')
 
     // A duplicated binding that disagrees with the plan is stale even when the digest is kept.
+    if (valid.schemaVersion !== 1) throw new Error('expected a local-skill grant')
     writeFileSync(grantFile, JSON.stringify({ ...valid, source: { ...valid.source, bytes: valid.source.bytes + 1 } }))
     assert.equal(inspectSetupApproval(ID, repository(repo), { env, now: at }).status, 'stale')
 
@@ -749,6 +750,7 @@ describe('setup approval grants', () => {
     const { repo } = fixture()
     const plan = planFor(repo)
     const grant = buildSetupApprovalGrant(plan, { now: T0, ttlMs: TTL, id: ID })
+    if (grant.schemaVersion !== 1) throw new Error('expected a local-skill grant')
     assert.equal(gradeSetupApprovalGrant(grant, plan).ok, true)
     assert.equal(gradeSetupApprovalGrant({ ...grant, adapterFingerprint: 'a'.repeat(64) }, plan).status, 'stale')
     assert.equal(gradeSetupApprovalGrant({ ...grant, planDigest: 'b'.repeat(64) }, plan).status, 'stale')

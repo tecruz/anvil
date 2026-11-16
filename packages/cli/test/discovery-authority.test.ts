@@ -525,6 +525,35 @@ describe('discovery cannot install, execute or grant approval', () => {
     assertOnlyCacheChanged(fx, before, 'setup apply')
   })
 
+  test('a pinned-skill plan never fetches: without a cache it refuses and writes nothing', () => {
+    const fx = fixture()
+    const before = snapshot(fx)
+    const planned = runAnvil(
+      fx.repo,
+      [
+        'setup',
+        'plan',
+        '--adapter',
+        'pinned-skill',
+        '--repo',
+        'nodejs/agent-skills',
+        '--commit',
+        'a'.repeat(40),
+        '--path',
+        'skills/x/SKILL.md',
+        '--name',
+        'pinned-x',
+        '--json',
+      ],
+      fx.env,
+    )
+    assert.notEqual(planned.code, 0, 'planning from an empty cache must fail')
+    assert.match(`${planned.stdout}\n${planned.stderr}`, /setup fetch/)
+    // The cache and the approval store belong to `setup fetch`; planning must not create
+    // either, so a hidden network step cannot hide behind this command.
+    assertOnlyCacheChanged(fx, before, 'setup plan --adapter pinned-skill')
+  })
+
   test('with no owner declarations, setup plan proposes nothing even when discovery has an install', () => {
     const fx = fixture()
     seedCache(fx)

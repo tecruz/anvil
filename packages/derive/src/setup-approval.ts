@@ -33,11 +33,12 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { homedir, userInfo } from 'node:os'
+import { userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { AnvilError, ErrorCode } from '@anvil/core'
-import { digestJson } from './canonical.ts'
+import { canonicalJson, digestJson } from './canonical.ts'
 import type { SetupRepositoryState } from './setup.ts'
+import { findSetupAdapterById, findSetupAdapterForPlan } from './setup-adapters.ts'
 import {
   buildSetupExecutionPlan,
   isSafeSetupExecutionPath,
@@ -47,11 +48,14 @@ import {
   SetupExecutionError,
   type SetupExecutionPlan,
 } from './setup-execution.ts'
+import { approvalStoreDir } from './setup-store.ts'
 import { SKILL_NAME_PATTERN } from './validate.ts'
 
 export const SETUP_APPROVAL_KIND = 'setup-approval'
 export const SETUP_APPROVAL_GRANT_KIND = 'setup-approval-grant'
 export const SETUP_APPROVAL_PERMISSION = 'apply-local-skill-once'
+/** Grant v2 applies to any registered adapter, so its permission names no one adapter. */
+export const SETUP_APPROVAL_V2_PERMISSION = 'apply-setup-plan-once'
 
 /** Grants are short-lived: ten minutes is enough to review and re-run the command. */
 export const SETUP_APPROVAL_TTL_MS = 10 * 60 * 1000
@@ -85,15 +89,31 @@ const GRANT_KEYS = [
   'skill',
   'source',
 ] as const
+const GRANT_V2_KEYS = [
+  'adapter',
+  'adapterFingerprint',
+  'bindings',
+  'bindingsDigest',
+  'expiresAt',
+  'id',
+  'issuedAt',
+  'kind',
+  'maxAttempts',
+  'operationsDigest',
+  'permission',
+  'planDigest',
+  'repository',
+  'schemaVersion',
+] as const
 const REPOSITORY_KEYS = ['head', 'root'] as const
 const SOURCE_KEYS = ['bytes', 'path', 'sha256'] as const
 const SKILL_KEYS = ['destination', 'name'] as const
 
 /**
- * One approval: the plan, repository, source, destination and adapter behaviour it authorizes,
- * with a single application attempt and a short expiry.
+ * Grant v1: the shipped `local-skill/v1` shape. It stays byte-identical so saved plans and
+ * in-flight grants survive later adapters.
  */
-export interface SetupApprovalGrant {
+export interface SetupLocalSkillApprovalGrant {
   schemaVersion: 1
   kind: typeof SETUP_APPROVAL_GRANT_KIND
   id: string
@@ -110,6 +130,33 @@ export interface SetupApprovalGrant {
   expiresAt: string
   maxAttempts: 1
 }
+
+/**
+ * Grant v2: any registered adapter.
+ *
+ * `bindings` is the adapter's canonical binding object (for pinned-skill: origin, frozen
+ * content identity and destination). `bindingsDigest` is recomputed on read, so an edited
+ * binding is refused rather than graded.
+ */
+export interface SetupApprovalGrantV2 {
+  schemaVersion: 2
+  kind: typeof SETUP_APPROVAL_GRANT_KIND
+  id: string
+  permission: typeof SETUP_APPROVAL_V2_PERMISSION
+  planDigest: string
+  adapter: string
+  adapterFingerprint: string
+  repository: { root: string; head: string }
+  bindings: Record<string, unknown>
+  bindingsDigest: string
+  /** Binds the ordered operations, including their preconditions. */
+  operationsDigest: string
+  issuedAt: string
+  expiresAt: string
+  maxAttempts: 1
+}
+
+export type SetupApprovalGrant = SetupLocalSkillApprovalGrant | SetupApprovalGrantV2
 
 /**
  * `consumed` means an application attempt has been reserved and cannot be reused; it is
@@ -153,17 +200,7 @@ export interface SetupApprovalVerdict {
   reason: string
 }
 
-/**
- * The approval store. A dedicated user-owned location, deliberately *not* the config home:
- * `ANVIL_CONFIG_HOME` may point inside a repository, and a repository must not be able to
- * choose where its own authority lives. `ANVIL_APPROVAL_HOME` is an explicit, process-level
- * override for tests and unusual setups, never a value a config file can set.
- */
-export function approvalStoreDir(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.ANVIL_APPROVAL_HOME
-  if (override !== undefined && override !== '') return resolve(override)
-  return join(homedir(), '.anvil', 'approvals', 'setup', 'v1')
-}
+export { approvalStoreDir } from './setup-store.ts'
 
 /**
  * Create the approval store if needed and make it private, returning its path. Exposed so a
@@ -202,21 +239,42 @@ export function buildSetupApprovalGrant(
   if (!GRANT_ID_PATTERN.test(id)) {
     throw new AnvilError(ErrorCode.Internal, 'The approval grant id is malformed')
   }
-  return {
-    schemaVersion: 1,
-    kind: SETUP_APPROVAL_GRANT_KIND,
+  const common = {
+    kind: SETUP_APPROVAL_GRANT_KIND as typeof SETUP_APPROVAL_GRANT_KIND,
     id,
-    permission: SETUP_APPROVAL_PERMISSION,
     planDigest: plan.digest,
-    adapter: plan.adapter,
     adapterFingerprint: plan.adapterFingerprint,
     repository: { root: plan.repository.root, head: plan.repository.head },
-    source: { path: plan.source.path, sha256: plan.source.sha256, bytes: plan.source.bytes },
-    skill: { name: plan.skill.name, destination: plan.skill.destination },
     operationsDigest: setupApprovalOperationsDigest(plan),
     issuedAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttlMs).toISOString(),
-    maxAttempts: 1,
+    maxAttempts: 1 as const,
+  }
+  if (plan.adapter === LOCAL_SKILL_ADAPTER) {
+    return {
+      ...common,
+      schemaVersion: 1,
+      permission: SETUP_APPROVAL_PERMISSION,
+      adapter: LOCAL_SKILL_ADAPTER,
+      source: { path: plan.source.path, sha256: plan.source.sha256, bytes: plan.source.bytes },
+      skill: { name: plan.skill.name, destination: plan.skill.destination },
+    }
+  }
+  const adapter = findSetupAdapterForPlan(plan)
+  if (adapter === null) {
+    throw new AnvilError(ErrorCode.Internal, 'The plan names an unregistered setup adapter.')
+  }
+  const bindings = adapter.bindings(plan)
+  if (adapter.parseBindings(bindings) === null) {
+    throw new AnvilError(ErrorCode.Internal, 'The adapter produced bindings it cannot parse back.')
+  }
+  return {
+    ...common,
+    schemaVersion: 2,
+    permission: SETUP_APPROVAL_V2_PERMISSION,
+    adapter: adapter.id,
+    bindings,
+    bindingsDigest: digestJson(bindings),
   }
 }
 
@@ -224,27 +282,44 @@ export function buildSetupApprovalGrant(
  * Compare a grant with a freshly rebuilt plan. Every field the grant duplicates is checked,
  * so a record whose digest was left in place but whose other fields were edited is caught;
  * the plan digest check is the backstop.
+ *
+ * Grant v1 is local-skill only. Grant v2 compares the adapter's canonical binding object, so
+ * an edited origin, content hash or destination is `stale`, and a malformed binding is
+ * refused at read time rather than graded.
  */
 export function gradeSetupApprovalGrant(grant: SetupApprovalGrant, plan: SetupExecutionPlan): SetupApprovalVerdict {
   const stale = (reason: string): SetupApprovalVerdict => ({ ok: false, status: 'stale', reason })
-  if (grant.adapter !== LOCAL_SKILL_ADAPTER) return stale('The grant names a different adapter.')
+  if (grant.adapter !== plan.adapter) return stale('The grant names a different adapter.')
   if (grant.adapterFingerprint !== plan.adapterFingerprint) {
     return stale('The adapter behaviour changed since this grant was issued.')
   }
   if (grant.repository.root !== plan.repository.root) return stale('The grant was approved for a different repository.')
   if (grant.repository.head !== plan.repository.head)
     return stale('The repository HEAD changed since this grant was issued.')
-  if (grant.source.path !== plan.source.path || grant.source.sha256 !== plan.source.sha256) {
-    return stale('The source file changed since this grant was issued.')
-  }
-  if (grant.source.bytes !== plan.source.bytes) return stale('The source size changed since this grant was issued.')
-  if (grant.skill.name !== plan.skill.name || grant.skill.destination !== plan.skill.destination) {
-    return stale('The destination changed since this grant was issued.')
-  }
   if (grant.operationsDigest !== setupApprovalOperationsDigest(plan)) {
     return stale('The planned operations changed since this grant was issued.')
   }
   if (grant.planDigest !== plan.digest) return stale('The plan changed since this grant was issued.')
+
+  if (grant.schemaVersion === 1) {
+    if (plan.adapter !== LOCAL_SKILL_ADAPTER) return stale('The grant names a different adapter.')
+    if (grant.source.path !== plan.source.path || grant.source.sha256 !== plan.source.sha256) {
+      return stale('The source file changed since this grant was issued.')
+    }
+    if (grant.source.bytes !== plan.source.bytes) return stale('The source size changed since this grant was issued.')
+    if (grant.skill.name !== plan.skill.name || grant.skill.destination !== plan.skill.destination) {
+      return stale('The destination changed since this grant was issued.')
+    }
+    return { ok: true, status: 'active', reason: 'The grant matches the current plan.' }
+  }
+
+  const adapter = findSetupAdapterForPlan(plan)
+  if (adapter === null) return stale('The plan names an unregistered setup adapter.')
+  const bindings = adapter.parseBindings(grant.bindings)
+  if (bindings === null) return stale('The grant bindings are malformed.')
+  if (canonicalJson(bindings) !== canonicalJson(adapter.bindings(plan))) {
+    return stale('The approved binding changed since this grant was issued.')
+  }
   return { ok: true, status: 'active', reason: 'The grant matches the current plan.' }
 }
 
@@ -277,7 +352,11 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
  * from, so a record swapped between directories is refused. A record issued in the future is
  * malformed, not a long-lived grant.
  */
-function parseSetupApprovalGrant(value: unknown, expectedId: string, nowMs: number): SetupApprovalGrant | null {
+function parseLocalSkillApprovalGrant(
+  value: unknown,
+  expectedId: string,
+  nowMs: number,
+): SetupLocalSkillApprovalGrant | null {
   if (!isPlainObject(value) || !hasExactKeys(value, GRANT_KEYS)) return null
   if (value.schemaVersion !== 1 || value.kind !== SETUP_APPROVAL_GRANT_KIND) return null
   if (value.id !== expectedId || typeof value.id !== 'string') return null
@@ -323,11 +402,71 @@ function parseSetupApprovalGrant(value: unknown, expectedId: string, nowMs: numb
   }
   if (skill.destination !== `.agents/skills/${skill.name}/SKILL.md`) return null
 
-  return value as unknown as SetupApprovalGrant
+  return value as unknown as SetupLocalSkillApprovalGrant
+}
+
+/** Parse a grant v2: exact keys, a registered adapter and bindings its parser accepts. */
+function parseApprovalGrantV2(
+  value: Record<string, unknown>,
+  expectedId: string,
+  nowMs: number,
+): SetupApprovalGrantV2 | null {
+  if (!hasExactKeys(value, GRANT_V2_KEYS)) return null
+  if (value.schemaVersion !== 2 || value.kind !== SETUP_APPROVAL_GRANT_KIND) return null
+  if (value.id !== expectedId || typeof value.id !== 'string') return null
+  if (value.permission !== SETUP_APPROVAL_V2_PERMISSION) return null
+  if (typeof value.adapter !== 'string' || value.adapter === '') return null
+  const adapter = findSetupAdapterById(value.adapter)
+  if (adapter === null) return null
+  if (value.maxAttempts !== 1) return null
+  if (
+    !isHex64(value.planDigest) ||
+    !isHex64(value.adapterFingerprint) ||
+    !isHex64(value.operationsDigest) ||
+    !isHex64(value.bindingsDigest)
+  ) {
+    return null
+  }
+  if (!isIsoDate(value.issuedAt) || !isIsoDate(value.expiresAt)) return null
+  if (Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) return null
+  if (Date.parse(value.issuedAt) > nowMs + ISSUED_AT_SKEW_MS) return null
+
+  const repository = value.repository
+  if (
+    !isPlainObject(repository) ||
+    !hasExactKeys(repository, REPOSITORY_KEYS) ||
+    typeof repository.root !== 'string' ||
+    repository.root === '' ||
+    typeof repository.head !== 'string' ||
+    repository.head === ''
+  ) {
+    return null
+  }
+  if (!isPlainObject(value.bindings) || value.bindings === null) return null
+  let bindingsDigest: string
+  try {
+    bindingsDigest = digestJson(value.bindings)
+  } catch {
+    return null
+  }
+  if (bindingsDigest !== value.bindingsDigest) return null
+  if (adapter.parseBindings(value.bindings) === null) return null
+  return value as unknown as SetupApprovalGrantV2
+}
+
+/**
+ * Parse an untrusted grant record in either supported shape. The id must match the directory
+ * it was read from; a v2 record naming an unregistered adapter or carrying bindings its own
+ * adapter cannot parse is malformed, not authority.
+ */
+function parseSetupApprovalGrant(value: unknown, expectedId: string, nowMs: number): SetupApprovalGrant | null {
+  if (!isPlainObject(value)) return null
+  if (value.schemaVersion === 2) return parseApprovalGrantV2(value, expectedId, nowMs)
+  return parseLocalSkillApprovalGrant(value, expectedId, nowMs)
 }
 
 /** Read a regular, singly-linked file, bounded, refusing symlinks. Null when absent or unsafe. */
-function readRegularFile(path: string, maxBytes: number): string | null {
+function readRegularBytes(path: string, maxBytes: number): Buffer | null {
   let stat: ReturnType<typeof lstatSync>
   try {
     stat = lstatSync(path)
@@ -348,12 +487,17 @@ function readRegularFile(path: string, maxBytes: number): string | null {
       length += count
     }
     if (length > maxBytes) return null
-    return buffer.subarray(0, length).toString('utf8')
+    return buffer.subarray(0, length)
   } catch {
     return null
   } finally {
     if (fd !== undefined) closeSync(fd)
   }
+}
+
+/** Read a regular, singly-linked UTF-8 file, bounded, refusing symlinks. Null when absent or unsafe. */
+function readRegularFile(path: string, maxBytes: number): string | null {
+  return readRegularBytes(path, maxBytes)?.toString('utf8') ?? null
 }
 
 /**
@@ -363,17 +507,16 @@ function readRegularFile(path: string, maxBytes: number): string | null {
  * the target exists, which is exactly the no-replace guarantee a one-shot grant needs. On a
  * filesystem without hard links, an exclusive create is the fallback.
  */
-function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' {
-  const data = `${JSON.stringify(value, null, 2)}\n`
+function writeExclusive(path: string, data: string | Buffer): 'written' | 'exists' {
   const temp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`)
-  writeFileSync(temp, data, { encoding: 'utf8', flag: 'wx', mode: PRIVATE_FILE_MODE })
+  writeFileSync(temp, data, { flag: 'wx', mode: PRIVATE_FILE_MODE })
   try {
     linkSync(temp, path)
     return 'written'
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === 'EEXIST') return 'exists'
     try {
-      writeFileSync(path, data, { encoding: 'utf8', flag: 'wx', mode: PRIVATE_FILE_MODE })
+      writeFileSync(path, data, { flag: 'wx', mode: PRIVATE_FILE_MODE })
       return 'written'
     } catch (fallback) {
       if ((fallback as NodeJS.ErrnoException).code === 'EEXIST') return 'exists'
@@ -386,6 +529,10 @@ function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' 
       // A leftover temp file is inert; the record itself is already in place.
     }
   }
+}
+
+function writeExclusiveJson(path: string, value: unknown): 'written' | 'exists' {
+  return writeExclusive(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
 /** Why a path is not a plain, inspectable directory or file, or null when it is. */
@@ -863,6 +1010,96 @@ function ensureStoreRoot(env: NodeJS.ProcessEnv | undefined): string {
   }
 }
 
+/**
+ * Prepare the protected approval store for a repository and return its root.
+ *
+ * Containment is checked *before* anything is created, so a store inside the repository it
+ * would approve leaves nothing behind. The fetch cache and any future adapter store live under
+ * this root and inherit the same ownership, ACL and link checks.
+ */
+export function prepareSetupStore(repositoryRoot: string, env: NodeJS.ProcessEnv = process.env): string {
+  assertStoreOutsideRepository(approvalStoreDir(env), repositoryRoot)
+  return ensureStoreRoot(env)
+}
+
+/**
+ * Create (or accept) one private subdirectory under a prepared store root.
+ *
+ * Each component is a fixed ASCII name from anvil, never caller input. A component that is a
+ * link, not a directory, or reachable by another user is refused rather than repaired: an
+ * existing unsafe directory is not authority.
+ */
+export function ensurePrivateStoreDirectory(storeDir: string, segments: readonly string[]): string {
+  let current = storeDir
+  for (const segment of segments) {
+    if (!/^[a-z][a-z0-9-]*$/.test(segment)) {
+      throw new AnvilError(ErrorCode.Internal, `Invalid protected store directory name: ${segment}`)
+    }
+    current = join(current, segment)
+    try {
+      mkdirSync(current, { mode: PRIVATE_DIRECTORY_MODE })
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new AnvilError(ErrorCode.PreflightFailed, `Cannot create the protected store directory "${segment}"`, {
+          hint: 'Choose a writable approval store outside the repository.',
+          cause,
+        })
+      }
+    }
+    const structure = structureProblem(current, 'directory')
+    if (structure !== null) {
+      throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the protected store at ${current}: ${structure}`)
+    }
+    const problem = protectionProblem(current, 'directory')
+    if (problem !== null) {
+      throw new AnvilError(ErrorCode.PreflightFailed, `Refusing the protected store at ${current}: ${problem}`, {
+        hint: 'The store must be a private directory owned by your user.',
+      })
+    }
+  }
+  return current
+}
+
+/** Write one content-addressed file into the protected store, never replacing an existing one. */
+export function writePrivateStoreFileOnce(path: string, data: string | Buffer): 'written' | 'exists' {
+  return writeExclusive(path, data)
+}
+
+export type SetupStoreRecordRead =
+  | { state: 'absent' }
+  | { state: 'present'; bytes: Buffer }
+  | { state: 'unknown'; reason: string }
+
+/**
+ * Read one file from the protected store. A link, a multiply-linked file or one another user
+ * could rewrite is `unknown`, never trusted bytes.
+ */
+export function readPrivateStoreRecord(path: string, maxBytes = MAX_RECORD_BYTES): SetupStoreRecordRead {
+  let stat: ReturnType<typeof lstatSync>
+  try {
+    stat = lstatSync(path)
+  } catch (cause) {
+    return (cause as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { state: 'absent' }
+      : { state: 'unknown', reason: 'The protected store record cannot be inspected.' }
+  }
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+    return { state: 'unknown', reason: 'The protected store record is a link or not a regular file.' }
+  }
+  const protection = inspectProtection(path, 'file')
+  if (protection.problem !== null) {
+    return {
+      state: 'unknown',
+      reason: protection.timedOut
+        ? timeoutReason('The protected store record protection check', protection.timeoutMs)
+        : `The protected store record is not private to the current user: ${protection.problem}`,
+    }
+  }
+  const bytes = readRegularBytes(path, maxBytes)
+  if (bytes === null) return { state: 'unknown', reason: 'The protected store record cannot be read.' }
+  return { state: 'present', bytes }
+}
+
 function assertGrantId(id: string): void {
   if (!GRANT_ID_PATTERN.test(id)) {
     throw new AnvilError(ErrorCode.ConfigInvalid, `Invalid approval grant id: ${id}`, {
@@ -1200,7 +1437,17 @@ export function inspectSetupApproval(
   }
   let plan: SetupExecutionPlan
   try {
-    plan = buildSetupExecutionPlan({ repository: current, sourcePath: grant.source.path, name: grant.skill.name })
+    if (grant.schemaVersion === 1) {
+      plan = buildSetupExecutionPlan({ repository: current, sourcePath: grant.source.path, name: grant.skill.name })
+    } else {
+      const adapter = findSetupAdapterById(grant.adapter)
+      if (adapter === null) {
+        return approvalRecord(id, 'invalid', 'The grant names an unregistered adapter.', grant)
+      }
+      const bindings = adapter.parseBindings(grant.bindings)
+      if (bindings === null) return approvalRecord(id, 'invalid', 'The grant bindings are malformed.', grant)
+      plan = adapter.planFromBindings(current, bindings, options.env === undefined ? {} : { env: options.env })
+    }
   } catch (cause) {
     if (cause instanceof SetupExecutionError) {
       return approvalRecord(id, cause.validationStatus === 'unknown' ? 'unknown' : 'stale', cause.message, grant)

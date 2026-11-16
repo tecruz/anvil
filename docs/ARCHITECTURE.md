@@ -37,9 +37,14 @@ running them.
 
 `anvil setup plan` derives inspect-only, content-addressed plans. The original proposal
 covers owner-declared install commands; `--adapter local-skill` plans one create-only copy of
-a repository-local `SKILL.md` into `.agents/skills/<name>/SKILL.md`. Executable adapters are
+a repository-local `SKILL.md` into `.agents/skills/<name>/SKILL.md`, and
+`--adapter pinned-skill` plans one file pinned to a GitHub commit after an explicit
+`anvil setup fetch`. Executable adapters are
 a closed registry: an adapter describes its plan and operations and never writes, while the
 framework owns approval, locking, journaling and verification ([ADR-0021](adr/0021-setup-adapters-are-a-registry.md)).
+Fetching is the only network step; it freezes bytes and an origin record in the protected
+store, so planning, validation, approval and application stay offline
+([ADR-0022](adr/0022-pinned-skills-are-fetched-then-offline.md)).
 `anvil setup validate`
 compares either saved plan with current inputs and a clean repository commit. `anvil setup
 approve` records a separate, single-use approval grant outside the repository, and `approval`
@@ -205,7 +210,7 @@ Three rules hold across the system:
 | `<worktree>/.anvil/session.json` | the agent session id, written by the plugin | per session |
 | `~/.anvil/config.json` | the global configuration | your machine |
 | `~/.anvil/playbooks/` | your installed playbooks | your machine |
-| `~/.anvil/approvals/setup/v1/` | single-use approval grants and the application journal for local-skill plans, deliberately outside the repository | until expiry, revocation or use; the terminal journal stays for inspection |
+| `~/.anvil/approvals/setup/v1/` | single-use approval grants, the application journal, and the fetched pinned-skill cache, deliberately outside the repository | until expiry, revocation or use; the terminal journal stays for inspection |
 | `~/.anvil/cache/discovery/` | the discovery cache | your machine |
 | `<repoParent>/<repoName>-worktrees/` | the worktrees, deliberately outside the repository | until released |
 
@@ -313,6 +318,7 @@ These are not style preferences. Each one is a bug that was found and fixed.
 | [ADR-0009](adr/0009-guidance-has-to-earn-its-place.md) | why instructions have a budget |
 | [ADR-0010](adr/0010-cost-is-read-from-the-hosts-ledger.md) | why cost is read and never stored |
 | [ADR-0021](adr/0021-setup-adapters-are-a-registry.md) | why setup adapters are a closed registry that never writes |
+| [ADR-0022](adr/0022-pinned-skills-are-fetched-then-offline.md) | why a pinned skill is fetched once and then planned offline |
 | [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) | the design, the milestones, and the defects each one found |
 
 The [usage guide](USAGE.md) is the other half of this document: what to run.
