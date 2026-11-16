@@ -21,16 +21,18 @@ import {
   type SupportedProviderId,
 } from '@anvil/providers'
 import type { AuthStatus, Ticket, TicketProvider, TicketRef } from '@anvil/tickets'
+import { repositoryOf } from '@anvil/tickets'
 
 /**
  * The directory local tickets live in, always resolved against the **main** worktree.
  *
- * `ANVIL_TICKETS_DIR` wins when it is set, and an absolute value is used as-is rather than
- * joined onto the repository. Every command that touches local tickets goes through here.
+ * `ANVIL_TICKETS_DIR` wins when it is set. An absolute value is used as-is; a relative
+ * value is resolved against the main worktree rather than the invocation directory, so
+ * claiming from the main checkout and shipping from a worktree use the same directory.
  */
 export function ticketsDirFor(mainRoot: string, env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.ANVIL_TICKETS_DIR
-  if (configured !== undefined && configured !== '') return resolve(configured)
+  if (configured !== undefined && configured !== '') return resolve(mainRoot, configured)
   return join(mainRoot, DEFAULT_TICKETS_DIR)
 }
 
@@ -56,6 +58,8 @@ export interface ProviderOptions {
   host?: string | null
   /** Injected resolved config, so a test does not read the developer's `~/.anvil`. */
   config?: AnvilConfig
+  /** Environment for `ANVIL_TICKETS_DIR` and `GH_HOST`; production uses `process.env`. */
+  env?: NodeJS.ProcessEnv
   /** `anvil issue --dir`: an explicit local tickets directory, overriding the default. */
   ticketsDir?: string
 }
@@ -82,22 +86,43 @@ export async function ticketProviderFor(
   request: ProviderRequest = {},
   options: ProviderOptions = {},
 ): Promise<CommandProvider> {
+  const env = options.env ?? process.env
   const config = options.config ?? loadConfig({ repoRoot: mainRoot }).config
+
+  // The ticket URL's own host is where the issue lives, and therefore the host the auth
+  // probe must name. It is also a candidate for recognising a GHE host the repository is
+  // already known to use.
+  const refUrlHost = repositoryOf(request.ref)?.host ?? null
+  // A URL needs the known host *before* selection so a GHE link can name its provider. A
+  // non-URL reference still probes only when GitHub ends up selected, so a local command
+  // spawns nothing here.
+  let knownHost: string | null = options.host !== undefined ? options.host : null
+  if (options.host === undefined && refUrlHost !== null) knownHost = await remoteHost(mainRoot)
+
+  const githubHosts = [knownHost, env.GH_HOST]
   const selection = resolveProviderId({
     configured: config.provider.default,
     ...(request.provider === undefined || request.provider === null ? {} : { explicit: request.provider }),
     ...(request.ref === undefined ? {} : { ref: request.ref }),
+    githubHosts,
   })
 
-  const host = options.host !== undefined ? options.host : selection.id === 'github' ? await remoteHost(mainRoot) : null
+  if (selection.id === 'github' && options.host === undefined && knownHost === null) {
+    knownHost = await remoteHost(mainRoot)
+  }
+
+  const host =
+    selection.id === 'github'
+      ? (refUrlHost ?? knownHost ?? (env.GH_HOST === undefined || env.GH_HOST === '' ? null : env.GH_HOST))
+      : null
 
   const provider = createTicketProvider(selection.id, {
-    ticketsDir: options.ticketsDir ?? ticketsDirFor(mainRoot),
+    ticketsDir: options.ticketsDir ?? ticketsDirFor(mainRoot, env),
     host,
     ...(options.gh === undefined ? {} : { gh: options.gh }),
   })
 
-  const ref = request.ref === undefined ? undefined : refFor(selection.id, request.ref)
+  const ref = request.ref === undefined ? undefined : refFor(selection.id, request.ref, githubHosts)
   return { ...selection, provider, ...(ref === undefined ? {} : { ref }) }
 }
 

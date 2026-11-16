@@ -184,6 +184,10 @@ Every command that reads or writes a ticket resolves one provider, in this order
 3. the reference itself — a ticket URL, or a `gh-42` key;
 4. `local`.
 
+`ship` and `issue sync` are the exception to that command-level ordering: they update a
+claimed ticket through the provider recorded in the claim. `ship` has no `--provider` flag;
+it uses the claim's recorded provider (and, for a hosted ticket, its recorded URL).
+
 `local` stays the built-in default: it needs no account, no network and no `gh`. That is
 what makes the tool evaluable in a company that blocks API egress
 ([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)). Detection, audit and
@@ -211,10 +215,14 @@ there rather than closing this repository's issue 42.
 A listing that failed is a failure, not an empty backlog. `anvil issue list --provider
 github` and the automatic work selection in `anvil crew up` both report the `gh` error
 (for example a 403) and exit non-zero, instead of printing "no tickets" when the tracker
-could not be read. `crew up` also claims only issues whose normalized state is `todo`: an
-issue already labelled `in-progress` or `in-review` is not ready work. Because that filter
-runs after `gh` answers, a page made up entirely of filtered-out issues is fetched again
-with a larger limit rather than reported as an empty backlog.
+could not be read. Automatic `crew up` selection claims only issues whose normalized state
+is `todo`: an issue already labelled `in-progress` or `in-review` is not ready work. An
+explicit `--tickets` list bypasses that state filter, because naming a ticket is a
+decision. Because the filter runs after `gh` answers, a page made up entirely of
+filtered-out issues is fetched again with a larger limit rather than reported as an empty
+backlog. `gh issue list` refuses a limit above 1,000; if that maximum page is still full
+and the wanted matches are short, the listing is reported as **incomplete** rather than
+returning a filtered subset as though it were the whole backlog.
 
 A GitHub transition sets the whole state, not just the label it adds. Moving an issue out
 of `in_review` (by `issue set-state`, `issue sync` or `ship`) removes the `in-review`
@@ -696,7 +704,7 @@ anvil config init    # write a starter repo-local config (refuses to overwrite)
 | --- | --- |
 | `ANVIL_CONFIG_HOME` | Where the global config and caches live. Defaults to `~/.anvil`. |
 | `ANVIL_PLAYBOOKS` | A directory of playbook YAML files, merged over the built-in registry. |
-| `ANVIL_TICKETS_DIR` | Where local tickets live. Defaults to `.anvil/tickets` in the main worktree. Read by `issue`, `claim`, `crew up` and `ship` alike. |
+| `ANVIL_TICKETS_DIR` | Where local tickets live. Defaults to `.anvil/tickets` in the main worktree; a relative value resolves against the main worktree, not the directory the command runs in. Read by `issue`, `claim`, `crew up` and `ship` alike. |
 | `NO_COLOR` | Disables ANSI colour. `--no-color` does the same for one command. |
 
 The opencode plugin forwards these four into the shell it hands to the agent, so a

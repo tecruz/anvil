@@ -44,6 +44,12 @@ export interface ProviderSelection {
   explicit?: string | null
   /** `provider.default` from the configuration; `null` means "infer it". */
   configured?: string | null
+  /**
+   * GitHub hosts already known to the caller, such as the `origin` host and `GH_HOST`.
+   * Passed in rather than probed here: resolution stays pure and offline, and a URL on an
+   * unknown host is not guessed to be GitHub.
+   */
+  githubHosts?: readonly (string | null | undefined)[]
 }
 
 export interface ProviderSelectionResult {
@@ -95,7 +101,7 @@ export function resolveProviderId(selection: ProviderSelection): ProviderSelecti
     }
   }
 
-  const hint = selection.ref === undefined ? null : providerHintFor(selection.ref)
+  const hint = selection.ref === undefined ? null : providerHintFor(selection.ref, selection.githubHosts)
   if (hint !== null) {
     return { id: assertSupportedProvider(hint, `The reference "${selection.ref}" names a provider`), source: 'ref' }
   }
@@ -122,8 +128,12 @@ export function createTicketProvider(id: SupportedProviderId, options: CreatePro
  * provider field is the one that will actually be used. That keeps the claim registry and
  * `ship` honest about which tracker the ticket came from.
  */
-export function refFor(provider: ProviderId, input: string): TicketRef {
-  return { ...parseRef(input, provider), provider }
+export function refFor(
+  provider: ProviderId,
+  input: string,
+  githubHosts?: readonly (string | null | undefined)[],
+): TicketRef {
+  return { ...parseRef(input, provider, githubHosts), provider }
 }
 
 /** The capabilities a provider actually has, for an error message that lists them. */

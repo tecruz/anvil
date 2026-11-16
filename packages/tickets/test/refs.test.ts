@@ -32,6 +32,15 @@ describe('providerHintFor', () => {
   test('a URL that is not a ticket URL names no provider', () => {
     assert.equal(providerHintFor('https://example.com/docs/42'), null)
   })
+
+  test('an enterprise issue URL names github only when its host is known', () => {
+    const ghe = 'https://ghe.acme-corp.com/acme/widgets/issues/42'
+    assert.equal(providerHintFor(ghe), null)
+    assert.equal(providerHintFor(ghe, ['ghe.acme-corp.com']), 'github')
+    assert.equal(providerHintFor(ghe, ['acme-corp.com']), null)
+    // Passing a known host does not turn a GitLab issue shape into GitHub.
+    assert.equal(providerHintFor(GITLAB_URL, ['gitlab.com']), 'gitlab')
+  })
 })
 
 describe('parseRef', () => {
@@ -65,6 +74,21 @@ describe('parseRef', () => {
     assert.equal(ref.id, '42')
     assert.equal(ref.key, 'gh-42')
     assert.equal(ref.url, GITHUB_URL)
+  })
+
+  test('a known enterprise host parses as a GitHub issue URL', () => {
+    const ghe = 'https://ghe.acme-corp.com/acme/widgets/issues/42'
+    assert.deepEqual(parseRef(ghe, 'local', ['ghe.acme-corp.com']), {
+      provider: 'github',
+      id: '42',
+      key: 'gh-42',
+      url: ghe,
+    })
+    // An explicit GitHub selection reads the number even when the caller did not pass the
+    // host; the selection is a decision, not an inference.
+    assert.equal(parseRef(ghe, 'github').id, '42')
+    // Without either, it stays an opaque reference rather than being guessed as GitHub.
+    assert.equal(parseRef(ghe, 'local').id, ghe)
   })
 
   test('formatRef shows the key and the URL when it has one', () => {

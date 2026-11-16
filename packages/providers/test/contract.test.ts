@@ -296,6 +296,23 @@ describe('the github provider where the fake is the only witness', () => {
     assert.ok((limits.at(-1) ?? 0) > (limits[0] ?? 0), `the retry must ask for more: ${limits.join(', ')}`)
   })
 
+  test('a listing that fills the maximum page without a match is reported as incomplete', async () => {
+    // Past 1,000 results `gh issue list` cannot be asked for more. Returning the filtered
+    // subset would tell `crew up` there is no ready work while a matching issue sits just
+    // beyond the cap. The truthful answer is an explicit incomplete result.
+    const backlog = Array.from({ length: 1000 }, (_, i) => ({
+      number: i + 1,
+      title: `already in review ${i + 1}`,
+      state: 'OPEN' as const,
+      labels: [{ name: 'in-review' }],
+    }))
+    backlog.push({ number: 1001, title: 'ready', state: 'OPEN', labels: [] })
+
+    const fake = fakeGh({ listIssues: backlog })
+    const provider = new GitHubProvider({ run: fake.run })
+    await assert.rejects(() => provider.list({ state: 'todo' }), /incomplete|1,000/)
+  })
+
   test('a full page that satisfies the caller does not fetch again', async () => {
     const fake = fakeGh({
       listIssues: Array.from({ length: 10 }, (_, i) => ({ number: i + 1, title: `ready ${i + 1}` })),
@@ -330,7 +347,7 @@ describe('the github provider where the fake is the only witness', () => {
     assert.equal(ticket.ref.id, '42')
     const view = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'view')
     assert.ok(view !== undefined)
-    assert.equal(view[2], '42')
+    assert.equal(view[view.indexOf('--') + 1], '42')
     assert.equal(view[view.indexOf('--repo') + 1], 'github.com/acme/issues')
   })
 
@@ -361,6 +378,32 @@ describe('the github provider where the fake is the only witness', () => {
     }
   })
 
+  test('closing and reopening keep the URL repository', async () => {
+    // `in_review` exercises `issue edit`; the open/close calls are a separate branch of the
+    // same transition and need the same `--repo` targeting. Without it, a cross-repository
+    // URL would close the same-numbered issue in the checkout instead.
+    const fake = fakeGh({ issue: { number: 42, title: 'elsewhere', state: 'OPEN' } })
+    const provider = new GitHubProvider({ run: fake.run })
+    const ref = {
+      provider: 'github',
+      id: '42',
+      key: 'gh-42',
+      url: 'https://github.com/acme/other-repo/issues/42',
+    }
+
+    await provider.transition(ref, 'done')
+    const close = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'close')
+    assert.ok(close !== undefined, 'issue close was never called')
+    assert.equal(close[close.indexOf('--repo') + 1], 'github.com/acme/other-repo')
+    assert.equal(close[close.indexOf('--') + 1], '42')
+
+    await provider.transition(ref, 'todo')
+    const reopen = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'reopen')
+    assert.ok(reopen !== undefined, 'issue reopen was never called')
+    assert.equal(reopen[reopen.indexOf('--repo') + 1], 'github.com/acme/other-repo')
+    assert.equal(reopen[reopen.indexOf('--') + 1], '42')
+  })
+
   test('a bare number leaves the repository to gh', async () => {
     const fake = fakeGh({ issue: { number: 7, title: 'here' } })
     const provider = new GitHubProvider({ run: fake.run })
@@ -368,6 +411,22 @@ describe('the github provider where the fake is the only witness', () => {
     const view = fake.calls.find((args) => args[0] === 'issue' && args[1] === 'view')
     assert.ok(view !== undefined)
     assert.equal(view.includes('--repo'), false)
+  })
+
+  test('a leading-dash issue id is refused before gh is called', async () => {
+    // Argument arrays stop shell injection but not option injection. A fallback id such as
+    // `--help` used to reach gh in the issue-id position and could produce a zero exit.
+    const fake = fakeGh({})
+    const provider = new GitHubProvider({ run: fake.run })
+    await assert.rejects(
+      () => provider.comment({ provider: 'github', id: '--help', key: 'gh---help' }, 'body'),
+      /Invalid GitHub issue id/,
+    )
+    await assert.rejects(
+      () => provider.fetch({ provider: 'github', id: '-1', key: 'gh--1' }),
+      /Invalid GitHub issue id/,
+    )
+    assert.deepEqual(fake.calls, [], 'no gh call may happen for an invalid id')
   })
 
   test('a URL that cannot name a repository is refused rather than re-aimed', async () => {

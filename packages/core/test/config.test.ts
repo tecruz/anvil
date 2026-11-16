@@ -199,6 +199,20 @@ describe('loadConfig', () => {
     assert.equal(resolved.config.output.color, 'always', 'global should survive where repo is silent')
   })
 
+  test('a repo layer can clear a global provider.default back to inference', () => {
+    const home = tempDir()
+    const repo = tempDir()
+
+    writeFileSync(join(home, 'anvil.config.json'), JSON.stringify({ provider: { default: 'github' } }))
+    writeFileSync(join(repo, 'anvil.config.json'), JSON.stringify({ provider: { default: null } }))
+
+    const resolved = loadConfig({
+      repoRoot: repo,
+      env: { ANVIL_CONFIG_HOME: home },
+    })
+    assert.equal(resolved.config.provider.default, null, 'null means infer it, and must not be skipped')
+  })
+
   test('records which files were present', () => {
     const home = tempDir()
     const repo = tempDir()

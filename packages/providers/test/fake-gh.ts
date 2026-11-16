@@ -89,8 +89,14 @@ export function fakeGh(options: {
   let nextNumber = Math.max(0, ...store.keys()) + 1
 
   /** The issue a command names, or the most recent one when it names nothing. */
+  const namedId = (args: string[]): string => {
+    // The provider puts `--` before the positional issue id, so flags may precede it.
+    const separator = args.lastIndexOf('--')
+    return separator === -1 ? (args[2] ?? '') : (args[separator + 1] ?? '')
+  }
+
   const target = (args: string[]): FakeIssue | undefined => {
-    const id = Number.parseInt(args[2] ?? '', 10)
+    const id = Number.parseInt(namedId(args), 10)
     if (Number.isFinite(id) && store.has(id)) return store.get(id)
     return [...store.values()].at(-1)
   }
@@ -110,7 +116,7 @@ export function fakeGh(options: {
 
     if (args[0] === 'issue' && args[1] === 'view') {
       const issue = target(args)
-      if (issue === undefined) return fail(`no issue ${args[2] ?? ''}`)
+      if (issue === undefined) return fail(`no issue ${namedId(args)}`)
       return ok(JSON.stringify(issue))
     }
 
@@ -135,7 +141,7 @@ export function fakeGh(options: {
 
     if (args[0] === 'issue' && args[1] === 'comment') {
       const issue = target(args)
-      if (issue === undefined) return fail(`no issue ${args[2] ?? ''}`)
+      if (issue === undefined) return fail(`no issue ${namedId(args)}`)
       const body = flagValue(args, '--body') ?? ''
       issue.comments = [
         ...(issue.comments ?? []),
@@ -147,14 +153,14 @@ export function fakeGh(options: {
 
     if (args[0] === 'issue' && (args[1] === 'close' || args[1] === 'reopen')) {
       const issue = target(args)
-      if (issue === undefined) return fail(`no issue ${args[2] ?? ''}`)
+      if (issue === undefined) return fail(`no issue ${namedId(args)}`)
       issue.state = args[1] === 'close' ? 'CLOSED' : 'OPEN'
       return ok('')
     }
 
     if (args[0] === 'issue' && args[1] === 'edit') {
       const issue = target(args)
-      if (issue === undefined) return fail(`no issue ${args[2] ?? ''}`)
+      if (issue === undefined) return fail(`no issue ${namedId(args)}`)
       // Both flags in one call, because anvil sends the state change as a single edit and
       // the fake must not hide a missing `--remove-label`.
       const added = listFlags(args, '--add-label')

@@ -11,6 +11,7 @@
 
 import type { AnvilError, FlagSpecs, Style } from '@anvil/core'
 import type { GitRepoInfo } from '@anvil/git'
+import type { ticketProviderFor } from '../tickets.ts'
 
 /** Commands that exist today. */
 export interface Command {
@@ -38,6 +39,11 @@ export interface CommandContext {
   repoRoot: string | null
   /** Full repo discovery result, when available. */
   repo: GitRepoInfo | null
+  /**
+   * Test seam: resolve a provider without the real transport. Production leaves this
+   * undefined, so every command uses `ticketProviderFor` exactly as before.
+   */
+  providerFor?: typeof ticketProviderFor
   style: Style
   json: boolean
   /** Print a human-readable line. No-op in --json mode. */

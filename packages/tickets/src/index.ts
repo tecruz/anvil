@@ -164,11 +164,14 @@ export function branchNameFor(ref: TicketRef, title: string, prefix?: string): s
  * and reference parsing are two questions, and a caller has to answer the first before it
  * can answer the second.
  */
-export function providerHintFor(input: string): ProviderId | null {
+export function providerHintFor(
+  input: string,
+  githubHosts?: readonly (string | null | undefined)[],
+): ProviderId | null {
   const raw = input.trim()
 
   if (/^https?:\/\/[^\s]+$/i.test(raw)) {
-    const parsed = parseTicketUrl(raw)
+    const parsed = parseTicketUrl(raw, githubHosts)
     return parsed === null ? null : parsed.provider
   }
 
@@ -179,15 +182,28 @@ export function providerHintFor(input: string): ProviderId | null {
 }
 
 /** Parse a user-supplied ref: `42`, `#42`, `gh-42`, `PROJ-123`, or a full URL. */
-export function parseRef(input: string, defaultProvider: ProviderId = 'local'): TicketRef {
+export function parseRef(
+  input: string,
+  defaultProvider: ProviderId = 'local',
+  githubHosts?: readonly (string | null | undefined)[],
+): TicketRef {
   const raw = input.trim()
 
   // A URL carries its own provider, and is worth honouring: pasting a ticket link is the
   // most natural thing a user can do.
   const url = /^(https?:\/\/[^\s]+)$/i.exec(raw)
   if (url !== null) {
-    const parsed = parseTicketUrl(raw)
+    const parsed = parseTicketUrl(raw, githubHosts)
     if (parsed !== null) return parsed
+    // An unknown host is not inferred as GitHub. When the caller *explicitly* selected
+    // GitHub, however, that is a decision rather than an inference: read the URL's issue
+    // number instead of treating the whole URL as a ticket id.
+    if (defaultProvider === 'github') {
+      const address = parseTicketAddress(raw)
+      if (address !== null) {
+        return { provider: 'github', id: address.id, key: `gh-${address.id}`, url: raw }
+      }
+    }
   }
 
   // `gh-42` and `gl-42` name their provider, exactly as the URL forms do. Without this a
@@ -310,16 +326,47 @@ export function repositoryOf(url: string | undefined): TicketRepository | null {
   return parseTicketAddress(url)?.repository ?? null
 }
 
-function parseTicketUrl(url: string): TicketRef | null {
+/** A hostname without a scheme, port, or path, for comparing a URL host to a known one. */
+function normalizeHostName(host: string): string {
+  return host
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/:\d+$/, '')
+}
+
+/**
+ * Whether a URL host is one of the GitHub hosts the caller already knows.
+ *
+ * Provider inference stays pure and offline: the CLI supplies the host it detected from
+ * `origin` (or `GH_HOST`), and this function only compares. An arbitrary unknown host is
+ * never assumed to be GitHub -- a ticket link on a company's intranet may be anything.
+ */
+function isKnownGithubHost(host: string, githubHosts: readonly (string | null | undefined)[] | undefined): boolean {
+  if (githubHosts === undefined) return false
+  const wanted = normalizeHostName(host)
+  return githubHosts.some((candidate) => {
+    if (candidate === null || candidate === undefined || candidate.trim() === '') return false
+    return normalizeHostName(candidate) === wanted
+  })
+}
+
+function parseTicketUrl(url: string, githubHosts?: readonly (string | null | undefined)[]): TicketRef | null {
   const address = parseTicketAddress(url)
   if (address === null) return null
   // The provider is decided by the host, so a GHE URL still names no provider rather than
-  // being read as GitHub against the public host.
+  // being read as GitHub against the public host. A host the caller already knows to be
+  // this checkout's GitHub host (including GH_HOST) is treated as GitHub without any I/O
+  // here; a host nobody named is not guessed.
   if (address.repository.host.includes('github')) {
     return { provider: 'github', id: address.id, key: `gh-${address.id}`, url }
   }
   if (address.repository.host.includes('gitlab')) {
     return { provider: 'gitlab', id: address.id, key: `gl-${address.id}`, url }
+  }
+  if (isKnownGithubHost(address.repository.host, githubHosts)) {
+    return { provider: 'github', id: address.id, key: `gh-${address.id}`, url }
   }
   return null
 }

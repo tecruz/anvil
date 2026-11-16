@@ -13,6 +13,7 @@ import { currentBranch, mainWorktreeRoot } from '@anvil/git'
 import { buildProfile } from '@anvil/profile'
 import { createTicketProvider, GitHubProvider, requireCapability, SUPPORTED_PROVIDERS } from '@anvil/providers'
 import type { NormalizedState, Ticket } from '@anvil/tickets'
+import { repositoryOf } from '@anvil/tickets'
 import { AGENTS_OVERLAY, CONTEXT_FILE, renderAgentsOverlay, renderContextBundle } from '@anvil/tickets/context'
 import { claimStatuses, claimTicket, findOrphanWorktrees, releaseClaim } from '@anvil/worktrees'
 import {
@@ -406,6 +407,7 @@ export const issueCommand: Command = {
     const mainRoot = await mainRootFor(ctx)
     const explicit = providerFlag(args)
     const overrides = providerOptions(args)
+    const providerFor = ctx.providerFor ?? ticketProviderFor
     // The directory a local create writes into. Only used for the human-readable path;
     // the provider itself owns the write.
     const localDir = overrides.ticketsDir ?? ticketsDirFor(mainRoot)
@@ -418,7 +420,7 @@ export const issueCommand: Command = {
         })
       }
       const body = typeof args.values.body === 'string' ? args.values.body : ''
-      const resolved = await ticketProviderFor(mainRoot, { provider: explicit }, overrides)
+      const resolved = await providerFor(mainRoot, { provider: explicit }, overrides)
       requireCapability(resolved.provider, 'create', 'create a ticket')
       const ref = await resolved.provider.create({
         title,
@@ -434,7 +436,7 @@ export const issueCommand: Command = {
     }
 
     if (sub === 'list') {
-      const resolved = await ticketProviderFor(mainRoot, { provider: explicit }, overrides)
+      const resolved = await providerFor(mainRoot, { provider: explicit }, overrides)
       requireCapability(resolved.provider, 'list', 'list tickets')
       const auth = await resolved.provider.authStatus()
       if (!auth.ok) throw providerUnavailable(resolved, auth)
@@ -468,7 +470,7 @@ export const issueCommand: Command = {
         hint: 'e.g. `anvil issue show 1`, `anvil issue show gh-42`, or a ticket URL.',
       })
     }
-    const resolved = await ticketProviderFor(mainRoot, { ref: refArg, provider: explicit }, overrides)
+    const resolved = await providerFor(mainRoot, { ref: refArg, provider: explicit }, overrides)
     if (resolved.ref === undefined) {
       throw new AnvilError(ErrorCode.Internal, `issue ${sub} resolved no ticket reference`, {
         hint: 'This is a bug in anvil: the reference was checked above.',
@@ -516,8 +518,36 @@ export const issueCommand: Command = {
       // PR -> ticket. The other direction is `ship`, which updates the ticket as it opens
       // the PR; `sync` is for when that update was skipped, or when the PR moved on.
       const { readClaims: readClaimsOf } = await import('@anvil/worktrees')
-      const claim = readClaimsOf(mainRoot).claims.find((c) => c.key === ref.key)
+      const claims = readClaimsOf(mainRoot).claims.filter((c) => c.key === ref.key)
+      // A URL names a repository. Two repositories can each have an issue #42, so a claim
+      // match by key alone would let a URL for repo B act on repo A's claim. The requested
+      // repository has to agree with what the claim recorded; substituting the claim's
+      // ticket is exactly the wrong-repository write this prevents.
+      const requestedRepo = repositoryOf(ref.url)
+      const claim =
+        requestedRepo === null
+          ? claims[0]
+          : claims.find((c) => {
+              const recorded = repositoryOf(c.ticket.url)
+              return recorded !== null && recorded.host === requestedRepo.host && recorded.path === requestedRepo.path
+            })
       if (claim === undefined) {
+        if (requestedRepo !== null && claims.length > 0) {
+          const recorded = claims
+            .map((c) => c.ticket.url)
+            .filter((url): url is string => url !== undefined && url !== '')
+          const recordedText =
+            recorded.length === 0
+              ? `a bare issue number in this repository (${claims.map((c) => c.key).join(', ')})`
+              : recorded.join(', ')
+          throw new AnvilError(ErrorCode.Usage, `Claim "${ref.key}" is for ${recordedText}, not ${ref.url}`, {
+            hint: `Refusing to sync a different repository's issue. Run \`anvil claim ${ref.url}\` to make a separate claim.`,
+            details: {
+              requested: { url: ref.url, repository: `${requestedRepo.host}/${requestedRepo.path}` },
+              recorded,
+            },
+          })
+        }
         throw new AnvilError(ErrorCode.Usage, `No claim for "${ref.key}"`, {
           hint: 'Run `anvil status` to see claims, or `anvil ship <key>` to open the pull request first.',
         })
@@ -535,7 +565,7 @@ export const issueCommand: Command = {
         )
       }
 
-      const ticketProvider = await ticketProviderFor(
+      const ticketProvider = await providerFor(
         mainRoot,
         { ref: claim.ticket.key, provider: claim.ticket.provider },
         overrides,

@@ -10,12 +10,13 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { defaultConfig } from '@anvil/core'
+import { defaultConfig, makeStyle } from '@anvil/core'
 import { LocalTicketProvider, type RunResult } from '@anvil/providers'
+import type { TicketProvider, TicketRef } from '@anvil/tickets'
 import { CONTEXT_FILE } from '@anvil/tickets/context'
 import { claimTicket } from '@anvil/worktrees'
 import { crewCommand } from '../src/commands/crew.ts'
@@ -97,7 +98,7 @@ async function claimFrom(repo: string, ref: string, run: (args: string[]) => Pro
  * quoting rules for a body full of parentheses and quotes. The script only prints the issue
  * it was built with; nothing here reaches the network.
  */
-function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = []): string {
+function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = [], logPath: string | null = null): string {
   const dir = temp('anvil-gh-stub-')
   writeFileSync(join(dir, 'issue.json'), JSON.stringify(issue), 'utf8')
   writeFileSync(join(dir, 'list.json'), JSON.stringify(list), 'utf8')
@@ -108,9 +109,18 @@ function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = []): 
       "const path = require('node:path')",
       "const issue = fs.readFileSync(path.join(__dirname, 'issue.json'), 'utf8')",
       "const list = fs.readFileSync(path.join(__dirname, 'list.json'), 'utf8')",
+      `const logPath = ${JSON.stringify(logPath)}`,
       'const args = process.argv.slice(2)',
+      'if (logPath !== null) fs.appendFileSync(logPath, JSON.stringify(args) + "\\n")',
+      'const at = args.lastIndexOf("--")',
+      'const id = at === -1 ? args[2] : args[at + 1]',
+      'const flag = (name) => { const i = args.indexOf(name); return i === -1 ? undefined : args[i + 1] }',
       "if (args[0] === 'auth') {",
       "  process.stdout.write('Logged in to github.com account octocat\\n')",
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'repo' && args[1] === 'view') {",
+      '  process.stdout.write(JSON.stringify({ url: "https://github.com/acme/widgets" }) + "\\n")',
       '  process.exit(0)',
       '}',
       "if (args[0] === 'issue' && args[1] === 'list') {",
@@ -120,8 +130,27 @@ function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = []): 
       "if (args[0] === 'issue' && args[1] === 'view') {",
       // Answer for the number asked for, the way gh does. A stub that always replays one
       // issue makes separate claims collide on one branch.
-      '  const wanted = JSON.parse(list).find((entry) => String(entry.number) === String(args[2]))',
+      '  const wanted = JSON.parse(list).find((entry) => String(entry.number) === String(id))',
       '  process.stdout.write((wanted === undefined ? issue : JSON.stringify(wanted)) + "\\n")',
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'issue' && args[1] === 'create') {",
+      '  process.stdout.write("https://github.com/acme/widgets/issues/77\\n")',
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'issue' && args[1] === 'comment') {",
+      '  process.stdout.write("https://github.com/acme/widgets/issues/" + id + "#issuecomment-1\\n")',
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'issue' && (args[1] === 'close' || args[1] === 'reopen' || args[1] === 'edit')) {",
+      '  process.exit(0)',
+      '}',
+      "if (args[0] === 'pr' && args[1] === 'view') {",
+      "  process.stderr.write('no pull requests found for branch\\n')",
+      '  process.exit(1)',
+      '}',
+      "if (args[0] === 'pr' && args[1] === 'create') {",
+      '  process.stdout.write("https://github.com/acme/widgets/pull/9\\n")',
       '  process.exit(0)',
       '}',
       "process.stderr.write('stub gh does not implement: ' + args.join(' ') + '\\n')",
@@ -139,18 +168,17 @@ function ghOnPath(issue: typeof ISSUE = ISSUE, list: Array<typeof ISSUE> = []): 
   }
   return dir
 }
-
 describe('the tickets directory', () => {
   test('defaults to the main worktree', () => {
     const repo = temp('anvil-tickets-dir-')
     assert.equal(ticketsDirFor(repo, {}), join(repo, '.anvil', 'tickets'))
   })
 
-  test('ANVIL_TICKETS_DIR wins, and an absolute path is not joined onto the repo', () => {
+  test('ANVIL_TICKETS_DIR wins, and a relative path is resolved against the main worktree', () => {
     const repo = temp('anvil-tickets-dir-')
     const elsewhere = temp('anvil-tickets-elsewhere-')
     assert.equal(ticketsDirFor(repo, { ANVIL_TICKETS_DIR: elsewhere }), resolve(elsewhere))
-    assert.equal(ticketsDirFor(repo, { ANVIL_TICKETS_DIR: 'relative/tickets' }), resolve('relative/tickets'))
+    assert.equal(ticketsDirFor(repo, { ANVIL_TICKETS_DIR: 'relative/tickets' }), resolve(repo, 'relative/tickets'))
   })
 
   test('an empty ANVIL_TICKETS_DIR is absence, not the current directory', () => {
@@ -201,6 +229,69 @@ describe('provider resolution in the commands', () => {
     const fallback = await ticketProviderFor(repo, { ref: 'local-1' }, { config: defaultConfig() })
     assert.equal(fallback.id, 'local')
     assert.equal(fallback.source, 'default')
+  })
+
+  test('a configured local provider still wins over a GitHub URL reference', async () => {
+    const repo = temp('anvil-tickets-resolve-')
+    const resolved = await ticketProviderFor(
+      repo,
+      { ref: ISSUE.url },
+      {
+        config: { ...defaultConfig(), provider: { default: 'local' } },
+        host: null,
+        gh: { run: fakeGhRun() },
+      },
+    )
+    assert.equal(resolved.id, 'local')
+    assert.equal(resolved.source, 'config')
+    assert.equal(resolved.ref?.url, ISSUE.url)
+  })
+
+  test('GH_HOST makes an enterprise issue URL select github without any origin probe', async () => {
+    const repo = temp('anvil-tickets-resolve-')
+    const enterprise = {
+      ...ISSUE,
+      url: 'https://ghe.acme-corp.com/acme/widgets/issues/42',
+    }
+    const resolved = await ticketProviderFor(
+      repo,
+      { ref: enterprise.url },
+      {
+        config: defaultConfig(),
+        host: null,
+        env: { GH_HOST: 'ghe.acme-corp.com' },
+        gh: { run: fakeGhRun(enterprise) },
+      },
+    )
+    assert.equal(resolved.id, 'github')
+    assert.equal(resolved.source, 'ref')
+    assert.equal(resolved.ref?.id, '42')
+  })
+
+  test('a ticket URL authenticates against its own host, not the checkout origin', async () => {
+    const repo = temp('anvil-tickets-resolve-')
+    const calls: string[][] = []
+    const run = fakeGhRun()
+    const resolved = await ticketProviderFor(
+      repo,
+      { ref: ISSUE.url },
+      {
+        config: defaultConfig(),
+        host: 'ghe.acme-corp.com',
+        gh: {
+          run: async (args) => {
+            calls.push(args)
+            return run(args)
+          },
+        },
+      },
+    )
+    await readTicket(resolved)
+    const auth = calls.find((args) => args[0] === 'auth' && args[1] === 'status')
+    assert.deepEqual(auth, ['auth', 'status', '--hostname', 'github.com'])
+    const view = calls.find((args) => args[0] === 'issue' && args[1] === 'view')
+    assert.ok(view !== undefined)
+    assert.equal(view[view.indexOf('--repo') + 1], 'github.com/acme/widgets')
   })
 
   test('an unknown --provider is refused with the supported list', async () => {
@@ -415,6 +506,394 @@ describe('a listing decides the work, so its failures are not empty answers', ()
       envelope.data.claims.map((c) => c.key),
       ['gh-42', 'gh-44'],
     )
+  })
+})
+
+describe('the issue subcommands select GitHub at the command level', () => {
+  function runIssue(repo: string, stub: string, args: string[]): string {
+    return execFileSync(process.execPath, [CLI_MAIN, 'issue', ...args, '--provider', 'github', '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+        PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+      },
+    })
+  }
+
+  test('create writes through GitHub, not local', { timeout: 180_000 }, () => {
+    const repo = makeRepo()
+    const stub = ghOnPath()
+    const envelope = JSON.parse(runIssue(repo, stub, ['create', 'A GitHub issue'])) as {
+      ok: boolean
+      data: { provider: string; created: { provider: string; id: string; key: string; url?: string } }
+    }
+    assert.equal(envelope.ok, true)
+    assert.equal(envelope.data.provider, 'github')
+    assert.equal(envelope.data.created.provider, 'github')
+    assert.equal(envelope.data.created.key, 'gh-77')
+    assert.equal(existsSync(join(repo, '.anvil', 'tickets', '77.md')), false, 'no local file was written')
+  })
+
+  test('show reads through GitHub', { timeout: 180_000 }, () => {
+    const repo = makeRepo()
+    const stub = ghOnPath(ISSUE)
+    const envelope = JSON.parse(runIssue(repo, stub, ['show', '42'])) as {
+      ok: boolean
+      data: { provider: string; ticket: { ref: { key: string }; title: string } }
+    }
+    assert.equal(envelope.ok, true)
+    assert.equal(envelope.data.provider, 'github')
+    assert.equal(envelope.data.ticket.ref.key, 'gh-42')
+    assert.equal(envelope.data.ticket.title, ISSUE.title)
+  })
+
+  test('comment writes through GitHub', { timeout: 180_000 }, () => {
+    const repo = makeRepo()
+    const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
+    const stub = ghOnPath(ISSUE, [], log)
+    const envelope = JSON.parse(runIssue(repo, stub, ['comment', '42', '--body', 'hello'])) as {
+      ok: boolean
+      data: { provider: string }
+    }
+    assert.equal(envelope.ok, true)
+    assert.equal(envelope.data.provider, 'github')
+    const calls = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[])
+    const comment = calls.find((args) => args[0] === 'issue' && args[1] === 'comment')
+    assert.ok(comment !== undefined)
+    assert.equal(comment[comment.indexOf('--body') + 1], 'hello')
+    assert.equal(comment[comment.indexOf('--') + 1], '42')
+  })
+
+  test('set-state transitions through GitHub', { timeout: 180_000 }, () => {
+    const repo = makeRepo()
+    const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
+    const stub = ghOnPath(ISSUE, [], log)
+    const envelope = JSON.parse(runIssue(repo, stub, ['set-state', '42', 'in_review'])) as {
+      ok: boolean
+      data: { provider: string; state: string }
+    }
+    assert.equal(envelope.ok, true)
+    assert.equal(envelope.data.provider, 'github')
+    assert.equal(envelope.data.state, 'in_review')
+    const calls = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as string[])
+    assert.ok(calls.some((args) => args[0] === 'issue' && args[1] === 'edit'))
+  })
+
+  for (const sub of ['pull', 'refresh'] as const) {
+    test(`${sub} reads the ticket through GitHub`, { timeout: 180_000 }, () => {
+      const repo = makeRepo()
+      const stub = ghOnPath(ISSUE)
+      const envelope = JSON.parse(runIssue(repo, stub, [sub, '42'])) as {
+        ok: boolean
+        data: { ref: { key: string }; written: string[] }
+      }
+      assert.equal(envelope.ok, true)
+      assert.equal(envelope.data.ref.key, 'gh-42')
+      assert.ok(envelope.data.written.includes('.anvil/ticket.md'))
+      assert.match(readFileSync(join(repo, '.anvil', 'ticket.md'), 'utf8'), /Login redirect drops the return path/)
+    })
+  }
+})
+
+describe('ship resolves the claim provider at the CLI boundary', () => {
+  function repoWithRemote(): string {
+    const repo = makeRepo()
+    const remote = temp('anvil-ship-remote-')
+    git(remote, 'init', '--bare', '--initial-branch=main')
+    git(repo, 'remote', 'add', 'origin', remote)
+    git(repo, 'push', '-u', 'origin', 'main')
+    return repo
+  }
+
+  function runCli(cwd: string, stub: string, args: string[], env: NodeJS.ProcessEnv): string {
+    return execFileSync(process.execPath, [CLI_MAIN, ...args], {
+      cwd,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+        PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+        ...env,
+      },
+    })
+  }
+
+  function commitWork(worktree: string): void {
+    writeFileSync(join(worktree, 'change.txt'), 'shipped\n', 'utf8')
+    git(worktree, 'add', 'change.txt')
+    git(worktree, 'commit', '-m', 'ship this change')
+  }
+
+  test('a local claim uses ANVIL_TICKETS_DIR relative to the main worktree, from a worktree', {
+    timeout: 180_000,
+  }, async () => {
+    const repo = repoWithRemote()
+    const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
+    const stub = ghOnPath(ISSUE, [], log)
+    const env = { ANVIL_TICKETS_DIR: 'custom-tickets' }
+
+    runCli(repo, stub, ['issue', 'create', 'Local ship target'], env)
+    const claimed = JSON.parse(runCli(repo, stub, ['claim', 'local-1', '--json'], env)) as {
+      data: { worktree: string; key: string }
+    }
+    assert.equal(claimed.data.key, 'local-1')
+    commitWork(claimed.data.worktree)
+
+    const shipped = JSON.parse(runCli(claimed.data.worktree, stub, ['ship', 'local-1', '--json'], env)) as {
+      ok: boolean
+      data: { stages: Array<{ name: string; ok: boolean }> }
+    }
+    assert.equal(shipped.ok, true)
+    assert.deepEqual(shipped.data.stages.find((stage) => stage.name === 'ticket')?.ok, true)
+
+    // The local ticket in the custom directory advanced, and no GitHub issue command ran.
+    const ticketFile = readFileSync(join(repo, 'custom-tickets', '1.md'), 'utf8')
+    assert.match(ticketFile, /state: in_review/)
+    assert.match(ticketFile, /pull request/i)
+    const calls = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as string[])
+    assert.equal(
+      calls.some((args) => args[0] === 'issue'),
+      false,
+      'a local ticket must not be updated through GitHub',
+    )
+  })
+
+  test('a GitHub claim keeps its URL, so ship updates the claimed repository', { timeout: 180_000 }, () => {
+    const repo = repoWithRemote()
+    const issue = { ...ISSUE, url: 'https://github.com/acme/other-repo/issues/42' }
+    const log = join(temp('anvil-gh-log-'), 'calls.jsonl')
+    const stub = ghOnPath(issue, [issue], log)
+
+    const claimed = JSON.parse(
+      execFileSync(process.execPath, [CLI_MAIN, 'claim', issue.url, '--json'], {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+          PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+        },
+      }),
+    ) as { data: { worktree: string; key: string } }
+    assert.equal(claimed.data.key, 'gh-42')
+    commitWork(claimed.data.worktree)
+
+    const shipped = JSON.parse(
+      execFileSync(process.execPath, [CLI_MAIN, 'ship', 'gh-42', '--json'], {
+        cwd: claimed.data.worktree,
+        encoding: 'utf8',
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          NO_COLOR: '1',
+          ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+          PATH: `${stub}${delimiter}${process.env.PATH ?? ''}`,
+        },
+      }),
+    ) as { ok: boolean }
+    assert.equal(shipped.ok, true)
+
+    const calls = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line) as string[])
+    for (const command of ['comment', 'edit'] as const) {
+      const call = calls.find((args) => args[0] === 'issue' && args[1] === command)
+      assert.ok(call !== undefined, `issue ${command} was never called`)
+      assert.equal(call[call.indexOf('--repo') + 1], 'github.com/acme/other-repo')
+    }
+  })
+})
+
+describe('issue sync refuses a URL from a different repository', () => {
+  test('a claim for repo A is not used for a repo B issue URL', { timeout: 180_000 }, async () => {
+    const repo = makeRepo()
+    const claimUrl = 'https://github.com/acme/repo-A/issues/42'
+    const requested = 'https://github.com/acme/repo-B/issues/42'
+    mkdirSync(join(repo, '.anvil'), { recursive: true })
+    writeFileSync(
+      join(repo, '.anvil', 'claims.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        claims: [
+          {
+            key: 'gh-42',
+            ticket: { provider: 'github', id: '42', key: 'gh-42', url: claimUrl },
+            branch: 'feat/gh-42-thing',
+            baseBranch: 'main',
+            baseRef: 'main',
+            worktreePath: repo,
+            worktreeId: null,
+            state: 'active',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+
+    const provider: TicketProvider = {
+      id: 'github',
+      capabilities: {
+        create: true,
+        comment: true,
+        transition: true,
+        link: true,
+        list: true,
+        rawBodies: false,
+      },
+      authStatus: async () => ({ ok: true }),
+      fetch: async (ref: TicketRef) => ({ ref, title: 'stub', normalizedState: 'todo' }),
+      list: async () => [],
+      create: async () => ({ provider: 'github', id: '1', key: 'gh-1' }),
+      comment: async () => undefined,
+      transitions: async () => [],
+      transition: async () => undefined,
+      link: async () => undefined,
+    }
+    const ctx = {
+      cwd: repo,
+      repoRoot: repo,
+      repo: null,
+      style: makeStyle(false),
+      json: true,
+      say: () => undefined,
+      out: () => undefined,
+      outFailure: () => undefined,
+      writeRaw: () => undefined,
+      writeError: () => undefined,
+      providerFor: async () => ({
+        id: 'github' as const,
+        source: 'config' as const,
+        provider,
+        ref: { provider: 'github', id: '42', key: 'gh-42', url: requested },
+      }),
+    }
+
+    await assert.rejects(
+      () => issueCommand.run(ctx, ['sync', requested, '--json']),
+      (err: Error) => /repo-B/.test(err.message) && /repo-A/.test(err.message),
+    )
+  })
+})
+
+describe('commands enforce provider capabilities themselves', () => {
+  function stubProvider(): TicketProvider {
+    return {
+      id: 'stub',
+      capabilities: {
+        create: false,
+        comment: false,
+        transition: false,
+        link: false,
+        list: false,
+        rawBodies: false,
+      },
+      authStatus: async () => ({ ok: true }),
+      fetch: async (ref: TicketRef) => ({ ref, title: 'stub', normalizedState: 'todo' }),
+      list: async () => [],
+      create: async () => ({ provider: 'stub', id: '1', key: 'stub-1' }),
+      comment: async () => undefined,
+      transitions: async () => [],
+      transition: async () => undefined,
+      link: async () => undefined,
+    }
+  }
+
+  for (const [capability, argv] of [
+    ['create', ['create', 'A title']],
+    ['list', ['list']],
+    ['comment', ['comment', '1', '--body', 'hello']],
+    ['transition', ['set-state', '1', 'in_review']],
+  ] as const) {
+    test(`issue ${argv[0]} names the missing "${capability}" capability`, { timeout: 180_000 }, async () => {
+      const repo = makeRepo()
+      const ctx = {
+        cwd: repo,
+        repoRoot: repo,
+        repo: null,
+        style: makeStyle(false),
+        json: true,
+        say: () => undefined,
+        out: () => undefined,
+        outFailure: () => undefined,
+        writeRaw: () => undefined,
+        writeError: () => undefined,
+        providerFor: async () => ({
+          id: 'local' as const,
+          source: 'config' as const,
+          provider: stubProvider(),
+          ref: { provider: 'local', id: '1', key: 'local-1' },
+        }),
+      }
+      await assert.rejects(
+        () => issueCommand.run(ctx, [...argv, '--json']),
+        (err: Error) => new RegExp(`"${capability}" capability`).test(err.message),
+      )
+    })
+  }
+})
+
+describe('automatic crew selection keeps the ref the provider listed', () => {
+  test('a non-numeric local ticket id is not reparsed from its display key', { timeout: 180_000 }, async () => {
+    const repo = makeRepo()
+    const tickets = temp('anvil-tickets-local-')
+    const provider = new LocalTicketProvider({ dir: tickets })
+    const created = await provider.create({ title: 'Investigate the incident', body: 'Body.' })
+    // The file name is the id. A non-numeric id is a real local ticket, and
+    // `local-incident` is not the key of a file called `local-incident.md`.
+    renameSync(join(tickets, `${created.id}.md`), join(tickets, 'incident.md'))
+
+    const worktreeRoot = `${repo}-crew-worktrees`
+    temps.push(worktreeRoot)
+    const configHome = temp('anvil-tickets-config-')
+    writeFileSync(
+      join(configHome, 'anvil.config.json'),
+      JSON.stringify({ schemaVersion: 1, git: { worktreeRoot } }),
+      'utf8',
+    )
+
+    const stdout = execFileSync(process.execPath, [CLI_MAIN, 'crew', 'up', '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: configHome,
+        ANVIL_TICKETS_DIR: tickets,
+      },
+    })
+
+    const envelope = JSON.parse(stdout) as {
+      ok: boolean
+      data: { claims: Array<{ key: string; worktree: string }>; failures: unknown[] }
+    }
+    assert.equal(envelope.ok, true)
+    assert.deepEqual(envelope.data.failures, [])
+    assert.equal(envelope.data.claims.length, 1)
+    assert.equal(envelope.data.claims[0]?.key, 'local-incident')
+    const bundle = readFileSync(join(envelope.data.claims[0]!.worktree, CONTEXT_FILE), 'utf8')
+    assert.match(bundle, /Investigate the incident/)
   })
 })
 

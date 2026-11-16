@@ -104,6 +104,24 @@ function repoArgs(ref: TicketRef): string[] {
 }
 
 /**
+ * Reject anything that is not a positive issue number before it reaches `gh`.
+ *
+ * An argument array prevents shell injection, but not option injection: a fallback id
+ * such as `--help` was passed where `gh` expects a number and could turn an operation into
+ * a help screen that exits 0. Every positional id also follows `--`, but validation is the
+ * part that holds even if a future call forgets the terminator.
+ */
+function assertIssueId(id: string): string {
+  if (!/^\d+$/.test(id) || id === '' || Number(id) < 1) {
+    throw new AnvilError(ErrorCode.Usage, `Invalid GitHub issue id "${id}"`, {
+      hint: 'A GitHub issue id is a positive number, for example 42 or a full issue URL.',
+      details: { id },
+    })
+  }
+  return id
+}
+
+/**
  * Flags that narrow `gh issue list` to a normalized state.
  *
  * `done`/`wontfix` are the only real issue states on GitHub (open/closed), so that is the
@@ -222,17 +240,19 @@ export class GitHubProvider implements TicketProvider {
 
   async fetch(ref: TicketRef): Promise<Ticket> {
     const run = runner(this.options)
+    const id = assertIssueId(ref.id)
     const args = [
       'issue',
       'view',
-      ref.id,
       '--json',
       'number,title,body,state,labels,assignees,url,milestone,comments',
       ...repoArgs(ref),
+      '--',
+      id,
     ]
     const res = await run(args, '.')
     if (res.exitCode !== 0) {
-      throw new AnvilError(ErrorCode.Usage, `gh issue view ${ref.id} failed: ${res.stderr.trim()}`, {
+      throw new AnvilError(ErrorCode.Usage, `gh issue view ${id} failed: ${res.stderr.trim()}`, {
         hint: 'Check the issue number and that gh is authenticated to this host.',
       })
     }
@@ -256,6 +276,8 @@ export class GitHubProvider implements TicketProvider {
    * see past a truncated page is to ask for a larger one. The fetch therefore retries with
    * a bigger limit while the answer looks truncated and the wanted matches are short -- a
    * fixed over-fetch would report "no ready work" while the ready issue sat just past it.
+   * `gh` refuses a limit above 1,000, so if the maximum page is still full the result is
+   * explicitly reported as incomplete rather than returned as a filtered subset.
    */
   async list(query: TicketQuery = {}): Promise<TicketRef[]> {
     const run = runner(this.options)
@@ -307,10 +329,23 @@ export class GitHubProvider implements TicketProvider {
         if (out.length >= limit) return out
       }
 
-      // A short page is the whole backlog, so nothing further can match. A full page may
-      // be truncated, which is the only case worth a bigger request.
+      // A short page is the whole backlog, so nothing further can match. A full page may be
+      // truncated. `gh issue list` has no cursor and refuses a limit above 1,000, so once
+      // the maximum page is full and still has no answer, the truthful result is
+      // "incomplete", not a filtered subset. Callers treat an empty-ish answer as "no
+      // ready work", which is exactly the false report this prevents.
       const truncated = parsed.length >= request
-      if (!truncated || request >= pageCap) return out
+      if (!truncated) return out
+      if (request >= pageCap) {
+        throw new AnvilError(
+          ErrorCode.Usage,
+          `gh issue list returned the maximum ${pageCap.toLocaleString('en-US')} issues and the listing is incomplete`,
+          {
+            hint: 'Narrow the query with a state or label, or list the issues you need explicitly.',
+            details: { state: query.state ?? null, label: query.label ?? null, matches: out.length, limit },
+          },
+        )
+      }
       request = Math.min(request * 2, pageCap)
     }
   }
@@ -349,7 +384,8 @@ export class GitHubProvider implements TicketProvider {
 
   async comment(ref: TicketRef, body: string): Promise<void> {
     const run = runner(this.options)
-    const res = await run(['issue', 'comment', ref.id, '--body', body, ...repoArgs(ref)], '.')
+    const id = assertIssueId(ref.id)
+    const res = await run(['issue', 'comment', ...repoArgs(ref), '--body', body, '--', id], '.')
     if (res.exitCode !== 0) {
       throw new AnvilError(ErrorCode.Internal, `gh issue comment failed: ${res.stderr.trim()}`)
     }
@@ -385,6 +421,7 @@ export class GitHubProvider implements TicketProvider {
         hint: 'Supported: todo, in_progress, in_review, done, wontfix.',
       })
     }
+    const id = assertIssueId(ref.id)
     const run = runner(this.options)
     const desired = desiredStateLabels(to)
     const current = await this.fetch(ref)
@@ -393,12 +430,12 @@ export class GitHubProvider implements TicketProvider {
     const wantsClosed = to === 'done' || to === 'wontfix'
     const isClosed = (current.state ?? '').toUpperCase() === 'CLOSED'
     if (wantsClosed && !isClosed) {
-      const res = await run(['issue', 'close', ref.id, ...repoArgs(ref)], '.')
+      const res = await run(['issue', 'close', ...repoArgs(ref), '--', id], '.')
       if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue close failed: ${res.stderr.trim()}`)
     } else if (!wantsClosed && isClosed) {
       // Reopening an open issue is an error ("issue is already open"), so this runs only
       // when the issue is actually closed.
-      const res = await run(['issue', 'reopen', ref.id, ...repoArgs(ref)], '.')
+      const res = await run(['issue', 'reopen', ...repoArgs(ref), '--', id], '.')
       if (res.exitCode !== 0) throw new AnvilError(ErrorCode.Internal, `gh issue reopen failed: ${res.stderr.trim()}`)
     }
 
@@ -417,14 +454,16 @@ export class GitHubProvider implements TicketProvider {
   /** Add and remove labels in one call, so the issue never stops between two states. */
   private async editLabels(ref: TicketRef, add: string[], remove: string[]): Promise<void> {
     const run = runner(this.options)
+    const id = assertIssueId(ref.id)
     const res = await run(
       [
         'issue',
         'edit',
-        ref.id,
         ...(add.length === 0 ? [] : ['--add-label', add.join(',')]),
         ...(remove.length === 0 ? [] : ['--remove-label', remove.join(',')]),
         ...repoArgs(ref),
+        '--',
+        id,
       ],
       '.',
     )

@@ -130,15 +130,20 @@ Three implementation rules make the GitHub provider honest:
   from the `state` and `labels` fields, using the same function `fetch` uses, because no
   `gh` flag can express "open but not `in-review`". Because `gh issue list` has no cursor,
   a page that is entirely filtered out is retried with a larger limit; stopping at a fixed
-  page size would report no ready work while a ready issue sat just past it.
+  page size would report no ready work while a ready issue sat just past it. `gh` caps that
+  limit at 1,000, so when the maximum page is still full and no wanted match has appeared,
+  `list` reports an incomplete result instead of returning the filtered subset as final.
 - **A transition is the whole state.** After closing or reopening as needed, one `gh issue
   edit` adds the desired state label and removes the other state labels in the same call,
   so `in_review → todo` leaves `todo` rather than a stale `in-review`.
 
 Both implement the same `TicketProvider` interface and pass the same contract tests
-(`packages/providers/test/contract.test.ts`), including the same states, comment semantics
-and acceptance-criteria extraction — that is what keeps `local` a real provider rather
-than a test double ([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)).
+(`packages/providers/test/contract.test.ts`), including the same states and comment
+semantics — that is what keeps `local` a real provider rather than a test double
+([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)). Acceptance extraction is
+provider-specific rather than identical: local reads unchecked checklist entries
+(`packages/providers/src/local.ts`), while GitHub also reads checked entries and headed
+sections (`packages/providers/src/github.ts`).
 
 `ProviderCapabilities` is the contract commands check before acting. A missing capability
 fails the command with the capability named (`cannot create a ticket: missing the "create"

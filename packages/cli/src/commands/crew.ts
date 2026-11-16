@@ -16,7 +16,7 @@ import {
   tokenizeCommand,
 } from '@anvil/core'
 import { requireCapability } from '@anvil/providers'
-import type { Ticket } from '@anvil/tickets'
+import type { Ticket, TicketRef } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import { formatCost, lookupSessionCosts } from '../cost.ts'
@@ -106,7 +106,10 @@ async function crewUpFlow(
   // Resolve the selection before anything else, so an unknown `--provider` is refused with
   // the supported list rather than wrapped in a per-ticket error.
   const base = await ticketProviderFor(repoRoot, { provider: explicit }, { config })
-  const refs = splitRefs(args.values.tickets)
+  // An explicit list stays textual (each entry is resolved on its own, so a mixed list is
+  // respected); an automatic list keeps the provider's own refs. Re-parsing a display key
+  // loses non-numeric ids: `local-incident` is not `local-` plus an id.
+  const refs: Array<string | TicketRef> = splitRefs(args.values.tickets)
   if (refs.length === 0) {
     // No explicit list: take the ready work. A crew is most useful when you do not have to
     // enumerate the tickets yourself.
@@ -118,14 +121,17 @@ async function crewUpFlow(
         hint: 'Name them explicitly with --tickets 1,2,3, or create one with `anvil issue create`.',
       })
     }
-    // The key, not the bare id: it names the provider it came from, so a listing cannot be
-    // re-read as a local ticket with the same number.
-    refs.push(...all.slice(0, limit).map((r) => r.key))
+    refs.push(...all.slice(0, limit))
   }
 
   const tickets: Ticket[] = []
   for (const raw of refs) {
+    const key = typeof raw === 'string' ? raw : raw.key
     try {
+      if (typeof raw !== 'string') {
+        tickets.push(await base.provider.fetch(raw))
+        continue
+      }
       // Resolved per reference, so `--tickets 1,gh-2` mixes providers exactly as the
       // selection rule says it should.
       const resolved = await ticketProviderFor(repoRoot, { ref: raw, provider: explicit }, { config })
@@ -134,7 +140,7 @@ async function crewUpFlow(
     } catch (err) {
       throw new AnvilError(
         ErrorCode.Usage,
-        `Cannot read ticket "${raw}": ${err instanceof Error ? err.message : String(err)}`,
+        `Cannot read ticket "${key}": ${err instanceof Error ? err.message : String(err)}`,
         {
           // Keep the underlying remediation (the supported provider list, a login command,
           // the file that was missing) instead of replacing it.

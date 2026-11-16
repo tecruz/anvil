@@ -23,6 +23,7 @@ import type { ProviderCapabilities, TicketProvider, TicketRef } from '@anvil/tic
 import { fakeGh } from './fake-gh.ts'
 
 const GITHUB_URL = 'https://github.com/acme/widgets/issues/42'
+const GHE_URL = 'https://ghe.acme-corp.com/acme/widgets/issues/42'
 const GITLAB_URL = 'https://gitlab.com/acme/widgets/-/issues/7'
 
 describe('the provider selection rule', () => {
@@ -39,6 +40,28 @@ describe('the provider selection rule', () => {
   test('a reference names its own provider when the config is silent', () => {
     assert.deepEqual(resolveProviderId({ configured: null, ref: 'gh-42' }), { id: 'github', source: 'ref' })
     assert.deepEqual(resolveProviderId({ configured: null, ref: GITHUB_URL }), { id: 'github', source: 'ref' })
+  })
+
+  test('a configured provider wins even over a GitHub URL', () => {
+    // The reference is the third choice, not the first. Moving inference ahead of the
+    // config would silently ignore a repository that says it always uses local tickets.
+    assert.deepEqual(resolveProviderId({ configured: 'local', ref: GITHUB_URL }), {
+      id: 'local',
+      source: 'config',
+    })
+  })
+
+  test('an enterprise issue URL is GitHub only when its host is already known', () => {
+    assert.deepEqual(resolveProviderId({ configured: null, ref: GHE_URL }), { id: 'local', source: 'default' })
+    assert.deepEqual(resolveProviderId({ configured: null, ref: GHE_URL, githubHosts: ['ghe.acme-corp.com'] }), {
+      id: 'github',
+      source: 'ref',
+    })
+    // A known host is matched exactly, not by suffix or a shared word.
+    assert.deepEqual(resolveProviderId({ configured: null, ref: GHE_URL, githubHosts: ['acme-corp.com'] }), {
+      id: 'local',
+      source: 'default',
+    })
   })
 
   test('local is the default when nothing else decides', () => {
@@ -85,6 +108,13 @@ describe('the provider selection rule', () => {
     assert.equal(selected.provider, 'local')
     assert.equal(selected.url, GITHUB_URL)
     assert.equal(selected.key, 'gh-42')
+
+    // An explicitly known enterprise host parses to the issue number, not to a local key
+    // that happens to contain the whole URL.
+    const enterprise = refFor('github', GHE_URL, ['ghe.acme-corp.com'])
+    assert.equal(enterprise.id, '42')
+    assert.equal(enterprise.key, 'gh-42')
+    assert.equal(enterprise.url, GHE_URL)
   })
 })
 
