@@ -47,7 +47,8 @@ Required artifacts are validated before the deliberate failure, and the
 `upload rehearsal artifacts` step is `if: always()` and retains only
 `failure-rehearsal.json`, `gate-rejection.log`, `run.json`, the run archive and checkpoints for
 30 days. The job summary reports the actual step outcomes and claims retention only after a
-successful upload. The tampered summary is never promoted to `latest.json`; none of this is
+successful upload. The tampered summary exists only in the ephemeral runner checkout so the
+gate has a modified file to reject; it is never committed or uploaded. None of this is
 product effectiveness evidence. The run id and retained-artifact evidence are recorded in
 [IMPROVEMENT_PLAN.md](../docs/IMPROVEMENT_PLAN.md#phase-1--preserve-evidence-and-survive-interrupted-runs)
 after an approved dispatch.
