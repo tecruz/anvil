@@ -142,3 +142,44 @@ describe('repositoryOf', () => {
     }
   })
 })
+
+describe('only GitHub-shaped URLs are GitHub issues', () => {
+  const CUSTOM_GITLAB = 'https://code.acme.test/acme/widgets/-/issues/42'
+
+  test('a GitLab issue path on a host known to be GitHub is not inferred as GitHub', () => {
+    assert.equal(providerHintFor(CUSTOM_GITLAB, ['code.acme.test']), null)
+    assert.equal(parseRef(CUSTOM_GITLAB, 'local', ['code.acme.test']).provider, 'local')
+    // The exact GitHub shape on the same known host still is GitHub.
+    assert.equal(providerHintFor('https://code.acme.test/acme/widgets/issues/42', ['code.acme.test']), 'github')
+  })
+
+  test('a known host matches through the userinfo and port of a remote', () => {
+    for (const host of ['git@code.acme.test', 'https://git@code.acme.test:8443/acme/widgets.git']) {
+      assert.equal(providerHintFor('https://code.acme.test/acme/widgets/issues/42', [host]), 'github', host)
+    }
+  })
+
+  test('a github host in a non-GitHub path shape names no provider', () => {
+    for (const url of [
+      'https://github.com/acme/widgets/-/issues/42',
+      'https://github.com/acme/team/widgets/issues/42',
+      'https://github.com/acme/widgets/tree/main/issues/42',
+    ]) {
+      assert.equal(providerHintFor(url), null, url)
+    }
+  })
+
+  test('an explicit github selection refuses a URL that is not GitHub-shaped', () => {
+    for (const url of [
+      CUSTOM_GITLAB,
+      'https://code.acme.test/group/sub/widgets/issues/42',
+      'https://code.acme.test/acme/widgets/tree/main/issues/42',
+      'https://code.acme.test/acme/widgets/issues/7/notes/issues/42',
+    ]) {
+      const ref = parseRef(url, 'github')
+      assert.notEqual(ref.id, '42', `${url} must not become issue 42 of some repository`)
+    }
+    const ok = parseRef('https://code.acme.test/acme/widgets/issues/42', 'github')
+    assert.deepEqual([ok.provider, ok.id, ok.key], ['github', '42', 'gh-42'])
+  })
+})

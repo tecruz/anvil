@@ -569,7 +569,7 @@ export function hostFromRemote(remote: string | null): string | null {
   if (remote === null) return null
   const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/]/.exec(remote)
   if (ssh !== null) return ssh[1] as string
-  const https = /^https?:\/\/([^/]+)\//.exec(remote)
+  const https = /^https?:\/\/(?:[^@/]+@)?([^/]+)\//.exec(remote)
   if (https !== null) return https[1] as string
   return null
 }

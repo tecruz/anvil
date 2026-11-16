@@ -199,7 +199,7 @@ export function parseRef(
     // GitHub, however, that is a decision rather than an inference: read the URL's issue
     // number instead of treating the whole URL as a ticket id.
     if (defaultProvider === 'github') {
-      const address = parseTicketAddress(raw)
+      const address = githubTicketAddress(raw)
       if (address !== null) {
         return { provider: 'github', id: address.id, key: `gh-${address.id}`, url: raw }
       }
@@ -316,6 +316,29 @@ function parseTicketAddress(url: string): TicketAddress | null {
 }
 
 /**
+ * A ticket address in GitHub's exact shape: `/<owner>/<repo>/issues|pull/<n>`.
+ *
+ * GitHub repositories are always two segments deep and an issue URL has nothing between
+ * the repository and the marker (a trailing `/files` page is still that issue), so anything else -- a GitLab `/-/issues/` path, a
+ * subgroup, a `tree/...` page that happens to end in `issues/42` -- is not a GitHub issue,
+ * and must not be turned into a `--repo` argument.
+ */
+function githubTicketAddress(url: string): TicketAddress | null {
+  const address = parseTicketAddress(url)
+  if (address === null) return null
+  let pathname: string
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    return null
+  }
+  const segments = pathname.split('/').filter((s) => s !== '')
+  if (segments[2] !== 'issues' && segments[2] !== 'pull') return null
+  if (`${segments[0]}/${segments[1]}` !== address.repository.path) return null
+  return address
+}
+
+/**
  * The repository a ticket URL names, or null when the URL does not name one.
  *
  * Used to keep a pasted issue URL on its own repository: `gh --repo` for the transport,
@@ -332,6 +355,7 @@ function normalizeHostName(host: string): string {
     .trim()
     .toLowerCase()
     .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/^[^@/]*@/, '')
     .replace(/\/.*$/, '')
     .replace(/:\d+$/, '')
 }
@@ -359,14 +383,16 @@ function parseTicketUrl(url: string, githubHosts?: readonly (string | null | und
   // being read as GitHub against the public host. A host the caller already knows to be
   // this checkout's GitHub host (including GH_HOST) is treated as GitHub without any I/O
   // here; a host nobody named is not guessed.
-  if (address.repository.host.includes('github')) {
-    return { provider: 'github', id: address.id, key: `gh-${address.id}`, url }
-  }
+  //
+  // Only a URL in GitHub's exact issue shape can be GitHub: a GitLab `/-/issues/` path on
+  // a host that is also this checkout's origin is still a GitLab issue.
+  const github = githubTicketAddress(url)
   if (address.repository.host.includes('gitlab')) {
     return { provider: 'gitlab', id: address.id, key: `gl-${address.id}`, url }
   }
-  if (isKnownGithubHost(address.repository.host, githubHosts)) {
-    return { provider: 'github', id: address.id, key: `gh-${address.id}`, url }
+  if (github === null) return null
+  if (address.repository.host.includes('github') || isKnownGithubHost(address.repository.host, githubHosts)) {
+    return { provider: 'github', id: github.id, key: `gh-${github.id}`, url }
   }
   return null
 }

@@ -212,6 +212,12 @@ anvil opens closes a ticket with that ticket's URL (`Closes
 https://github.com/acme/widgets/issues/42`), so a ticket from another repository is closed
 there rather than closing this repository's issue 42.
 
+A URL names GitHub only in GitHub's own shape, `https://<host>/<owner>/<repo>/issues/<n>`
+(or `/pull/<n>`), on `github.com`-style hosts or on a host anvil already knows is this
+checkout's GitHub host (`origin`, or `GH_HOST`). A GitLab-style `/-/issues/` URL is never
+read as a GitHub issue, even on that host, and with `--provider github` a URL in any other
+shape is refused rather than turned into an issue number in a guessed repository.
+
 A listing that failed is a failure, not an empty backlog. `anvil issue list --provider
 github` and the automatic work selection in `anvil crew up` both report the `gh` error
 (for example a 403) and exit non-zero, instead of printing "no tickets" when the tracker

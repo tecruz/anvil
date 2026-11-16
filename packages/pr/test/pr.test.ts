@@ -708,6 +708,7 @@ describe('GitHub transport', () => {
     assert.equal(hostFromRemote('git@github.com:acme/app.git'), 'github.com')
     assert.equal(hostFromRemote('https://github.com/acme/app.git'), 'github.com')
     assert.equal(hostFromRemote('git@ghe.acme-corp.com:acme/app.git'), 'ghe.acme-corp.com')
+    assert.equal(hostFromRemote('https://git@ghe.acme-corp.com/acme/app.git'), 'ghe.acme-corp.com')
     assert.equal(hostFromRemote(null), null)
   })
 
