@@ -1071,10 +1071,44 @@ export type SetupStoreRecordRead =
   | { state: 'unknown'; reason: string }
 
 /**
- * Read one file from the protected store. A link, a multiply-linked file or one another user
- * could rewrite is `unknown`, never trusted bytes.
+ * Why a record cannot be reached through the store's own directories, or null when it can.
+ *
+ * The record file itself is checked separately. This checks every directory between the store
+ * root and that file, because a link or another user's directory *above* a record can redirect
+ * the read just as effectively as a link on the record: `lstat` follows the parent components,
+ * so the final file can look regular while the path leads somewhere the store does not own.
  */
-export function readPrivateStoreRecord(path: string, maxBytes = MAX_RECORD_BYTES): SetupStoreRecordRead {
+function storeParentProblem(storeRoot: string, path: string): string | null {
+  const relativePath = relative(storeRoot, path)
+  if (relativePath === '' || relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+    return 'it is outside the store that owns it.'
+  }
+  const link = ancestorLinkProblem(storeRoot)
+  if (link !== null) return link
+  const directories = [storeRoot]
+  let current = storeRoot
+  for (const segment of relativePath.split(sep).slice(0, -1)) {
+    current = join(current, segment)
+    directories.push(current)
+  }
+  // Checked in order, so the reported problem names the first directory that is not trusted.
+  for (const directory of directories) {
+    const problem = protectionProblem(directory, 'directory')
+    if (problem !== null) return problem
+  }
+  return null
+}
+
+/**
+ * Read one file from the protected store. A link, a multiply-linked file, a file another user
+ * could rewrite, or a path reached through a directory that is not the store's own is
+ * `unknown`, never trusted bytes.
+ */
+export function readPrivateStoreRecord(
+  storeRoot: string,
+  path: string,
+  maxBytes = MAX_RECORD_BYTES,
+): SetupStoreRecordRead {
   let stat: ReturnType<typeof lstatSync>
   try {
     stat = lstatSync(path)
@@ -1085,6 +1119,10 @@ export function readPrivateStoreRecord(path: string, maxBytes = MAX_RECORD_BYTES
   }
   if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
     return { state: 'unknown', reason: 'The protected store record is a link or not a regular file.' }
+  }
+  const parentProblem = storeParentProblem(storeRoot, path)
+  if (parentProblem !== null) {
+    return { state: 'unknown', reason: `The protected store record cannot be trusted: ${parentProblem}` }
   }
   const protection = inspectProtection(path, 'file')
   if (protection.problem !== null) {

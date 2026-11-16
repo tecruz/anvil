@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -116,6 +116,29 @@ describe('pinned-skill fetch and plan', () => {
     assert.equal(plan.source.sha256, fetched.record.blobSha256)
     assert.equal(plan.source.bytes, fetched.record.bytes)
     assert.equal(plan.origin.commit, COMMIT)
+  })
+
+  test('every gh request names the explicit host, so GH_HOST cannot redirect the fetch', async () => {
+    const { repo, env } = fixture()
+    const gh = fakeGh(skill('release-notes'))
+    await fetchPinnedSkill({
+      repositoryRoot: repo,
+      repo: REPO,
+      ref: 'main',
+      path: PATH,
+      name: 'release-notes',
+      // The real runner inherits this environment. An explicit --hostname must win, or the
+      // recorded origin would name github.com while the bytes came from another host.
+      env: { ...env, GH_HOST: 'enterprise.example.com' },
+      now: T0,
+      gh: gh.run,
+    })
+    assert.equal(gh.calls.length, 2)
+    for (const args of gh.calls) {
+      const at = args.indexOf('--hostname')
+      assert.notEqual(at, -1, `gh api call does not pin the host: ${args.join(' ')}`)
+      assert.equal(args[at + 1], 'github.com')
+    }
   })
 
   test('a 40-hex --commit is used directly, and a mismatched --commit is refused', async () => {
@@ -271,6 +294,33 @@ describe('pinned-skill fetch and plan', () => {
       () => adapter.parseRequest({ repo: REPO, commit: 'main', path: PATH, name: 'release-notes' }),
       (error: unknown) => error instanceof AnvilError && error.code === ErrorCode.ConfigInvalid,
     )
+  })
+
+  test('a cache directory reached through a link is unknown, not trusted provenance', async () => {
+    const { repo, env } = fixture()
+    const gh = fakeGh(skill('release-notes'))
+    await fetchPinnedSkill({
+      repositoryRoot: repo,
+      repo: REPO,
+      commit: COMMIT,
+      path: PATH,
+      name: 'release-notes',
+      env,
+      now: T0,
+      gh: gh.run,
+    })
+    const store = env.ANVIL_APPROVAL_HOME as string
+    const origins = join(store, 'fetched', 'origins')
+    const moved = join(scratch('anvil-pinned-moved-'), 'origins')
+    // `lstat` follows the parent components, so the record file still looks regular. A link
+    // above it is what redirects the read, and that is what the reader must refuse.
+    renameSync(origins, moved)
+    symlinkSync(moved, origins, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const read = readPinnedSkillContent({ host: 'github.com', repo: REPO, commit: COMMIT, path: PATH }, env)
+    assert.equal(read.state, 'unknown')
+    if (read.state !== 'unknown') throw new Error('expected an unknown cache read')
+    assert.match(read.reason, /link|junction/i)
   })
 
   test('a store inside the repository is refused before it is created', async () => {

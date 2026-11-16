@@ -49,12 +49,17 @@ Three smaller questions had to be answered before writing code:
 - **The read path is fail-closed.** A missing origin or blob is `unknown`; a malformed record,
   a size mismatch or bytes that do not hash to their address is `invalid`. Neither becomes a
   plan. Reading re-hashes the bytes on every plan, because the content address is the only
-  reason to trust cached content.
-- **`gh` must be outside the checkout.** The default runner resolves `gh` to an absolute path
-  and refuses a binary whose real path is inside the repository the fetch is for. The
-  `SetupFetchGhRun` seam stays a test seam, not a security boundary. The host is explicit
-  (`--host`, default `github.com`), never taken from the repository's remotes, and a host other
-  than GitHub is `UNSUPPORTED_HOST` in v1.
+  reason to trust cached content. It also checks every directory between the store root and
+  the record, not only the record file: `lstat` follows parent components, so a link or a
+  foreign directory above a record can redirect a read while the file itself still looks
+  regular. Either makes the read `unknown`.
+- **`gh` must be outside the checkout, and the host is pinned on the wire.** The default runner
+  resolves `gh` to an absolute path and refuses a binary whose real path is inside the
+  repository the fetch is for. The `SetupFetchGhRun` seam stays a test seam, not a security
+  boundary. The host is explicit (`--host`, default `github.com`), never taken from the
+  repository's remotes, and a host other than GitHub is `UNSUPPORTED_HOST` in v1. Every
+  `gh api` call passes `--hostname` with that value, so an inherited `GH_HOST` cannot send the
+  request elsewhere while the origin record still names `github.com`.
 - **Bounds and grammar are the existing ones.** Repository is `owner/name`, the path uses
   `isSafeSetupExecutionPath`, the ref is bounded and cannot start with `-`, and the file is
   capped at `MAX_SOURCE_BYTES` (128 KiB) on both the reported and the decoded size. A ref that
@@ -79,8 +84,8 @@ Three smaller questions had to be answered before writing code:
 - Fetch is auditable as its own step: it either wrote a new blob and origin, or reported the
   existing records. A fetch cannot silently change what an approved plan refers to.
 - The protected store now holds two kinds of record. Both use the same private-directory and
-  no-link read rules, and the fetch code refuses a store inside the repository before creating
-  anything.
+  no-link read rules, checked on the record and on every directory between it and the store
+  root, and the fetch code refuses a store inside the repository before creating anything.
 - A commit pins bytes, not authorship, review, licensing, safety or intent. It also does not
   prove an agent will load the skill or follow it. The plan warnings say so, and the docs say
   so.

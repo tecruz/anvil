@@ -299,7 +299,7 @@ export function readPinnedSkillOrigin(
   request: Pick<PinnedSkillRequest, 'host' | 'repo' | 'commit' | 'path'>,
   env: NodeJS.ProcessEnv = process.env,
 ): PinnedSkillOriginRead {
-  const read = readPrivateStoreRecord(pinnedSkillOriginPath(request, env))
+  const read = readPrivateStoreRecord(approvalStoreDir(env), pinnedSkillOriginPath(request, env))
   if (read.state === 'absent') return { state: 'absent' }
   if (read.state === 'unknown') return { state: 'unknown', reason: read.reason }
   let parsed: unknown
@@ -349,7 +349,11 @@ export function readPinnedSkillContent(
     return origin
   }
   const record = origin.record
-  const blob = readPrivateStoreRecord(pinnedSkillBlobPath(record.blobSha256, env), MAX_SOURCE_BYTES)
+  const blob = readPrivateStoreRecord(
+    approvalStoreDir(env),
+    pinnedSkillBlobPath(record.blobSha256, env),
+    MAX_SOURCE_BYTES,
+  )
   if (blob.state === 'absent') {
     return { state: 'unknown', reason: 'The origin record exists but its frozen bytes are missing.' }
   }

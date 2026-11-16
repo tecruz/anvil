@@ -189,8 +189,15 @@ function resolvedCommitFrom(text: string): string | null {
   return null
 }
 
-async function resolveRef(gh: SetupFetchGhRun, repo: string, ref: string): Promise<string> {
-  const args = ['api', '-H', 'Accept: application/vnd.github.sha', `repos/${repo}/commits/${encodeURIComponent(ref)}`]
+async function resolveRef(gh: SetupFetchGhRun, host: string, repo: string, ref: string): Promise<string> {
+  const args = [
+    'api',
+    '--hostname',
+    host,
+    '-H',
+    'Accept: application/vnd.github.sha',
+    `repos/${repo}/commits/${encodeURIComponent(ref)}`,
+  ]
   const result = await gh(args)
   assertOk(args, result)
   const commit = resolvedCommitFrom(result.stdout)
@@ -207,8 +214,14 @@ interface DownloadedFile {
   sha256: string
 }
 
-async function downloadFile(gh: SetupFetchGhRun, repo: string, commit: string, path: string): Promise<DownloadedFile> {
-  const args = ['api', '-X', 'GET', `repos/${repo}/contents/${encodedPath(path)}?ref=${commit}`]
+async function downloadFile(
+  gh: SetupFetchGhRun,
+  host: string,
+  repo: string,
+  commit: string,
+  path: string,
+): Promise<DownloadedFile> {
+  const args = ['api', '--hostname', host, '-X', 'GET', `repos/${repo}/contents/${encodedPath(path)}?ref=${commit}`]
   const result = await gh(args)
   assertOk(args, result)
   let parsed: unknown
@@ -266,9 +279,9 @@ function conflict(url: string, detail: string): AnvilError {
   )
 }
 
-function writeBlob(blobPath: string, bytes: Buffer, sha256: string, url: string): void {
+function writeBlob(storeRoot: string, blobPath: string, bytes: Buffer, sha256: string, url: string): void {
   const written = writePrivateStoreFileOnce(blobPath, bytes)
-  const read = readPrivateStoreRecord(blobPath, MAX_SOURCE_BYTES)
+  const read = readPrivateStoreRecord(storeRoot, blobPath, MAX_SOURCE_BYTES)
   if (read.state === 'absent') throw conflict(url, 'the frozen bytes disappeared during publication')
   if (read.state === 'unknown') throw conflict(url, read.reason)
   if (read.bytes.length !== bytes.length || digestBytes(read.bytes) !== sha256) {
@@ -279,10 +292,10 @@ function writeBlob(blobPath: string, bytes: Buffer, sha256: string, url: string)
   void written
 }
 
-function writeOrigin(originPath: string, record: PinnedSkillOriginRecord): 'written' | 'exists' {
+function writeOrigin(storeRoot: string, originPath: string, record: PinnedSkillOriginRecord): 'written' | 'exists' {
   const written = writePrivateStoreFileOnce(originPath, `${JSON.stringify(record, null, 2)}\n`)
   if (written === 'written') return 'written'
-  const read = readStoreOrigin(originPath)
+  const read = readStoreOrigin(storeRoot, originPath)
   if (read.state !== 'present') {
     throw conflict(
       record.url,
@@ -301,8 +314,8 @@ type StoreOriginRead =
   | { state: 'absent' }
   | { state: 'unknown'; reason: string }
 
-function readStoreOrigin(originPath: string): StoreOriginRead {
-  const read = readPrivateStoreRecord(originPath, 256 * 1024)
+function readStoreOrigin(storeRoot: string, originPath: string): StoreOriginRead {
+  const read = readPrivateStoreRecord(storeRoot, originPath, 256 * 1024)
   if (read.state === 'absent') return { state: 'absent' }
   if (read.state === 'unknown') return { state: 'unknown', reason: read.reason }
   let parsed: unknown
@@ -355,7 +368,7 @@ export async function fetchPinnedSkill(options: SetupFetchOptions): Promise<Pinn
       })
     }
   } else {
-    commit = await resolveRef(gh, repo, ref)
+    commit = await resolveRef(gh, host, repo, ref)
     requestedRef = ref
     if (fixedCommit !== null && fixedCommit !== commit) {
       throw new AnvilError(ErrorCode.PreflightFailed, '--commit does not match the resolved --ref', {
@@ -391,7 +404,7 @@ export async function fetchPinnedSkill(options: SetupFetchOptions): Promise<Pinn
   const existing = readPinnedSkillOrigin({ host, repo, commit, path }, env)
   if (existing.state === 'invalid') throw conflict(origin.url, existing.reason)
 
-  const downloaded = await downloadFile(gh, repo, commit, path)
+  const downloaded = await downloadFile(gh, host, repo, commit, path)
   const frozen: PinnedSkillOriginRecord = {
     ...record,
     blobSha256: downloaded.sha256,
@@ -405,17 +418,17 @@ export async function fetchPinnedSkill(options: SetupFetchOptions): Promise<Pinn
     }
     // Keep the original fetchedAt: freezing happened once, and re-fetching must not move an
     // approved plan's identity.
-    writeBlob(pinnedSkillBlobPath(current.blobSha256, env), downloaded.bytes, downloaded.sha256, origin.url)
+    writeBlob(store, pinnedSkillBlobPath(current.blobSha256, env), downloaded.bytes, downloaded.sha256, origin.url)
     return { schemaVersion: 1, kind: 'setup-fetch', status: 'cached', wrote: false, origin, record: current }
   }
   if (existing.state === 'unknown') {
     throw conflict(origin.url, existing.reason)
   }
 
-  writeBlob(pinnedSkillBlobPath(frozen.blobSha256, env), downloaded.bytes, frozen.blobSha256, origin.url)
-  const written = writeOrigin(pinnedSkillOriginPath({ host, repo, commit, path }, env), frozen)
+  writeBlob(store, pinnedSkillBlobPath(frozen.blobSha256, env), downloaded.bytes, frozen.blobSha256, origin.url)
+  const written = writeOrigin(store, pinnedSkillOriginPath({ host, repo, commit, path }, env), frozen)
   if (written === 'exists') {
-    const after = readStoreOrigin(pinnedSkillOriginPath({ host, repo, commit, path }, env))
+    const after = readStoreOrigin(store, pinnedSkillOriginPath({ host, repo, commit, path }, env))
     if (after.state !== 'present') throw conflict(origin.url, 'the stored origin record cannot be read back')
     if (after.record.blobSha256 !== frozen.blobSha256 || after.record.bytes !== frozen.bytes) {
       throw conflict(origin.url, 'a concurrent fetch recorded different bytes')

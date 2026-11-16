@@ -204,7 +204,8 @@ anvil setup fetch --adapter pinned-skill --repo owner/name --commit <40-hex> --p
 resolution. Passing both is allowed only when they name the same commit. `--adapter` is
 required, and the only supported value is `pinned-skill`; the host is explicit (`--host`,
 default `github.com`), never taken from the repository's remotes, and any other host is
-`UNSUPPORTED_HOST` in v1.
+`UNSUPPORTED_HOST` in v1. Both `gh api` calls name that host with `--hostname`, so an
+inherited `GH_HOST` cannot fetch from another host while the record says `github.com`.
 
 Fetching is never a side effect of `plan`, `validate`, `approve`, `apply`, `brief`, `ready`,
 `doctor` or `discover`. It resolves `gh` to an absolute path and refuses a GitHub CLI whose
@@ -224,7 +225,11 @@ the same origin that yields different bytes is a **conflict**: the command refus
 the existing record instead of overwriting it. Re-fetching identical bytes reports `cached`
 and leaves the recorded fetch time untouched, so an approved plan keeps its identity. A
 malformed record, a size mismatch or bytes that do not hash to their address are `invalid`;
-a missing origin or blob is `unknown`. Neither can become a plan.
+a missing origin or blob is `unknown`. Neither can become a plan. Reading also checks every
+directory between the store root and a record, so a cache reached through a link or a
+directory another user can write is `unknown`, never trusted provenance: `lstat` follows the
+parent components, and a regular-looking file behind a redirected directory is still not the
+store's own content.
 
 Planning and validation read only the cache and the destination. An offline machine can plan
 a pinned skill it has already fetched; if it has not, the remedy is one explicit fetch. What a
