@@ -1,0 +1,274 @@
+/**
+ * The dashboard's static assets.
+ *
+ * No framework, no CDN, no inline script or style: the server sets a strict content
+ * security policy and these three files are served from the same loopback origin. All data
+ * is inserted with `textContent`, never `innerHTML`, because ticket text and file paths are
+ * untrusted input.
+ */
+
+export const HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>anvil dashboard</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>anvil</h1>
+  <span id="scope"></span>
+  <span id="stamp"></span>
+  <button id="refresh" type="button">Refresh</button>
+</header>
+<nav>
+  <button class="tab active" data-view="repository" type="button">Repository</button>
+  <button class="tab" data-view="context" type="button">Context</button>
+  <button class="tab" data-view="work" type="button">Work</button>
+</nav>
+<main>
+  <p id="notes" class="notes"></p>
+  <section id="repository"></section>
+  <section id="context" hidden></section>
+  <section id="work" hidden></section>
+</main>
+<script src="/app.js" defer></script>
+</body>
+</html>
+`
+
+export const CSS = `:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 0 1rem 3rem; }
+header { display: flex; gap: 1rem; align-items: baseline; padding: 1rem 0; border-bottom: 1px solid #8886; }
+h1 { margin: 0; font-size: 1.4rem; }
+#scope { color: #888; }
+#stamp { color: #888; font-size: 0.85rem; }
+#refresh { margin-left: auto; }
+nav { display: flex; gap: 0.5rem; padding: 1rem 0; }
+button { cursor: pointer; }
+.tab.active { font-weight: bold; text-decoration: underline; }
+section { max-width: 70rem; }
+h2 { font-size: 1.1rem; margin-top: 1.5rem; }
+.notes { color: #888; font-size: 0.85rem; }
+.card { border: 1px solid #8886; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
+.error { border-left: 4px solid #c33; background: #c33110; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
+.badge { display: inline-block; border-radius: 4px; padding: 0 0.35rem; margin-right: 0.4rem; font-size: 0.8rem; border: 1px solid #8888; }
+.badge.fail, .badge.blocker, .badge.high { color: #c33; border-color: #c338; }
+.badge.warn, .badge.medium { color: #a60; border-color: #a608; }
+.badge.unknown, .badge.na { color: #888; }
+.badge.ok, .badge.pass { color: #282; border-color: #2828; }
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline; }
+.muted { color: #888; font-size: 0.85rem; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding: 0.5rem; border-radius: 4px; }
+code { font-family: ui-monospace, monospace; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
+`
+
+export const JS = `const state = { view: 'repository', snapshot: null, loading: false };
+
+function make(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+function badge(text) {
+  const normalized = String(text || 'unknown').toLowerCase();
+  const kind = ['fail', 'blocker', 'high', 'warn', 'medium', 'pass', 'ok', 'unknown', 'na']
+    .find((candidate) => normalized.includes(candidate)) || 'muted';
+  return make('span', 'badge ' + kind, text);
+}
+
+function sourceCard(parent, source, label) {
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', label));
+  if (!source || source.ok === false) {
+    card.appendChild(make('div', 'error', (source && source.error) || 'no data'));
+    if (source && source.command) card.appendChild(make('div', 'muted', source.command));
+    parent.appendChild(card);
+    return false;
+  }
+  card.appendChild(make('div', 'muted', source.command + ' · ' + source.fetchedAt));
+  parent.appendChild(card);
+  return true;
+}
+
+function summaryLine(parent, label, value) {
+  parent.appendChild(make('div', 'row', label + ': ' + (value === undefined || value === null ? 'unknown' : String(value))));
+}
+
+function renderFindings(parent, report) {
+  const findings = Array.isArray(report.findings) ? report.findings : [];
+  const notable = findings.filter((f) => ['fail', 'warn', 'blocker'].includes(String(f.status)));
+  parent.appendChild(make('h2', '', 'Findings'));
+  if (notable.length === 0) {
+    parent.appendChild(make('div', 'muted', 'No failed or warning findings in this snapshot.'));
+    return;
+  }
+  for (const finding of notable.slice(0, 30)) {
+    const row = make('div', 'card');
+    row.appendChild(badge(finding.status));
+    row.appendChild(badge(finding.severity || 'unknown'));
+    row.appendChild(make('strong', '', finding.id || 'finding'));
+    const detail = finding.detail || finding.message || finding.fix || '';
+    if (detail) row.appendChild(make('div', '', detail));
+    const evidence = finding.evidence;
+    if (evidence) row.appendChild(make('div', 'muted', Array.isArray(evidence) ? evidence.join('; ') : String(evidence)));
+    parent.appendChild(row);
+  }
+}
+
+function renderRepository(root, snap) {
+  const parent = root.querySelector('#repository');
+  parent.replaceChildren();
+  const doctor = snap.repository.doctor;
+  if (sourceCard(parent, doctor, 'Repository readiness')) {
+    const data = doctor.data || {};
+    summaryLine(parent, 'Score', data.score === undefined ? 'unknown' : String(data.score) + '/100 ' + (data.grade || ''));
+    if (Array.isArray(data.degraded) && data.degraded.length > 0) {
+      parent.appendChild(make('div', 'error', 'Incomplete profile: ' + data.degraded.map((d) => d.reason || String(d)).join('; ')));
+    }
+    renderFindings(parent, data);
+  }
+  const ready = snap.repository.ready;
+  if (sourceCard(parent, ready, 'What an AI needs here')) {
+    const data = ready.data || {};
+    summaryLine(parent, 'Status', data.status);
+    summaryLine(parent, 'Checked', data.checked ? 'yes' : 'no (pass --check to probe)');
+    const blocked = Array.isArray(data.tools) ? data.tools.filter((t) => t.status === 'missing' || t.status === 'unavailable' || t.status === 'incompatible') : [];
+    if (blocked.length > 0) {
+      parent.appendChild(make('div', 'error', 'Blocked: ' + blocked.map((t) => t.id).join(', ')));
+    }
+  }
+  const plan = snap.repository.plan;
+  if (sourceCard(parent, plan, 'Recommended next steps')) {
+    const data = plan.data || {};
+    summaryLine(parent, 'Suggestions', data.satisfied === undefined ? '' : String(data.satisfied) + ' already satisfied');
+    const suggestions = Array.isArray(data.suggestions) ? data.suggestions.slice(0, 12) : [];
+    for (const suggestion of suggestions) {
+      const row = make('div', 'card');
+      row.appendChild(badge(suggestion.tier));
+      row.appendChild(make('strong', '', suggestion.id || 'suggestion'));
+      if (suggestion.title) row.appendChild(make('span', '', suggestion.title));
+      if (suggestion.why) row.appendChild(make('div', 'muted', suggestion.why));
+      parent.appendChild(row);
+    }
+  }
+}
+
+function renderContext(root, snap) {
+  const parent = root.querySelector('#context');
+  parent.replaceChildren();
+  const brief = snap.context.brief;
+  if (sourceCard(parent, brief, 'Verified context')) {
+    const data = brief.data || {};
+    summaryLine(parent, 'Target', data.target);
+    const gaps = Array.isArray(data.gaps) ? data.gaps : [];
+    parent.appendChild(make('h2', '', 'Open gaps'));
+    if (gaps.length === 0) parent.appendChild(make('div', 'muted', 'No gaps reported.'));
+    for (const gap of gaps.slice(0, 20)) {
+      parent.appendChild(make('div', 'card', typeof gap === 'string' ? gap : (gap.title || gap.id || JSON.stringify(gap))));
+    }
+  }
+  const staged = snap.context.staged;
+  if (sourceCard(parent, staged, 'Staged changes')) {
+    const data = staged.data || {};
+    if (!data.exists) {
+      parent.appendChild(make('div', 'muted', 'No staged bundle. Run anvil init to prepare one; this view never prepares it for you.'));
+    } else {
+      summaryLine(parent, 'Created', data.createdAt);
+      summaryLine(parent, 'Summary', (data.summary && data.summary.files) + ' file(s), +' + (data.summary && data.summary.added) + ' -' + (data.summary && data.summary.removed));
+      const files = Array.isArray(data.files) ? data.files : [];
+      for (const file of files) {
+        const card = make('div', 'card');
+        card.appendChild(make('strong', '', file.path));
+        if (file.edited) card.appendChild(badge('edited since staging'));
+        if (file.diff) card.appendChild(make('pre', '', file.diff));
+        else card.appendChild(make('div', 'muted', 'No changes against the repository copy.'));
+        parent.appendChild(card);
+      }
+    }
+  }
+}
+
+function renderWork(root, snap) {
+  const parent = root.querySelector('#work');
+  parent.replaceChildren();
+  const crew = snap.work.crew;
+  if (sourceCard(parent, crew, 'Claims and worktrees')) {
+    const people = Array.isArray(crew.data && crew.data.crew) ? crew.data.crew : [];
+    if (people.length === 0) {
+      parent.appendChild(make('div', 'muted', 'No claims. Run anvil claim with a ticket to start one.'));
+    } else {
+      const table = make('table');
+      const head = make('tr');
+      for (const label of ['key', 'branch', 'worktree', 'uncommitted', 'unpushed', 'agent', 'state']) head.appendChild(make('th', '', label));
+      table.appendChild(head);
+      for (const person of people) {
+        const row = make('tr');
+        for (const value of [person.key, person.branch, person.worktree, person.uncommitted, person.unpushed, person.agentAlive === null ? '-' : person.agentAlive ? 'alive' : 'dead', person.state]) {
+          row.appendChild(make('td', '', value === undefined || value === null ? '-' : String(value)));
+        }
+        table.appendChild(row);
+      }
+      parent.appendChild(table);
+    }
+  }
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Verification'));
+  card.appendChild(badge('unavailable'));
+  card.appendChild(make('div', '', snap.verification.reason));
+  parent.appendChild(card);
+}
+
+function render() {
+  const snap = state.snapshot;
+  const root = document;
+  if (!snap) return;
+  root.querySelector('#stamp').textContent = 'snapshot ' + snap.fetchedAt;
+  const ready = snap.repository.ready;
+  if (ready && ready.ok && ready.data && ready.data.root) root.querySelector('#scope').textContent = ready.data.root;
+  root.querySelector('#notes').textContent = snap.notes.join(' ');
+  renderRepository(root, snap);
+  renderContext(root, snap);
+  renderWork(root, snap);
+  for (const section of ['repository', 'context', 'work']) {
+    root.querySelector('#' + section).hidden = section !== state.view;
+  }
+  for (const tab of document.querySelectorAll('.tab')) {
+    tab.classList.toggle('active', tab.dataset.view === state.view);
+  }
+}
+
+async function load(refresh) {
+  if (state.loading) return;
+  state.loading = true;
+  document.querySelector('#refresh').disabled = true;
+  try {
+    const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
+    state.snapshot = await response.json();
+    render();
+  } catch (error) {
+    const target = document.querySelector('#' + state.view);
+    target.replaceChildren();
+    target.appendChild(make('div', 'error', error instanceof Error ? error.message : String(error)));
+  } finally {
+    state.loading = false;
+    document.querySelector('#refresh').disabled = false;
+  }
+}
+
+for (const tab of document.querySelectorAll('.tab')) {
+  tab.addEventListener('click', function () {
+    state.view = tab.dataset.view;
+    render();
+  });
+}
+document.querySelector('#refresh').addEventListener('click', function () { load(true); });
+load(false);
+`

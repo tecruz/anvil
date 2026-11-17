@@ -1,0 +1,10 @@
+{
+  "name": "@anvil/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional local read-only overview over the CLI's JSON contracts.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

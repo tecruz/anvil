@@ -29,6 +29,7 @@ import {
 import { discoverRepo, type GitRepoInfo } from '@anvil/git'
 import { configCommand } from './commands/config.ts'
 import { crewCommand } from './commands/crew.ts'
+import { dashboardCommand } from './commands/dashboard.ts'
 import { doctorCommand, profileCommand } from './commands/doctor.ts'
 import { briefCommand, initCommand } from './commands/init.ts'
 import { mcpCommand } from './commands/mcp.ts'
@@ -48,6 +49,7 @@ const COMMANDS: Command[] = [
   claimCommand,
   configCommand,
   crewCommand,
+  dashboardCommand,
   doctorCommand,
   initCommand,
   issueCommand,

@@ -68,7 +68,7 @@ the explicit request for no network at all. See the
 
 ## The packages
 
-Thirteen packages, one directory each, no package depending on a higher layer than its
+Fourteen packages, one directory each, no package depending on a higher layer than its
 own. The import graph below is the real one, read from the source.
 
 | Package | Responsibility | Imports |
@@ -84,7 +84,8 @@ own. The import graph below is the real one, read from the source.
 | `packages/providers` | The `gh`, Jira Cloud and local-markdown providers, the shared contract tests, and the one place a command resolves which provider to use | `core`, `tickets`, `worktrees` |
 | `packages/pr` | Pull request construction: title, body, risk checklist, reviewers | `profile`, `tickets` |
 | `packages/worktrees` | Claims, the crew, the ship pipeline | `core`, `git`, `pr`, `profile`, `tickets` |
-| `packages/cli` | The command surface: parsing, help, output, exit codes, and the stdio MCP server | all of the above |
+| `packages/cli` | The command surface: parsing, help, output, exit codes, the stdio MCP server and the loopback dashboard | all of the above |
+| `packages/dashboard` | The optional local read-only overview: a loopback HTTP server over CLI JSON and staging diffs | — (Node built-ins only) |
 | `packages/plugin-opencode` | The opencode plugin: four tools, a compaction hook, a session recorder | — (it shells out to the CLI) |
 
 Two consequences worth knowing:
@@ -103,6 +104,11 @@ Two consequences worth knowing:
   three read-only commands — `doctor`, `plan` and `crew status` — by running the CLI and
   returning its envelope, so an MCP client and a shell cannot disagree about what the
   tool said.
+- **The dashboard is a view, not a second implementation.** `anvil dashboard` binds to
+  loopback, requires a one-time session token, and presents `doctor`, `ready`, `plan`,
+  `brief` and `crew status` JSON beside a read-only view of the staging bundle. A failed
+  source is reported beside the others, and verification is `unavailable` rather than
+  green by absence ([ADR-0025](adr/0025-local-dashboard.md)).
 
 ## Tickets and providers
 
@@ -354,6 +360,7 @@ These are not style preferences. Each one is a bug that was found and fixed.
 | [ADR-0021](adr/0021-setup-adapters-are-a-registry.md) | why setup adapters are a closed registry that never writes |
 | [ADR-0022](adr/0022-pinned-skills-are-fetched-then-offline.md) | why a pinned skill is fetched once and then planned offline |
 | [ADR-0024](adr/0024-jira-cloud-rest-v3.md) | why the Jira provider speaks Jira Cloud REST v3 only |
+| [ADR-0025](adr/0025-local-dashboard.md) | why the dashboard is a read-only view over CLI JSON |
 | [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) | the design, the milestones, and the defects each one found |
 
 The [usage guide](USAGE.md) is the other half of this document: what to run.
