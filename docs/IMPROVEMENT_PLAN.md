@@ -5,8 +5,9 @@ Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconcil
 unknown cost, and skill-access evidence that was diagnosed from local, uncommitted session
 observations rather than rerun. Phase 4's installed-CLI matrix now passes on
 all six CI legs; publication is the remaining Phase 4 criterion. The Phase 0 merge-gate
-demonstration was recorded on 2026-11-14. Open: the Phase 1 artifact-retention
-demonstration and publication (needs publishing approval and control of the scoped npm name).
+demonstration was recorded on 2026-11-14, and the Phase 1 artifact-retention demonstration
+was recorded on 2026-11-17. Open: publication (needs publishing approval and control of the
+scoped npm name).
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -169,17 +170,21 @@ New checkpoint/report modules can be extracted from the script if that keeps tes
 - [x] Synthetic secret markers do not appear in published artifacts or summary output.
   `scripts/test/eval-transcript.test.ts` covers OpenAI, OpenRouter and both GitHub token
   shapes, and `sanitizes errors, verifier output, and transcripts before persistence`.
-- [ ] A maintainer-approved synthetic CI run demonstrates artifact retention after failure.
-  **Implementation ready for an approved dispatch.** A `rehearse_failure: true` dispatch of
-  `eval.yml` runs a separate hermetic job: it uses `--fake-agent`, confirms the healthy gate
-  passes, tampers with one visible result, asserts that the gate rejects it, then fails on
-  purpose. An `if: always()` upload retains only `failure-rehearsal.json`,
-  `gate-rejection.log`, `run.json`, the run archive and checkpoints for 30 days. The real-model
-  job is skipped for that dispatch, so no provider keys or model spend are involved. The
-  rehearsal checks live in `scripts/eval-rehearsal.ts` and are covered by
+- [x] A maintainer-approved synthetic CI run demonstrates artifact retention after failure.
+  [Run 44056529412](https://github.com/tecruz/anvil/actions/runs/44056529412) dispatched
+  `rehearse_failure: true` at `5968521e960d62c3ba59890e389d922e6cbc8e18`. The separate
+  hermetic job used `--fake-agent`, confirmed the healthy gate passed, tampered with one
+  visible result, asserted the gate rejected it, validated every required file, then failed
+  on purpose. The real-model job was skipped, so no provider keys were used and no model was
+  called. The `if: always()` upload retained `failure-rehearsal.json`,
+  `gate-rejection.log`, `run.json`, the run archive and eight checkpoints as
+  `eval-failure-rehearsal-44056529412-attempt1` (9,117 bytes, expires 2026-12-17). The
+  downloaded copy was re-validated with the merged checker:
+  `Validated 3 files, the run archive and 8 checkpoints.` Details and hashes are in
+  [the retention evidence record](evidence/2026-11-17-artifact-retention.md). The rehearsal
+  checks live in `scripts/eval-rehearsal.ts` and are covered by
   `scripts/test/eval-rehearsal.test.ts`, so a regression is caught by the normal suite rather
-  than only by a dispatch. The dispatch run id and the retained artifact evidence will be
-  recorded here after Tiago approves and runs it.
+  than only by a dispatch.
 
 ## Phase 2 — Measure whether derived context actually helps
 
@@ -569,11 +574,12 @@ for it exists. These are the commands behind the reconciled checklists.
 | Full validation before the registry-smoke expansion | `npm run check` completed: 1810 tests, 1797 passed, 13 skipped, 0 failed; build, docs check and eval gate passed. |
 | Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
+| Artifact retention after an intentional failure | [Retained artifact record](evidence/2026-11-17-artifact-retention.md): run 44056529412 failed on purpose; artifact `eval-failure-rehearsal-44056529412-attempt1` retained 12 allowlisted files and expires 2026-12-17; the downloaded copy re-validated as `Validated 3 files, the run archive and 8 checkpoints.` |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
 
-The remaining open Phase 1 artifact-retention item and the open Phase 4 items each name
-what would close them.
+The Phase 1 artifact-retention criterion is closed by the rehearsal record above; the open
+Phase 4 items each name what would close them.
 The bounded pilot is recorded as complete, not as proof of product effectiveness.
 Publication remains on hold. Approval and successful execution are separate facts.
 
