@@ -687,7 +687,26 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
+| `anvil dashboard` | Loopback-only read-only overview of readiness, context and work. `--repo <dir>`, `--port <n>`. |
 | `anvil version` | The anvil version and the JSON schema version. |
+
+### The local dashboard
+
+`anvil dashboard` starts a small read-only server for the current repository. Open the
+one-time URL it prints; the session token is then held in an HttpOnly cookie. The server
+binds to `127.0.0.1`, never to a network interface, and is stopped with Ctrl+C.
+
+The page has three views: **Repository** (readiness findings, blockers and ranked next
+steps), **Context** (verified brief gaps and a read-only view of the staged diff), and
+**Work** (claims, worktrees, uncommitted and unpushed changes, and agent liveness). Each
+value names the CLI command behind it, and every refresh re-reads those commands in offline
+mode. A failed command appears as an error beside the other views; it never renders as an
+empty result.
+
+Verification is deliberately shown as *unavailable*: anvil does not persist verification
+results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`
+for a current verdict. The dashboard does not stage, apply, set up, claim, ship, or update a
+tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
 `fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
