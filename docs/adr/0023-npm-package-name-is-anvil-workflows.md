@@ -17,10 +17,11 @@ npm account was not authenticated on the build machine (`npm whoami` returned `E
 and the repository has no npm token secret.
 
 The maintainer selected `@anvil-workflows/cli`. The `@anvil-workflows` scope did not exist
-when checked (`{"error":"Scope not found"}`), and `@anvil-workflows/cli` returned 404. That
-is availability evidence, not ownership: the maintainer still has to create the scope and
-confirm publish rights before the name-control acceptance criterion is met. The check is
-recorded in [the npm scope evidence](../evidence/2026-11-17-npm-scope.md).
+when checked (`{"error":"Scope not found"}`), and `@anvil-workflows/cli` returned 404. The
+maintainer then created the org; `npm org ls anvil-workflows --json` returned
+`{"tecruz":"owner"}` on 2026-11-17, which confirms name control. The package is still
+unpublished. The check is recorded in
+[the npm scope evidence](../evidence/2026-11-17-npm-scope.md).
 
 ## Decision
 
@@ -31,8 +32,7 @@ root git-install package stays `anvil`.**
   the tag boundary is unchanged. Only the registry package name changes.
 - The release workflow packs `--workspace @anvil-workflows/cli`, refuses to publish when the
   packed name differs from that exact string, and titles release notes with the new name.
-- The registry channel remains unreleased until the maintainer creates the npm org and
-  confirms publish rights, and a first release is separately approved.
+- The registry channel remains unreleased until a first release is separately approved.
 
 ## Consequences
 
