@@ -7,13 +7,14 @@
 # The bundle is never rebuilt after testing: if the build changes, the tag moves and a
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
 #
-# The published package is the scoped workspace `@anvil/cli` (ADR-0012), because the
-# unscoped `anvil` name belongs to an unrelated package on npm. The repository root stays
-# the git-install unit (ADR-0007); it is not the registry target.
+# The published package is the scoped workspace `@anvil-workflows/cli` (ADR-0023),
+# because the unscoped `anvil` name and the `@anvil` scope belong to unrelated packages on
+# npm. The repository root stays the git-install unit (ADR-0007); it is not the registry
+# target.
 #
 # Secrets:
-#   NPM_TOKEN — an npm auth token with publish access to `@anvil/cli`. Scoped to this
-#     workflow only; ordinary PR jobs never see it.
+#   NPM_TOKEN — an npm auth token with publish access to `@anvil-workflows/cli`. Scoped to
+#     this workflow only; ordinary PR jobs never see it.
 
 name: Release
 
@@ -44,7 +45,7 @@ jobs:
       - name: check (lint, typecheck, test, build)
         run: npm run check
 
-      # Pack the scoped workspace that is the registry target (ADR-0012), not the root:
+      # Pack the scoped workspace that is the registry target (ADR-0023), not the root:
       # the root is the git-install unit and its unscoped name is unavailable on npm.
       # npm always includes README and LICENSE found beside the manifest, and this
       # workspace carries neither, so stage the root copies first. `--pack-destination`
@@ -54,7 +55,7 @@ jobs:
         run: |
           mkdir -p dist
           cp LICENSE README.md packages/cli/
-          npm pack --workspace @anvil/cli --pack-destination dist
+          npm pack --workspace @anvil-workflows/cli --pack-destination dist
 
       # Enforce the allowlist, do not merely print it. A publish is irreversible, so an
       # unexpected entry -- source, tests, a stray credential -- has to fail here rather
@@ -96,7 +97,7 @@ jobs:
           # Sidecars live outside the tarball: preserving evidence must not repack or
           # change the bytes that the installed-binary smoke test receives.
           printf '%s  %s\n' "$checksum" "$(basename "$tarball")" > dist/SHA256SUMS
-          printf '## @anvil/cli@%s\n\nSource commit: `%s`\n\nTarball: `%s`\n\nSHA-256: `%s`\n' \
+          printf '## @anvil-workflows/cli@%s\n\nSource commit: `%s`\n\nTarball: `%s`\n\nSHA-256: `%s`\n' \
             "$version" "$source_sha" "$(basename "$tarball")" "$checksum" > dist/RELEASE_NOTES.md
 
       # Install the tarball into an isolated consumer project and smoke-test the
@@ -150,8 +151,8 @@ jobs:
             if (packed.name !== manifest.name) {
               throw new Error(`tarball is ${packed.name}, the workspace manifest is ${manifest.name}`)
             }
-            if (packed.name !== "@anvil/cli") {
-              throw new Error(`this workflow publishes @anvil/cli, not ${packed.name}`)
+            if (packed.name !== "@anvil-workflows/cli") {
+              throw new Error(`this workflow publishes @anvil-workflows/cli, not ${packed.name}`)
             }
             if (packed.version !== manifest.version) {
               throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)

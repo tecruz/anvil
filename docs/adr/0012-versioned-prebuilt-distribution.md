@@ -1,6 +1,7 @@
 # ADR-0012: Versioned prebuilt distribution via a scoped registry package
 
-- Status: accepted
+- Status: accepted, superseded on the package name by
+  [ADR-0023](0023-npm-package-name-is-anvil-workflows.md)
 - Date: 2026-10-28
 - Milestone: Phase 4
 - Supersedes: none — extends [ADR-0007](0007-distribution-git-install.md)
@@ -10,6 +11,10 @@
 The decision is accepted, but the registry channel is **unreleased**. Acceptance records the
 intended design, not an available npm package. GitHub installation remains the supported
 channel until a scoped release has been published and verified.
+
+The package name was later changed to `@anvil-workflows/cli` by
+[ADR-0023](0023-npm-package-name-is-anvil-workflows.md), after the `@anvil` scope was found
+to belong to an unrelated npm user. The rest of this decision stands.
 
 The release workflow packs, smoke-tests and publishes the scoped `packages/cli` workspace
 (`@anvil/cli`) from a version tag, and refuses to publish when the tag, the workspace manifest

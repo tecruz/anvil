@@ -476,12 +476,16 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 
 **Status:** in progress. Expanded installed-CLI smoke coverage passes on all three OSes and
 both Node lanes; publication is the remaining criterion. Publishing separately requires
-approval and confirmed scope access, and the maintainer has explicitly put it on hold.
+approval and confirmed scope access, and the maintainer has explicitly put it on hold. The
+registry name changed from `@anvil/cli` to `@anvil-workflows/cli` on 2026-11-17 after the
+`@anvil` scope was found to belong to an unrelated npm user
+([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)). The new scope was unclaimed,
+but the maintainer still has to create it and confirm publish rights.
 
 Implemented: the release workflow (`.github/workflows/release.yml`), the tarball allowlist,
 the identity check that the tag, the workspace manifest and the packed tarball agree, an
 install of the staged artifact with `--ignore-scripts`, the MCP handshake, and a packaging
-suite that packs the same `@anvil/cli` target from a temporary copy. That suite runs in
+suite that packs the same `@anvil-workflows/cli` target from a temporary copy. That suite runs in
 `npm run check` on every CI leg. Existing CI evidence covers tarball contents, installation
 without scripts, version/JSON and MCP on all three OSes and both Node lanes. The expanded
 registry test now also exercises help, doctor, staged generation/apply and preservation
@@ -497,15 +501,19 @@ and rejects tampering; the GitHub artifact upload and publication remain unexerc
 
 Also not done: confirming control of the scoped name, publishing a first release, and
 recording a published checksum and source SHA in the release notes. No release workflow
-has run, and the registry's `/latest` endpoint returns 404; neither observation establishes
-scope ownership. The workflow itself remains unproven end to end.
+has run. `@anvil/cli` returned 404 only because it is unpublished; the `@anvil` scope itself
+belongs to `kyle-mccarthy` and already contains `@anvil/common-asc`, so the maintainer cannot
+publish under it without membership. The `@anvil-workflows` scope returned `Scope not found`
+on 2026-11-17, which makes the chosen name available but does not prove ownership. The
+workflow itself remains unproven end to end.
 
 ### Decisions before implementation
 
 - Confirm that public distribution of the bundled code is intended, even if the source
   repository remains private.
 - Verify ownership/availability of a scoped npm name; do not use the unrelated unscoped
-  `anvil` registry name. The executable can remain `anvil`.
+  `anvil` registry name. The executable can remain `anvil`. `@anvil` is also taken, so the
+  agreed scope is `@anvil-workflows` ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)).
 - Decide whether to publish a generated distribution package or change the root manifest.
   Write an ADR extending [ADR-0007](adr/0007-distribution-git-install.md); preserve the
   GitHub source-install path unless its retirement is explicitly approved.
@@ -538,10 +546,12 @@ scope ownership. The workflow itself remains unproven end to end.
 ### Acceptance
 
 - [ ] The agreed package name is controlled by the maintainer, with no naming collision.
-  **Open, needs the maintainer**: it requires an authenticated npm account with publish
-  rights to the `@anvil` scope. `https://registry.npmjs.org/@anvil%2fcli/latest` returned
-  404 on 2026-11-14, which establishes no publicly accessible `latest` release at that
-  endpoint, not that the package has never existed or that the scope is ours.
+  **Open, needs the maintainer.** `@anvil/cli` cannot satisfy this: the `@anvil` scope is
+  owned by `kyle-mccarthy` and already contains `@anvil/common-asc`, while `@anvil/cli`
+  itself is unpublished. The agreed replacement is `@anvil-workflows/cli`; its scope returned
+  `Scope not found` on 2026-11-17, so the name is available, but the maintainer must create
+  the npm org and confirm publish rights. Local `npm whoami` returned `ENEEDAUTH`, and no
+  `NPM_TOKEN` secret exists. See [the scope evidence](evidence/2026-11-17-npm-scope.md).
 - [x] A clean tarball install works without a source build or runtime dependencies.
   `the staged artifact installs without scripts and exercises the installed CLI` in
   `packages/cli/test/package.test.ts`: `npm pack` of the staged workspace, then
@@ -553,7 +563,7 @@ scope ownership. The workflow itself remains unproven end to end.
   legs (3 OS x floor/LTS) have existed since PR #30.
 - [ ] Published bytes match the tested checksum; version and provenance identify the source.
   **Open, blocked on publication.** No comparison of the tested artifact with a published
-  `@anvil/cli` release has been recorded.
+  `@anvil-workflows/cli` release has been recorded.
 - [ ] First publication is explicitly approved; GitHub installation remains tested if supported.
   **Half satisfied**: the git channel is tested (`npm pack -> npm install -> the installed
   binary does real work`), but no publication has been approved or attempted.
@@ -575,6 +585,7 @@ for it exists. These are the commands behind the reconciled checklists.
 | Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
 | Artifact retention after an intentional failure | [Retained artifact record](evidence/2026-11-17-artifact-retention.md): run 44056529412 failed on purpose; artifact `eval-failure-rehearsal-44056529412-attempt1` retained 12 allowlisted files and expires 2026-12-17; the downloaded copy re-validated as `Validated 3 files, the run archive and 8 checkpoints.` |
+| The planned `@anvil` scope is not maintainer-controlled | [Scope check](evidence/2026-11-17-npm-scope.md): npmjs.com names `kyle-mccarthy` as the owner of `@anvil`, which already contains `@anvil/common-asc`; `@anvil/cli` returns 404 but is unpublishable without org membership. `@anvil-workflows` returned `Scope not found`, so `@anvil-workflows/cli` is available, but ownership remains unconfirmed. |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
 | No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
 

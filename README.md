@@ -22,10 +22,11 @@ or without installing, for one run:
 npx github:tecruz/anvil doctor
 ```
 
-**There is no npm registry release yet.** The prebuilt `@anvil/cli` channel is an accepted
-[distribution plan](docs/adr/0012-versioned-prebuilt-distribution.md), not an available
-release. Registry installation is not supported until the scoped package has been published
-and verified.
+**There is no npm registry release yet.** The prebuilt `@anvil-workflows/cli` channel is an
+accepted [distribution plan](docs/adr/0012-versioned-prebuilt-distribution.md), with the package
+name set by [ADR-0023](docs/adr/0023-npm-package-name-is-anvil-workflows.md). It is not an
+available release: registry installation is not supported until the scoped package has been
+published and verified.
 
 **Not `npm install -g anvil`.** That name belongs to an unrelated package on npm; use the
 GitHub install instructions above.

@@ -178,8 +178,8 @@ describe('publishable package', () => {
   })
 
   test('the bin is what people type, and it is unscoped', () => {
-    // A scoped `@anvil/cli` installs as `anvil` via the bin key but shows up in `npm ls` as
-    // a scope the user never chose. The bin is what people type, so it stays unscoped.
+    // A scoped `@anvil-workflows/cli` installs as `anvil` via the bin key but shows up in
+    // `npm ls` as a scope the user never chose. The bin is what people type, so it stays unscoped.
     assert.equal((CLI_PKG.bin as Record<string, string>).anvil, './dist/cli.js')
   })
 
@@ -741,7 +741,7 @@ describe('the MCP handshake is validated, not just observed', () => {
   })
 })
 
-/** The filename npm gives the scoped package: @anvil/cli -> anvil-cli-0.1.0.tgz */
+/** The filename npm gives the scoped package: @anvil-workflows/cli -> anvil-workflows-cli-0.1.0.tgz */
 function tarballName(): string {
   return `${String(CLI_PKG.name).replace('@', '').replace('/', '-')}-${String(CLI_PKG.version)}.tgz`
 }
@@ -758,7 +758,7 @@ async function listTarball(tarball: string): Promise<string[]> {
 /**
  * The registry artifact (ADR-0012).
  *
- * `npm pack --workspace @anvil/cli` is what `release.yml` publishes, and nothing above packs
+ * `npm pack --workspace @anvil-workflows/cli` is what `release.yml` publishes, and nothing above packs
  * it: the suite above packs the *root*, which is the git-install unit and a different
  * artifact. A wrong bin path, a `files` allowlist that omits the bundle, or a workspace whose
  * bytes only work from a checkout would otherwise be discovered by a user after a publish --
@@ -920,7 +920,7 @@ describe('the registry tarball (ADR-0012)', () => {
     assert.equal(existsSync(join(consumer, '.anvil', 'staging')), false, 'apply did not clear staging')
     for (const [path, content] of fixtureFiles) assert.equal(readFileSync(join(consumer, path), 'utf8'), content)
 
-    const installedBundle = join(consumer, 'node_modules', '@anvil', 'cli', 'dist', 'cli.js')
+    const installedBundle = join(consumer, 'node_modules', ...String(CLI_PKG.name).split('/'), 'dist', 'cli.js')
     assert.ok(existsSync(installedBundle), `the tarball did not install ${installedBundle}`)
     const responses = await mcpHandshake(installedBundle, consumer)
     checkHandshake(responses)
