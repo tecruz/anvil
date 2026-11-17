@@ -20,7 +20,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0009](0009-guidance-has-to-earn-its-place.md) | Guidance has to earn its place: an instruction budget, and resources that can be satisfied | accepted |
 | [0010](0010-cost-is-read-from-the-hosts-ledger.md) | Cost is read from the host's ledger; anvil records nothing | accepted |
 | [0011](0011-mcp-for-the-control-surface.md) | The MCP control surface runs the CLI, not a second contract | accepted |
-| [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | accepted |
+| [0012](0012-versioned-prebuilt-distribution.md) | Versioned prebuilt distribution via a scoped registry package | accepted, superseded on the package name by [0023](0023-npm-package-name-is-anvil-workflows.md) |
 | [0013](0013-stale-discovery-is-reported-not-merged.md) | A stale discovery cache is reported, not merged | superseded for `plan`/`brief` by [0017](0017-plan-enriches-by-default.md) |
 | [0014](0014-optional-resources-in-the-worktree.md) | A worktree gets a shortlist of optional resources, with publisher evidence | accepted |
 | [0015](0015-framework-evidence-is-the-framework.md) | A framework is matched by its own evidence, not its build system | accepted |
@@ -31,6 +31,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0020](0020-application-is-a-journaled-transition.md) | Application is a journaled, create-only transition after consumption | accepted |
 | [0021](0021-setup-adapters-are-a-registry.md) | Setup adapters are a closed registry, and they never write | accepted |
 | [0022](0022-pinned-skills-are-fetched-then-offline.md) | A pinned skill is fetched once, then planned offline | accepted |
+| [0023](0023-npm-package-name-is-anvil-workflows.md) | The registry package name is `@anvil-workflows/cli` | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.

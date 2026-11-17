@@ -15,7 +15,7 @@ Typescript project, with javascript. Default branch: `origin/main`.
 ## Layout
 
 - `packages/audit` -- @anvil/audit (depends on @anvil/profile)
-- `packages/cli` -- @anvil/cli
+- `packages/cli` -- @anvil-workflows/cli
 - `packages/core` -- @anvil/core
 - `packages/derive` -- @anvil/derive (depends on @anvil/audit, @anvil/playbooks, @anvil/profile)
 - `packages/discovery` -- @anvil/discovery (depends on @anvil/core, @anvil/playbooks)

@@ -1,5 +1,5 @@
 {
-  "name": "@anvil/cli",
+  "name": "@anvil-workflows/cli",
   "version": "0.1.0",
   "type": "module",
   "description": "The anvil CLI. Published from the workspace root; see ADR-0007.",
