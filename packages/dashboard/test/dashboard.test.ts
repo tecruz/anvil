@@ -10,12 +10,14 @@
 import assert from 'node:assert/strict'
 import { request as httpRequest } from 'node:http'
 import { describe, test } from 'node:test'
+import { createContext, runInContext } from 'node:vm'
 import {
   createDashboardServer,
   type DashboardInvoke,
   type DashboardInvokeResult,
   type DashboardServerHandle,
   type DashboardSnapshot,
+  JS,
   loadSnapshot,
   type StagedView,
 } from '@anvil/dashboard'
@@ -31,7 +33,7 @@ const staged: StagedView = {
   createdAt: '2026-11-17T10:00:00.000Z',
   inputHash: 'abc123',
   summary: { files: 1, added: 2, removed: 0 },
-  files: [{ path: '.anvil/AGENTS.md', diff: '+ a line', edited: false }],
+  files: [{ path: '.anvil/AGENTS.md', diff: '+ a line', edited: false, error: null }],
 }
 
 function envelope(data: unknown): DashboardInvokeResult {
@@ -74,13 +76,22 @@ async function withServer<T>(
 }
 
 function authed(server: DashboardServerHandle, path: string): Promise<Response> {
-  return fetch(new URL(path, server.url), { headers: { cookie: `anvil_dashboard=${TOKEN}` } })
+  return fetch(new URL(path, server.url), { headers: { cookie: `${server.cookieName}=${TOKEN}` } })
 }
 
-function rawGet(port: number, path: string, host: string): Promise<{ status: number | undefined; body: string }> {
+function rawGet(
+  server: DashboardServerHandle,
+  path: string,
+  host: string,
+): Promise<{ status: number | undefined; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest(
-      { host: '127.0.0.1', port, path, headers: { host, cookie: `anvil_dashboard=${TOKEN}` } },
+      {
+        host: '127.0.0.1',
+        port: server.port,
+        path,
+        headers: { host, cookie: `${server.cookieName}=${TOKEN}` },
+      },
       (res) => {
         let body = ''
         res.setEncoding('utf8')
@@ -120,12 +131,34 @@ describe('the dashboard server', () => {
     })
   })
 
+  test('concurrent dashboards keep separate session cookies', async () => {
+    const { invoke } = fakeInvoke()
+    const readStaged = () => staged
+    const first = await createDashboardServer({ cwd: '/repo', invoke, readStaged, token: TOKEN })
+    let second: DashboardServerHandle | undefined
+    try {
+      second = await createDashboardServer({ cwd: '/repo', invoke, readStaged, token: 'another-token' })
+      assert.notEqual(first.cookieName, second.cookieName)
+
+      const bootFirst = await fetch(first.url, { redirect: 'manual' })
+      const firstCookie = bootFirst.headers.get('set-cookie')?.split(';')[0] ?? ''
+      const bootSecond = await fetch(second.url, { redirect: 'manual' })
+      assert.match(bootSecond.headers.get('set-cookie') ?? '', new RegExp(second.cookieName))
+
+      const stillValid = await fetch(new URL('/api/snapshot', first.url), { headers: { cookie: firstCookie } })
+      assert.equal(stillValid.status, 200)
+    } finally {
+      await first.close()
+      if (second !== undefined) await second.close()
+    }
+  })
+
   test('the API requires the session token', async () => {
     await withServer(async (server) => {
       const anonymous = await fetch(new URL('/api/snapshot', server.url))
       assert.equal(anonymous.status, 401)
       const wrong = await fetch(new URL('/api/snapshot', server.url), {
-        headers: { cookie: 'anvil_dashboard=not-the-token' },
+        headers: { cookie: `${server.cookieName}=not-the-token` },
       })
       assert.equal(wrong.status, 401)
       const right = await authed(server, '/api/snapshot')
@@ -135,12 +168,12 @@ describe('the dashboard server', () => {
 
   test('it rejects a foreign Host header and any write method', async () => {
     await withServer(async (server) => {
-      const rebound = await rawGet(server.port, '/api/snapshot', 'dashboard.example.com')
+      const rebound = await rawGet(server, '/api/snapshot', 'dashboard.example.com')
       assert.equal(rebound.status, 403)
 
       const post = await fetch(new URL('/api/snapshot', server.url), {
         method: 'POST',
-        headers: { cookie: `anvil_dashboard=${TOKEN}` },
+        headers: { cookie: `${server.cookieName}=${TOKEN}` },
       })
       assert.equal(post.status, 405)
       assert.equal(post.headers.get('allow'), 'GET, HEAD')
@@ -249,6 +282,26 @@ describe('the dashboard server', () => {
 })
 
 describe('the snapshot reader', () => {
+  test('a staged read error survives into the snapshot instead of an empty diff', async () => {
+    const { invoke } = fakeInvoke()
+    const broken: StagedView = {
+      ...staged,
+      files: [
+        {
+          path: '.anvil/AGENTS.md',
+          diff: '',
+          edited: true,
+          error: 'Staged file could not be read: files/AGENTS.md',
+        },
+      ],
+    }
+    const snapshot = await loadSnapshot({ cwd: '/repo', invoke, readStaged: () => broken })
+    assert.equal(snapshot.context.staged.ok, true)
+    const file = snapshot.context.staged.data?.files[0]
+    assert.equal(file?.diff, '')
+    assert.match(file?.error ?? '', /could not be read/)
+  })
+
   test('a thrown invocation becomes one error, not a rejected promise', async () => {
     const { invoke } = fakeInvoke()
     const snapshot = await loadSnapshot({
@@ -262,5 +315,184 @@ describe('the snapshot reader', () => {
     assert.equal(snapshot.work.crew.ok, false)
     assert.match(snapshot.work.crew.error ?? '', /spawn failed/)
     assert.equal(snapshot.repository.doctor.ok, true)
+  })
+})
+
+describe('the dashboard page', () => {
+  class FakeElement {
+    children: FakeElement[] = []
+    textContent = ''
+    className = ''
+    dataset: Record<string, string> = {}
+    hidden = false
+    disabled = false
+    classList = { toggle() {} }
+
+    readonly tag: string
+
+    constructor(tag: string) {
+      this.tag = tag
+    }
+
+    appendChild(node: FakeElement): FakeElement {
+      this.children.push(node)
+      return node
+    }
+
+    replaceChildren(...nodes: FakeElement[]): void {
+      this.children = nodes
+    }
+
+    addEventListener(): void {}
+
+    text(): string {
+      return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
+    }
+  }
+
+  test('status badges are matched exactly, not by substring', () => {
+    const context = createContext({
+      document: {
+        createElement: () => ({
+          className: '',
+          textContent: '',
+          appendChild() {},
+          replaceChildren() {},
+          addEventListener() {},
+        }),
+        querySelector: () => ({ addEventListener() {} }),
+        querySelectorAll: () => [],
+      },
+    })
+    runInContext(JS.replace('load(false);', ''), context)
+
+    const unavailable = runInContext("badge('unavailable')", context)
+    assert.equal(unavailable.className, 'badge unknown')
+    const available = runInContext("badge('available')", context)
+    assert.equal(available.className, 'badge available')
+    const incompatible = runInContext("badge('incompatible')", context)
+    assert.equal(incompatible.className, 'badge fail')
+  })
+
+  test('the views surface blocker causes, read errors, orphaned work and plan details', () => {
+    const nodes = new Map<string, FakeElement>(
+      ['repository', 'context', 'work', 'refresh', 'scope', 'stamp', 'notes'].map((id) => [
+        `#${id}`,
+        new FakeElement('section'),
+      ]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const source = <T>(data: T) => ({
+      ok: true,
+      data,
+      error: null,
+      fetchedAt: 'now',
+      command: 'anvil test --json',
+    })
+    const snapshot: DashboardSnapshot = {
+      schemaVersion: 1,
+      fetchedAt: 'now',
+      repository: {
+        doctor: source({ score: 90, grade: 'A', findings: [], degraded: [] }),
+        ready: source({
+          status: 'blocked',
+          checked: true,
+          root: '/repo',
+          tools: [],
+          env: [{ name: 'GITHUB_TOKEN', status: 'missing', reason: 'needed for gh' }],
+          services: [],
+          references: [
+            {
+              id: 'requirements',
+              path: 'docs/requirements.md',
+              required: true,
+              status: 'missing',
+              reason: 'approved context',
+            },
+            { id: 'optional', path: 'docs/optional.md', required: false, status: 'missing' },
+          ],
+          credentials: [],
+          access: [],
+          hardware: [],
+          context: [{ id: 'instructions', label: 'Agent instructions', status: 'blocked', detail: 'no context' }],
+        }),
+        plan: source({
+          satisfied: 0,
+          suggestions: [
+            {
+              tier: 'derived',
+              id: 'fix:verify',
+              title: 'Add test command',
+              detail: 'Document npm test in AGENTS.md',
+              evidence: ['AGENTS.md:3'],
+            },
+          ],
+        }),
+      },
+      context: {
+        brief: source({ target: 'all', gaps: [] }),
+        staged: source({
+          exists: true,
+          createdAt: 'now',
+          inputHash: 'test-hash',
+          summary: { files: 1, added: 0, removed: 0 },
+          files: [
+            {
+              path: 'AGENTS.md',
+              diff: '',
+              edited: true,
+              error: 'Staged file could not be read: files/AGENTS.md',
+            },
+          ],
+        }),
+      },
+      work: {
+        crew: source({
+          crew: [
+            {
+              key: 'local-1',
+              branch: 'feat/one',
+              worktree: '/gone',
+              present: false,
+              uncommitted: 0,
+              unpushed: null,
+              agentAlive: null,
+              state: 'active',
+              orphaned: true,
+            },
+          ],
+        }),
+      },
+      verification: { status: 'unavailable', reason: 'not persisted' },
+      notes: [],
+    }
+
+    const context = createContext({ document })
+    ;(context as Record<string, unknown>).__snapshot = snapshot
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext(
+      'renderRepository(document, __snapshot); renderContext(document, __snapshot); renderWork(document, __snapshot);',
+      context,
+    )
+
+    const repository = nodes.get('#repository')?.text() ?? ''
+    assert.match(repository, /docs\/requirements\.md/)
+    assert.doesNotMatch(repository, /docs\/optional\.md/)
+    assert.match(repository, /GITHUB_TOKEN/)
+    assert.match(repository, /Agent instructions/)
+    assert.match(repository, /Document npm test in AGENTS\.md/)
+    assert.match(repository, /AGENTS\.md:3/)
+
+    const contextText = nodes.get('#context')?.text() ?? ''
+    assert.match(contextText, /Staged file could not be read/)
+    assert.doesNotMatch(contextText, /No changes against the repository copy/)
+
+    const work = nodes.get('#work')?.text() ?? ''
+    assert.match(work, /orphaned/)
+    assert.doesNotMatch(work, /active/)
   })
 })

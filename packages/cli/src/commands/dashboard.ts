@@ -9,7 +9,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
-import { createDashboardServer, type StagedView } from '@anvil/dashboard'
+import { createDashboardServer, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
 import { createCliInvoker } from '../mcp.ts'
 import type { Command } from './types.ts'
@@ -30,8 +30,8 @@ function parsePort(value: unknown): number {
   return port
 }
 
-/** Read the staging bundle without changing it. Any read failure becomes a source error. */
-function stagedView(repoRoot: string): StagedView {
+/** Read the staging bundle without changing it. A per-file read failure stays an error. */
+export function stagedView(repoRoot: string): StagedView {
   const state = inspectStaging(repoRoot)
   const manifest = state.manifest
   if (!state.exists || manifest === null) {
@@ -39,28 +39,37 @@ function stagedView(repoRoot: string): StagedView {
   }
 
   const diffs = []
+  const files: StagedFileView[] = []
   for (const file of manifest.files) {
+    const edited = state.tampered.includes(file.path)
     const staged = readStaged(repoRoot, file)
+    if (staged === null) {
+      // A missing, unreadable or unsafe staged file is not an empty file. Rendering an empty
+      // file would fabricate a deletion diff and make a broken bundle look intentionally edited.
+      files.push({
+        path: file.path,
+        diff: '',
+        edited,
+        error: `Staged file could not be read: ${file.stagedPath}`,
+      })
+      continue
+    }
     const before = readRepoFile(repoRoot, file.path)
-    const diff = diffFile({ path: file.path, before, after: staged ?? '' })
+    const diff = diffFile({ path: file.path, before, after: staged })
     if (diff !== null) diffs.push(diff)
+    files.push({
+      path: file.path,
+      diff: diff === null ? '' : renderUnifiedDiff([diff]),
+      edited,
+      error: null,
+    })
   }
-  const totals = summarize(diffs)
   return {
     exists: true,
     createdAt: manifest.createdAt,
     inputHash: manifest.inputHash,
-    files: manifest.files.map((file) => {
-      const staged = readStaged(repoRoot, file) ?? ''
-      const before = readRepoFile(repoRoot, file.path)
-      const diff = diffFile({ path: file.path, before, after: staged })
-      return {
-        path: file.path,
-        diff: diff === null ? '' : renderUnifiedDiff([diff]),
-        edited: state.tampered.includes(file.path),
-      }
-    }),
-    summary: totals,
+    files,
+    summary: summarize(diffs),
   }
 }
 

@@ -15,7 +15,7 @@ import { createServer, type Server } from 'node:http'
 import { CSS, HTML, JS } from './assets.ts'
 import { type DashboardSnapshot, type LoadSnapshotOptions, loadSnapshot } from './snapshot.ts'
 
-const COOKIE = 'anvil_dashboard'
+const COOKIE_PREFIX = 'anvil_dashboard'
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
@@ -39,6 +39,11 @@ export interface DashboardServerHandle {
   url: string
   token: string
   port: number
+  /**
+   * The session cookie name. It is unique per server because cookies are scoped by name,
+   * not by port: two dashboards on different ports must not overwrite each other's tokens.
+   */
+  cookieName: string
   close(): Promise<void>
 }
 
@@ -79,6 +84,10 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? 0
   const token = options.token ?? randomBytes(24).toString('base64url')
+  // Cookies are keyed by name and path, not by port, so every dashboard needs its own name.
+  // A fixed `anvil_dashboard` cookie would let a second dashboard overwrite the first one's
+  // token and lock the first browser session out on its next refresh.
+  const cookieName = `${COOKIE_PREFIX}_${randomBytes(6).toString('base64url')}`
   // Port 0 is resolved by the OS. The Host check must use the bound port, not the request.
   let boundPort = port
   let cache: DashboardSnapshot | null = null
@@ -113,7 +122,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
       }
 
       const supplied = url.searchParams.get('token')
-      const cookie = cookieValue(req.headers.cookie, COOKIE)
+      const cookie = cookieValue(req.headers.cookie, cookieName)
       const authorized =
         (supplied !== null && sameToken(supplied, token)) || (cookie !== null && sameToken(cookie, token))
 
@@ -121,7 +130,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         if (supplied !== null && sameToken(supplied, token)) {
           res.writeHead(302, {
             location: '/',
-            'set-cookie': `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`,
+            'set-cookie': `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict`,
             'cache-control': 'no-store',
             'referrer-policy': 'no-referrer',
             'content-security-policy': CSP,
@@ -182,6 +191,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
     url: `http://${host}:${String(boundPort)}/?token=${token}`,
     token,
     port: boundPort,
+    cookieName,
     close() {
       return new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)))

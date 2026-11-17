@@ -14,6 +14,8 @@ export interface StagedFileView {
   diff: string
   /** True when the staged bytes no longer match what `init` produced. */
   edited: boolean
+  /** Non-null when the staged bytes could not be read, so `diff` must not be shown. */
+  error: string | null
 }
 
 /** A read-only view of `.anvil/staging/`, supplied by the CLI, which owns that format. */

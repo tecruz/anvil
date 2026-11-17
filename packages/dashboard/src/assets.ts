@@ -55,10 +55,10 @@ h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 .card { border: 1px solid #8886; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
 .error { border-left: 4px solid #c33; background: #c33110; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
 .badge { display: inline-block; border-radius: 4px; padding: 0 0.35rem; margin-right: 0.4rem; font-size: 0.8rem; border: 1px solid #8888; }
-.badge.fail, .badge.blocker, .badge.high { color: #c33; border-color: #c338; }
+.badge.fail, .badge.blocker, .badge.high, .badge.missing, .badge.empty, .badge.unreachable, .badge.unsatisfied { color: #c33; border-color: #c338; }
 .badge.warn, .badge.medium { color: #a60; border-color: #a608; }
 .badge.unknown, .badge.na { color: #888; }
-.badge.ok, .badge.pass { color: #282; border-color: #2828; }
+.badge.ok, .badge.pass, .badge.verified, .badge.available, .badge.satisfied, .badge.present, .badge.reachable { color: #282; border-color: #2828; }
 .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: baseline; }
 .muted { color: #888; font-size: 0.85rem; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding: 0.5rem; border-radius: 4px; }
@@ -76,10 +76,36 @@ function make(tag, className, text) {
   return node;
 }
 
+// Exact statuses, not substrings: unavailable contains available, but it is an absence
+// of evidence and must never inherit the success colour.
+const BADGE_KINDS = {
+  fail: 'fail',
+  blocker: 'blocker',
+  high: 'high',
+  warn: 'warn',
+  medium: 'medium',
+  missing: 'missing',
+  empty: 'empty',
+  unreachable: 'unreachable',
+  unsatisfied: 'unsatisfied',
+  incompatible: 'fail',
+  blocked: 'blocker',
+  unavailable: 'unknown',
+  declared: 'warn',
+  pass: 'pass',
+  ok: 'ok',
+  verified: 'verified',
+  available: 'available',
+  satisfied: 'satisfied',
+  present: 'present',
+  reachable: 'reachable',
+  unknown: 'unknown',
+  na: 'na',
+};
+
 function badge(text) {
-  const normalized = String(text || 'unknown').toLowerCase();
-  const kind = ['fail', 'blocker', 'high', 'warn', 'medium', 'pass', 'ok', 'unknown', 'na']
-    .find((candidate) => normalized.includes(candidate)) || 'muted';
+  const normalized = String(text === undefined || text === null || text === '' ? 'unknown' : text).toLowerCase();
+  const kind = BADGE_KINDS[normalized] || 'muted';
   return make('span', 'badge ' + kind, text);
 }
 
@@ -99,6 +125,35 @@ function sourceCard(parent, source, label) {
 
 function summaryLine(parent, label, value) {
   parent.appendChild(make('div', 'row', label + ': ' + (value === undefined || value === null ? 'unknown' : String(value))));
+}
+
+/** Every required need that made the readiness report blocked, with its own status and cause. */
+function blockedNeeds(report) {
+  const needs = [];
+  function add(list, idOf, statuses) {
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      // An optional capability that is missing is guidance, not a blocker. Context entries
+      // have no required field and are always real needs, so they pass this check.
+      if (entry && entry.required === false) continue;
+      const status = String(entry && entry.status ? entry.status : 'unknown');
+      if (!statuses.includes(status)) continue;
+      needs.push({
+        id: idOf(entry),
+        status,
+        reason: entry && entry.reason ? entry.reason : (entry && entry.detail) || null,
+      });
+    }
+  }
+  add(report.tools, (t) => t.id || t.bin || 'tool', ['missing', 'unavailable', 'incompatible']);
+  add(report.env, (e) => e.name || 'environment variable', ['missing', 'empty']);
+  add(report.services, (s) => s.id || 'service', ['unreachable']);
+  add(report.references, (r) => r.path || r.id || 'reference', ['missing']);
+  add(report.credentials, (c) => c.id || 'credential', ['missing', 'empty']);
+  add(report.access, (a) => a.id || a.kind || 'access', ['missing', 'empty']);
+  add(report.hardware, (h) => h.id || 'hardware', ['unsatisfied']);
+  add(report.context, (c) => c.label || c.id || 'context', ['blocked']);
+  return needs;
 }
 
 function renderFindings(parent, report) {
@@ -139,9 +194,18 @@ function renderRepository(root, snap) {
     const data = ready.data || {};
     summaryLine(parent, 'Status', data.status);
     summaryLine(parent, 'Checked', data.checked ? 'yes' : 'no (pass --check to probe)');
-    const blocked = Array.isArray(data.tools) ? data.tools.filter((t) => t.status === 'missing' || t.status === 'unavailable' || t.status === 'incompatible') : [];
+    const blocked = blockedNeeds(data);
     if (blocked.length > 0) {
-      parent.appendChild(make('div', 'error', 'Blocked: ' + blocked.map((t) => t.id).join(', ')));
+      const card = make('div', 'card');
+      card.appendChild(make('h2', '', 'Blocked needs'));
+      for (const need of blocked) {
+        const row = make('div', 'row');
+        row.appendChild(badge(need.status));
+        row.appendChild(make('strong', '', need.id));
+        if (need.reason) row.appendChild(make('span', '', need.reason));
+        card.appendChild(row);
+      }
+      parent.appendChild(card);
     }
   }
   const plan = snap.repository.plan;
@@ -154,7 +218,11 @@ function renderRepository(root, snap) {
       row.appendChild(badge(suggestion.tier));
       row.appendChild(make('strong', '', suggestion.id || 'suggestion'));
       if (suggestion.title) row.appendChild(make('span', '', suggestion.title));
-      if (suggestion.why) row.appendChild(make('div', 'muted', suggestion.why));
+      const detail = suggestion.detail || suggestion.why;
+      if (detail) row.appendChild(make('div', '', detail));
+      if (Array.isArray(suggestion.evidence) && suggestion.evidence.length > 0) {
+        row.appendChild(make('div', 'muted', suggestion.evidence.join('; ')));
+      }
       parent.appendChild(row);
     }
   }
@@ -186,13 +254,24 @@ function renderContext(root, snap) {
       for (const file of files) {
         const card = make('div', 'card');
         card.appendChild(make('strong', '', file.path));
-        if (file.edited) card.appendChild(badge('edited since staging'));
-        if (file.diff) card.appendChild(make('pre', '', file.diff));
-        else card.appendChild(make('div', 'muted', 'No changes against the repository copy.'));
+        if (file.error) {
+          card.appendChild(make('div', 'error', file.error));
+        } else {
+          if (file.edited) card.appendChild(badge('edited since staging'));
+          if (file.diff) card.appendChild(make('pre', '', file.diff));
+          else card.appendChild(make('div', 'muted', 'No changes against the repository copy.'));
+        }
         parent.appendChild(card);
       }
     }
   }
+}
+
+/** The CLI labels a missing worktree orphaned; the table must not show it as active. */
+function worktreeState(person) {
+  if (person.orphaned === true) return 'orphaned';
+  if (person.present === false) return 'gone';
+  return person.state === undefined || person.state === null ? '-' : String(person.state);
 }
 
 function renderWork(root, snap) {
@@ -210,7 +289,17 @@ function renderWork(root, snap) {
       table.appendChild(head);
       for (const person of people) {
         const row = make('tr');
-        for (const value of [person.key, person.branch, person.worktree, person.uncommitted, person.unpushed, person.agentAlive === null ? '-' : person.agentAlive ? 'alive' : 'dead', person.state]) {
+        const present = person.present !== false;
+        const values = [
+          person.key,
+          person.branch,
+          person.worktree,
+          present ? person.uncommitted : '-',
+          present ? person.unpushed : '-',
+          person.agentAlive === null ? '-' : person.agentAlive ? 'alive' : 'dead',
+          worktreeState(person),
+        ];
+        for (const value of values) {
           row.appendChild(make('td', '', value === undefined || value === null ? '-' : String(value)));
         }
         table.appendChild(row);
