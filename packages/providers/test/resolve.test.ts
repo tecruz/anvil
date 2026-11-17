@@ -13,6 +13,7 @@ import {
   capabilitiesOf,
   createTicketProvider,
   GitHubProvider,
+  JiraProvider,
   LocalTicketProvider,
   refFor,
   requireCapability,
@@ -21,6 +22,7 @@ import {
 } from '@anvil/providers'
 import type { ProviderCapabilities, TicketProvider, TicketRef } from '@anvil/tickets'
 import { fakeGh } from './fake-gh.ts'
+import { fakeJira } from './fake-jira.ts'
 
 const GITHUB_URL = 'https://github.com/acme/widgets/issues/42'
 const GHE_URL = 'https://ghe.acme-corp.com/acme/widgets/issues/42'
@@ -80,15 +82,15 @@ describe('the provider selection rule', () => {
 
   test('an unknown provider is rejected with the list of supported ones', () => {
     assert.throws(
-      () => resolveProviderId({ explicit: 'jira' }),
+      () => resolveProviderId({ explicit: 'linear' }),
       (err: Error) => {
         const hint = (err as { hint?: string }).hint ?? ''
-        return /Unsupported ticket provider: jira/.test(err.message) && /local, github/.test(hint)
+        return /Unsupported ticket provider: linear/.test(err.message) && /local, github, jira/.test(hint)
       },
     )
     assert.throws(
-      () => assertSupportedProvider('jira', '`provider.default`'),
-      (err: Error) => /Supported providers: local, github/.test((err as { hint?: string }).hint ?? ''),
+      () => assertSupportedProvider('linear', '`provider.default`'),
+      (err: Error) => /Supported providers: local, github, jira/.test((err as { hint?: string }).hint ?? ''),
     )
   })
 
@@ -96,7 +98,21 @@ describe('the provider selection rule', () => {
     // The reference names a provider, so the message is about that provider rather than a
     // generic parse failure -- and it lists what would work instead.
     assert.throws(() => resolveProviderId({ ref: GITLAB_URL }), /Unsupported ticket provider: gitlab/)
-    assert.deepEqual(SUPPORTED_PROVIDERS, ['local', 'github'])
+    assert.deepEqual(SUPPORTED_PROVIDERS, ['local', 'github', 'jira'])
+  })
+
+  test('a Jira browse URL names jira when its host is recognisably Jira', () => {
+    assert.deepEqual(resolveProviderId({ ref: 'https://acme.atlassian.net/browse/PROJ-1' }), {
+      id: 'jira',
+      source: 'ref',
+    })
+    assert.deepEqual(
+      resolveProviderId({
+        ref: 'https://tickets.acme.com/browse/PROJ-1',
+        jiraSites: ['https://tickets.acme.com'],
+      }),
+      { id: 'jira', source: 'ref' },
+    )
   })
 
   test('the parsed reference uses the selected provider', () => {
@@ -157,6 +173,18 @@ describe('provider construction', () => {
     })
     await provider.authStatus()
     assert.deepEqual(calls[0], ['auth', 'status'])
+  })
+
+  test('jira is built with the site, project and injected transport', async () => {
+    const fake = fakeJira()
+    const provider = createTicketProvider('jira', {
+      ticketsDir: '/tmp/unused',
+      jira: { site: fake.site, project: fake.project, env: fake.env, request: fake.request },
+    })
+    assert.ok(provider instanceof JiraProvider)
+    const status = await provider.authStatus()
+    assert.equal(status.ok, true)
+    assert.deepEqual(fake.calls, [], 'the auth check is offline')
   })
 })
 

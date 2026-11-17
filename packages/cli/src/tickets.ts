@@ -15,6 +15,7 @@ import {
   DEFAULT_TICKETS_DIR,
   type GhOptions,
   hostFromRemote,
+  type JiraOptions,
   type ProviderSource,
   refFor,
   resolveProviderId,
@@ -55,6 +56,8 @@ export interface ProviderOptions {
    * Production passes neither, so the host comes from the repository and `gh` is real.
    */
   gh?: GhOptions
+  /** Injected Jira transport and environment, so a test never reaches the network. */
+  jira?: JiraOptions
   host?: string | null
   /** Injected resolved config, so a test does not read the developer's `~/.anvil`. */
   config?: AnvilConfig
@@ -100,11 +103,13 @@ export async function ticketProviderFor(
   if (options.host === undefined && refUrlHost !== null) knownHost = await remoteHost(mainRoot)
 
   const githubHosts = [knownHost, env.GH_HOST]
+  const jiraSites = [config.provider.jira.site]
   const selection = resolveProviderId({
     configured: config.provider.default,
     ...(request.provider === undefined || request.provider === null ? {} : { explicit: request.provider }),
     ...(request.ref === undefined ? {} : { ref: request.ref }),
     githubHosts,
+    jiraSites,
   })
 
   if (selection.id === 'github' && options.host === undefined && knownHost === null) {
@@ -120,9 +125,16 @@ export async function ticketProviderFor(
     ticketsDir: options.ticketsDir ?? ticketsDirFor(mainRoot, env),
     host,
     ...(options.gh === undefined ? {} : { gh: options.gh }),
+    jira: {
+      site: config.provider.jira.site,
+      project: config.provider.jira.project,
+      issueType: config.provider.jira.issueType,
+      env,
+      ...(options.jira ?? {}),
+    },
   })
 
-  const ref = request.ref === undefined ? undefined : refFor(selection.id, request.ref, githubHosts)
+  const ref = request.ref === undefined ? undefined : refFor(selection.id, request.ref, githubHosts, jiraSites)
   return { ...selection, provider, ...(ref === undefined ? {} : { ref }) }
 }
 

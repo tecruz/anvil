@@ -51,7 +51,7 @@ export const crewCommand: Command = {
     '',
     '--launch          start an agent in each new worktree',
     '--runner <r>      agent binary, default `opencode`',
-    '--provider <p>    ticket provider for the whole crew: local (default) or github',
+    '--provider <p>    ticket provider for the whole crew: local (default), github or jira',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
     '--force-parallel  ignore the cache policy and use --jobs literally',
     '--cost            with `status`, show what each agent session cost',

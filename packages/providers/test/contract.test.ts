@@ -16,9 +16,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { GitHubProvider, LocalTicketProvider, type RunResult } from '@anvil/providers'
+import { GitHubProvider, JiraProvider, LocalTicketProvider, type RunResult } from '@anvil/providers'
 import type { TicketProvider, TicketRef } from '@anvil/tickets'
 import { fakeGh } from './fake-gh.ts'
+import { fakeJira } from './fake-jira.ts'
 
 const temps: string[] = []
 after(() => {
@@ -59,6 +60,29 @@ function githubHarness(): Harness {
     unusable: new GitHubProvider({ run: unauth.run }),
     seed: (title, body, labels = []) => provider.create({ title, body, labels }),
     calls: fake.calls,
+  }
+}
+
+function jiraHarness(): Harness {
+  const fake = fakeJira({})
+  const provider = new JiraProvider({
+    site: fake.site,
+    project: fake.project,
+    env: fake.env,
+    request: fake.request,
+  })
+  // A provider with no credentials: the offline auth check must not claim it can be used.
+  const unusable = new JiraProvider({
+    site: fake.site,
+    project: fake.project,
+    env: {},
+    request: fake.request,
+  })
+  return {
+    provider,
+    unusable,
+    seed: (title, body, labels = []) => provider.create({ title, body, labels }),
+    calls: [],
   }
 }
 
@@ -442,3 +466,4 @@ describe('the github provider where the fake is the only witness', () => {
 
 runContract('local', localHarness)
 runContract('github', githubHarness)
+runContract('jira', jiraHarness)

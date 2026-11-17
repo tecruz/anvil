@@ -1,3 +1,5 @@
+export { extractAcceptance } from './acceptance.ts'
+export { type AdfDoc, type AdfMark, type AdfNode, adfToMarkdown, markdownToAdf } from './adf.ts'
 export {
   GhForgeTransport,
   type GhOptions,
@@ -7,6 +9,16 @@ export {
   parseGhIssue,
   type RunResult,
 } from './github.ts'
+export {
+  type JiraHttpRequest,
+  type JiraHttpResponse,
+  type JiraOptions,
+  JiraProvider,
+  type JiraRequest,
+  jiraIssueKey,
+  normalizedStateForJira,
+  normalizeJiraSite,
+} from './jira.ts'
 export {
   DEFAULT_TICKETS_DIR,
   type LocalProviderOptions,

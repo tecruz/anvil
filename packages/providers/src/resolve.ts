@@ -28,10 +28,11 @@ import {
   type TicketRef,
 } from '@anvil/tickets'
 import { type GhOptions, GitHubProvider } from './github.ts'
+import { type JiraOptions, JiraProvider } from './jira.ts'
 import { LocalTicketProvider } from './local.ts'
 
 /** Providers a command can be pointed at today. `local` first: it is the default. */
-export const SUPPORTED_PROVIDERS = ['local', 'github'] as const
+export const SUPPORTED_PROVIDERS = ['local', 'github', 'jira'] as const
 export type SupportedProviderId = (typeof SUPPORTED_PROVIDERS)[number]
 
 /** Why this provider was chosen, for the payload and for error messages. */
@@ -50,6 +51,11 @@ export interface ProviderSelection {
    * unknown host is not guessed to be GitHub.
    */
   githubHosts?: readonly (string | null | undefined)[]
+  /**
+   * Configured Jira sites. A `browse` URL on one of these hosts is inferred as Jira without
+   * having to pass `--provider jira`; the parser still stays offline.
+   */
+  jiraSites?: readonly (string | null | undefined)[]
 }
 
 export interface ProviderSelectionResult {
@@ -64,6 +70,8 @@ export interface CreateProviderOptions {
   host?: string | null
   /** Injected `gh` runner, so a test never shells out. */
   gh?: GhOptions
+  /** Jira site, project and injected transport. */
+  jira?: JiraOptions
 }
 
 export function isSupportedProvider(value: string): value is SupportedProviderId {
@@ -101,7 +109,8 @@ export function resolveProviderId(selection: ProviderSelection): ProviderSelecti
     }
   }
 
-  const hint = selection.ref === undefined ? null : providerHintFor(selection.ref, selection.githubHosts)
+  const hint =
+    selection.ref === undefined ? null : providerHintFor(selection.ref, selection.githubHosts, selection.jiraSites)
   if (hint !== null) {
     return { id: assertSupportedProvider(hint, `The reference "${selection.ref}" names a provider`), source: 'ref' }
   }
@@ -116,6 +125,7 @@ export function createTicketProvider(id: SupportedProviderId, options: CreatePro
     if (options.host !== null && options.host !== undefined && options.host !== '') gh.host = options.host
     return new GitHubProvider(gh)
   }
+  if (id === 'jira') return new JiraProvider(options.jira ?? {})
   return new LocalTicketProvider({ dir: options.ticketsDir })
 }
 
@@ -132,8 +142,9 @@ export function refFor(
   provider: ProviderId,
   input: string,
   githubHosts?: readonly (string | null | undefined)[],
+  jiraSites?: readonly (string | null | undefined)[],
 ): TicketRef {
-  return { ...parseRef(input, provider, githubHosts), provider }
+  return { ...parseRef(input, provider, githubHosts, jiraSites), provider }
 }
 
 /** The capabilities a provider actually has, for an error message that lists them. */

@@ -81,7 +81,7 @@ own. The import graph below is the real one, read from the source.
 | `packages/derive` | The LLM seam: brief, generate, validate, diff, staging | `core`, `profile`, `audit`, `playbooks` |
 | `packages/git` | Git operations, worktree preflight, path normalisation | `core` |
 | `packages/tickets` | The canonical ticket model, reference parsing, and the provider interface | `core`, `profile` |
-| `packages/providers` | The `gh` and local-markdown providers, the shared contract tests, and the one place a command resolves which provider to use | `core`, `tickets`, `worktrees` |
+| `packages/providers` | The `gh`, Jira Cloud and local-markdown providers, the shared contract tests, and the one place a command resolves which provider to use | `core`, `tickets`, `worktrees` |
 | `packages/pr` | Pull request construction: title, body, risk checklist, reviewers | `profile`, `tickets` |
 | `packages/worktrees` | Claims, the crew, the ship pipeline | `core`, `git`, `pr`, `profile`, `tickets` |
 | `packages/cli` | The command surface: parsing, help, output, exit codes, and the stdio MCP server | all of the above |
@@ -108,7 +108,7 @@ Two consequences worth knowing:
 
 A ticket command resolves its provider once, in `packages/providers/src/resolve.ts`, from:
 
-1. `--provider local|github` on the command,
+1. `--provider local|github|jira` on the command,
 2. `provider.default` from the resolved configuration,
 3. the reference's own provider — a ticket URL, or a `gh-42` key,
 4. `local`.
@@ -122,6 +122,7 @@ recognised and refused that way rather than parsed as a local ticket.
 | --- | --- | --- | --- | --- | --- |
 | `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | `create`, `list`, `comment`, `transition`, `link` | native `state:` frontmatter |
 | `github` | `gh`, always `execFile` with an argument array | `gh auth login` | yes, through `gh` | `create`, `list`, `comment`, `transition`, `link` | open/closed; `in_progress`, `in_review`, `wontfix` are labels |
+| `jira` | Jira Cloud REST API v3 over `fetch`, injectable for tests | `JIRA_EMAIL` + `JIRA_API_TOKEN` | yes | `create`, `list`, `comment`, `transition`, `link` | status category, status name for review, resolution for `wontfix` |
 
 Three implementation rules make the GitHub provider honest:
 
@@ -145,13 +146,38 @@ Three implementation rules make the GitHub provider honest:
   edit` adds the desired state label and removes the other state labels in the same call,
   so `in_review → todo` leaves `todo` rather than a stale `in-review`.
 
-Both implement the same `TicketProvider` interface and pass the same contract tests
+Three rules make the Jira provider honest:
+
+- **Credentials are environment only.** `JIRA_EMAIL` and `JIRA_API_TOKEN` are read at the
+  moment a request is built and never copied onto the provider or into a ticket, error or
+  log. The default transport is the built-in `fetch`; `JiraOptions.request` is the seam the
+  tests inject, so no test reaches the network.
+- **Bodies are converted, not reinterpreted.** Jira Cloud stores descriptions and comments
+  as Atlassian Document Format. `packages/providers/src/adf.ts` converts ADF to markdown on
+  read and back on write, including task lists as literal checklist bullets so the shared
+  acceptance extractor works. Ticket text is never treated as markup for anything except
+  ADF, and an unknown node keeps its text rather than disappearing.
+- **Transitions are workflow-driven.** The provider asks the issue which transitions are
+  available *now* and maps the target state onto them. `in_review` is a review-shaped
+  status name within Jira's `indeterminate` category; `wontfix` needs a done status whose
+  transition offers a rejection resolution. A target the workflow cannot reach is refused
+  with the available names, not silently skipped. `list` narrows with JQL and follows
+  `nextPageToken`; reaching the page cap is an explicit incomplete-listing error.
+
+The provider deliberately speaks only Jira Cloud's REST API v3. Jira Server and Data Center
+have a different REST surface and deployment model; a client that pretends to cover both
+produces authentication failures nobody can diagnose
+([ADR-0024](adr/0024-jira-cloud-rest-v3.md)).
+
+All three implement the same `TicketProvider` interface and pass the same contract tests
 (`packages/providers/test/contract.test.ts`), including the same states and comment
 semantics — that is what keeps `local` a real provider rather than a test double
 ([ADR-0004](adr/0004-local-provider-as-egress-escape-hatch.md)). Acceptance extraction is
-provider-specific rather than identical: local reads unchecked checklist entries
-(`packages/providers/src/local.ts`), while GitHub also reads checked entries and headed
-sections (`packages/providers/src/github.ts`).
+shared where the providers can share it: local reads unchecked checklist entries
+(`packages/providers/src/local.ts`), GitHub also reads checked entries and headed
+sections (`packages/providers/src/github.ts`), and Jira converts its ADF task list to the
+same checklist markdown before extracting
+(`packages/providers/src/acceptance.ts`).
 
 `ProviderCapabilities` is the contract commands check before acting. A missing capability
 fails the command with the capability named (`cannot create a ticket: missing the "create"
@@ -327,6 +353,7 @@ These are not style preferences. Each one is a bug that was found and fixed.
 | [ADR-0010](adr/0010-cost-is-read-from-the-hosts-ledger.md) | why cost is read and never stored |
 | [ADR-0021](adr/0021-setup-adapters-are-a-registry.md) | why setup adapters are a closed registry that never writes |
 | [ADR-0022](adr/0022-pinned-skills-are-fetched-then-offline.md) | why a pinned skill is fetched once and then planned offline |
+| [ADR-0024](adr/0024-jira-cloud-rest-v3.md) | why the Jira provider speaks Jira Cloud REST v3 only |
 | [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) | the design, the milestones, and the defects each one found |
 
 The [usage guide](USAGE.md) is the other half of this document: what to run.

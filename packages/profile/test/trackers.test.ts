@@ -492,9 +492,14 @@ describe('review regressions', () => {
   })
 
   test('advice never suggests confirming a provider anvil does not have', () => {
-    const jira = detectTrackerCandidates(repo({ 'README.md': 'https://acme.atlassian.net/browse/X\n' }), null)
-    assert.match(jira.reason, /no jira provider/)
-    assert.doesNotMatch(jira.reason, /provider\.default: "jira"/)
+    // `ABC-1` looks like a Jira issue key too, which would make this an unconfirmed pair
+    // instead of the single unsupported candidate this test is about.
+    const linear = detectTrackerCandidates(repo({ 'README.md': 'https://linear.app/acme/overview\n' }), null)
+    assert.match(linear.reason, /no linear provider/)
+    assert.doesNotMatch(linear.reason, /provider\.default: "linear"/)
+    const jira = detectTrackerCandidates(repo({ 'README.md': 'https://acme.atlassian.net/browse/X-1\n' }), null)
+    assert.match(jira.reason, /provider\.default: "jira"/)
+    assert.match(jira.reason, /provider\.jira\.site/)
     const github = detectTrackerCandidates(repo({ 'README.md': 'https://github.com/a/b/issues\n' }), null)
     assert.match(github.reason, /provider\.default: "github"/)
   })

@@ -197,9 +197,16 @@ describe('refs and slugs', () => {
     assert.equal(ref.id, '9')
   })
 
-  test('an unknown host falls back to a verbatim key rather than guessing', () => {
+  test('a Jira browse URL on a recognisably Jira host parses to its issue key', () => {
     const ref = parseRef('https://jira.acme.internal/browse/PROJ-9')
-    assert.equal(ref.id, 'https://jira.acme.internal/browse/PROJ-9')
+    assert.equal(ref.provider, 'jira')
+    assert.equal(ref.id, 'PROJ-9')
+    assert.equal(ref.key, 'PROJ-9')
+  })
+
+  test('an unknown host falls back to a verbatim key rather than guessing', () => {
+    const ref = parseRef('https://tickets.acme.internal/browse/PROJ-9')
+    assert.equal(ref.id, 'https://tickets.acme.internal/browse/PROJ-9')
   })
 
   test('slugify produces branch-safe text', () => {

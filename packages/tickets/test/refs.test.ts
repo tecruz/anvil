@@ -41,6 +41,19 @@ describe('providerHintFor', () => {
     // Passing a known host does not turn a GitLab issue shape into GitHub.
     assert.equal(providerHintFor(GITLAB_URL, ['gitlab.com']), 'gitlab')
   })
+
+  test('a Jira browse URL names jira only on a recognisably Jira host', () => {
+    const cloud = 'https://acme.atlassian.net/browse/PROJ-123'
+    const named = 'https://jira.acme.internal/browse/PROJ-9'
+    const arbitrary = 'https://tickets.acme.com/browse/PROJ-9'
+
+    assert.equal(providerHintFor(cloud), 'jira')
+    assert.equal(providerHintFor(named), 'jira')
+    // A `/browse/` path alone is not proof: an intranet page can have one too.
+    assert.equal(providerHintFor(arbitrary), null)
+    assert.equal(providerHintFor(arbitrary, undefined, ['https://tickets.acme.com']), 'jira')
+    assert.equal(providerHintFor(arbitrary, undefined, ['https://other.acme.com']), null)
+  })
 })
 
 describe('parseRef', () => {
@@ -61,7 +74,10 @@ describe('parseRef', () => {
   })
 
   test('a project key keeps its own prefix and the selected provider', () => {
-    assert.deepEqual(parseRef('PROJ-123', 'jira'), { provider: 'jira', id: '123', key: 'proj-123' })
+    assert.deepEqual(parseRef('PROJ-123', 'jira'), { provider: 'jira', id: 'PROJ-123', key: 'PROJ-123' })
+    // Jira keys are case-insensitive in the UI but conventionally uppercase, and the two
+    // spellings must not become two claims.
+    assert.deepEqual(parseRef('proj-123', 'jira'), { provider: 'jira', id: 'PROJ-123', key: 'PROJ-123' })
   })
 
   test('a local key stays local and keeps its prefix', () => {
@@ -89,6 +105,22 @@ describe('parseRef', () => {
     assert.equal(parseRef(ghe, 'github').id, '42')
     // Without either, it stays an opaque reference rather than being guessed as GitHub.
     assert.equal(parseRef(ghe, 'local').id, ghe)
+  })
+
+  test('a Jira browse URL parses to the issue key, not a forged number', () => {
+    const cloud = 'https://acme.atlassian.net/browse/PROJ-123'
+    assert.deepEqual(parseRef(cloud, 'local'), {
+      provider: 'jira',
+      id: 'PROJ-123',
+      key: 'PROJ-123',
+      url: cloud,
+    })
+    // The key is case-insensitive in Jira and conventionally uppercase; a pasted lowercase
+    // URL must land on the same ref as the uppercase one.
+    assert.equal(parseRef('https://acme.atlassian.net/browse/proj-123').key, 'PROJ-123')
+    // An explicit Jira selection accepts a browse URL on any host, because Jira Server
+    // deployments are not on atlassian.net.
+    assert.equal(parseRef('https://jira.acme.internal/browse/PROJ-9', 'jira').key, 'PROJ-9')
   })
 
   test('formatRef shows the key and the URL when it has one', () => {

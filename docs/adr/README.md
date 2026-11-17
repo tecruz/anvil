@@ -32,6 +32,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0021](0021-setup-adapters-are-a-registry.md) | Setup adapters are a closed registry, and they never write | accepted |
 | [0022](0022-pinned-skills-are-fetched-then-offline.md) | A pinned skill is fetched once, then planned offline | accepted |
 | [0023](0023-npm-package-name-is-anvil-workflows.md) | The registry package name is `@anvil-workflows/cli` | accepted |
+| [0024](0024-jira-cloud-rest-v3.md) | The Jira provider speaks Jira Cloud REST API v3 only | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.
