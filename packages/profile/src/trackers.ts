@@ -78,7 +78,7 @@ const CONFIDENCE_RANK: Record<TrackerConfidence, number> = {
 }
 
 /** The providers anvil can actually run, so the advice never suggests an unsupported one. */
-const SUPPORTED_KINDS: ReadonlySet<TrackerKind> = new Set(['github'])
+const SUPPORTED_KINDS: ReadonlySet<TrackerKind> = new Set(['github', 'jira'])
 
 /**
  * Key prefixes that look like an issue key but are ordinary standards.
@@ -485,9 +485,13 @@ function selectEvidence(evidence: readonly DraftEvidence[]): TrackerEvidence[] {
 }
 
 function confirmAdvice(kind: TrackerKind): string {
-  return SUPPORTED_KINDS.has(kind)
-    ? `If that is right, confirm it with provider.default: "${kind}".`
-    : `anvil has no ${kind} provider, so there is nothing to confirm; provider.default stays as it is.`
+  if (!SUPPORTED_KINDS.has(kind)) {
+    return `anvil has no ${kind} provider, so there is nothing to confirm; provider.default stays as it is.`
+  }
+  if (kind === 'jira') {
+    return 'If that is right, confirm it with provider.default: "jira", then set provider.jira.site (credentials stay in JIRA_EMAIL and JIRA_API_TOKEN).'
+  }
+  return `If that is right, confirm it with provider.default: "${kind}".`
 }
 
 function finalize(draft: DetectionDraft, remote: string | null): TrackerDetection {
@@ -537,7 +541,7 @@ function finalize(draft: DetectionDraft, remote: string | null): TrackerDetectio
   const labels = candidates.map((candidate) => `${candidate.kind} (${candidate.confidence})`).join(', ')
   return {
     state: 'unconfirmed',
-    reason: `Unconfirmed: ${String(candidates.length)} tracker candidates (${labels}).${guess}${scan} No winner is chosen; only a provider anvil supports (local, github) can be confirmed in provider.default.${never}`,
+    reason: `Unconfirmed: ${String(candidates.length)} tracker candidates (${labels}).${guess}${scan} No winner is chosen; only a provider anvil supports (local, github, jira) can be confirmed in provider.default.${never}`,
     candidates,
   }
 }

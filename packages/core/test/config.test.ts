@@ -83,6 +83,38 @@ describe('mergeConfig', () => {
     assert.equal(next.git.defaultBaseBranch, null)
   })
 
+  test('jira settings merge partially and keep their defaults', () => {
+    const next = mergeConfig(defaultConfig(), { provider: { jira: { site: 'https://acme.atlassian.net' } } }, 'cfg')
+    assert.equal(next.provider.jira.site, 'https://acme.atlassian.net')
+    assert.equal(next.provider.jira.project, null)
+    assert.equal(next.provider.jira.issueType, 'Task', 'an omitted issue type keeps the default')
+
+    const cleared = mergeConfig(next, { provider: { jira: { site: null } } }, 'cfg')
+    assert.equal(cleared.provider.jira.site, null, 'a repo layer can clear a global site')
+  })
+
+  test('an empty jira issue type is rejected', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { provider: { jira: { issueType: '  ' } } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /provider\.jira\.issueType: expected a non-empty string/)
+        return true
+      },
+    )
+  })
+
+  test('an unknown key inside provider.jira is rejected', () => {
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { provider: { jira: { url: 'https://acme.atlassian.net' } } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /provider\.jira\.url: unknown configuration key/)
+        return true
+      },
+    )
+  })
+
   test('rejects unknown top-level keys', () => {
     assert.throws(
       () => mergeConfig(defaultConfig(), { nope: true }, '/tmp/anvil.config.json'),
@@ -283,6 +315,14 @@ describe('the starter config is a config anvil accepts', () => {
     assert.deepEqual(parsed.project.credentials, [])
     assert.deepEqual(parsed.project.access, [])
     assert.deepEqual(parsed.project.hardware, [])
+  })
+
+  test('the starter file documents the jira settings without credentials', () => {
+    const parsed = JSON.parse(starterConfigJson()) as {
+      provider: { jira: Record<string, unknown> }
+    }
+    assert.deepEqual(parsed.provider.jira, { site: null, project: null, issueType: 'Task' })
+    assert.equal(JSON.stringify(parsed).includes('JIRA_API_TOKEN'), false)
   })
 
   test('a hand-added $schema is tolerated, because editors add it', () => {

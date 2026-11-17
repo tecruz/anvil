@@ -158,20 +158,21 @@ export function branchNameFor(ref: TicketRef, title: string, prefix?: string): s
 /**
  * The provider a reference names by itself, if any.
  *
- * Two shapes carry one: a hosted ticket URL (`.../issues/42`) and a `gh-42` / `gl-42`
- * key. Everything else -- `42`, `#42`, `local-3`, `PROJ-123` -- names no provider, and the
- * caller's default decides. This is separate from `parseRef` because provider selection
- * and reference parsing are two questions, and a caller has to answer the first before it
- * can answer the second.
+ * Two shapes carry one: a hosted ticket URL (`.../issues/42` or a Jira `/browse/PROJ-123`)
+ * and a `gh-42` / `gl-42` key. Everything else -- `42`, `#42`, `local-3`, `PROJ-123` --
+ * names no provider, and the caller's default decides. This is separate from `parseRef`
+ * because provider selection and reference parsing are two questions, and a caller has to
+ * answer the first before it can answer the second.
  */
 export function providerHintFor(
   input: string,
   githubHosts?: readonly (string | null | undefined)[],
+  jiraSites?: readonly (string | null | undefined)[],
 ): ProviderId | null {
   const raw = input.trim()
 
   if (/^https?:\/\/[^\s]+$/i.test(raw)) {
-    const parsed = parseTicketUrl(raw, githubHosts)
+    const parsed = parseTicketUrl(raw, githubHosts, jiraSites)
     return parsed === null ? null : parsed.provider
   }
 
@@ -186,6 +187,7 @@ export function parseRef(
   input: string,
   defaultProvider: ProviderId = 'local',
   githubHosts?: readonly (string | null | undefined)[],
+  jiraSites?: readonly (string | null | undefined)[],
 ): TicketRef {
   const raw = input.trim()
 
@@ -202,8 +204,16 @@ export function parseRef(
       if (address !== null) {
         return { provider: 'github', id: address.id, key: `gh-${address.id}`, url: raw }
       }
+    } else if (defaultProvider === 'jira') {
+      // An explicit `--provider jira` is the user saying "this is Jira": any host with a
+      // `/browse/<KEY>` path is accepted, because Jira Server deployments live on arbitrary
+      // hostnames. Inference stays conservative and only recognises known Jira hosts.
+      const address = jiraTicketAddress(raw)
+      if (address !== null) {
+        return { provider: 'jira', id: address.key, key: address.key, url: raw }
+      }
     } else {
-      const parsed = parseTicketUrl(raw, githubHosts)
+      const parsed = parseTicketUrl(raw, githubHosts, jiraSites)
       if (parsed !== null) return parsed
     }
   }
@@ -222,13 +232,20 @@ export function parseRef(
   const hash = /^#(\d+)$/.exec(raw)
   if (hash !== null) {
     const id = hash[1] as string
-    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
+    return { provider: defaultProvider, id, key: numericKey(defaultProvider, id) }
   }
 
   const prefixed = /^([A-Za-z][\w-]*?)-(\d+)$/.exec(raw)
   if (prefixed !== null) {
     const prefix = prefixed[1] as string
     const id = prefixed[2] as string
+    // A Jira issue key is case-sensitive in the API and conventionally uppercase. The
+    // branch name is lowercased separately, so preserving `PROJ` here keeps `claim
+    // PROJ-123` and `claim proj-123` on the same issue rather than two.
+    if (defaultProvider === 'jira') {
+      const key = `${prefix}-${id}`.toUpperCase()
+      return { provider: 'jira', id: key, key }
+    }
     return {
       provider: defaultProvider,
       id,
@@ -239,7 +256,7 @@ export function parseRef(
   const numeric = /^(\d+)$/.exec(raw)
   if (numeric !== null) {
     const id = numeric[1] as string
-    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
+    return { provider: defaultProvider, id, key: numericKey(defaultProvider, id) }
   }
 
   // Anything else is treated as a key verbatim, e.g. `PROJ-123` or `local-7`.
@@ -258,6 +275,17 @@ function keyPrefix(provider: ProviderId): string {
   if (provider === 'github') return 'gh'
   if (provider === 'gitlab') return 'gl'
   return provider
+}
+
+/**
+ * The human key for a bare number under `provider`.
+ *
+ * Jira issue keys always carry a project prefix, so inventing `jira-42` would make a bare
+ * number address the literal JIRA project. Keeping the number as the key lets the provider
+ * refuse it as the ambiguous reference it is, before any write is made.
+ */
+function numericKey(provider: ProviderId, id: string): string {
+  return provider === 'jira' ? id : `${keyPrefix(provider)}-${id}`
 }
 
 /** The repository a hosted ticket URL points at, independent of the forge. */
@@ -362,6 +390,59 @@ function normalizeHostName(host: string): string {
     .replace(/:\d+$/, '')
 }
 
+/** A Jira issue key in a URL path. */
+const JIRA_KEY = /^[A-Za-z][A-Za-z0-9_]*-[0-9]+$/
+
+interface JiraTicketAddress {
+  host: string
+  key: string
+}
+
+/**
+ * The Jira browse address a URL names: `/browse/<KEY>` on any host.
+ *
+ * Jira Cloud uses this shape, and so do most Server and Data Center deployments. Only the
+ * *shape* is read here; whether the host is actually Jira is decided separately, so the
+ * parser cannot turn an unrelated intranet page into a ticket just because its path has
+ * "browse" in it.
+ */
+function jiraTicketAddress(url: string): JiraTicketAddress | null {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  const segments = parsed.pathname.split('/').filter((s) => s !== '')
+  for (let i = segments.length - 2; i >= 0; i--) {
+    if (segments[i] !== 'browse') continue
+    const key = segments[i + 1] ?? ''
+    if (!JIRA_KEY.test(key)) continue
+    return { host: parsed.hostname.toLowerCase(), key: key.toUpperCase() }
+  }
+  return null
+}
+
+/**
+ * Whether a host is recognisably Jira.
+ *
+ * Three signals, none of which needs the network: a Jira Cloud host (`*.atlassian.net`), the
+ * long-standing convention of naming the tracker `jira.` something, or a site the caller
+ * configured in `provider.jira.site`. An arbitrary company host is not guessed to be Jira
+ * merely because the path looks right; `--provider jira` is how the user says so.
+ */
+function isKnownJiraHost(host: string, jiraSites: readonly (string | null | undefined)[] | undefined): boolean {
+  const normalized = normalizeHostName(host)
+  if (normalized.endsWith('.atlassian.net')) return true
+  if (normalized.startsWith('jira.')) return true
+  if (jiraSites === undefined) return false
+  return jiraSites.some((candidate) => {
+    if (candidate === null || candidate === undefined || candidate.trim() === '') return false
+    return normalizeHostName(candidate) === normalized
+  })
+}
+
 /**
  * Whether a URL host is one of the GitHub hosts the caller already knows.
  *
@@ -378,7 +459,16 @@ function isKnownGithubHost(host: string, githubHosts: readonly (string | null | 
   })
 }
 
-function parseTicketUrl(url: string, githubHosts?: readonly (string | null | undefined)[]): TicketRef | null {
+function parseTicketUrl(
+  url: string,
+  githubHosts?: readonly (string | null | undefined)[],
+  jiraSites?: readonly (string | null | undefined)[],
+): TicketRef | null {
+  const jira = jiraTicketAddress(url)
+  if (jira !== null && isKnownJiraHost(jira.host, jiraSites)) {
+    return { provider: 'jira', id: jira.key, key: jira.key, url }
+  }
+
   const address = parseTicketAddress(url)
   if (address === null) return null
   // The provider is decided by the host, so a GHE URL still names no provider rather than

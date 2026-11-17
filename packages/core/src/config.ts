@@ -257,6 +257,19 @@ export interface AnvilConfig {
      * that always uses one tracker configurable.
      */
     default: string | null
+    /**
+     * Jira Cloud connection details. Credentials are deliberately absent: they live in
+     * `JIRA_EMAIL` and `JIRA_API_TOKEN`, so they never end up in a committed config file,
+     * an error message or a log line.
+     */
+    jira: {
+      /** Jira Cloud site, e.g. `https://acme.atlassian.net`. */
+      site: string | null
+      /** Project key used by `issue list` and `issue create`. */
+      project: string | null
+      /** Issue type used by `issue create`. */
+      issueType: string
+    }
   }
   output: {
     color: 'auto' | 'always' | 'never'
@@ -288,7 +301,10 @@ export function defaultConfig(): AnvilConfig {
   return {
     schemaVersion: 1,
     git: { defaultBaseBranch: null, worktreeRoot: null },
-    provider: { default: null },
+    provider: {
+      default: null,
+      jira: { site: null, project: null, issueType: 'Task' },
+    },
     output: { color: 'auto' },
     features: { probeCommands: false },
     project: {
@@ -1018,7 +1034,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     // at the point a provider would actually be built.
     const provider = expectObject(layer.provider, 'provider', issues)
     for (const key of Object.keys(provider)) {
-      if (key !== 'default')
+      if (key !== 'default' && key !== 'jira')
         issues.push({
           path: `provider.${key}`,
           message: 'unknown configuration key',
@@ -1027,6 +1043,25 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (provider.default !== undefined) {
       const value = expectStringOrNull(provider.default, 'provider.default', issues)
       if (value !== undefined) next.provider.default = value
+    }
+    if (provider.jira !== undefined) {
+      const jira = expectObject(provider.jira, 'provider.jira', issues)
+      checkUnknownKeys(jira, ['site', 'project', 'issueType'], 'provider.jira', issues)
+      if (jira.site !== undefined) {
+        const value = expectStringOrNull(jira.site, 'provider.jira.site', issues)
+        if (value !== undefined) next.provider.jira.site = value
+      }
+      if (jira.project !== undefined) {
+        const value = expectStringOrNull(jira.project, 'provider.jira.project', issues)
+        if (value !== undefined) next.provider.jira.project = value
+      }
+      if (jira.issueType !== undefined) {
+        if (typeof jira.issueType !== 'string' || jira.issueType.trim() === '') {
+          issues.push({ path: 'provider.jira.issueType', message: 'expected a non-empty string' })
+        } else {
+          next.provider.jira.issueType = jira.issueType
+        }
+      }
     }
   }
 
@@ -1227,7 +1262,10 @@ export function starterConfigJson(): string {
       defaultBaseBranch: null,
       worktreeRoot: null,
     },
-    provider: { default: null },
+    provider: {
+      default: null,
+      jira: { site: null, project: null, issueType: 'Task' },
+    },
     output: { color: 'auto' },
     features: { probeCommands: false },
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and

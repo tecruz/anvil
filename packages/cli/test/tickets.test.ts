@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join, resolve } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { defaultConfig, makeStyle } from '@anvil/core'
-import { LocalTicketProvider, type RunResult } from '@anvil/providers'
+import { type JiraHttpRequest, LocalTicketProvider, type RunResult } from '@anvil/providers'
 import type { TicketProvider, TicketRef } from '@anvil/tickets'
 import { CONTEXT_FILE } from '@anvil/tickets/context'
 import { claimTicket } from '@anvil/worktrees'
@@ -214,7 +214,11 @@ describe('provider resolution in the commands', () => {
     const configured = await ticketProviderFor(
       repo,
       { ref: 'local-1' },
-      { config: { ...defaultConfig(), provider: { default: 'github' } }, host: null, gh: { run: fakeGhRun() } },
+      {
+        config: { ...defaultConfig(), provider: { ...defaultConfig().provider, default: 'github' } },
+        host: null,
+        gh: { run: fakeGhRun() },
+      },
     )
     assert.equal(configured.id, 'github')
     assert.equal(configured.source, 'config')
@@ -238,7 +242,7 @@ describe('provider resolution in the commands', () => {
       repo,
       { ref: ISSUE.url },
       {
-        config: { ...defaultConfig(), provider: { default: 'local' } },
+        config: { ...defaultConfig(), provider: { ...defaultConfig().provider, default: 'local' } },
         host: null,
         gh: { run: fakeGhRun() },
       },
@@ -295,13 +299,88 @@ describe('provider resolution in the commands', () => {
     assert.equal(view[view.indexOf('--repo') + 1], 'github.com/acme/widgets')
   })
 
+  test('a Jira browse URL on the configured site resolves to jira, and keeps the key', async () => {
+    const repo = temp('anvil-tickets-resolve-')
+    const calls: JiraHttpRequest[] = []
+    const ticket = {
+      id: '9',
+      key: 'PROJ-9',
+      fields: {
+        summary: 'From Jira',
+        description: {
+          type: 'doc',
+          version: 1,
+          content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Body.' }] }],
+        },
+        status: { name: 'To Do', statusCategory: { key: 'new' } },
+        resolution: null,
+        labels: [],
+      },
+    }
+    const config = defaultConfig()
+    config.provider.jira.site = 'https://acme.atlassian.net'
+    config.provider.jira.project = 'PROJ'
+
+    const resolved = await ticketProviderFor(
+      repo,
+      { ref: 'https://acme.atlassian.net/browse/PROJ-9' },
+      {
+        config,
+        env: { JIRA_EMAIL: 'dev@example.com', JIRA_API_TOKEN: 'fake-token' },
+        jira: {
+          request: async (request) => {
+            calls.push(request)
+            return { status: 200, body: JSON.stringify(ticket) }
+          },
+        },
+      },
+    )
+    assert.equal(resolved.id, 'jira')
+    assert.equal(resolved.source, 'ref')
+    assert.equal(resolved.ref?.key, 'PROJ-9')
+
+    const read = await readTicket({ ...resolved, ref: resolved.ref })
+    assert.equal(read.title, 'From Jira')
+    assert.equal(
+      calls[0]?.url,
+      'https://acme.atlassian.net/rest/api/3/issue/PROJ-9?fields=summary,description,status,resolution,issuetype,priority,assignee,labels,comment,fixVersions,issuelinks,parent',
+    )
+    assert.match(calls[0]?.headers.authorization ?? '', /^Basic /)
+  })
+
+  test('anvil auth jira reports the configuration offline and never prints either credential', () => {
+    const repo = makeRepo()
+    writeFileSync(
+      join(repo, 'anvil.config.json'),
+      JSON.stringify({ provider: { jira: { site: 'https://acme.atlassian.net', project: 'PROJ' } } }),
+      'utf8',
+    )
+    const stdout = execFileSync(process.execPath, [CLI_MAIN, 'auth', 'jira', '--json'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        NO_COLOR: '1',
+        ANVIL_CONFIG_HOME: temp('anvil-tickets-config-'),
+        JIRA_EMAIL: 'dev@example.com',
+        JIRA_API_TOKEN: 'super-secret-token',
+      },
+    })
+    const data = (JSON.parse(stdout) as { data: { provider: string; ok: boolean } }).data
+    assert.equal(data.provider, 'jira')
+    assert.equal(data.ok, true)
+    assert.doesNotMatch(stdout, /super-secret-token/)
+    assert.doesNotMatch(stdout, /dev@example\.com/, 'the account email is half of the credential pair')
+  })
+
   test('an unknown --provider is refused with the supported list', async () => {
     const repo = temp('anvil-tickets-resolve-')
     await assert.rejects(
-      () => ticketProviderFor(repo, { provider: 'jira' }, { config: defaultConfig() }),
+      () => ticketProviderFor(repo, { provider: 'linear' }, { config: defaultConfig() }),
       (err: Error) =>
-        /Unsupported ticket provider: jira/.test(err.message) &&
-        /local, github/.test((err as { hint?: string }).hint ?? ''),
+        /Unsupported ticket provider: linear/.test(err.message) &&
+        /local, github, jira/.test((err as { hint?: string }).hint ?? ''),
     )
   })
 

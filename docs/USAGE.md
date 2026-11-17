@@ -175,11 +175,19 @@ anvil claim gh-42                               # or the full issue URL
 anvil crew up --tickets gh-42,gh-43 --provider github
 ```
 
+And against Jira Cloud:
+
+```bash
+anvil auth jira                                 # offline: site and both variables set?
+anvil claim PROJ-123                            # with provider.default: "jira"
+anvil claim https://acme.atlassian.net/browse/PROJ-123
+```
+
 ### Which provider runs
 
 Every command that reads or writes a ticket resolves one provider, in this order:
 
-1. `--provider local|github` on the command;
+1. `--provider local|github|jira` on the command;
 2. `provider.default` in `anvil.config.json`;
 3. the reference itself — a ticket URL, or a `gh-42` key;
 4. `local`.
@@ -198,6 +206,7 @@ contact a tracker are the ones whose whole job is a ticket.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `local` | markdown files in `ANVIL_TICKETS_DIR` | none | none | yes | yes | yes | yes | yes | the default and the offline escape hatch |
 | `github` | the `gh` CLI, argument arrays only | `gh auth login` | yes (via `gh`) | yes | yes | yes | yes, open/close plus labels | yes | `in_progress`/`in_review`/`wontfix` are labels, because GitHub issues have no state machine |
+| `jira` | Jira Cloud REST API v3, over `fetch` | `JIRA_EMAIL` + `JIRA_API_TOKEN` | yes | yes | yes | yes | yes, the issue's own workflow | yes, as a comment | descriptions and comments are ADF, converted to and from markdown; Jira Server/Data Center is not supported |
 
 An unknown provider is refused with the list of supported ones. A provider that cannot do
 what a subcommand asks fails naming the missing capability (`create`, `list`, `comment`,
@@ -236,6 +245,38 @@ of `in_review` (by `issue set-state`, `issue sync` or `ship`) removes the `in-re
 label, and `set-state` refuses `unknown`. Label spellings are matched case-insensitively
 and with either separator, so a repository's existing `In Review` label is recognised,
 reused and removed rather than duplicated.
+
+A Jira `browse` URL (`https://<host>/browse/PROJ-123`) names Jira without a flag when the
+host is recognisably Jira: a `*.atlassian.net` cloud site, a host whose name begins with
+`jira.`, or the site in `provider.jira.site`. An arbitrary intranet host is not guessed to
+be Jira from its path alone; `--provider jira` accepts a `browse` URL on any host, which is
+also how a Jira Server or Data Center deployment would be addressed if it were supported.
+The issue key is uppercased, so `proj-123` and `PROJ-123` are the same claim. A bare
+`PROJ-123` names no provider by itself — exactly like a project key anywhere else — so set
+`provider.default: "jira"` or pass `--provider jira`.
+
+Jira credentials are environment only. `JIRA_EMAIL` and `JIRA_API_TOKEN` are read when a
+request is made, never copied into the configuration, a claim, an error message or a log
+line; a report names a missing variable, not a value. Create the token at
+<https://id.atlassian.com/manage-profile/security/api-tokens>, then run `anvil auth jira`:
+the check is entirely offline, so it tells you whether the site and both variables are set
+before the first ticket command tries the network. A missing `provider.jira.project` is a
+note, not a failure, because `claim PROJ-123` needs no project; `list` and `create` do.
+
+Jira Cloud stores descriptions and comments as Atlassian Document Format, not markdown.
+Anvil converts ADF to markdown on read and markdown to ADF on write, and converts an ADF
+task list to literal `- [ ]` / `- [x]` bullets so the same acceptance-criteria extractor
+that serves local and GitHub tickets works unchanged. The conversion is a deliberate
+subset; an unknown node keeps its text rather than disappearing.
+
+Transitions follow the project's own workflow. Anvil asks the issue which transitions are
+available *now* and maps the target normalized state onto them; `in_review` is a status
+named like review or verification within Jira's `indeterminate` category, and `wontfix`
+requires a done status whose transition offers a won't-do, rejected or declined
+resolution. A state the workflow cannot reach is refused with the available transition
+names, rather than silently leaving the issue where it was. `list` narrows with JQL and
+follows `nextPageToken`; a listing that cannot be completed within the page cap is an
+explicit incomplete-listing error, never a truncated backlog reported as empty.
 
 ### What can and cannot be concluded locally
 
@@ -279,19 +320,19 @@ Detection never writes configuration, never contacts a tracker, and grants no au
 create, comment on or transition an issue; tests check that a detection run makes no write,
 network or process call. Confirmation is a separate, deliberate act: set
 `provider.default` in `anvil.config.json` (or pass `--provider`). Only a provider anvil has
-(`local`, `github`) can be confirmed; a Jira, GitLab or Linear candidate is information
+(`local`, `github`, `jira`) can be confirmed; a GitLab or Linear candidate is information
 about the project, not something anvil can act on yet. Provider resolution reads
 only that value, the flag and the ticket reference; it never consults detection, so a
-repository whose files mention Jira or GitLab still resolves `local` until you say
+repository whose files mention GitLab or Linear still resolves `local` until you say
 otherwise.
 
 What each step does:
 
 - **`issue create`** writes a ticket to `.anvil/tickets/` in the main worktree with the
-  local provider, or opens an issue with `--provider github`. The local markdown provider
-  is deliberate: it is the escape hatch for a company that blocks API egress, and it needs
-  no account and no network. A ticket reference can be `3`, `#3`, `local-3`, `gh-42`,
-  `PROJ-123`, or a full ticket URL for a hosted tracker.
+  local provider, or opens an issue with `--provider github` or `--provider jira`. The
+  local markdown provider is deliberate: it is the escape hatch for a company that blocks
+  API egress, and it needs no account and no network. A ticket reference can be `3`, `#3`,
+  `local-3`, `gh-42`, `PROJ-123`, or a full ticket URL for a hosted tracker.
 - **`claim`** creates a branch (`feat/local-1-fix-the-login-redirect` by default) and a
   worktree *outside* the repository, in a short sibling directory so Windows path lengths
   stay inside the budget. The worktree comes warm: the ticket, the acceptance criteria,
@@ -636,9 +677,9 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
 | `anvil setup` | `plan`, `fetch`, `validate`, `approve`, `approval`, `revoke`, `apply` - inspect-only owner-command proposals, one create-only execution plan from the closed adapter registry (`local-skill`, and `pinned-skill` after an explicit `fetch`), its single-use approval grant, and one journaled application. |
 | `anvil brief` | Emit verified facts for an LLM step, with the `gaps`, evidence-use rules and open context questions kept explicit. `--for agents\|commands\|skills\|all`. |
-| `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. `--provider local\|github`. |
-| `anvil claim` | Branch, worktree and context bundle for one ticket. `--provider local\|github`. |
-| `anvil crew` | `up`, `status`, `verify` — several tickets at once. `up` takes `--provider local\|github`. |
+| `anvil issue` | `show`, `list`, `create`, `comment`, `set-state`, `pull`, `refresh`, `sync`. `--provider local\|github\|jira`. |
+| `anvil claim` | Branch, worktree and context bundle for one ticket. `--provider local\|github\|jira`. |
+| `anvil crew` | `up`, `status`, `verify` — several tickets at once. `up` takes `--provider local\|github\|jira`. |
 | `anvil status` | Every claim, and what would be lost if it were released. |
 | `anvil ship` | Verify, push, open the pull request, update the ticket. |
 | `anvil release` | Tear down a claim's worktree, and optionally its branch. |
@@ -678,7 +719,10 @@ Two layers, repo-local wins:
 {
   "schemaVersion": 1,
   "git": { "defaultBaseBranch": null, "worktreeRoot": null },
-  "provider": { "default": null },
+  "provider": {
+    "default": null,
+    "jira": { "site": null, "project": null, "issueType": "Task" }
+  },
   "output": { "color": "auto" },
   "features": { "probeCommands": false },
   "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
@@ -691,10 +735,19 @@ Two layers, repo-local wins:
   `<repoParent>/<repoName>-worktrees`.
 - `provider.default` — the ticket provider every ticket command uses when no `--provider`
   flag is given. `null` (the default) means "infer it": a `gh-42` reference or a ticket URL
-  names its own provider, and `local` is the fallback. Set `"local"` or `"github"` to make
-  one tracker the repository's choice; that value then wins over the reference, which is
-  what a repository that only uses one tracker wants. See
+  names its own provider, and `local` is the fallback. Set `"local"`, `"github"` or
+  `"jira"` to make one tracker the repository's choice; that value then wins over the
+  reference, which is what a repository that only uses one tracker wants. See
   [which provider runs](#which-provider-runs).
+- `provider.jira.site` — the Jira Cloud site, for example `https://acme.atlassian.net`. A
+  bare host and a pasted URL are both accepted and reduced to the origin; only `http` and
+  `https` are. A `browse` URL on this host is recognised as Jira without `--provider jira`.
+- `provider.jira.project` — the project key used by `issue list` and `issue create`, for
+  example `PROJ`. `claim PROJ-123` does not need it, so it may stay unset for a
+  read-and-transition workflow.
+- `provider.jira.issueType` — the issue type `issue create` uses. Defaults to `Task`.
+- Credentials are deliberately not configuration keys. They are read from `JIRA_EMAIL` and
+  `JIRA_API_TOKEN`, so they never end up in a committed file, a claim, an error or a log.
 - `output.color` — `auto`, `always` or `never`.
 - `features.probeCommands` — run the project's verify commands during `ship`.
 - `project.commands` — commands the owner declares for a project anvil cannot detect on
@@ -800,10 +853,14 @@ anvil config init    # write a starter repo-local config (refuses to overwrite)
 | `ANVIL_CONFIG_HOME` | Where the global config and caches live. Defaults to `~/.anvil`. |
 | `ANVIL_PLAYBOOKS` | A directory of playbook YAML files, merged over the built-in registry. |
 | `ANVIL_TICKETS_DIR` | Where local tickets live. Defaults to `.anvil/tickets` in the main worktree; a relative value resolves against the main worktree, not the directory the command runs in. Read by `issue`, `claim`, `crew up` and `ship` alike. |
+| `JIRA_EMAIL` | The Atlassian account email the Jira provider authenticates as. Read when a request is made; never written to disk or printed. |
+| `JIRA_API_TOKEN` | The Jira API token paired with `JIRA_EMAIL` for Basic auth. Create one at <https://id.atlassian.com/manage-profile/security/api-tokens>. Read per request and never retained by the provider. |
 | `NO_COLOR` | Disables ANSI colour. `--no-color` does the same for one command. |
 
-The opencode plugin forwards these four into the shell it hands to the agent, so a
-worktree agent sees the same configuration the CLI does.
+The opencode plugin forwards `ANVIL_CONFIG_HOME`, `ANVIL_PLAYBOOKS`, `ANVIL_TICKETS_DIR` and
+`NO_COLOR` into the shell it hands to the agent, so a worktree agent sees the same
+configuration the CLI does. Jira credentials are not forwarded: a worktree agent inherits
+the environment it is launched with, and anvil itself never copies a token anywhere.
 
 ## Automation: `--json` and exit codes
 
@@ -925,8 +982,18 @@ Create a ticket with `anvil issue create "<title>"`, or point `ANVIL_TICKETS_DIR
 directory that already has one.
 
 **`Unsupported ticket provider: gitlab`.** The reference named a tracker anvil has no
-transport for. The hint lists the ones it has (`local`, `github`); pass `--provider local`
-to read the reference as a local ticket instead.
+transport for. The hint lists the ones it has (`local`, `github`, `jira`); pass `--provider
+local` to read the reference as a local ticket instead.
+
+**`jira provider: Jira credentials are not set: JIRA_API_TOKEN`.** `anvil auth jira` found
+the site configured but one or both variables missing. Export them in the shell that runs
+anvil; the error names the variable and never a value. Anvil does not read a token from
+`anvil.config.json`.
+
+**`Jira has no transition from PROJ-123 to "in_review"`.** The project's workflow has no
+available transition landing in a review status from the issue's current status. The hint
+lists the transitions available now; move the issue in Jira, or map the state in the
+workflow. Anvil refuses rather than leaving the issue where it was.
 
 **`The github provider cannot create a ticket: missing the "create" capability`.** The
 provider cannot do what the subcommand asked. The error names the capability and the ones

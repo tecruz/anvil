@@ -77,7 +77,7 @@ const GLOBAL_ONLY = {
 export const claimCommand: Command = {
   name: 'claim',
   summary: 'Create a branch, a worktree, and the ticket context for an agent to work in.',
-  usage: 'anvil claim <ticket-ref> [--provider local|github] [--prefix feat] [--base <branch>] [--runner <name>]',
+  usage: 'anvil claim <ticket-ref> [--provider local|github|jira] [--prefix feat] [--base <branch>] [--runner <name>]',
   details: [
     'Creates a worktree outside the repository (a short sibling directory, to stay under',
     'the Windows path limit) and makes it warm: the ticket, the acceptance criteria, the',
@@ -93,7 +93,7 @@ export const claimCommand: Command = {
     'The provider is the `--provider` flag, else `provider.default`, else whatever the',
     'reference names (`gh-42`, or a ticket URL), else `local`.',
     '',
-    '--provider <p>  ticket provider: local (default) or github',
+    '--provider <p>  ticket provider: local (default), github or jira',
     '--prefix <p>    branch prefix, default `feat` (try fix/, chore/, spike/)',
     '--base <b>      branch from this instead of the ticket or default branch',
     '--runner <r>    record which agent will work here, for `anvil status`',
@@ -372,18 +372,18 @@ const ISSUE_SUBCOMMANDS = ['show', 'list', 'create', 'comment', 'set-state', 'pu
 export const issueCommand: Command = {
   name: 'issue',
   summary: 'Work with tickets: show, list, create, comment, set-state, refresh context.',
-  usage: 'anvil issue <show|list|create|comment|set-state|pull|refresh> [args] [--provider local|github]',
+  usage: 'anvil issue <show|list|create|comment|set-state|pull|refresh> [args] [--provider local|github|jira]',
   details: [
     'The provider is the `--provider` flag, else `provider.default`, else whatever the',
     'reference names (`gh-42`, or a ticket URL), else `local`. `local` reads markdown files',
     'and needs no account, no network and no `gh`: it is the escape hatch for a company that',
-    'blocks API egress.',
+    'blocks API egress. `jira` needs `provider.jira.site` plus JIRA_EMAIL and JIRA_API_TOKEN.',
     '',
     'pull       write the context bundle into the current directory (or a worktree)',
     'refresh    re-read the ticket and rewrite the bundle, picking up new comments',
     'sync       push state from the linked pull request back to the ticket',
     '',
-    '--provider <p>  ticket provider: local (default) or github',
+    '--provider <p>  ticket provider: local (default), github or jira',
   ].join('\n'),
   flags: {
     ...GLOBAL_ONLY,
@@ -560,7 +560,7 @@ export const issueCommand: Command = {
           ErrorCode.Usage,
           `Ticket ${ref.key} is a ${claim.ticket.provider} ticket, not a GitHub issue`,
           {
-            hint: '`anvil issue sync` links a GitHub pull request to a GitHub issue. A local ticket is updated by `anvil ship` itself.',
+            hint: '`anvil issue sync` links a GitHub pull request to a GitHub issue. Other ticket providers are updated by `anvil ship` itself.',
           },
         )
       }
@@ -714,7 +714,7 @@ function renderTicket(ctx: CommandContext, ticket: Ticket): string {
 export const authCommand: Command = {
   name: 'auth',
   summary: 'Check ticket-provider access and print the exact command to fix it.',
-  usage: 'anvil auth [local|github] [--check]',
+  usage: 'anvil auth [local|github|jira] [--check]',
   details: [
     'Checks the provider offline where possible, and never emits a bare "auth failed".',
     '',
@@ -722,6 +722,10 @@ export const authCommand: Command = {
     'probes the *detected host* and returns the login command naming that host, so you do',
     'not authenticate to the wrong one. A failure here stops `ship` before anything is',
     'pushed.',
+    '',
+    'For Jira the check is entirely offline: it reports whether provider.jira.site and the',
+    'JIRA_EMAIL / JIRA_API_TOKEN environment variables are set, without printing either',
+    'value or contacting Atlassian.',
   ].join('\n'),
   flags: {
     ...GLOBAL_ONLY,
@@ -766,6 +770,44 @@ export const authCommand: Command = {
         () =>
           `${ctx.style.green('ok')} github${host === null ? '' : ` (${host})`}: ${status.identity ?? 'authenticated'}`,
       )
+      return undefined
+    }
+
+    if (which === 'jira') {
+      const { JiraProvider } = await import('@anvil/providers')
+      const mainRoot = await mainRootFor(ctx)
+      const { config } = loadConfig({ repoRoot: mainRoot })
+      const provider = new JiraProvider({
+        site: config.provider.jira.site,
+        project: config.provider.jira.project,
+        issueType: config.provider.jira.issueType,
+      })
+      const status = await provider.authStatus()
+      const data = {
+        schemaVersion: 1,
+        provider: 'jira',
+        ok: status.ok,
+        site: config.provider.jira.site,
+        project: config.provider.jira.project,
+      }
+
+      if (!status.ok) {
+        const err = new AnvilError(ErrorCode.AuthFailed, `jira provider: ${status.detail ?? 'unavailable'}`, {
+          ...(status.remediation === undefined ? {} : { hint: status.remediation }),
+        })
+        ctx.outFailure(
+          data,
+          err,
+          () => `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}`,
+        )
+        return err.exitCode
+      }
+
+      ctx.out(data, () => {
+        const site = config.provider.jira.site ?? '(unset)'
+        const note = status.detail === undefined ? '' : ` ${ctx.style.dim(`(${status.detail})`)}`
+        return `${ctx.style.green('ok')} jira (${site})${note}`
+      })
       return undefined
     }
 

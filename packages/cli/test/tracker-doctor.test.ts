@@ -185,7 +185,7 @@ describe('provider resolution does not read tracker detection', () => {
     const configured = await ticketProviderFor(
       dir,
       { ref: '7' },
-      { config: { ...defaultConfig(), provider: { default: 'github' } }, host: null, gh },
+      { config: { ...defaultConfig(), provider: { ...defaultConfig().provider, default: 'github' } }, host: null, gh },
     )
     assert.equal(configured.id, 'github')
     assert.equal(configured.source, 'config')
