@@ -478,7 +478,7 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 both Node lanes; publication is the remaining criterion. Publishing separately requires
 approval and confirmed scope access, and the maintainer has explicitly put it on hold. The
 registry name changed from `@anvil/cli` to `@anvil-workflows/cli` on 2026-11-17 after the
-`@anvil` scope was found to belong to an unrelated npm user
+`@anvil` scope was found to already contain an unrelated package
 ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)). The maintainer created the
 `anvil-workflows` org and is its owner, so name control is confirmed; the package remains
 unpublished.
@@ -500,21 +500,19 @@ the tested tarball for 90 days. Upload failure blocks publication. Actionlint pa
 and a local rehearsal of the exact provenance/checksum commands accepts unchanged bytes
 and rejects tampering; the GitHub artifact upload and publication remain unexercised.
 
-Also not done: confirming control of the scoped name, publishing a first release, and
-recording a published checksum and source SHA in the release notes. No release workflow
-has run. `@anvil/cli` returned 404 only because it is unpublished; the `@anvil` scope itself
-belongs to `kyle-mccarthy` and already contains `@anvil/common-asc`, so the maintainer cannot
-publish under it without membership. The `@anvil-workflows` scope returned `Scope not found`
-on 2026-11-17, which makes the chosen name available but does not prove ownership. The
-workflow itself remains unproven end to end.
+Still not done: approving and publishing a first release, and recording a published checksum
+and source SHA in the release notes. Name control is confirmed by the authenticated owner
+check recorded below; that confirmation does not authorize publication. No release workflow
+has run, so the workflow itself remains unproven end to end.
 
 ### Decisions before implementation
 
 - Confirm that public distribution of the bundled code is intended, even if the source
   repository remains private.
 - Verify ownership/availability of a scoped npm name; do not use the unrelated unscoped
-  `anvil` registry name. The executable can remain `anvil`. `@anvil` is also taken, so the
-  agreed scope is `@anvil-workflows` ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)).
+  `anvil` registry name. The executable can remain `anvil`. `@anvil` was already in use,
+  and maintainer control was not established; the agreed scope is `@anvil-workflows`
+  ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)).
 - Decide whether to publish a generated distribution package or change the root manifest.
   Write an ADR extending [ADR-0007](adr/0007-distribution-git-install.md); preserve the
   GitHub source-install path unless its retirement is explicitly approved.
@@ -547,13 +545,11 @@ workflow itself remains unproven end to end.
 ### Acceptance
 
 - [x] The agreed package name is controlled by the maintainer, with no naming collision.
-  `@anvil/cli` could not satisfy this: the `@anvil` scope is owned by `kyle-mccarthy` and
-  already contains `@anvil/common-asc`, while `@anvil/cli` itself was never published. The
-  replacement, `@anvil-workflows/cli`, is controlled by the maintainer:
-  `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}` on 2026-11-17, and the
-  scope had returned `Scope not found` before the org was created. The package is still
-  unpublished, which is the intended state. See
-  [the scope evidence](evidence/2026-11-17-npm-scope.md).
+  The original `@anvil` scope already contained `@anvil/common-asc`; the public checks did
+  not establish maintainer control. For the agreed replacement, `@anvil-workflows/cli`,
+  `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned
+  `{"tecruz":"owner"}` on 2026-11-17. The package lookup still returned 404, and no publication
+  was attempted. See [the scope evidence](evidence/2026-11-17-npm-scope.md).
 - [x] A clean tarball install works without a source build or runtime dependencies.
   `the staged artifact installs without scripts and exercises the installed CLI` in
   `packages/cli/test/package.test.ts`: `npm pack` of the staged workspace, then
@@ -572,6 +568,8 @@ workflow itself remains unproven end to end.
 
 ## Acceptance evidence (2026-11-14)
 
+Initially reconciled on 2026-11-14; dated additions through 2026-11-17 are included below.
+
 "Complete" in this document means a command was run and its output was read, not that code
 for it exists. These are the commands behind the reconciled checklists.
 
@@ -587,9 +585,9 @@ for it exists. These are the commands behind the reconciled checklists.
 | Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
 | Artifact retention after an intentional failure | [Retained artifact record](evidence/2026-11-17-artifact-retention.md): run 44056529412 failed on purpose; artifact `eval-failure-rehearsal-44056529412-attempt1` retained 12 allowlisted files and expires 2026-12-17; the downloaded copy re-validated as `Validated 3 files, the run archive and 8 checkpoints.` |
-| Name control | [Scope check](evidence/2026-11-17-npm-scope.md): `@anvil` is owned by `kyle-mccarthy` and already contains `@anvil/common-asc`, so `@anvil/cli` was unpublishable. `@anvil-workflows` returned `Scope not found` before the maintainer created it; afterwards `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`, and `@anvil-workflows/cli` remains unpublished. |
+| Name control (2026-11-17) | [Scope check](evidence/2026-11-17-npm-scope.md): `@anvil` already contained `@anvil/common-asc`, and maintainer control was not established. After the maintainer created `anvil-workflows`, `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. The `@anvil-workflows/cli` lookup still returned 404; no publication was attempted. |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
-| No publicly accessible latest registry release was found | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404 |
+| Historical lookup of the superseded package name (2026-11-14) | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404. This records no publicly accessible `latest` release at that endpoint then, not publication history or ownership. The agreed name's check is recorded in the scope evidence above. |
 
 The Phase 1 artifact-retention criterion is closed by the rehearsal record above; the open
 Phase 4 items each name what would close them.
@@ -607,6 +605,12 @@ Publication remains on hold. Approval and successful execution are separate fact
   `npm whoami` returned `ENEEDAUTH`; no `NPM_TOKEN` repository secret was listed.
   Scope ownership and final artifact verification remain prerequisites, not implicit
   publication permission.
+
+**2026-11-17 follow-up:** the authorization and environment details above record the state
+on 2026-11-14. Name control was subsequently confirmed: authenticated `npm whoami` returned
+`tecruz`, and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. See
+[the scope evidence](evidence/2026-11-17-npm-scope.md). The publication hold is unchanged;
+name control does not authorize a release, and final artifact verification is still required.
 
 ## PR breakdown and release gates
 

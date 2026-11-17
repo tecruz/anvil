@@ -9,12 +9,13 @@
 ## Context
 
 ADR-0012 chose `@anvil/cli` to avoid the unrelated unscoped `anvil` package. Phase 4's
-name-control check on 2026-11-17 found that the `@anvil` **scope** is also unavailable:
-npmjs.com lists it as owned by `kyle-mccarthy` and already containing
-`@anvil/common-asc`, and the registry's org endpoint reports that package under the scope.
-`@anvil/cli` is unpublished, but only a member of that org could publish it. The maintainer's
-npm account was not authenticated on the build machine (`npm whoami` returned `ENEEDAUTH`),
-and the repository has no npm token secret.
+name-control check on 2026-11-17 found that the `@anvil` **scope** was already in use:
+npmjs.com listed `@anvil/common-asc`, with `kyle-mccarthy` named as the package's publisher,
+and the registry endpoint also listed that package under the scope. Neither establishes
+scope ownership or maintainer access. `@anvil/cli` returned 404, which does not prove that
+it was never published. At that first check the maintainer's npm account was not
+authenticated on the build machine (`npm whoami` returned `ENEEDAUTH`), and no `NPM_TOKEN`
+repository secret was listed.
 
 The maintainer selected `@anvil-workflows/cli`. The `@anvil-workflows` scope did not exist
 when checked (`{"error":"Scope not found"}`), and `@anvil-workflows/cli` returned 404. The
@@ -40,15 +41,16 @@ root git-install package stays `anvil`.**
   packaging tests and the architecture documents name the new package.
 - An `NPM_TOKEN`, when created, must grant publish access to `@anvil-workflows/cli`. It is
   not a credential for `@anvil`, and it must not be granted to ordinary pull-request CI.
-- Scope availability is a snapshot. An unclaimed scope can be claimed by anyone, so it must
-  be re-checked at the first release.
+- Scope control and package availability are snapshots. Re-check maintainer membership and
+  the intended package/version immediately before the first release, because either can
+  change after this confirmation.
 - The packed tarball filename changes to `anvil-workflows-cli-<version>.tgz`. The command
   users type does not change.
 
 ## Alternatives rejected
 
-- **Keep `@anvil/cli`.** The scope is owned by an unrelated npm user; membership cannot be
-  assumed, and asking that owner to transfer it is neither reliable nor necessary.
+- **Keep `@anvil/cli`.** The scope already contains an unrelated package, and maintainer
+  control was not established. A new maintainer-controlled org avoids that uncertainty.
 - **`anvil-cli` or `@anvil-tools/cli`.** Both names are already published by other people.
 - **`@tecruz/cli`.** The npm scope does not exist and matches a personal account name; the
   maintainer chose a product-named scope instead.
