@@ -211,6 +211,43 @@ describe('creating and commenting', () => {
     ])
   })
 
+  test('a thread longer than the embedded comment page is read completely', async () => {
+    const comments = Array.from({ length: 5 }, (_, index) => ({
+      author: `Person ${String(index + 1)}`,
+      body: markdownToAdf(`Comment ${String(index + 1)}`),
+      created: '2026-11-17T10:00:00.000+0000',
+    }))
+    const { fake, provider } = makeJira({
+      commentPageSize: 2,
+      issues: [{ key: 'PROJ-1', summary: 'Chatty', comments }],
+    })
+
+    const ticket = await provider.fetch(TODO)
+    assert.equal(ticket.comments?.length, 5, 'the embedded page is not the whole thread')
+    assert.match(ticket.comments?.[4]?.body ?? '', /Comment 5/)
+    const pages = fake.calls.filter((call) => call.method === 'GET' && call.url.includes('/comment?'))
+    assert.deepEqual(
+      pages.map((call) => new URL(call.url).searchParams.get('startAt')),
+      ['0', '2', '4'],
+    )
+  })
+
+  test('a reference from another Jira site is refused before any request', async () => {
+    const { fake, provider } = makeJira()
+    await assert.rejects(
+      () =>
+        provider.comment(
+          { provider: 'jira', id: 'PROJ-1', key: 'PROJ-1', url: 'https://other.atlassian.net/browse/PROJ-1' },
+          'wrong site',
+        ),
+      (err: Error) =>
+        err instanceof AnvilError &&
+        /provider\.jira\.site is acme\.atlassian\.net/.test(err.message) &&
+        /other\.atlassian\.net/.test(err.message),
+    )
+    assert.deepEqual(fake.calls, [], 'a cross-site reference must not reach the configured site')
+  })
+
   test('create without a project fails before the request', async () => {
     const { fake, provider } = makeJira({}, { project: null })
     await assert.rejects(() => provider.create({ title: 'No project' }), /provider\.jira\.project/)
@@ -333,9 +370,13 @@ describe('workflow transitions', () => {
     assert.equal(ticket.normalizedState, 'done')
 
     const move = fake.calls.find((call) => call.method === 'POST' && call.url.endsWith('/transitions'))
-    const payload = JSON.parse(move?.body ?? '{}') as { transition: { id: string }; resolution?: { id: string } }
+    const payload = JSON.parse(move?.body ?? '{}') as {
+      transition: { id: string }
+      fields?: { resolution?: { id: string } }
+    }
     assert.equal(payload.transition.id, '13')
-    assert.deepEqual(payload.resolution, { id: '1' })
+    // Jira reads the resolution as a field update; a top-level key leaves it unset.
+    assert.deepEqual(payload.fields, { resolution: { id: '1' } })
   })
 
   test('wontfix needs a resolution that says so, not a status name', async () => {
@@ -345,7 +386,7 @@ describe('workflow transitions', () => {
     await provider.transition(TODO, 'wontfix')
     assert.equal((await provider.fetch(TODO)).normalizedState, 'wontfix')
     const move = fake.calls.find((call) => call.method === 'POST' && call.url.endsWith('/transitions'))
-    assert.match(move?.body ?? '', /"resolution":\{"id":"2"\}/)
+    assert.match(move?.body ?? '', /"fields":\{"resolution":\{"id":"2"\}\}/)
   })
 
   test('a state the workflow cannot reach is refused with what is available', async () => {
@@ -466,6 +507,30 @@ describe('error mapping', () => {
       () => provider.fetch(TODO),
       (err: Error) => /Could not reach Jira/.test(err.message) && !/abcdef/.test(err.message),
     )
+  })
+
+  test('a response body that cannot be read is an error, not an empty ticket', async () => {
+    // `fetch` resolved, so there are headers, but the body stream failed. Swallowing that
+    // produced a "successful" ticket with no title and an unknown state.
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => ({
+      status: 200,
+      text: async () => {
+        throw new Error('stream reset: authorization Basic abcdef')
+      },
+    })) as unknown as typeof fetch
+    try {
+      const provider = new JiraProvider({
+        site: 'https://acme.atlassian.net',
+        env: { JIRA_EMAIL: 'dev@example.com', JIRA_API_TOKEN: 'fake-token-not-real' },
+      })
+      await assert.rejects(
+        () => provider.fetch(TODO),
+        (err: Error) => /Could not read the response from Jira/.test(err.message) && !/abcdef/.test(err.message),
+      )
+    } finally {
+      globalThis.fetch = original
+    }
   })
 })
 

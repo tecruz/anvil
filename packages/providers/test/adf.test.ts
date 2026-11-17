@@ -82,16 +82,18 @@ describe('ADF to markdown', () => {
         },
         {
           type: 'taskList',
+          attrs: { localId: 'checks' },
+          // A task item holds inline content in ADF, not paragraphs.
           content: [
             {
               type: 'taskItem',
-              attrs: { state: 'DONE' },
-              content: [{ type: 'paragraph', content: [{ type: 'text', text: 'finished' }] }],
+              attrs: { localId: '1', state: 'DONE' },
+              content: [{ type: 'text', text: 'finished' }],
             },
             {
               type: 'taskItem',
-              attrs: { state: 'TODO' },
-              content: [{ type: 'paragraph', content: [{ type: 'text', text: 'pending' }] }],
+              attrs: { localId: '2', state: 'TODO' },
+              content: [{ type: 'text', text: 'pending' }],
             },
           ],
         },
@@ -102,6 +104,33 @@ describe('ADF to markdown', () => {
       adfToMarkdown(doc),
       ['**bold** and `code` and [docs](https://example.com/docs)', '', '- [x] finished', '- [ ] pending'].join('\n'),
     )
+  })
+
+  test('a checklist item keeps its inline link and date', () => {
+    const doc: AdfDoc = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'taskList',
+          attrs: { localId: 'checks' },
+          content: [
+            {
+              type: 'taskItem',
+              attrs: { localId: '1', state: 'TODO' },
+              content: [
+                { type: 'text', text: 'ship by ' },
+                { type: 'date', attrs: { timestamp: '1794873600000' } },
+                { type: 'text', text: ' against ' },
+                { type: 'inlineCard', attrs: { url: 'https://example.com/spec' } },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    assert.equal(adfToMarkdown(doc), '- [ ] ship by 2026-11-17 against https://example.com/spec')
   })
 
   test('an unknown node keeps its text instead of disappearing', () => {

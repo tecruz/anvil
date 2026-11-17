@@ -42,6 +42,8 @@ export interface FakeJiraOptions {
   authenticated?: boolean
   /** Force pagination smaller than `maxResults`, so a test can prove the cursor is followed. */
   pageSize?: number
+  /** Cap the comment page Jira embeds in an issue, so a test can prove the thread is completed. */
+  commentPageSize?: number
   issues?: FakeJiraIssue[]
   /** One injected failure, optionally scoped to a path, for the error-mapping tests. */
   failure?: { status: number; body: string; path?: string }
@@ -62,6 +64,9 @@ const STATUS: Record<string, { category: string }> = {
   'In Review': { category: 'indeterminate' },
   Done: { category: 'done' },
 }
+
+/** The page size Jira uses when a caller asks for no particular one. */
+const COMMENT_PAGE_FALLBACK = 100
 
 const RESOLUTIONS: Record<string, { id: string; name: string }> = {
   Fixed: { id: '1', name: 'Fixed' },
@@ -120,6 +125,24 @@ export function fakeJira(options: FakeJiraOptions = {}): FakeJira {
 
   const statusOf = (issue: FakeJiraIssue): string => issue.status ?? 'To Do'
 
+  /** One page of the issue's comments, in the shape Jira embeds and pages with `startAt`. */
+  const commentPage = (issue: FakeJiraIssue, startAt: number, maxResults: number) => {
+    const all = issue.comments ?? []
+    const page = all.slice(startAt, startAt + maxResults)
+    return {
+      comments: page.map((comment, index) => ({
+        author: { displayName: comment.author },
+        body: comment.body,
+        created: comment.created,
+        self: `${site}/rest/api/3/issue/${issue.key}/comment/${String(startAt + index + 1)}`,
+      })),
+      startAt,
+      maxResults,
+      total: all.length,
+      self: `${site}/rest/api/3/issue/${issue.key}/comment`,
+    }
+  }
+
   const issuePayload = (issue: FakeJiraIssue) => {
     const status = statusOf(issue)
     const category = STATUS[status]?.category ?? 'indeterminate'
@@ -136,14 +159,7 @@ export function fakeJira(options: FakeJiraOptions = {}): FakeJira {
         priority: { name: 'Medium' },
         assignee: { displayName: 'Fake User' },
         labels: issue.labels ?? [],
-        comment: {
-          comments: (issue.comments ?? []).map((comment, index) => ({
-            author: { displayName: comment.author },
-            body: comment.body,
-            created: comment.created,
-            self: `${site}/rest/api/3/issue/${issue.key}/comment/${String(index + 1)}`,
-          })),
-        },
+        comment: commentPage(issue, 0, options.commentPageSize ?? 100),
         fixVersions: [],
         issuelinks: [],
       },
@@ -255,14 +271,25 @@ export function fakeJira(options: FakeJiraOptions = {}): FakeJira {
     }
 
     const comment = /^\/issue\/([^/]+)\/comment$/.exec(path)
-    if (req.method === 'POST' && comment !== null) {
+    if (comment !== null) {
       const issue = issues.find((entry) => entry.key === decodeURIComponent(comment[1] as string))
       if (issue === undefined) return fail(404, 'Issue does not exist')
-      const payload = body() as { body?: AdfDoc }
-      if (payload.body === undefined) return fail(400, 'comment body is required')
-      issue.comments = issue.comments ?? []
-      issue.comments.push({ author: 'Fake User', body: payload.body, created: '2026-11-17T12:00:00.000+0000' })
-      return { status: 201, body: JSON.stringify({ id: String(issue.comments.length) }) }
+
+      if (req.method === 'GET') {
+        const startAt = Number.parseInt(url.searchParams.get('startAt') ?? '0', 10)
+        const maxResults = Number.parseInt(url.searchParams.get('maxResults') ?? String(COMMENT_PAGE_FALLBACK), 10)
+        if (!Number.isFinite(startAt) || startAt < 0) return fail(400, 'startAt must be a non-negative integer')
+        if (!Number.isFinite(maxResults) || maxResults < 1) return fail(400, 'maxResults must be positive')
+        return { status: 200, body: JSON.stringify(commentPage(issue, startAt, maxResults)) }
+      }
+
+      if (req.method === 'POST') {
+        const payload = body() as { body?: AdfDoc }
+        if (payload.body === undefined) return fail(400, 'comment body is required')
+        issue.comments = issue.comments ?? []
+        issue.comments.push({ author: 'Fake User', body: payload.body, created: '2026-11-17T12:00:00.000+0000' })
+        return { status: 201, body: JSON.stringify({ id: String(issue.comments.length) }) }
+      }
     }
 
     const transitions = /^\/issue\/([^/]+)\/transitions$/.exec(path)
@@ -298,13 +325,24 @@ export function fakeJira(options: FakeJiraOptions = {}): FakeJira {
       }
 
       if (req.method === 'POST') {
-        const payload = body() as { transition?: { id?: string }; resolution?: { id?: string } }
+        const payload = body() as {
+          transition?: { id?: string }
+          fields?: { resolution?: { id?: string } }
+          resolution?: { id?: string }
+        }
         const chosen = available.find((transition) => transition.id === payload.transition?.id)
         if (chosen === undefined) return fail(400, 'Transition is not valid for this issue')
+        // The real API reads the resolution as a field update, inside `fields`. Accepting a
+        // top-level `resolution` here would hide exactly that mistake.
+        if (payload.resolution !== undefined) return fail(400, 'resolution must be inside fields')
         issue.status = chosen.to
         issue.resolution = null
-        if (payload.resolution?.id !== undefined) {
-          const resolution = Object.values(RESOLUTIONS).find((entry) => entry.id === payload.resolution?.id)
+        const chosenResolution = payload.fields?.resolution?.id
+        if ((chosen.resolutions?.length ?? 0) > 0 && chosenResolution === undefined) {
+          return fail(400, 'resolution is required for this transition')
+        }
+        if (chosenResolution !== undefined) {
+          const resolution = Object.values(RESOLUTIONS).find((entry) => entry.id === chosenResolution)
           if (resolution === undefined) return fail(400, 'Resolution is not valid')
           issue.resolution = resolution.name
         }

@@ -112,6 +112,12 @@ const DONE_RESOLUTION = /^(done|fixed|complete|completed|resolved|implemented)$/
 /** A search page. Jira Cloud caps `maxResults`; 100 is always accepted. */
 const SEARCH_PAGE = 100
 
+/** A comment page. Jira caps the embedded list and this is the same safe size. */
+const COMMENT_PAGE = 100
+
+/** A comment thread is capped at 5,000 in Jira Cloud; this leaves room to detect a lie. */
+const MAX_COMMENT_PAGES = 60
+
 /** Request timeout. A hung socket must not hang `crew up`. */
 const REQUEST_TIMEOUT_MS = 30_000
 
@@ -131,6 +137,14 @@ interface JiraCommentPayload {
   self?: string
 }
 
+/** The page of comments Jira embeds in an issue. `total` can exceed `comments.length`. */
+interface JiraCommentPage {
+  comments?: JiraCommentPayload[]
+  startAt?: number
+  maxResults?: number
+  total?: number
+}
+
 interface JiraIssueFields {
   summary?: string
   description?: unknown
@@ -140,7 +154,7 @@ interface JiraIssueFields {
   priority?: { name?: string }
   assignee?: { displayName?: string; emailAddress?: string }
   labels?: string[]
-  comment?: { comments?: JiraCommentPayload[] }
+  comment?: JiraCommentPage
   fixVersions?: Array<{ name?: string }>
   issuelinks?: Array<{
     outwardIssue?: { key?: string; fields?: { summary?: string } }
@@ -293,7 +307,13 @@ async function defaultRequest(request: JiraHttpRequest): Promise<JiraHttpRespons
   try {
     body = await response.text()
   } catch {
-    body = ''
+    // Headers arrived but the body did not. Treating that as an empty 200 would turn a
+    // broken connection into a ticket with no title and an `unknown` state.
+    const host = safeHost(request.url)
+    throw new AnvilError(ErrorCode.AuthFailed, `Could not read the response from Jira at ${host}`, {
+      hint: 'The connection was interrupted while reading the response. Retry; if it persists, check the network and any proxy.',
+      details: { host, status: response.status },
+    })
   }
   return { status: response.status, body }
 }
@@ -426,7 +446,7 @@ export class JiraProvider implements TicketProvider {
       'GET',
       `/issue/${encodeURIComponent(key)}?fields=${ISSUE_FIELDS}`,
     )) as JiraIssuePayload
-    return this.toTicket(key, payload)
+    return this.toTicket(key, payload, await this.allComments(key, payload))
   }
 
   /**
@@ -612,7 +632,9 @@ export class JiraProvider implements TicketProvider {
 
     await this.call('POST', `/issue/${encodeURIComponent(key)}/transitions`, {
       transition: { id: chosen.id },
-      ...(resolution === null ? {} : { resolution: { id: resolution.id } }),
+      // Jira reads the resolution as a field update on the transition screen. A top-level
+      // `resolution` is ignored (or rejected), which would leave a required field unset.
+      ...(resolution === null ? {} : { fields: { resolution: { id: resolution.id } } }),
     })
   }
 
@@ -665,6 +687,37 @@ export class JiraProvider implements TicketProvider {
   }
 
   /**
+   * Refuse a reference whose URL names a different Jira site.
+   *
+   * A key alone does not identify an issue across sites: two Jira Cloud sites can both have
+   * PROJ-1. Without this check a URL pasted from another site would fetch, comment on and
+   * transition the *configured* site's same-key issue instead.
+   */
+  private assertSiteOf(ref: TicketRef): void {
+    if (ref.url === undefined || ref.url.trim() === '') return
+    let parsed: URL
+    try {
+      parsed = new URL(ref.url)
+    } catch {
+      return
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return
+    const configured = normalizeJiraSite(this.options.site)
+    // No site is a configuration error, and `site()` reports it with the remediation.
+    if (configured === null) return
+    const host = new URL(configured).host.toLowerCase()
+    if (parsed.host.toLowerCase() === host) return
+    throw new AnvilError(
+      ErrorCode.Usage,
+      `Refusing to use ${ref.key} from ${parsed.host}: provider.jira.site is ${host}`,
+      {
+        hint: 'Point provider.jira.site at the site the issue lives on, or use a reference from that site.',
+        details: { key: ref.key, url: ref.url, site: configured },
+      },
+    )
+  }
+
+  /**
    * The issue key a ref names.
    *
    * A URL is honoured when the ref's id is not itself a key, so a claim recorded from a
@@ -672,6 +725,7 @@ export class JiraProvider implements TicketProvider {
    * built.
    */
   private keyOf(ref: TicketRef): string {
+    this.assertSiteOf(ref)
     const candidates = [ref.id, ref.key]
     for (const candidate of candidates) {
       if (ISSUE_KEY.test(candidate.trim())) return jiraIssueKey(candidate)
@@ -780,12 +834,60 @@ export class JiraProvider implements TicketProvider {
     return out
   }
 
+  /**
+   * Every comment on the issue.
+   *
+   * Jira embeds only a page in the issue payload and reports the real size in `total`. The
+   * context bundle is built from the comments, so stopping at the embedded page would
+   * silently omit the later discussion -- exactly the part that answers "what changed?".
+   * A thread that cannot be read completely is an error, not a shorter ticket.
+   */
+  private async allComments(key: string, payload: JiraIssuePayload): Promise<JiraCommentPayload[]> {
+    const page = payload.fields?.comment
+    const embedded = page?.comments ?? []
+    const total = typeof page?.total === 'number' && page.total >= embedded.length ? page.total : embedded.length
+    if (embedded.length >= total) return embedded
+
+    const pageSize =
+      typeof page?.maxResults === 'number' && page.maxResults > 0
+        ? Math.min(page.maxResults, COMMENT_PAGE)
+        : COMMENT_PAGE
+    // The embedded page is not necessarily the first one, so an incomplete thread is read
+    // from offset 0 rather than stitched onto whatever slice Jira happened to embed.
+    const collected: JiraCommentPayload[] = []
+    for (let pages = 1; pages <= MAX_COMMENT_PAGES; pages++) {
+      const startAt = collected.length
+      const next = (await this.call(
+        'GET',
+        `/issue/${encodeURIComponent(key)}/comment?startAt=${String(startAt)}&maxResults=${String(pageSize)}`,
+      )) as JiraCommentPage
+      const batch = next.comments ?? []
+      if (batch.length === 0) {
+        throw new AnvilError(
+          ErrorCode.Internal,
+          `Jira returned no comments at offset ${String(startAt)} of ${String(total)} on ${key}`,
+          {
+            hint: 'The comment thread could not be read completely. Retry, or read the issue in Jira.',
+            details: { issue: key, startAt, total },
+          },
+        )
+      }
+      collected.push(...batch)
+      if (collected.length >= total) return collected.slice(0, total)
+    }
+
+    throw new AnvilError(ErrorCode.Usage, `Jira returned more comments on ${key} than anvil can page through`, {
+      hint: `Read the thread in Jira; anvil stops after ${(MAX_COMMENT_PAGES * pageSize).toLocaleString('en-US')} comments.`,
+      details: { issue: key, total, read: collected.length },
+    })
+  }
+
   /** Map one issue payload onto the canonical ticket. */
-  private toTicket(key: string, payload: JiraIssuePayload): Ticket {
+  private toTicket(key: string, payload: JiraIssuePayload, commentPayloads: JiraCommentPayload[]): Ticket {
     const fields = payload.fields ?? {}
     const body = fields.description === undefined ? undefined : adfToMarkdown(fields.description)
     const site = normalizeJiraSite(this.options.site)
-    const comments: TicketComment[] = (fields.comment?.comments ?? []).map((comment) => ({
+    const comments: TicketComment[] = commentPayloads.map((comment) => ({
       author: comment.author?.displayName ?? comment.author?.emailAddress ?? 'unknown',
       body: comment.body === undefined ? '' : adfToMarkdown(comment.body),
       at: comment.created ?? '',

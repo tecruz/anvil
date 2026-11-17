@@ -149,11 +149,25 @@ function renderListItem(node: AdfNode, prefix: string): string {
   return `${prefix} ${first ?? ''}${indented === '' ? '' : `\n${indented}`}`
 }
 
+/** Node types ADF allows inside a `taskItem`, which holds inline content, not blocks. */
+const INLINE_NODE_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'hardBreak',
+  'mention',
+  'emoji',
+  'inlineCard',
+  'status',
+  'date',
+])
+
 function renderTaskItem(node: AdfNode): string {
   const state = typeof node.attrs?.state === 'string' && node.attrs.state.toLowerCase() === 'done' ? 'x' : ' '
-  const body = renderBlocks(node.content ?? [])
-    .replace(/\n+/g, ' ')
-    .trim()
+  const content = node.content ?? []
+  // A task item is inline in ADF (`text`, `inlineCard`, ...), unlike a `listItem`, which
+  // holds paragraphs. Rendering it as blocks dropped the inline nodes -- a checklist whose
+  // item linked a spec lost the link. Older/looser payloads with a paragraph still work.
+  const inline = content.length > 0 && content.every((child) => INLINE_NODE_TYPES.has(child.type))
+  const body = (inline ? renderInline(content) : renderBlocks(content)).replace(/\n+/g, ' ').trim()
   return `- [${state}] ${body}`
 }
 
@@ -186,9 +200,14 @@ function renderInlineNode(node: AdfNode): string {
       return typeof text === 'string' ? text : ''
     }
     case 'date': {
+      // ADF types `timestamp` as a string of epoch milliseconds; older payloads use a
+      // number. Dropping the string form left a sentence like "Due 2026-11-17" as "Due".
       const timestamp = node.attrs?.timestamp
-      if (typeof timestamp !== 'number') return ''
-      return new Date(timestamp).toISOString().slice(0, 10)
+      if (typeof timestamp !== 'number' && typeof timestamp !== 'string') return ''
+      if (typeof timestamp === 'string' && timestamp.trim() === '') return ''
+      const millis = typeof timestamp === 'number' ? timestamp : Number(timestamp.trim())
+      if (!Number.isFinite(millis)) return ''
+      return new Date(millis).toISOString().slice(0, 10)
     }
     default:
       return node.content === undefined ? (node.text ?? '') : renderInline(node.content)
