@@ -37,6 +37,22 @@ The harness has one gate per evidence channel, and they are not interchangeable:
 A benchmark summary is per-run output and is ignored by Git. It is not promoted evidence; to
 retain a real-agent run, move its record and summary under `pilots/<runId>/` deliberately.
 
+## Failure rehearsal
+
+A dispatch of the `Eval benchmark` workflow with `rehearse_failure: true` skips the real-model
+job and runs a separate hermetic rehearsal instead. It calls no model and receives no provider
+keys. The rehearsal runs `--fake-agent`, confirms the committed gate passes, tampers with one
+visible result, asserts that the gate rejects the tampered summary, then fails on purpose.
+Required artifacts are validated before the deliberate failure, and the
+`upload rehearsal artifacts` step is `if: always()` and retains only
+`failure-rehearsal.json`, `gate-rejection.log`, `run.json`, the run archive and checkpoints for
+30 days. The job summary reports the actual step outcomes and claims retention only after a
+successful upload. The tampered summary exists only in the ephemeral runner checkout so the
+gate has a modified file to reject; it is never committed or uploaded. None of this is
+product effectiveness evidence. The run id and retained-artifact evidence are recorded in
+[IMPROVEMENT_PLAN.md](../docs/IMPROVEMENT_PLAN.md#phase-1--preserve-evidence-and-survive-interrupted-runs)
+after an approved dispatch.
+
 ## Real-agent records
 
 - `pilots/<runId>/` holds an explicitly approved real-agent run: its run record and the

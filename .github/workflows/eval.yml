@@ -26,6 +26,11 @@
 # rather than a guarantee that `all` (sixteen runs) finishes. Dispatch `frontier` or `all`
 # only when that spend is wanted.
 #
+# A dispatch with `rehearse_failure` skips that job and runs a hermetic rehearsal instead:
+# it produces bounded evidence, proves the gate rejects tampered evidence, then fails on
+# purpose so the always() upload can demonstrate artifact retention. No model is called and
+# the rehearsal receives no provider keys.
+#
 # PINNING: the OpenCode 2 package, `@opencode/cli`, is pinned to an exact version because
 # the harness records the version and two weeks have to be comparable. Bump it deliberately.
 name: Eval benchmark
@@ -41,6 +46,10 @@ on:
         type: choice
         options: [small, frontier, all]
         default: small
+      rehearse_failure:
+        description: Run the hermetic failure rehearsal instead of a real benchmark
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +61,9 @@ concurrency:
 jobs:
   benchmark:
     name: real-model benchmark
+    # A rehearsal dispatch must never reach the model-running path. Scheduled runs and a
+    # normal dispatch without rehearse_failure keep this job exactly as before.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rehearse_failure != true }}
     runs-on: ubuntu-latest
     # Eight agent runs with a 10-minute per-run timeout, plus setup, is the realistic
     # weekly case. The ceiling is what a hung provider cannot exceed; `all` can hit it and
@@ -202,3 +214,133 @@ jobs:
             eval-results/checkpoints/**/*.json
             eval-results/raw/*.json
           retention-days: 30
+
+  # A hermetic rehearsal of the retention contract. It never calls a model and receives no
+  # provider credentials. The deliberate failure at the end is the demonstration, not an
+  # accident: the always() upload below has to retain the bounded evidence written earlier.
+  rehearsal:
+    name: hermetic failure rehearsal
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rehearse_failure }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Anything checked in describes an earlier run. Drop it so this rehearsal cannot
+      # accidentally present stale evidence as its own.
+      - name: discard checked-out evidence
+        run: rm -rf eval-results/latest.json eval-results/run.json eval-results/runs eval-results/checkpoints eval-results/raw eval-results/benchmark-summary.json
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+
+      - name: run the hermetic matrix
+        run: npm run eval -- --fake-agent --repetitions 1 --order alternate
+
+      - name: confirm the healthy gate passes
+        id: healthy_gate
+        run: npm run eval:check
+
+      - name: tamper with hermetic evidence and write the rehearsal record
+        id: tamper
+        env:
+          REHEARSAL_RUN_ID: ${{ github.run_id }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs')
+          const latestPath = 'eval-results/latest.json'
+          const runPath = 'eval-results/run.json'
+          const latest = JSON.parse(fs.readFileSync(latestPath, 'utf8'))
+          const run = JSON.parse(fs.readFileSync(runPath, 'utf8'))
+          const result = latest.results.find(
+            (entry) => entry.scenario === 'tiny-code-change' && entry.variant === 'bare',
+          )
+          if (result === undefined) throw new Error('tiny-code-change/bare result is missing')
+          result.verified = false
+          result.verifyExitCodes = [1, ...result.verifyExitCodes.slice(1)]
+          fs.writeFileSync(latestPath, `${JSON.stringify(latest, null, 2)}\n`)
+          const record = {
+            evidence: 'hermetic-failure-rehearsal',
+            generatedAt: new Date().toISOString(),
+            githubRunId: process.env.REHEARSAL_RUN_ID,
+            runId: run.runId,
+            sourceCommit: process.env.GITHUB_SHA,
+            tampered: 'tiny-code-change/bare: verified=false, first verifyExitCode=1',
+            expectedGate: 'reject',
+            note: 'Synthetic rehearsal evidence only. No model was called and no tokens were spent.',
+          }
+          fs.writeFileSync('eval-results/failure-rehearsal.json', `${JSON.stringify(record, null, 2)}\n`)
+          NODE
+
+      # A blocking assertion: a crash, a missing command or any other non-zero exit is not
+      # proof that the gate rejected the tampering. The script requires its normal failure
+      # code and the diagnostic for the result we changed.
+      - name: assert the gate rejects the tampered evidence
+        id: gate_assertion
+        run: node scripts/eval-rehearsal.ts assert-gate
+
+      # Verify every file the retention claim depends on before the deliberate failure.
+      # upload-artifact's if-no-files-found only catches the case where no file matches.
+      - name: validate required rehearsal artifacts
+        id: validate_artifacts
+        run: node scripts/eval-rehearsal.ts validate-artifacts
+
+      - name: fail the rehearsal on purpose
+        id: intentional_failure
+        run: |
+          echo '::error::synthetic failure rehearsal; the allowlisted artifacts must be retained.'
+          exit 1
+
+      - name: upload rehearsal artifacts
+        id: upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-failure-rehearsal-${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: |
+            eval-results/failure-rehearsal.json
+            eval-results/gate-rejection.log
+            eval-results/run.json
+            eval-results/runs/**/*.json
+            eval-results/checkpoints/**/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Runs after the upload so its outcome can support an honest retention claim.
+      - name: publish rehearsal summary
+        if: always()
+        env:
+          HEALTHY_GATE: ${{ steps.healthy_gate.outcome }}
+          TAMPER: ${{ steps.tamper.outcome }}
+          GATE_ASSERTION: ${{ steps.gate_assertion.outcome }}
+          VALIDATE_ARTIFACTS: ${{ steps.validate_artifacts.outcome }}
+          INTENTIONAL_FAILURE: ${{ steps.intentional_failure.outcome }}
+          UPLOAD: ${{ steps.upload.outcome }}
+        run: |
+          {
+            echo '## Hermetic failure rehearsal'
+            echo ''
+            echo '| Step | Outcome |'
+            echo '| --- | --- |'
+            echo "| Healthy gate | $HEALTHY_GATE |"
+            echo "| Tamper and record | $TAMPER |"
+            echo "| Gate rejection assertion | $GATE_ASSERTION |"
+            echo "| Artifact validation | $VALIDATE_ARTIFACTS |"
+            echo "| Intentional failure | $INTENTIONAL_FAILURE |"
+            echo "| Artifact upload | $UPLOAD |"
+            echo ''
+            if [ "$HEALTHY_GATE" = success ] && [ "$TAMPER" = success ] &&
+               [ "$GATE_ASSERTION" = success ] && [ "$VALIDATE_ARTIFACTS" = success ] &&
+               [ "$INTENTIONAL_FAILURE" = failure ] && [ "$UPLOAD" = success ]; then
+              echo 'The rehearsal failed on purpose as designed, and the bounded artifacts were retained.'
+              echo 'Retained: failure-rehearsal.json, gate-rejection.log, run.json, runs/ and checkpoints/.'
+            else
+              echo 'The rehearsal did not complete as designed. No artifact-retention claim is made.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
