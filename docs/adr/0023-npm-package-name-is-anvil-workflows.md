@@ -41,8 +41,9 @@ root git-install package stays `anvil`.**
   packaging tests and the architecture documents name the new package.
 - An `NPM_TOKEN`, when created, must grant publish access to `@anvil-workflows/cli`. It is
   not a credential for `@anvil`, and it must not be granted to ordinary pull-request CI.
-- Scope availability is a snapshot. An unclaimed scope can be claimed by anyone, so it must
-  be re-checked at the first release.
+- Scope control and package availability are snapshots. Re-check maintainer membership and
+  the intended package/version immediately before the first release, because either can
+  change after this confirmation.
 - The packed tarball filename changes to `anvil-workflows-cli-<version>.tgz`. The command
   users type does not change.
 

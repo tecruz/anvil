@@ -13,14 +13,17 @@ intended design, not an available npm package. GitHub installation remains the s
 channel until a scoped release has been published and verified.
 
 The package name was later changed to `@anvil-workflows/cli` by
-[ADR-0023](0023-npm-package-name-is-anvil-workflows.md), after the `@anvil` scope was found
-to belong to an unrelated npm user. The rest of this decision stands.
+[ADR-0023](0023-npm-package-name-is-anvil-workflows.md). The public checks showed
+`@anvil/common-asc` already under `@anvil`; they did not establish maintainer control of
+that scope. ADR-0023 records those limits and the confirmed control of the replacement
+scope. The rest of this decision stands.
 
 The release workflow packs, smoke-tests and publishes the scoped `packages/cli` workspace
-(`@anvil/cli`) from a version tag, and refuses to publish when the tag, the workspace manifest
-and the packed tarball disagree. The unscoped `anvil` name belongs to an unrelated package, so
-the repository root stays the git-install unit only. The channel remains unadvertised until a
-release has been published and installation of `@anvil/cli` from the registry verified.
+(`@anvil-workflows/cli`) from a version tag, and refuses to publish when the tag, the
+workspace manifest and the packed tarball disagree. The unscoped `anvil` name belongs to an
+unrelated package, so the repository root stays the git-install unit only. The channel remains
+unadvertised until a release has been published and installation of `@anvil-workflows/cli`
+from the registry verified.
 
 ## Context
 

@@ -510,8 +510,9 @@ has run, so the workflow itself remains unproven end to end.
 - Confirm that public distribution of the bundled code is intended, even if the source
   repository remains private.
 - Verify ownership/availability of a scoped npm name; do not use the unrelated unscoped
-  `anvil` registry name. The executable can remain `anvil`. `@anvil` is also taken, so the
-  agreed scope is `@anvil-workflows` ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)).
+  `anvil` registry name. The executable can remain `anvil`. `@anvil` was already in use,
+  and maintainer control was not established; the agreed scope is `@anvil-workflows`
+  ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)).
 - Decide whether to publish a generated distribution package or change the root manifest.
   Write an ADR extending [ADR-0007](adr/0007-distribution-git-install.md); preserve the
   GitHub source-install path unless its retirement is explicitly approved.
@@ -604,6 +605,12 @@ Publication remains on hold. Approval and successful execution are separate fact
   `npm whoami` returned `ENEEDAUTH`; no `NPM_TOKEN` repository secret was listed.
   Scope ownership and final artifact verification remain prerequisites, not implicit
   publication permission.
+
+**2026-11-17 follow-up:** the authorization and environment details above record the state
+on 2026-11-14. Name control was subsequently confirmed: authenticated `npm whoami` returned
+`tecruz`, and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. See
+[the scope evidence](evidence/2026-11-17-npm-scope.md). The publication hold is unchanged;
+name control does not authorize a release, and final artifact verification is still required.
 
 ## PR breakdown and release gates
 
