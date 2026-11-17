@@ -20,6 +20,7 @@ import {
   jiraIssueKey,
   markdownToAdf,
   normalizeJiraSite,
+  refFor,
 } from '@anvil/providers'
 import { type FakeJiraOptions, fakeJira } from './fake-jira.ts'
 
@@ -172,6 +173,17 @@ describe('reading a Jira issue', () => {
     ]) {
       await assert.rejects(() => provider.fetch(ref), /Invalid Jira issue key/)
     }
+    assert.deepEqual(fake.calls, [])
+  })
+
+  test('a bare number is refused before it can address the JIRA project', async () => {
+    // The parser used to invent `jira-42`, which the provider accepted as a real key and
+    // wrote to JIRA-42 on the configured site.
+    const { fake, provider } = makeJira()
+    const ref = refFor('jira', '42')
+    assert.equal(ref.key, '42')
+    await assert.rejects(() => provider.comment(ref, 'wrong issue'), /Invalid Jira issue key/)
+    await assert.rejects(() => provider.transition(ref, 'done'), /Invalid Jira issue key/)
     assert.deepEqual(fake.calls, [])
   })
 

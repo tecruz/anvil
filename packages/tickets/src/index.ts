@@ -232,7 +232,7 @@ export function parseRef(
   const hash = /^#(\d+)$/.exec(raw)
   if (hash !== null) {
     const id = hash[1] as string
-    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
+    return { provider: defaultProvider, id, key: numericKey(defaultProvider, id) }
   }
 
   const prefixed = /^([A-Za-z][\w-]*?)-(\d+)$/.exec(raw)
@@ -256,7 +256,7 @@ export function parseRef(
   const numeric = /^(\d+)$/.exec(raw)
   if (numeric !== null) {
     const id = numeric[1] as string
-    return { provider: defaultProvider, id, key: `${keyPrefix(defaultProvider)}-${id}` }
+    return { provider: defaultProvider, id, key: numericKey(defaultProvider, id) }
   }
 
   // Anything else is treated as a key verbatim, e.g. `PROJ-123` or `local-7`.
@@ -275,6 +275,17 @@ function keyPrefix(provider: ProviderId): string {
   if (provider === 'github') return 'gh'
   if (provider === 'gitlab') return 'gl'
   return provider
+}
+
+/**
+ * The human key for a bare number under `provider`.
+ *
+ * Jira issue keys always carry a project prefix, so inventing `jira-42` would make a bare
+ * number address the literal JIRA project. Keeping the number as the key lets the provider
+ * refuse it as the ambiguous reference it is, before any write is made.
+ */
+function numericKey(provider: ProviderId, id: string): string {
+  return provider === 'jira' ? id : `${keyPrefix(provider)}-${id}`
 }
 
 /** The repository a hosted ticket URL points at, independent of the forge. */

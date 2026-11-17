@@ -123,6 +123,8 @@ describe('ADF to markdown', () => {
                 { type: 'date', attrs: { timestamp: '1794873600000' } },
                 { type: 'text', text: ' against ' },
                 { type: 'inlineCard', attrs: { url: 'https://example.com/spec' } },
+                { type: 'text', text: ' with ' },
+                { type: 'mediaInline', attrs: { id: 'attachment-1', collection: 'jira', alt: 'screenshot' } },
               ],
             },
           ],
@@ -130,7 +132,21 @@ describe('ADF to markdown', () => {
       ],
     }
 
-    assert.equal(adfToMarkdown(doc), '- [ ] ship by 2026-11-17 against https://example.com/spec')
+    assert.equal(adfToMarkdown(doc), '- [ ] ship by 2026-11-17 against https://example.com/spec with [screenshot]')
+  })
+
+  test('an out-of-range date is dropped rather than throwing', () => {
+    const doc: AdfDoc = {
+      type: 'doc',
+      version: 1,
+      content: [
+        {
+          type: 'paragraph',
+          content: [{ type: 'date', attrs: { timestamp: '8640000000000001' } }],
+        },
+      ],
+    }
+    assert.equal(adfToMarkdown(doc), '')
   })
 
   test('an unknown node keeps its text instead of disappearing', () => {

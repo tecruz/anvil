@@ -73,6 +73,12 @@ describe('parseRef', () => {
     assert.deepEqual(parseRef('42', 'local'), { provider: 'local', id: '42', key: 'local-42' })
   })
 
+  test('a bare number is not a Jira issue key', () => {
+    // Inventing `jira-42` would make a bare number address the literal JIRA project.
+    assert.deepEqual(parseRef('42', 'jira'), { provider: 'jira', id: '42', key: '42' })
+    assert.deepEqual(parseRef('#42', 'jira'), { provider: 'jira', id: '42', key: '42' })
+  })
+
   test('a project key keeps its own prefix and the selected provider', () => {
     assert.deepEqual(parseRef('PROJ-123', 'jira'), { provider: 'jira', id: 'PROJ-123', key: 'PROJ-123' })
     // Jira keys are case-insensitive in the UI but conventionally uppercase, and the two

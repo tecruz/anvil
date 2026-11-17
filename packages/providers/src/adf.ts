@@ -149,25 +149,32 @@ function renderListItem(node: AdfNode, prefix: string): string {
   return `${prefix} ${first ?? ''}${indented === '' ? '' : `\n${indented}`}`
 }
 
-/** Node types ADF allows inside a `taskItem`, which holds inline content, not blocks. */
-const INLINE_NODE_TYPES: ReadonlySet<string> = new Set([
-  'text',
-  'hardBreak',
-  'mention',
-  'emoji',
-  'inlineCard',
-  'status',
-  'date',
+/** ADF block nodes. A task item holds inline nodes, but older payloads may wrap them. */
+const BLOCK_NODE_TYPES: ReadonlySet<string> = new Set([
+  'paragraph',
+  'bulletList',
+  'orderedList',
+  'taskList',
+  'blockquote',
+  'codeBlock',
+  'mediaSingle',
+  'mediaGroup',
+  'panel',
+  'expand',
+  'nestedExpand',
+  'table',
+  'rule',
 ])
 
 function renderTaskItem(node: AdfNode): string {
   const state = typeof node.attrs?.state === 'string' && node.attrs.state.toLowerCase() === 'done' ? 'x' : ' '
   const content = node.content ?? []
-  // A task item is inline in ADF (`text`, `inlineCard`, ...), unlike a `listItem`, which
-  // holds paragraphs. Rendering it as blocks dropped the inline nodes -- a checklist whose
-  // item linked a spec lost the link. Older/looser payloads with a paragraph still work.
-  const inline = content.length > 0 && content.every((child) => INLINE_NODE_TYPES.has(child.type))
-  const body = (inline ? renderInline(content) : renderBlocks(content)).replace(/\n+/g, ' ').trim()
+  // A task item is inline in ADF. Every child goes through the inline renderer, so an
+  // unrecognised inline node (a media attachment, an extension) cannot force the whole
+  // item through the block renderer and take its links and dates down with it. Payloads
+  // that really do wrap text in a paragraph are still handled as blocks.
+  const blocks = content.some((child) => BLOCK_NODE_TYPES.has(child.type))
+  const body = (blocks ? renderBlocks(content) : renderInline(content)).replace(/\n+/g, ' ').trim()
   return `- [${state}] ${body}`
 }
 
@@ -195,6 +202,15 @@ function renderInlineNode(node: AdfNode): string {
       const url = node.attrs?.url
       return typeof url === 'string' ? url : ''
     }
+    case 'mediaInline': {
+      const alt = typeof node.attrs?.alt === 'string' && node.attrs.alt !== '' ? node.attrs.alt : 'media'
+      return `[${alt}]`
+    }
+    case 'placeholder':
+    case 'inlineExtension': {
+      const text = node.attrs?.text
+      return typeof text === 'string' ? text : ''
+    }
     case 'status': {
       const text = node.attrs?.text
       return typeof text === 'string' ? text : ''
@@ -207,7 +223,10 @@ function renderInlineNode(node: AdfNode): string {
       if (typeof timestamp === 'string' && timestamp.trim() === '') return ''
       const millis = typeof timestamp === 'number' ? timestamp : Number(timestamp.trim())
       if (!Number.isFinite(millis)) return ''
-      return new Date(millis).toISOString().slice(0, 10)
+      const date = new Date(millis)
+      // A finite number can still be outside Date's range; toISOString would throw.
+      if (Number.isNaN(date.getTime())) return ''
+      return date.toISOString().slice(0, 10)
     }
     default:
       return node.content === undefined ? (node.text ?? '') : renderInline(node.content)
