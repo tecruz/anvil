@@ -16,6 +16,11 @@ This directory holds two different kinds of evidence, and they must not be mixed
   implementation, harness, fixture and bundle digests, attempts and completion state.
 - `checkpoints/` and `raw/` are regenerated scratch output and are ignored by Git.
 
+`runs/a9bf3455-af1e-4306-9957-ce37492c08d8.json` is superseded historical evidence, kept as
+history and not rewritten. Its `commitSha` (`44d342e`, the base of #77) is mis-attributed:
+the evidence was produced from the then-uncommitted #77 changes, and its digests match
+`d058848`, not `44d342e`. Do not read it as provenance for `44d342e`.
+
 `npm run eval:check` only reads the hermetic files above. It never compares a real-agent
 record with `latest.json`. A real-agent run still writes its run record to `run.json` and
 `runs/` while it runs; move it under `pilots/` rather than committing it here.

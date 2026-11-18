@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -43,6 +43,27 @@ function temp(prefix: string): string {
   temps.push(dir)
   return dir
 }
+
+/**
+ * Whether this machine can create a symlink to a file.
+ *
+ * Windows only allows file symlinks with Developer Mode or elevation, and a directory
+ * junction is not a substitute for one. Only the coverage that needs a file symlink is
+ * skipped without it.
+ */
+function canCreateFileSymlink(): boolean {
+  const probe = temp('anvil-file-link-probe-')
+  const target = join(probe, 'target')
+  writeFileSync(target, '')
+  try {
+    symlinkSync(target, join(probe, 'link'), 'file')
+    return true
+  } catch {
+    return false
+  }
+}
+
+const fileSymlinks = canCreateFileSymlink()
 
 function scenario(over: Partial<EvalScenario> = {}): EvalScenario {
   return {
@@ -988,6 +1009,36 @@ describe('checkpoint reconciliation', () => {
     const read = readCheckpointDirectory(dir)
     assert.equal(read.entries.length, 1)
     assert.equal(read.rejected.length, 1)
+  })
+
+  test('rejects a .json symlink as not a regular file instead of reading its target', {
+    skip: fileSymlinks ? false : 'this machine cannot create a file symlink',
+  }, () => {
+    const dir = temp('anvil-eval-checkpoint-symlink-')
+    const outside = temp('anvil-eval-checkpoint-symlink-target-')
+    const dangling = checkpointFileName({
+      scenario: 'tiny-code-change',
+      variant: 'anvil',
+      model: 'fake-agent',
+      repetition: 0,
+    })
+    const linked = checkpointFileName({
+      scenario: 'tiny-code-change',
+      variant: 'bare',
+      model: 'fake-agent',
+      repetition: 0,
+    })
+    symlinkSync(join(dir, 'missing-target.json'), join(dir, dangling), 'file')
+    const target = join(outside, 'real.json')
+    writeFileSync(target, JSON.stringify(runRecordFor(latest(matrix())).results[0]!), 'utf8')
+    symlinkSync(target, join(dir, linked), 'file')
+    const read = readCheckpointDirectory(dir)
+    const rejectedFiles = [...read.rejectedFiles].sort((a, b) => a.name.localeCompare(b.name))
+    assert.deepEqual(rejectedFiles, [
+      { name: dangling, reason: 'checkpoint is not a regular file' },
+      { name: linked, reason: 'checkpoint is not a regular file' },
+    ])
+    assert.deepEqual(read.entries, [])
   })
 
   test('recovers a completed checkpoint that run.json never recorded', () => {
