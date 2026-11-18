@@ -347,6 +347,55 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
   }
 })
 
+test('resume keeps a failed attempt as a scored failure instead of retrying it', { timeout: 600_000 }, () => {
+  const harness = isolatedHarness('anvil-eval-resume-failed-')
+  try {
+    const { read, write, invoke } = harness
+    const baseline = invoke('--write-baseline')
+    assert.equal(baseline.status, 0, baseline.output)
+
+    const complete = JSON.parse(read('eval-results/run.json')) as EvalRunRecord
+    const failed = structuredClone(complete)
+    const target = failed.results[0]!
+    target.verified = false
+    target.error = 'agent exited 1'
+    target.attempts = [
+      {
+        ...target.attempts[0]!,
+        state: 'failed',
+        error: 'agent exited 1',
+      },
+    ]
+    failed.completionState = 'in-progress'
+    failed.completedAt = null
+    const targetKey = resultKey(target)
+    const latestBefore = read('eval-results/latest.json')
+    write('eval-results/run.json', failed)
+
+    const resumed = invoke('--resume')
+    assert.equal(resumed.status, 0, resumed.output)
+    assert.match(resumed.output, /already settled all 8 keys/)
+    assert.match(resumed.output, /1 failed key\(s\) remain scored failures and will not be retried/)
+    assert.match(resumed.output, /agent exited 1/)
+    assert.match(resumed.output, /finished in state partial/)
+
+    const after = JSON.parse(read('eval-results/run.json')) as EvalRunRecord
+    assert.equal(after.completionState, 'partial')
+    const scored = after.results.find((entry) => resultKey(entry) === targetKey)
+    assert.ok(scored !== undefined)
+    assert.equal(scored.attempts.length, 1)
+    assert.equal(scored.attempts[0]!.state, 'failed')
+    assert.equal(scored.error, 'agent exited 1')
+    assert.equal(scored.verified, false)
+    assert.equal(read('eval-results/latest.json'), latestBefore)
+
+    const check = invoke('--check')
+    assert.equal(check.status, 0, check.output)
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('an interrupted fake-agent run keeps its checkpoint and resume reuses it', {
   // The budget below is deliberately smaller than this timeout, so a slow step fails with its
   // own message instead of the runner killing the test first.

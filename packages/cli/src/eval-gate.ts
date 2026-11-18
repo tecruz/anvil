@@ -1182,8 +1182,8 @@ function skillEvidenceProblem(
  * A checkpoint whose latest attempt completed, whose key belongs to this run, and whose
  * scenario/source hashes match the current fixtures is usable evidence. A newer checkpoint
  * (more attempts) replaces a stale record entry; an older or equal one never does. A newer
- * checkpoint whose latest attempt failed is still adopted so the retry keeps the failure
- * in its history and the key is not mistaken for complete.
+ * checkpoint whose latest attempt failed is still adopted so the failure remains a scored
+ * outcome and the key is not mistaken for complete or silently retried.
  */
 export function reconcileRunRecord(
   record: EvalRunRecord,
@@ -1213,10 +1213,9 @@ export function reconcileRunRecord(
       rejected.push(`${key}: checkpoint model is not part of this run`)
       continue
     }
-    // A failed or timed-out attempt is retried on resume, never recovered as evidence.
-    // It is still adopted when it is newer than the recorded result: otherwise a retry
-    // would overwrite the checkpoint with only its own attempt and lose the failure that
-    // happened after the last run.json write.
+    // A failed or timed-out attempt is a terminal, scored outcome; resume never retries it.
+    // It is still adopted when it is newer than the recorded result: otherwise a later
+    // run.json write would lose the failure that happened after the checkpoint was written.
     if (latestAttemptState(result) === null) {
       rejected.push(`${key}: checkpoint has no attempts`)
       continue

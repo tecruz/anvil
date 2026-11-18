@@ -290,9 +290,11 @@ The summary records a hash of the anvil sources that produced it, so a stale run
 vouch for a newer implementation. The run record also records the harness digest, Node and
 OpenCode versions, transcript policy, model set, and whether the run was a subset.
 `--resume` refuses any run whose inputs differ, validates every checkpoint before
-recovering it, and never promotes a subset or partial run. Transcripts are empty by
-default; `--publish-transcripts` opts in, and every persisted transcript, error, and
-verifier output is redacted and size-limited first.
+recovering it, and never promotes a subset or partial run. A terminal attempt is settled:
+a failed key stays in the scored results with its error and is never retried, so a later
+success cannot replace it in a comparison. Transcripts are empty by default;
+`--publish-transcripts` opts in, and every persisted transcript, error, and verifier output
+is redacted and size-limited first.
 
 Captured verify-only checks use a harness-provided `node` launcher. Its parent-process
 broker executes a Node ESM source snapshot captured before the agent starts, using an
