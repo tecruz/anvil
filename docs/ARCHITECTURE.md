@@ -303,7 +303,9 @@ Resume fails closed rather than guessing when the record and its checkpoints dis
   run already holds, so `run.json` is left unchanged. The same file is only a warning when
   its key is already settled, or when its name maps to no declared key, because neither can
   cause a rerun. A readable checkpoint that fails verifier-evidence validation is still
-  ignored: the missing key is recovered or rerun, as before.
+  ignored: the missing key is recovered or rerun, as before. A `.json` entry that is not a
+  regular file, including a dangling symlink, is treated as unreadable with reason
+  `checkpoint is not a regular file`.
 - Overlapping resumes: a checkpoint for a key the record has settled is refused when it
   reports a different latest state, a different attempt (timestamps or verdicts) at the same
   attempt count, or more attempts than the record. A recorded terminal failure

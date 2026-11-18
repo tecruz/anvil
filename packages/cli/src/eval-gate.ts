@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 
 /** The two repository sizes the matrix is required to cover. */
@@ -1017,6 +1017,21 @@ export interface EvalRejectedCheckpointFile {
 }
 
 /**
+ * Whether a path is a regular file, without following a symlink.
+ *
+ * A dangling symlink is `ENOENT` to `statSync`, and following a live one would parse a
+ * target the checkpoint directory does not own. Either way resume must not treat it as a
+ * readable checkpoint, so both are reported rather than skipped.
+ */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
  * Read every checkpoint under a checkpoint directory, recursively.
  *
  * A malformed checkpoint is reported, not cast into evidence. Direct-child discovery was
@@ -1039,7 +1054,13 @@ export function readCheckpointDirectory(directory: string): {
         walk(path)
         continue
       }
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      if (!entry.name.endsWith('.json')) continue
+      if (!isRegularFile(path)) {
+        const reason = 'checkpoint is not a regular file'
+        rejected.push(`${entry.name}: ${reason}`)
+        rejectedFiles.push({ name: entry.name, reason })
+        continue
+      }
       const raw = readJsonFile(path)
       const schemaVersion = isObject(raw) ? (raw.schemaVersion ?? 1) : 1
       if (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) {
