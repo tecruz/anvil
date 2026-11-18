@@ -344,8 +344,9 @@ be inferred entirely from source code.
   checkpoint would replace a recorded terminal failure or otherwise conflict with
   `run.json` (for example two overlapping resumes; there is no lock, so only conflicts
   visible when the later resume starts are caught), or when the record holds a result it
-  never declared. A fresh run archives an unfinished record before starting a new run id,
-  so a failed key's scored work is not lost. Two end-to-end tests in
+  never declared. A fresh run archives an unfinished record (including an unfinished subset,
+  but not a completed subset) before starting a new run id, so a failed key's scored work is
+  not lost. Two end-to-end tests in
   `scripts/test/eval-resume.test.ts` cover this: one where the failure is already in
   `run.json`, and one where the failure exists only in a checkpoint while other declared
   keys are still missing.

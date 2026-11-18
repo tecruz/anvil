@@ -305,16 +305,20 @@ Resume fails closed rather than guessing when the record and its checkpoints dis
   cause a rerun. A readable checkpoint that fails verifier-evidence validation is still
   ignored: the missing key is recovered or rerun, as before.
 - Overlapping resumes: a checkpoint for a key the record has settled is refused when it
-  reports a different latest state or more attempts than the record. A recorded terminal
-  failure (`failed` / `timed-out`) is final; a later completed or longer checkpoint never
-  replaces it. There is no lock, so this only catches a conflict already visible when the
-  later resume starts; two resumes that start together can still race.
+  reports a different latest state, a different attempt (timestamps or verdicts) at the same
+  attempt count, or more attempts than the record. A recorded terminal failure
+  (`failed` / `timed-out`) is final; a later completed or longer checkpoint never replaces
+  it. The completed checkpoint written beside the record before that same attempt failed is
+  stale, so it is ignored rather than refused. There is no lock, so this only catches a
+  conflict already visible when the later resume starts; two resumes that start together can
+  still race.
 - A result in `run.json` whose key is not in that run's declared key set is refused, since
   resuming would score evidence the run never produced.
 - A fresh run (no `--resume`) archives an unarchived `partial`, `failed` or `in-progress`
   record under `eval-results/runs/<runId>.json` before starting a new run id, so scored
-  failures and other settled work from the unfinished run survive. An existing archive of
-  the same run id is never overwritten.
+  failures and other settled work from the unfinished run survive. This includes an
+  unfinished subset; a completed subset is not archived. An existing archive of the same run
+  id is never overwritten.
 
 A recorded failed attempt is a scored run error even when the top-level `error` is missing:
 scoring copies the attempt's error, or a stable fallback message when the attempt has none,

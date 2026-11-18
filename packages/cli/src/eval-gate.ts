@@ -1188,14 +1188,32 @@ function skillEvidenceProblem(
   return null
 }
 
+/** Whether two equal-length histories describe the same settled outcome. */
+function sameSettledOutcome(recorded: EvalRunRecordResult, candidate: EvalRunRecordResult): boolean {
+  const recordedLast = recorded.attempts[recorded.attempts.length - 1]
+  const candidateLast = candidate.attempts[candidate.attempts.length - 1]
+  return (
+    recordedLast?.state === candidateLast?.state &&
+    recordedLast?.error === candidateLast?.error &&
+    recorded.verified === candidate.verified &&
+    recorded.hiddenVerified === candidate.hiddenVerified &&
+    recorded.error === candidate.error &&
+    recorded.verifyExitCodes.length === candidate.verifyExitCodes.length &&
+    recorded.verifyExitCodes.every((code, index) => code === candidate.verifyExitCodes[index]) &&
+    recorded.skillInstall === candidate.skillInstall &&
+    recorded.skillAccess === candidate.skillAccess &&
+    recorded.skillAccessReason === candidate.skillAccessReason
+  )
+}
+
 /**
  * Why a checkpoint disagrees with a key the record already settled, or null.
  *
  * A settled key is never rerun, so a checkpoint with more attempts can only come from a
  * run that overlapped this one; adopting it would change or extend evidence the record
- * already fixed. A completed record with a failed checkpoint is a visible conflict too. An
- * equal-length completed checkpoint for a recorded failure is the stale file written next
- * to the record before it failed, so it is ignored rather than treated as a conflict.
+ * already fixed. An equal-length checkpoint can come from an overlapping resume too, so it
+ * is a conflict unless it is the same attempt with the same verdicts, or the stale completed
+ * file written next to the record before that attempt failed.
  */
 function checkpointConflict(recorded: EvalRunRecordResult, candidate: EvalRunRecordResult): string | null {
   const recordedState = latestAttemptState(recorded)
@@ -1206,18 +1224,18 @@ function checkpointConflict(recorded: EvalRunRecordResult, candidate: EvalRunRec
     return `checkpoint has ${candidate.attempts.length} attempts but run.json recorded ${recorded.attempts.length} for a settled key`
   }
   if (candidate.attempts.length < recorded.attempts.length) return null
-  if (candidateState === recordedState) return null
-  if (recordedState === 'completed') {
-    return `checkpoint is ${candidateState} but run.json recorded ${recordedState}`
-  }
   const recordedLast = recorded.attempts[recorded.attempts.length - 1]
   const candidateLast = candidate.attempts[candidate.attempts.length - 1]
-  if (
-    recordedLast?.startedAt === candidateLast?.startedAt &&
-    recordedLast?.completedAt === candidateLast?.completedAt
-  ) {
-    return null
-  }
+  const sameAttempt =
+    recordedLast !== undefined &&
+    candidateLast !== undefined &&
+    recordedLast.startedAt === candidateLast.startedAt &&
+    recordedLast.completedAt === candidateLast.completedAt
+  // The checkpoint written beside run.json for this same attempt mirrors the record.
+  if (sameAttempt && sameSettledOutcome(recorded, candidate)) return null
+  // A completed checkpoint beside a recorded failure with the same timestamps is the stale
+  // file written before that attempt failed; ignore it rather than adopt or refuse it.
+  if (sameAttempt && recordedState !== 'completed' && candidateState === 'completed') return null
   return `checkpoint is ${candidateState} but run.json recorded ${recordedState}`
 }
 

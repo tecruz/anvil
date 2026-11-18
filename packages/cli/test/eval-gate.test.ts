@@ -1163,6 +1163,53 @@ describe('checkpoint reconciliation', () => {
     assert.equal(latestAttemptState(reconciled.record.results[index]!), 'failed')
   })
 
+  test('refuses an equal-length checkpoint from an overlapping run', () => {
+    const record = runRecordFor(latest(matrix()))
+    const recorded = record.results.find((result) => resultKey(result) === `${key}/0`)!
+    // Two resumes can settle the same key with the same attempt count but different
+    // timestamps or verdicts. That is visible evidence mixing, not the normal checkpoint
+    // written beside run.json, so it must be refused rather than adopted.
+    const laterRun: EvalRunRecordResult = {
+      ...recorded,
+      attempts: recorded.attempts.map((attempt, index) =>
+        index === recorded.attempts.length - 1
+          ? {
+              ...attempt,
+              startedAt: '2026-10-27T00:10:00.000Z',
+              completedAt: '2026-10-27T00:10:30.000Z',
+            }
+          : attempt,
+      ),
+    }
+    const differentTimes = reconcileRunRecord(record, [{ result: laterRun, modifiedMs: 10 }], hashes, matrix())
+    assert.equal(differentTimes.changed, false)
+    assert.equal(differentTimes.conflicts.length, 1)
+    assert.match(differentTimes.conflicts[0]!, /checkpoint is completed but run\.json recorded completed/)
+    assert.deepEqual(
+      differentTimes.record.results.find((result) => resultKey(result) === resultKey(recorded))!.attempts,
+      recorded.attempts,
+    )
+
+    const differentVerdict: EvalRunRecordResult = {
+      ...recorded,
+      verified: false,
+      error: 'the overlapping attempt failed verification',
+      attempts: recorded.attempts.map((attempt, index) =>
+        index === recorded.attempts.length - 1
+          ? { ...attempt, error: 'the overlapping attempt failed verification' }
+          : attempt,
+      ),
+    }
+    const differentResult = reconcileRunRecord(record, [{ result: differentVerdict, modifiedMs: 10 }], hashes, matrix())
+    assert.equal(differentResult.changed, false)
+    assert.equal(differentResult.conflicts.length, 1)
+    assert.match(differentResult.conflicts[0]!, /checkpoint is completed but run\.json recorded completed/)
+    assert.deepEqual(
+      differentResult.record.results.find((result) => resultKey(result) === resultKey(recorded))!.attempts,
+      recorded.attempts,
+    )
+  })
+
   test('does not resurrect an equal-attempt success over a failed record', () => {
     const record = runRecordFor(latest(matrix()))
     const index = record.results.findIndex((result) => `${result.scenario}/${result.variant}/${result.model}` === key)

@@ -622,8 +622,8 @@ async function main(): Promise<void> {
             ? `Archived previous run ${prior.runId} to ${join(runArchiveDir, `${prior.runId}.json`)}.`
             : `Previous run ${prior.runId} is already archived.`,
         )
-      } else if (prior.subset) {
-        console.log(`Previous run ${prior.runId} is a subset; not archiving it.`)
+      } else if (prior.subset && prior.completionState === 'completed') {
+        console.log(`Previous run ${prior.runId} is a completed subset; not archiving it.`)
       } else {
         // partial, failed or in-progress: keep the scored results it already holds. An
         // existing archive of the same run id is never overwritten.

@@ -662,6 +662,45 @@ test('a fresh run archives an unfinished record before starting a new one', { ti
   }
 })
 
+test('a fresh run archives an unfinished subset record before starting a new one', { timeout: 600_000 }, () => {
+  const harness = isolatedHarness('anvil-eval-fresh-archive-subset-')
+  try {
+    const { read, invoke } = harness
+    const baseline = invoke('--write-baseline')
+    assert.equal(baseline.status, 0, baseline.output)
+
+    const complete = JSON.parse(read('eval-results/run.json')) as EvalRunRecord
+    for (const completionState of ['partial', 'failed'] as const) {
+      const subset = structuredClone(complete)
+      subset.runId = `subset-${completionState}-before-fresh`
+      subset.results = subset.results.slice(0, 1)
+      subset.executionOrder = subset.executionOrder.slice(0, 1)
+      subset.subset = true
+      subset.completionState = completionState
+      subset.completedAt = null
+      harness.write('eval-results/run.json', subset)
+      assert.equal(existsSync(join(harness.root, 'eval-results', 'runs', `${subset.runId}.json`)), false)
+
+      const fresh = invoke()
+      assert.equal(fresh.status, 0, fresh.output)
+      assert.match(fresh.output, new RegExp(`Archived previous ${completionState} run ${subset.runId}`))
+
+      // The unfinished subset keeps its scored work under its own run id instead of being
+      // dropped because it was a subset.
+      const archived = JSON.parse(read(`eval-results/runs/${subset.runId}.json`)) as EvalRunRecord
+      assert.equal(archived.runId, subset.runId)
+      assert.equal(archived.completionState, completionState)
+      assert.equal(archived.subset, true)
+      assert.equal(resultKey(archived.results[0]!), resultKey(subset.results[0]!))
+
+      const started = JSON.parse(read('eval-results/run.json')) as EvalRunRecord
+      assert.notEqual(started.runId, subset.runId)
+    }
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('a fresh run does not overwrite an existing archive of the same run', { timeout: 600_000 }, () => {
   const harness = isolatedHarness('anvil-eval-fresh-archive-keep-')
   try {
