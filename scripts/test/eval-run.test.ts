@@ -21,13 +21,13 @@ import type { EvalRunRecord, EvalScenario } from '../../packages/cli/src/eval-ga
 import {
   atomicWriteJson,
   captureInstalledSkill,
-  completedResultsFromRecord,
   explainSkillAccess,
   type InstalledSkillArtifact,
   isCheckCommand,
   observeSkillAccess,
   parseOpenCodeRunEvents,
   run,
+  scoredResultsFromRecord,
 } from '../eval.ts'
 
 const temps: string[] = []
@@ -629,7 +629,7 @@ describe('fake-agent skill-access wiring', () => {
   })
 })
 
-describe('resumed results keep every recorded fact', () => {
+describe('scored results keep every recorded fact', () => {
   const record: EvalRunRecord = {
     schemaVersion: 3,
     runId: 'run-1',
@@ -692,12 +692,62 @@ describe('resumed results keep every recorded fact', () => {
   ] as EvalScenario[]
 
   test('a resumed report keeps skillInstall, skillAccess and the access reason', () => {
-    const [result] = completedResultsFromRecord(record, scenarios)
+    const [result] = scoredResultsFromRecord(record, scenarios)
     assert.equal(result?.skillInstall, 'verified')
     assert.equal(result?.skillAccess, 'observed')
     assert.equal(result?.skillAccessReason, 'read-of-installed-artifact')
     assert.equal(result?.verified, true)
     assert.equal(result?.hiddenVerified, true)
+  })
+
+  test('a failed attempt stays a scored result with its error', () => {
+    const failed = structuredClone(record)
+    const result = failed.results[0]!
+    result.verified = false
+    result.error = 'agent exited 1'
+    result.attempts = [
+      {
+        ...result.attempts[0]!,
+        state: 'failed',
+        error: 'agent exited 1',
+      },
+    ]
+
+    const [scored] = scoredResultsFromRecord(failed, scenarios)
+    assert.equal(scored?.error, 'agent exited 1')
+    assert.equal(scored?.verified, false)
+    assert.equal(scored?.skillInstall, 'verified')
+  })
+
+  test('a failed attempt stays a run error when only the attempt records the error', () => {
+    const failed = structuredClone(record)
+    const result = failed.results[0]!
+    // An inconsistent record: the attempt says it failed, but only the attempt carries the
+    // error. Scoring must not read that as task success just because the top-level error is
+    // missing.
+    delete result.error
+    result.verified = false
+    result.attempts = [
+      {
+        ...result.attempts[0]!,
+        state: 'failed',
+        error: 'agent exited 1',
+      },
+    ]
+
+    const [scored] = scoredResultsFromRecord(failed, scenarios)
+    assert.equal(scored?.error, 'agent exited 1')
+    assert.equal(scored?.verified, false)
+  })
+
+  test('a timed-out attempt without any recorded error still scores as a run error', () => {
+    const timedOut = structuredClone(record)
+    const result = timedOut.results[0]!
+    delete result.error
+    result.attempts = [{ ...result.attempts[0]!, state: 'timed-out' }]
+
+    const [scored] = scoredResultsFromRecord(timedOut, scenarios)
+    assert.match(scored?.error ?? '', /timed-out without a recorded error/)
   })
 })
 

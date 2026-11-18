@@ -1010,19 +1010,28 @@ export interface EvalCheckpointEntry {
   modifiedMs: number
 }
 
+/** One checkpoint file that could not be read, named so a resume can attribute it. */
+export interface EvalRejectedCheckpointFile {
+  name: string
+  reason: string
+}
+
 /**
  * Read every checkpoint under a checkpoint directory, recursively.
  *
  * A malformed checkpoint is reported, not cast into evidence. Direct-child discovery was
- * wrong once model IDs started containing `/`; recursion keeps that fixed.
+ * wrong once model IDs started containing `/`; recursion keeps that fixed. Each rejected
+ * file is named individually so a resume can tell whether ignoring it would rerun its key.
  */
 export function readCheckpointDirectory(directory: string): {
   entries: EvalCheckpointEntry[]
   rejected: string[]
+  rejectedFiles: EvalRejectedCheckpointFile[]
 } {
   const entries: EvalCheckpointEntry[] = []
   const rejected: string[] = []
-  if (!existsSync(directory)) return { entries, rejected }
+  const rejectedFiles: EvalRejectedCheckpointFile[] = []
+  if (!existsSync(directory)) return { entries, rejected, rejectedFiles }
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
@@ -1034,19 +1043,22 @@ export function readCheckpointDirectory(directory: string): {
       const raw = readJsonFile(path)
       const schemaVersion = isObject(raw) ? (raw.schemaVersion ?? 1) : 1
       if (schemaVersion !== 1 && schemaVersion !== 2 && schemaVersion !== 3) {
-        rejected.push(`${entry.name}: checkpoint schemaVersion must be 1, 2 or 3`)
+        const reason = 'checkpoint schemaVersion must be 1, 2 or 3'
+        rejected.push(`${entry.name}: ${reason}`)
+        rejectedFiles.push({ name: entry.name, reason })
         continue
       }
       const parsed = parseRunRecordResult(raw, schemaVersion)
       if (typeof parsed === 'string') {
         rejected.push(`${entry.name}: ${parsed}`)
+        rejectedFiles.push({ name: entry.name, reason: parsed })
         continue
       }
       entries.push({ result: parsed, modifiedMs: statSync(path).mtimeMs })
     }
   }
   walk(directory)
-  return { entries, rejected }
+  return { entries, rejected, rejectedFiles }
 }
 
 /**
@@ -1176,21 +1188,78 @@ function skillEvidenceProblem(
   return null
 }
 
+/** Whether two equal-length histories describe the same settled outcome. */
+function sameSettledOutcome(recorded: EvalRunRecordResult, candidate: EvalRunRecordResult): boolean {
+  const recordedLast = recorded.attempts[recorded.attempts.length - 1]
+  const candidateLast = candidate.attempts[candidate.attempts.length - 1]
+  return (
+    recordedLast?.state === candidateLast?.state &&
+    recordedLast?.error === candidateLast?.error &&
+    recorded.verified === candidate.verified &&
+    recorded.hiddenVerified === candidate.hiddenVerified &&
+    recorded.error === candidate.error &&
+    recorded.verifyExitCodes.length === candidate.verifyExitCodes.length &&
+    recorded.verifyExitCodes.every((code, index) => code === candidate.verifyExitCodes[index]) &&
+    recorded.skillInstall === candidate.skillInstall &&
+    recorded.skillAccess === candidate.skillAccess &&
+    recorded.skillAccessReason === candidate.skillAccessReason
+  )
+}
+
+/**
+ * Why a checkpoint disagrees with a key the record already settled, or null.
+ *
+ * A settled key is never rerun, so a checkpoint with more attempts can only come from a
+ * run that overlapped this one; adopting it would change or extend evidence the record
+ * already fixed. An equal-length checkpoint can come from an overlapping resume too, so it
+ * is a conflict unless it is the same attempt with the same verdicts, or the stale completed
+ * file written next to the record before that attempt failed.
+ */
+function checkpointConflict(recorded: EvalRunRecordResult, candidate: EvalRunRecordResult): string | null {
+  const recordedState = latestAttemptState(recorded)
+  if (recordedState === null) return null
+  const candidateState = latestAttemptState(candidate)
+  if (candidateState === null) return null
+  if (candidate.attempts.length > recorded.attempts.length) {
+    return `checkpoint has ${candidate.attempts.length} attempts but run.json recorded ${recorded.attempts.length} for a settled key`
+  }
+  if (candidate.attempts.length < recorded.attempts.length) return null
+  const recordedLast = recorded.attempts[recorded.attempts.length - 1]
+  const candidateLast = candidate.attempts[candidate.attempts.length - 1]
+  const sameAttempt =
+    recordedLast !== undefined &&
+    candidateLast !== undefined &&
+    recordedLast.startedAt === candidateLast.startedAt &&
+    recordedLast.completedAt === candidateLast.completedAt
+  // The checkpoint written beside run.json for this same attempt mirrors the record.
+  if (sameAttempt && sameSettledOutcome(recorded, candidate)) return null
+  // A completed checkpoint beside a recorded failure with the same timestamps is the stale
+  // file written before that attempt failed; ignore it rather than adopt or refuse it.
+  if (sameAttempt && recordedState !== 'completed' && candidateState === 'completed') return null
+  return `checkpoint is ${candidateState} but run.json recorded ${recordedState}`
+}
+
 /**
  * Reconcile checkpoints written before a run-record write succeeded.
  *
- * A checkpoint whose latest attempt completed, whose key belongs to this run, and whose
- * scenario/source hashes match the current fixtures is usable evidence. A newer checkpoint
- * (more attempts) replaces a stale record entry; an older or equal one never does. A newer
- * checkpoint whose latest attempt failed is still adopted so the retry keeps the failure
- * in its history and the key is not mistaken for complete.
+ * A checkpoint whose latest attempt is terminal, whose key belongs to this run, and whose
+ * scenario/source hashes match the current fixtures is usable evidence. A record entry with
+ * no terminal attempt is replaced by the checkpoint: otherwise a run interrupted after its
+ * checkpoint but before its run-record write would lose that attempt. A key the record has
+ * already settled (completed, failed or timed-out) is never replaced; it is compared instead,
+ * before the evidence and hash checks, so a disagreement is a conflict rather than a warning.
+ *
+ * A checkpoint that conflicts with a settled key is reported in `conflicts`. A caller must
+ * refuse the resume when it is non-empty: a recorded terminal failure is final, and an
+ * overlapping resume is the other way such a checkpoint can appear. There is no lock, so
+ * this only catches a conflict already visible when the later resume starts.
  */
 export function reconcileRunRecord(
   record: EvalRunRecord,
   checkpoints: readonly EvalCheckpointEntry[],
   currentScenarioHashes: Record<string, { scenarioHash: string; sourceHash: string }>,
   scenarios: readonly EvalVerifierScenario[],
-): { record: EvalRunRecord; changed: boolean; rejected: string[] } {
+): { record: EvalRunRecord; changed: boolean; rejected: string[]; conflicts: string[] } {
   const next: EvalRunRecord = {
     ...record,
     runKeys: [...record.runKeys],
@@ -1198,6 +1267,7 @@ export function reconcileRunRecord(
     results: record.results.map((result) => ({ ...result, attempts: [...result.attempts] })),
   }
   const rejected: string[] = []
+  const conflicts: string[] = []
   const declared = new Set(next.runKeys)
   const modelIds = new Set(next.models.map((model) => model.id))
   const scenarioById = new Map(scenarios.map((scenario) => [scenario.id, scenario]))
@@ -1213,13 +1283,23 @@ export function reconcileRunRecord(
       rejected.push(`${key}: checkpoint model is not part of this run`)
       continue
     }
-    // A failed or timed-out attempt is retried on resume, never recovered as evidence.
-    // It is still adopted when it is newer than the recorded result: otherwise a retry
-    // would overwrite the checkpoint with only its own attempt and lose the failure that
-    // happened after the last run.json write.
+    // A failed or timed-out attempt is a terminal, scored outcome; resume never retries it.
+    // A checkpoint carrying one is adopted only for a key the record has not settled.
     if (latestAttemptState(result) === null) {
       rejected.push(`${key}: checkpoint has no attempts`)
       continue
+    }
+    const index = next.results.findIndex((entry) => resultKey(entry) === key)
+    const recorded = index === -1 ? undefined : next.results[index]!
+    // A settled key is final. Compare its history before any evidence or hash check: a
+    // checkpoint that would change or extend a recorded result is evidence mixing, and must
+    // be refused even when its fixtures are stale, or a later hash warning would hide it.
+    if (recorded !== undefined && latestAttemptState(recorded) !== null) {
+      const conflict = checkpointConflict(recorded, result)
+      if (conflict !== null) {
+        conflicts.push(`${key}: ${conflict}`)
+        continue
+      }
     }
     if (latestAttemptState(result) === 'completed') {
       const last = result.attempts[result.attempts.length - 1]
@@ -1251,11 +1331,10 @@ export function reconcileRunRecord(
       rejected.push(`${key}: checkpoint hashes do not match the current fixtures`)
       continue
     }
-    const index = next.results.findIndex((entry) => resultKey(entry) === key)
-    // Only a checkpoint with strictly more attempts can replace a recorded result. Using
-    // mtime or an equal attempt count could resurrect an older success over a newer
-    // failure, which is precisely the kind of evidence mixing resume must refuse.
-    if (index !== -1 && result.attempts.length <= next.results[index]!.attempts.length) continue
+    // A settled key is never replaced. The conflict check above already refused a
+    // disagreement; a checkpoint that mirrors the record is the normal file written beside
+    // run.json, and the record stays the authority for it.
+    if (recorded !== undefined && latestAttemptState(recorded) !== null) continue
     if (index === -1) {
       next.results.push(result)
       if (!next.executionOrder.includes(key)) next.executionOrder.push(key)
@@ -1264,7 +1343,7 @@ export function reconcileRunRecord(
     }
     changed = true
   }
-  return { record: next, changed, rejected }
+  return { record: next, changed, rejected, conflicts }
 }
 
 /** Every declared key has a completed result and nothing else does. */
@@ -1574,6 +1653,17 @@ export function checkRunRecordCompatibility(
     return {
       ok: false,
       message: `run ${record.runId} records duplicate results; cannot resume`,
+    }
+  }
+  // A result for a key the run never declared cannot be true evidence: it was written by
+  // another run (or by hand), and resuming would score it. Fail closed instead of carrying it.
+  const declaredKeySet = new Set(record.runKeys)
+  for (const key of recordedKeys) {
+    if (!declaredKeySet.has(key)) {
+      return {
+        ok: false,
+        message: `run ${record.runId} records ${key}, which it did not declare; cannot resume`,
+      }
     }
   }
   const recordModels = JSON.stringify(record.models)

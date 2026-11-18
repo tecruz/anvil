@@ -477,17 +477,26 @@ async function main(): Promise<void> {
   ensureCliBuilt()
 
   // `--resume` continues an existing run: it validates that the implementation, fixtures,
-  // models, harness policy, and requested run keys still match, skips keys that already
-  // completed, and retries only the incomplete ones. Each attempt is recorded explicitly; a
-  // failure is never silently retried until it passes.
+  // models, harness policy, and requested run keys still match, then skips keys that are
+  // already settled. A settled key is one whose last attempt completed, failed, or timed out;
+  // a failed or timed-out key stays a scored failure and is never retried, so a later success
+  // cannot replace it. Each attempt is recorded explicitly.
   let runRecord: EvalRunRecord
   let runId: string
   const declaredKeys: string[] = []
+  // A checkpoint's filename is derived from its key, so an unreadable file can be attributed
+  // to a declared key without trusting anything inside it.
+  const declaredCheckpointFileNames = new Map<string, string>()
   for (const model of models) {
     for (const scenario of selectedScenarios) {
       for (let repetition = 0; repetition < repetitions; repetition += 1) {
         for (const variant of counterbalanceOrder(repetition, order)) {
-          declaredKeys.push(`${scenario.id}/${variant}/${model.id}/${repetition}`)
+          const key = `${scenario.id}/${variant}/${model.id}/${repetition}`
+          declaredKeys.push(key)
+          declaredCheckpointFileNames.set(
+            checkpointFileName({ scenario: scenario.id, variant, model: model.id, repetition }),
+            key,
+          )
         }
       }
     }
@@ -524,12 +533,35 @@ async function main(): Promise<void> {
     // because model IDs contain `/`, and every checkpoint is validated before it can
     // become evidence.
     const checkpointRead = readCheckpointDirectory(join(checkpointsDir, parsed.runId))
-    for (const rejected of checkpointRead.rejected) {
-      console.warn(`Ignoring checkpoint ${rejected}`)
+    // A readable checkpoint that fails evidence checks is ignored: its key stays missing and
+    // is rerun, which the existing recovery test depends on. An unreadable file is different.
+    // It is identified only by its name, so a resume can tell whether ignoring it would
+    // silently rerun a key whose evidence exists but cannot be read -- that must refuse.
+    const recordedKeysBefore = new Set(
+      parsed.results.filter((result) => latestAttemptState(result) !== null).map(resultKey),
+    )
+    for (const file of checkpointRead.rejectedFiles) {
+      const key = declaredCheckpointFileNames.get(file.name)
+      if (key !== undefined && !recordedKeysBefore.has(key)) {
+        console.error(
+          `Cannot resume run ${parsed.runId}: checkpoint ${file.name} for ${key} is unreadable (${file.reason}) and ${key} is not settled; rerunning it would replace evidence this run may already hold.`,
+        )
+        process.exit(1)
+      }
+      console.warn(`Ignoring checkpoint ${file.name}: ${file.reason}`)
     }
     const reconciled = reconcileRunRecord(parsed, checkpointRead.entries, currentScenarioHashes, selectedScenarios)
     for (const rejected of reconciled.rejected) {
       console.warn(`Ignoring checkpoint ${rejected}`)
+    }
+    // A settled key is final, so a checkpoint that disagrees with it can only come from a
+    // stale file next to a terminal failure or from a resume that overlapped this run.
+    // Neither may be adopted; refuse before touching run.json.
+    if (reconciled.conflicts.length > 0) {
+      console.error(
+        `Cannot resume run ${parsed.runId}: the run record and its checkpoints disagree; refusing to mix evidence from overlapping runs:\n  - ${reconciled.conflicts.join('\n  - ')}`,
+      )
+      process.exit(1)
     }
     runRecord = reconciled.record
 
@@ -560,17 +592,25 @@ async function main(): Promise<void> {
       console.log(`Recovered completed checkpoints for run ${runRecord.runId} from previous attempts.`)
     }
     runId = runRecord.runId
-    const completed = new Set(runRecord.results.filter((r) => latestAttemptState(r) === 'completed').map(resultKey))
-    const remaining = declaredKeys.filter((key) => !completed.has(key))
+    const settled = new Set(runRecord.results.filter((r) => latestAttemptState(r) !== null).map(resultKey))
+    const failed = [...settled].filter((key) => {
+      const result = runRecord.results.find((entry) => resultKey(entry) === key)
+      return result !== undefined && latestAttemptState(result) !== 'completed'
+    })
+    const remaining = declaredKeys.filter((key) => !settled.has(key))
     console.log(
       remaining.length === 0
-        ? `Run ${runId} already completed all ${declaredKeys.length} keys; finishing without rerunning them.`
+        ? `Run ${runId} already settled all ${declaredKeys.length} keys; finishing without rerunning them.`
         : `Resuming run ${runId}: ${remaining.length} of ${declaredKeys.length} keys remain.`,
     )
+    if (failed.length > 0) {
+      console.log(`${failed.length} failed key(s) remain scored failures and will not be retried.`)
+    }
   } else {
-    // Never clobber the record that a checked-in summary references. Archiving a complete
+    // Never clobber the record that a checked-in summary references. Archiving the previous
     // record first means a later partial or subset run cannot take away the provenance of
-    // the last complete one. Incomplete runs have no evidence to preserve.
+    // the last complete one. An incomplete run can already hold scored work -- a failed key
+    // is a scored outcome -- so a fresh run archives it too instead of dropping that evidence.
     if (existsSync(runRecordPath)) {
       const prior = parseRunRecord(readJsonFile(runRecordPath))
       if (typeof prior === 'string') {
@@ -582,9 +622,16 @@ async function main(): Promise<void> {
             ? `Archived previous run ${prior.runId} to ${join(runArchiveDir, `${prior.runId}.json`)}.`
             : `Previous run ${prior.runId} is already archived.`,
         )
+      } else if (prior.subset && prior.completionState === 'completed') {
+        console.log(`Previous run ${prior.runId} is a completed subset; not archiving it.`)
       } else {
+        // partial, failed or in-progress: keep the scored results it already holds. An
+        // existing archive of the same run id is never overwritten.
+        const archived = archiveRunRecord(prior, false)
         console.log(
-          `Previous run ${prior.runId} is ${prior.subset ? 'a subset' : prior.completionState}; not archiving it.`,
+          archived
+            ? `Archived previous ${prior.completionState} run ${prior.runId} to ${join(runArchiveDir, `${prior.runId}.json`)} before starting a new run.`
+            : `Previous run ${prior.runId} is already archived; keeping the existing archive.`,
         )
       }
     }
@@ -616,15 +663,14 @@ async function main(): Promise<void> {
     writeRunRecord(runRecord)
   }
 
-  const results: ScenarioResult[] = completedResultsFromRecord(runRecord, selectedScenarios)
-  const completedKeys = new Set(
-    runRecord.results
-      .filter((r) => latestAttemptState(r) === 'completed')
-      .map((r) => `${r.scenario}/${r.variant}/${r.model}/${r.repetition}`),
-  )
+  const results: ScenarioResult[] = scoredResultsFromRecord(runRecord, selectedScenarios)
+  // A terminal attempt (completed or failed) is settled. Resume must never rerun a failed
+  // key, because a later success would replace the failure in the scored results and turn
+  // selective retry into a favourable comparison.
+  const settledKeys = new Set(runRecord.results.filter((r) => latestAttemptState(r) !== null).map(resultKey))
   // Print the spend before the first agent starts. Resume is included: only the keys that
   // remain are counted, so the ceiling matches what this invocation can actually cost.
-  const planned = plannedRuns(selectedScenarios, models, repetitions, order, completedKeys)
+  const planned = plannedRuns(selectedScenarios, models, repetitions, order, settledKeys)
   for (const line of formatPreflight(
     buildPreflight({
       scenarios: selectedScenarios,
@@ -645,9 +691,10 @@ async function main(): Promise<void> {
       for (let repetition = 0; repetition < repetitions; repetition += 1) {
         for (const variant of counterbalanceOrder(repetition, order)) {
           const key = `${scenario.id}/${variant}/${model.id}/${repetition}`
-          // A key that already completed is not re-run: resume picks up incomplete work,
-          // it does not silently rerun finished results until they pass.
-          if (completedKeys.has(key)) continue
+          // A settled key is not re-run: resume picks up only work that never reached a
+          // terminal attempt. Retrying a failed key could replace its failure with a later
+          // success and bias the comparison.
+          if (settledKeys.has(key)) continue
 
           const attemptStartedAt = new Date().toISOString()
           const rawResult = await runScenario(
@@ -695,10 +742,10 @@ async function main(): Promise<void> {
             runRecord.executionOrder.push(key)
             runRecord.results.push(checkpoint)
           } else {
-            // A retry replaces the previous attempt's verdicts and metadata with the latest
-            // attempt's, so the run record never mixes a failed attempt's verdict with a
-            // completed attempt's metadata. In particular, a successful retry must clear the
-            // previous attempt's error rather than leave a contradiction behind.
+            // Only a key with no terminal attempt reaches this branch; settled failures are
+            // skipped above. The retry still replaces the previous attempt's verdicts and
+            // metadata with its own, so the record never mixes verdicts and metadata from
+            // different attempts.
             const existing = runRecord.results[index]!
             const updated = recordResultFrom(result, scenarioHash, sourceHash, [...existing.attempts, attempt])
             runRecord.results[index] = updated
@@ -787,7 +834,8 @@ async function main(): Promise<void> {
     console.log(`Run ${runId} finished in state ${completionState}; eval-results/latest.json is unchanged.`)
   }
 
-  printSummary(results, evalGateHint(results, runId, args, repetitions, order, isSubset))
+  const promoted = completionState === 'completed' && promotionProblems.length === 0
+  printSummary(results, evalGateHint(results, runId, args, repetitions, order, isSubset, promoted))
   if (writeBaselineAfterRun && completionState === 'completed') writeBaseline(selectedScenarios)
 
   // The exit code is the verdict of the harness, not of the agent: a failed run is
@@ -1988,20 +2036,30 @@ function hashHarness(): string {
 }
 
 /**
- * Rebuild the console results from a completed run record.
+ * Rebuild the console results from every settled run-key result.
  *
- * Every recorded fact is copied, including the skill verdicts. Resume reuses completed work
- * instead of rerunning it, so a field dropped here disappears from the resumed report even
- * though the run record still holds it.
+ * A failed attempt is a scored outcome, not an invisible one: it stays in the report with its
+ * error so a resumed run cannot hide a failure behind a later success. Every other recorded
+ * fact is copied too, including the skill verdicts, so a field dropped here disappears from
+ * the resumed report even though the run record still holds it.
  */
-export function completedResultsFromRecord(
+export function scoredResultsFromRecord(
   runRecord: EvalRunRecord,
   scenarios: readonly EvalScenario[],
 ): ScenarioResult[] {
   const results: ScenarioResult[] = []
   for (const prior of runRecord.results) {
-    if (latestAttemptState(prior) !== 'completed') continue
+    if (latestAttemptState(prior) === null) continue
     const scenario = scenarios.find((entry) => entry.id === prior.scenario)
+    // A terminal failure must not read as success even when the record's top-level error is
+    // missing: the attempt that failed is the evidence, so its error (or a stable fallback)
+    // becomes the run error. Otherwise an inconsistent record would score as a passing task.
+    const terminal = latestAttemptState(prior)
+    const attemptError = prior.attempts[prior.attempts.length - 1]?.error
+    const error =
+      terminal === 'completed'
+        ? prior.error
+        : (prior.error ?? attemptError ?? `attempt ${terminal} without a recorded error`)
     results.push(
       sanitizeResult({
         scenario: prior.scenario,
@@ -2023,7 +2081,7 @@ export function completedResultsFromRecord(
         tokens: prior.tokens,
         durationMs: prior.durationMs,
         transcript: prior.transcript,
-        ...(prior.error === undefined ? {} : { error: prior.error }),
+        ...(error === undefined ? {} : { error }),
         ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
         ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
         ...(prior.skillAccessReason === undefined ? {} : { skillAccessReason: prior.skillAccessReason }),
@@ -2659,9 +2717,15 @@ export function evalGateHint(
   repetitions: number,
   order: string,
   subset: boolean,
+  promoted = false,
 ): string {
   if (results.every((result) => result.model === FAKE_AGENT_MODEL)) {
-    return 'Run `npm run eval:check` to compare this run with the baseline.'
+    // A partial or failed run stays in run.json but never replaces latest.json, so `eval:check`
+    // would compare the last promoted run rather than the one just printed. Say so; a hint
+    // that claims otherwise would send the reader to the wrong evidence.
+    return promoted
+      ? 'Run `npm run eval:check` to compare this run with the baseline.'
+      : 'This run was not promoted to `eval-results/latest.json`; `npm run eval:check` validates the last promoted run, not the run just printed.'
   }
   if (subset) {
     return 'This is a subset run; the benchmark gate validates only the complete smoke matrix.'

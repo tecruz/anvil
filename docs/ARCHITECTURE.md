@@ -290,9 +290,39 @@ The summary records a hash of the anvil sources that produced it, so a stale run
 vouch for a newer implementation. The run record also records the harness digest, Node and
 OpenCode versions, transcript policy, model set, and whether the run was a subset.
 `--resume` refuses any run whose inputs differ, validates every checkpoint before
-recovering it, and never promotes a subset or partial run. Transcripts are empty by
-default; `--publish-transcripts` opts in, and every persisted transcript, error, and
-verifier output is redacted and size-limited first.
+recovering it, and never promotes a subset or partial run. A terminal attempt is settled:
+a failed key stays in the scored results with its error and is never retried, so a later
+success cannot replace it in a comparison. Transcripts are empty by default;
+`--publish-transcripts` opts in, and every persisted transcript, error, and verifier output
+is redacted and size-limited first.
+
+Resume fails closed rather than guessing when the record and its checkpoints disagree:
+
+- A checkpoint that cannot be read or parsed is a refusal when its filename maps to a
+  declared key the record has not settled. Rerunning that key could overwrite evidence the
+  run already holds, so `run.json` is left unchanged. The same file is only a warning when
+  its key is already settled, or when its name maps to no declared key, because neither can
+  cause a rerun. A readable checkpoint that fails verifier-evidence validation is still
+  ignored: the missing key is recovered or rerun, as before.
+- Overlapping resumes: a checkpoint for a key the record has settled is refused when it
+  reports a different latest state, a different attempt (timestamps or verdicts) at the same
+  attempt count, or more attempts than the record. A recorded terminal failure
+  (`failed` / `timed-out`) is final; a later completed or longer checkpoint never replaces
+  it. The completed checkpoint written beside the record before that same attempt failed is
+  stale, so it is ignored rather than refused. There is no lock, so this only catches a
+  conflict already visible when the later resume starts; two resumes that start together can
+  still race.
+- A result in `run.json` whose key is not in that run's declared key set is refused, since
+  resuming would score evidence the run never produced.
+- A fresh run (no `--resume`) archives an unarchived `partial`, `failed` or `in-progress`
+  record under `eval-results/runs/<runId>.json` before starting a new run id, so scored
+  failures and other settled work from the unfinished run survive. This includes an
+  unfinished subset; a completed subset is not archived. An existing archive of the same run
+  id is never overwritten.
+
+A recorded failed attempt is a scored run error even when the top-level `error` is missing:
+scoring copies the attempt's error, or a stable fallback message when the attempt has none,
+so an inconsistent record cannot read as task success.
 
 Captured verify-only checks use a harness-provided `node` launcher. Its parent-process
 broker executes a Node ESM source snapshot captured before the agent starts, using an

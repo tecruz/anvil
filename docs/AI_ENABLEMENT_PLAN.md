@@ -334,14 +334,22 @@ be inferred entirely from source code.
   1-0, 2-0, 3-2 and ties are not. Pairs with a run error are excluded and counted. The report
   never pools groups into an overall verdict; its totals are descriptive. These are
   thresholds for a small sample, not a significance test.
-- [ ] Unknown measurements remain unknown, and failures are not rerun selectively until a
-  favorable comparison appears. _Partial._ Cost and tokens stay `null` unless the host ledger
-  reports them, a missing duration stays `null`, an incomplete pair is not a zero, and every
-  attempt is kept in the run record. However, `--resume` retries a key whose last attempt
-  failed (an agent timeout or exit), and the retry's outcome replaces the failed one in the
-  results the report and summary use; the failed attempt survives only in the record's
-  attempt history. Until a failed attempt stays a scored outcome, or resume refuses to retry
-  it for a comparison, this item is not met.
+- [x] Unknown measurements remain unknown, and failures are not rerun selectively until a
+  favorable comparison appears. Cost and tokens stay `null` unless the host ledger reports
+  them, a missing duration stays `null`, and an incomplete pair is not a zero. A failed
+  attempt is terminal: `--resume` skips that key, keeps its result in the scored report with
+  the error, and leaves the run partial so it cannot be promoted. The scored error is
+  reported even when it is recorded only on the attempt, not the top-level result. Resume
+  also refuses rather than reruns when a declared key's checkpoint is unreadable, when a
+  checkpoint would replace a recorded terminal failure or otherwise conflict with
+  `run.json` (for example two overlapping resumes; there is no lock, so only conflicts
+  visible when the later resume starts are caught), or when the record holds a result it
+  never declared. A fresh run archives an unfinished record (including an unfinished subset,
+  but not a completed subset) before starting a new run id, so a failed key's scored work is
+  not lost. Two end-to-end tests in
+  `scripts/test/eval-resume.test.ts` cover this: one where the failure is already in
+  `run.json`, and one where the failure exists only in a checkpoint while other declared
+  keys are still missing.
 - [x] Claims of effectiveness identify the tested technologies and conditions rather than
   implying universal coverage. Each group prints its scenario as the scope, the source line
   names the evidence kind, verdicts are never pooled across scenarios or models, and the only
