@@ -290,6 +290,7 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     assert.match(invocation.output, /Ignoring checkpoint.*reports 1 visible verifier commands.*defines 2/)
     assert.match(invocation.output, /1 of 8 keys remain/)
     const retried = record()
+    const consistent = structuredClone(retried)
     const result = retried.results.find(
       (entry) => entry.scenario === original.scenario && entry.variant === original.variant,
     )!
@@ -301,6 +302,8 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
 
     // Corruption in run.json itself is refused, rather than silently rerunning completed
     // work or overwriting the previously valid summary and its archived provenance.
+    // The checkpoint written beside the original record still has the complete verifier
+    // evidence, so the disagreement is a visible checkpoint/record conflict.
     const latestBefore = read('eval-results/latest.json')
     const archivePath = `eval-results/runs/${retried.runId}.json`
     const archiveBefore = read(archivePath)
@@ -310,13 +313,16 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     const recordBefore = read('eval-results/run.json')
     invocation = invoke('--resume')
     assert.equal(invocation.status, 1, invocation.output)
-    assert.match(invocation.output, /reports 1 visible verifier commands.*defines 2.*cannot resume/)
+    assert.match(invocation.output, /the run record and its checkpoints disagree/)
+    assert.match(invocation.output, /tiny-verify-only\/bare\/fake-agent\/0/)
     assert.equal(read('eval-results/run.json'), recordBefore)
     assert.equal(read('eval-results/latest.json'), latestBefore)
     assert.equal(read(archivePath), archiveBefore)
 
     // Refusing a fixture mismatch must not persist an otherwise recoverable checkpoint.
-    const unstarted = structuredClone(complete)
+    // Use the record that matches the checkpoints left by the successful resume; the
+    // original baseline timestamps would look like an overlapping conflict.
+    const unstarted = structuredClone(consistent)
     unstarted.results = unstarted.results.filter((entry) => !entry.scenario.startsWith('medium-code-change/'))
     unstarted.executionOrder = unstarted.executionOrder.filter((key) => !key.startsWith('medium-code-change/'))
     unstarted.completionState = 'in-progress'
@@ -327,8 +333,8 @@ test('fake-agent resume validates verifier evidence before recovery and preserve
     const fixture = read(fixturePath)
     writeFileSync(join(root, fixturePath), `${fixture}\n// Synthetic incompatible fixture.\n`)
     const scenario = scenarios.scenarios.find((entry) => entry.id === 'medium-code-change')!
-    const recovered = complete.results.find((entry) => entry.scenario === scenario.id)!
-    write(checkpoint(recovered, complete.runId), {
+    const recovered = consistent.results.find((entry) => entry.scenario === scenario.id)!
+    write(checkpoint(recovered, consistent.runId), {
       schemaVersion: 3,
       ...recovered,
       sourceHash: hashScenarioSource(root, scenario),
