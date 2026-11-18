@@ -28,6 +28,7 @@ import {
   readCheckpointDirectory,
   reconcileRunRecord,
   recordFixtureProblem,
+  resultKey,
   checkRunRecord as validateRunRecord,
   validateScenarioMatrix,
 } from '../src/eval-gate.ts'
@@ -1027,26 +1028,29 @@ describe('checkpoint reconciliation', () => {
     assert.match(recovered.rejected.join('\n'), /unknown verifier counts/)
   })
 
-  test('prefers a newer completed checkpoint over a stale record entry', () => {
+  test('refuses a longer checkpoint over a settled key instead of adopting it', () => {
     const record = runRecordFor(latest(matrix()))
-    const stale = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    const recorded = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    // A longer history for a key run.json already settled can only come from a run that
+    // overlapped this one. Adopting it would mix two runs' evidence, so it is a conflict.
     const newer: EvalRunRecordResult = {
-      ...stale,
+      ...recorded,
       verified: false,
       hiddenVerified: false,
       verifyExitCodes: [1, 1],
       attempts: [
-        ...stale.attempts,
+        ...recorded.attempts,
         { startedAt: '2026-10-27T00:06:00.000Z', completedAt: '2026-10-27T00:06:30.000Z', state: 'completed' },
       ],
     }
     const reconciled = reconcileRunRecord(record, [{ result: newer, modifiedMs: 20 }], hashes, matrix())
-    const got = reconciled.record.results.find(
-      (result) => `${result.scenario}/${result.variant}/${result.model}` === key,
-    )!
-    assert.equal(reconciled.changed, true)
-    assert.equal(got.verified, false)
-    assert.equal(got.attempts.length, 2)
+    assert.equal(reconciled.changed, false)
+    assert.equal(
+      reconciled.record.results.find((result) => resultKey(result) === resultKey(recorded))!.attempts.length,
+      1,
+    )
+    assert.equal(reconciled.conflicts.length, 1)
+    assert.match(reconciled.conflicts[0]!, /^tiny-code-change\/anvil\/fake-agent\/0: .*2 attempts.*recorded 1/)
   })
 
   test('rejects a checkpoint whose hashes no longer match the fixtures', () => {
@@ -1062,11 +1066,60 @@ describe('checkpoint reconciliation', () => {
     assert.match(reconciled.rejected.join('\n'), /hashes do not match/)
   })
 
-  test('adopts a newer failed checkpoint so a retry keeps the failure history', () => {
+  test('refuses a conflicting settled key even when the checkpoint hashes are stale', () => {
     const record = runRecordFor(latest(matrix()))
-    const stale = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
+    const recorded = record.results.find((result) => resultKey(result) === `${key}/0`)!
+    // A longer history for a settled key with stale fixtures. Comparing the history first
+    // makes this a conflict, not a warning about fixtures that would only hide the mixing.
+    const longer: EvalRunRecordResult = {
+      ...recorded,
+      sourceHash: 'other',
+      attempts: [
+        ...recorded.attempts,
+        { startedAt: '2026-10-27T00:09:00.000Z', completedAt: '2026-10-27T00:09:30.000Z', state: 'completed' },
+      ],
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: longer, modifiedMs: 10 }], hashes, matrix())
+    assert.equal(reconciled.changed, false)
+    assert.equal(reconciled.conflicts.length, 1)
+    assert.match(reconciled.conflicts[0]!, /2 attempts.*recorded 1/)
+    assert.equal(reconciled.rejected.length, 0)
+  })
+
+  test('refuses a completed checkpoint that would replace a recorded failure', () => {
+    const record = runRecordFor(latest(matrix()))
+    const index = record.results.findIndex((result) => resultKey(result) === `${key}/0`)
+    const recorded = record.results[index]!
+    // A recorded terminal failure is final. A later checkpoint that claims success for the
+    // same key is either an overlapping resume or a selective retry; neither may replace it.
+    record.results[index] = {
+      ...recorded,
+      verified: false,
+      error: 'agent exited 1',
+      attempts: [{ ...recorded.attempts[0]!, state: 'failed', error: 'agent exited 1' }],
+    }
+    const retriedSuccess: EvalRunRecordResult = {
+      ...recorded,
+      attempts: [
+        {
+          startedAt: '2026-10-27T00:09:00.000Z',
+          completedAt: '2026-10-27T00:09:30.000Z',
+          state: 'completed',
+        },
+      ],
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: retriedSuccess, modifiedMs: 10 }], hashes, matrix())
+    assert.equal(reconciled.changed, false)
+    assert.equal(latestAttemptState(reconciled.record.results[index]!), 'failed')
+    assert.equal(reconciled.conflicts.length, 1)
+    assert.match(reconciled.conflicts[0]!, /checkpoint is completed but run\.json recorded failed/)
+  })
+
+  test('refuses a longer failed checkpoint over a settled key', () => {
+    const record = runRecordFor(latest(matrix()))
+    const recorded = record.results.find((result) => `${result.scenario}/${result.variant}/${result.model}` === key)!
     const failed: EvalRunRecordResult = {
-      ...stale,
+      ...recorded,
       verifyCount: 1,
       hiddenVerifyCount: 0,
       verified: false,
@@ -1074,7 +1127,7 @@ describe('checkpoint reconciliation', () => {
       verifyExitCodes: [],
       error: 'the retry failed',
       attempts: [
-        ...stale.attempts,
+        ...recorded.attempts,
         {
           startedAt: '2026-10-27T00:06:00.000Z',
           completedAt: '2026-10-27T00:06:30.000Z',
@@ -1084,14 +1137,30 @@ describe('checkpoint reconciliation', () => {
       ],
     }
     const reconciled = reconcileRunRecord(record, [{ result: failed, modifiedMs: 10 }], hashes, matrix())
-    assert.equal(reconciled.changed, true)
-    const got = reconciled.record.results.find(
-      (result) => `${result.scenario}/${result.variant}/${result.model}` === key,
-    )!
-    assert.equal(latestAttemptState(got), 'failed')
-    assert.equal(got.attempts.length, 2)
-    assert.equal(got.error, 'the retry failed')
-    assert.equal(allDeclaredCompleted(reconciled.record), false)
+    assert.equal(reconciled.changed, false)
+    const got = reconciled.record.results.find((result) => resultKey(result) === resultKey(recorded))!
+    assert.equal(latestAttemptState(got), 'completed')
+    assert.equal(got.attempts.length, 1)
+    assert.equal(reconciled.conflicts.length, 1)
+  })
+
+  test('ignores the stale completed checkpoint written before a recorded failure', () => {
+    const record = runRecordFor(latest(matrix()))
+    const index = record.results.findIndex((result) => resultKey(result) === `${key}/0`)
+    const completed = record.results[index]!
+    // The checkpoint is the file written next to run.json before the recorded attempt failed.
+    // Same attempt, same timestamps: it is stale, not a conflict, and must not be adopted.
+    const staleSuccess = structuredClone(completed)
+    record.results[index] = {
+      ...completed,
+      verified: false,
+      error: 'agent exited 1',
+      attempts: [{ ...completed.attempts[0]!, state: 'failed', error: 'agent exited 1' }],
+    }
+    const reconciled = reconcileRunRecord(record, [{ result: staleSuccess, modifiedMs: 10 }], hashes, matrix())
+    assert.equal(reconciled.changed, false)
+    assert.deepEqual(reconciled.conflicts, [])
+    assert.equal(latestAttemptState(reconciled.record.results[index]!), 'failed')
   })
 
   test('does not resurrect an equal-attempt success over a failed record', () => {
@@ -1106,6 +1175,7 @@ describe('checkpoint reconciliation', () => {
     const reconciled = reconcileRunRecord(record, [{ result: staleSuccess, modifiedMs: 10 }], hashes, matrix())
     assert.equal(reconciled.changed, false)
     assert.equal(latestAttemptState(reconciled.record.results[index]!), 'failed')
+    assert.equal(reconciled.conflicts.length, 1)
   })
 
   test('recognises a record whose declared keys all completed', () => {
@@ -1223,6 +1293,18 @@ describe('run record compatibility for resume', () => {
     const gate = checkRunRecordCompatibility(runRecord(), config({ scenarioHashes: changed }))
     assert.equal(gate.ok, false)
     assert.match(gate.message, /cannot resume/)
+  })
+
+  test('fails when the run records a result it never declared', () => {
+    const record = runRecord()
+    // Resuming would score this result even though the run's key set never included it.
+    record.results.push({
+      ...structuredClone(record.results[0]!),
+      repetition: 1,
+    })
+    const gate = checkRunRecordCompatibility(record, config())
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /records tiny-code-change\/bare\/fake-agent\/1, which it did not declare; cannot resume/)
   })
 
   test('fails when there is no run record', () => {

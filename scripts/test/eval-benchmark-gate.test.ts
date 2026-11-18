@@ -564,4 +564,13 @@ describe('benchmark gate hint', () => {
     assert.match(evalGateHint(fakeResults, 'run-1', [], 1, 'alternate', false), /eval:check/)
     assert.match(evalGateHint(realResults, 'run-1', [], 1, 'alternate', true), /subset run/)
   })
+
+  test('does not claim eval:check compares a run that was not promoted', () => {
+    const hinted = evalGateHint(fakeResults, 'run-1', [], 1, 'alternate', false, false)
+    assert.doesNotMatch(hinted, /compare this run/)
+    assert.match(hinted, /not promoted/)
+    assert.match(hinted, /last promoted run, not the run just printed/)
+    // A promoted run keeps the plain instruction.
+    assert.match(evalGateHint(fakeResults, 'run-1', [], 1, 'alternate', false, true), /compare this run/)
+  })
 })

@@ -718,6 +718,37 @@ describe('scored results keep every recorded fact', () => {
     assert.equal(scored?.verified, false)
     assert.equal(scored?.skillInstall, 'verified')
   })
+
+  test('a failed attempt stays a run error when only the attempt records the error', () => {
+    const failed = structuredClone(record)
+    const result = failed.results[0]!
+    // An inconsistent record: the attempt says it failed, but only the attempt carries the
+    // error. Scoring must not read that as task success just because the top-level error is
+    // missing.
+    delete result.error
+    result.verified = false
+    result.attempts = [
+      {
+        ...result.attempts[0]!,
+        state: 'failed',
+        error: 'agent exited 1',
+      },
+    ]
+
+    const [scored] = scoredResultsFromRecord(failed, scenarios)
+    assert.equal(scored?.error, 'agent exited 1')
+    assert.equal(scored?.verified, false)
+  })
+
+  test('a timed-out attempt without any recorded error still scores as a run error', () => {
+    const timedOut = structuredClone(record)
+    const result = timedOut.results[0]!
+    delete result.error
+    result.attempts = [{ ...result.attempts[0]!, state: 'timed-out' }]
+
+    const [scored] = scoredResultsFromRecord(timedOut, scenarios)
+    assert.match(scored?.error ?? '', /timed-out without a recorded error/)
+  })
 })
 
 describe('atomicWriteJson failure handling', () => {
