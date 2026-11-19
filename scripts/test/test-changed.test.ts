@@ -30,9 +30,12 @@ import {
   allRootTests,
   changedFiles,
   changeSet,
+  type GitRunner,
+  main,
   porcelainPaths,
   readGraph,
   rootTestsFor,
+  type TestRunner,
   testFilesFor,
   testFilesForSelection,
 } from '../test-changed.ts'
@@ -198,6 +201,43 @@ describe('git failures are never a green run', () => {
     })
     assert.notEqual(result.status, 0, 'a caller error must not exit successfully')
     assert.match(result.stderr ?? '', /does not resolve to a commit/)
+  })
+
+  test('a failed automatic diff runs the full suite and propagates its exit status', () => {
+    const savedBase = process.env.ANVIL_TEST_BASE
+    const savedFull = process.env.ANVIL_TEST_FULL
+    delete process.env.ANVIL_TEST_BASE
+    delete process.env.ANVIL_TEST_FULL
+    let invoked: readonly string[] | null = null
+    const git: GitRunner = {
+      raw: (args) => {
+        if (args[0] === 'rev-parse') return 'base'
+        if (args[0] === 'merge-base') return 'base'
+        // Both change sources fail: this is a broken git run, not a clean tree.
+        return null
+      },
+      succeeds: () => true,
+    }
+    const runTests: TestRunner = (_command, args) => {
+      invoked = args
+      return { status: 7 }
+    }
+    try {
+      assert.equal(main({ git, runTests }), 7)
+    } finally {
+      if (savedBase === undefined) delete process.env.ANVIL_TEST_BASE
+      else process.env.ANVIL_TEST_BASE = savedBase
+      if (savedFull === undefined) delete process.env.ANVIL_TEST_FULL
+      else process.env.ANVIL_TEST_FULL = savedFull
+    }
+
+    assert.ok(invoked !== null, 'the selector must still run tests when git fails')
+    const files = (invoked as readonly string[]).slice(2)
+    assert.deepEqual(
+      [...files].sort(),
+      [...testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)].sort(),
+      'a failed git probe must select every package and root test',
+    )
   })
 })
 

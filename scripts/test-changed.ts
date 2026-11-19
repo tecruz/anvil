@@ -53,9 +53,22 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const noColor = process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== ''
 const color = noColor ? (s: string): string => s : (s: string): string => `\u001b[36m${s}\u001b[0m`
 
+/** The git calls the selector needs, injectable so tests can simulate a failed probe. */
+export interface GitRunner {
+  raw(args: readonly string[], root: string): string | null
+  succeeds(args: readonly string[], root: string): boolean
+}
+
+/** The test command runner, injectable so tests can observe the selection and exit status. */
+export type TestRunner = (
+  command: string,
+  args: string[],
+  options: { cwd: string; stdio: 'inherit'; windowsHide: boolean },
+) => { status: number | null }
+
 /** Run git, returning trimmed stdout, or null when git declines (missing ref, no repo). */
-function git(args: readonly string[], root: string): string | null {
-  const out = gitRaw(args, root)
+function git(args: readonly string[], root: string, runner: GitRunner): string | null {
+  const out = runner.raw(args, root)
   return out === null ? null : out.trim()
 }
 
@@ -99,15 +112,17 @@ function gitSucceeds(args: readonly string[], root: string): boolean {
   }
 }
 
+const systemGit: GitRunner = { raw: gitRaw, succeeds: gitSucceeds }
+
 /** The ref to diff against: the merge base with the default branch, when there is one. */
-function baseRef(root: string = repoRoot): string | null {
+function baseRef(root: string = repoRoot, runner: GitRunner = systemGit): string | null {
   const override = process.env.ANVIL_TEST_BASE
   if (override !== undefined && override !== '') return override
   for (const candidate of ['origin/main', 'main', 'origin/master', 'master']) {
-    if (git(['rev-parse', '--verify', '--quiet', candidate], root) === null) continue
+    if (git(['rev-parse', '--verify', '--quiet', candidate], root, runner) === null) continue
     // The merge base, not the branch tip: work that landed on main after this branch
     // started is not this branch's to verify.
-    return git(['merge-base', candidate, 'HEAD'], root) ?? candidate
+    return git(['merge-base', candidate, 'HEAD'], root, runner) ?? candidate
   }
   return null
 }
@@ -151,14 +166,14 @@ export interface ChangeSet {
  * base or a broken repository produced the same green "nothing to run" as a clean tree. A
  * caller that will claim verification must be able to tell those apart.
  */
-export function changeSet(base: string | null, root: string = repoRoot): ChangeSet {
+export function changeSet(base: string | null, root: string = repoRoot, runner: GitRunner = systemGit): ChangeSet {
   const out = new Set<string>()
   if (base !== null) {
     // `--no-renames` because `git diff` reports a rename as the new path alone. A suite that
     // still imports or spawns the old file would then not be selected, even though the
     // rename deleted it.
     const args = ['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`]
-    const diff = gitRaw(args, root)
+    const diff = runner.raw(args, root)
     if (diff === null) return { files: [...out], ok: false, error: `git ${args.join(' ')}` }
     for (const path of diff.split('\0')) {
       if (path.trim() !== '') out.add(path.trim())
@@ -171,7 +186,7 @@ export function changeSet(base: string | null, root: string = repoRoot): ChangeS
   // new subdirectory -- the exact case `allRootTests` enumerates recursively -- would be
   // discovered and then never selected.
   const statusArgs = ['status', '--porcelain', '-z', '--untracked-files=all']
-  const status = gitRaw(statusArgs, root)
+  const status = runner.raw(statusArgs, root)
   if (status === null) return { files: [...out], ok: false, error: `git ${statusArgs.join(' ')}` }
   for (const path of porcelainPaths(status)) {
     out.add(path)
@@ -660,7 +675,28 @@ export function testFilesForSelection(
   return [...testFilesFor(targets, graph), ...rootTests.map((test) => join(root, test))]
 }
 
-export function main(): number {
+/** Execute the selected files and turn a failing suite into the command's exit status. */
+export function runSelectedTests(files: readonly string[], root: string, run: TestRunner = spawnSync): number {
+  if (files.length === 0) {
+    console.log(`${color('test:changed:')} no test files for the selected packages`)
+    return 0
+  }
+  const started = Date.now()
+  // `spawnSync` rather than `execFileSync`: a failing suite should be a pass-through exit
+  // code, not an exception carrying the whole report in `err.stdout`.
+  const result = run(process.execPath, ['--test', '--test-reporter=spec', ...files], {
+    cwd: root,
+    stdio: 'inherit',
+    windowsHide: true,
+  })
+  if (result.status !== 0) return typeof result.status === 'number' ? result.status : 1
+  console.log(`\n${color('test:changed:')} done in ${Math.round((Date.now() - started) / 1000)}s`)
+  return 0
+}
+
+export function main(options: { git?: GitRunner; runTests?: TestRunner } = {}): number {
+  const gitRunner = options.git ?? systemGit
+  const runTests = options.runTests ?? spawnSync
   const wantsFull = process.env.ANVIL_TEST_FULL === '1' || process.argv.includes('--full')
   const graph = readGraph(repoRoot)
   if (graph.packages.length === 0) {
@@ -674,7 +710,7 @@ export function main(): number {
 
   if (!wantsFull) {
     const override = process.env.ANVIL_TEST_BASE
-    const base = baseRef(repoRoot)
+    const base = baseRef(repoRoot, gitRunner)
     // An explicit base that does not resolve is a caller error, not a clean tree. Fail loudly
     // rather than reporting a green run that verified nothing. Autodetected refs are different:
     // they were already probed with `rev-parse`, and a failed probe simply moves to the next
@@ -682,12 +718,12 @@ export function main(): number {
     if (
       override !== undefined &&
       override !== '' &&
-      !gitSucceeds(['rev-parse', '--verify', '--quiet', `${override}^{commit}`], repoRoot)
+      !gitRunner.succeeds(['rev-parse', '--verify', '--quiet', `${override}^{commit}`], repoRoot)
     ) {
       console.error(`test:changed: ANVIL_TEST_BASE=${override} does not resolve to a commit`)
       return 1
     }
-    const changes = changeSet(base, repoRoot)
+    const changes = changeSet(base, repoRoot, gitRunner)
     if (base === null || !changes.ok) {
       reason =
         base === null
@@ -721,26 +757,11 @@ export function main(): number {
   }
 
   const files = testFilesForSelection(targets, rootTests, graph, repoRoot)
-  if (files.length === 0) {
-    console.log(`${color('test:changed:')} no test files for the selected packages`)
-    return 0
-  }
-
   console.log(`${color('test:changed:')} ${reason}`)
   for (const pkg of targets) console.log(`  ${pkg.dirName}`)
   console.log(`  ${files.length} test file(s)\n`)
 
-  const started = Date.now()
-  // `spawnSync` rather than `execFileSync`: a failing suite should be a pass-through exit
-  // code, not an exception carrying the whole report in `err.stdout`.
-  const result = spawnSync(process.execPath, ['--test', '--test-reporter=spec', ...files], {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    windowsHide: true,
-  })
-  if (result.status !== 0) return typeof result.status === 'number' ? result.status : 1
-  console.log(`\n${color('test:changed:')} done in ${Math.round((Date.now() - started) / 1000)}s`)
-  return 0
+  return runSelectedTests(files, repoRoot, runTests)
 }
 
 // Only run when executed directly; importing the selectors must not start a suite.
