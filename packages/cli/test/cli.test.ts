@@ -16,6 +16,8 @@ import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
+import { emptyProfile } from '@anvil/profile'
+import { stackLocations } from '../src/commands/doctor.ts'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
 
@@ -1257,5 +1259,42 @@ describe('per-command help', () => {
     assert.match(res.stdout, /USAGE/)
     assert.match(res.stdout, /anvil config <show\|path\|init>/)
     assert.match(res.stdout, /--json/)
+  })
+})
+
+describe('doctor per-module stack summaries', () => {
+  test('groups the existing stacks by the directory that produced their evidence', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [
+        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
+        { id: 'typescript', version: null, evidence: ['apps/web/tsconfig.json'] },
+        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
+        { id: 'node', version: null, evidence: ['package.json'] },
+      ],
+    }
+    assert.deepEqual(stackLocations(profile), [
+      { dir: '.', stacks: ['node'], evidence: 'package.json' },
+      { dir: 'apps/web', stacks: ['nextjs', 'typescript'], evidence: 'apps/web/package.json' },
+      { dir: 'services/api', stacks: ['fastapi'], evidence: 'services/api/pyproject.toml' },
+    ])
+    // The machine-readable array is not replaced by the presentation summary.
+    assert.equal(profile.stacks.length, 4)
+  })
+
+  test('a repo with one stack location has no second table to read', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'node', version: null, evidence: ['package.json'] }],
+    }
+    assert.equal(stackLocations(profile).length, 1)
+  })
+
+  test('a stack with no evidence is shown as unknown, not silently dropped', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'unknown', version: null, evidence: [] }],
+    }
+    assert.deepEqual(stackLocations(profile), [{ dir: '.', stacks: ['unknown'], evidence: 'unknown' }])
   })
 })

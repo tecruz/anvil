@@ -128,6 +128,35 @@ export const profileCommand: Command = {
   },
 }
 
+/** A stack summary grouped by the directory that produced its evidence. */
+export interface StackLocation {
+  dir: string
+  stacks: string[]
+  evidence: string
+}
+
+/**
+ * Group the *existing* stacks by the directory of their first evidence file. This is a
+ * presentation of `ProjectProfile.stacks`, not a new detector or a second source of truth:
+ * the `stacks` array, playbook matching and `--json` output are untouched.
+ */
+export function stackLocations(profile: ProjectProfile): StackLocation[] {
+  const groups = new Map<string, { stacks: Set<string>; evidence: string | null }>()
+  for (const stack of profile.stacks) {
+    const evidence = stack.evidence[0]
+    const normalized = evidence?.replace(/\\/g, '/') ?? ''
+    const slash = normalized.lastIndexOf('/')
+    const dir = evidence === undefined || slash === -1 ? '.' : normalized.slice(0, slash)
+    const group = groups.get(dir) ?? { stacks: new Set<string>(), evidence: null }
+    group.stacks.add(stack.id)
+    if (group.evidence === null && evidence !== undefined) group.evidence = evidence
+    groups.set(dir, group)
+  }
+  return [...groups.entries()]
+    .map(([dir, group]) => ({ dir, stacks: [...group.stacks].sort(), evidence: group.evidence ?? 'unknown' }))
+    .sort((a, b) => a.dir.localeCompare(b.dir))
+}
+
 function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   const s = ctx.style
   const out: string[] = []
@@ -157,6 +186,19 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
           .map((st) => `  ${st.id.padEnd(14)} ${(st.version ?? '').padEnd(10)} ${s.dim(st.evidence[0] ?? '')}`)
           .join('\n'),
   )
+
+  // The flat list above is the machine-readable fact and stays unchanged. A newcomer on a
+  // polyglot monorepo asks a different question: which part of this repo uses what? Group
+  // the same stacks by the directory their evidence came from, and show it only when there
+  // is more than one location -- a single-location repo needs no second table.
+  const located = stackLocations(p)
+  if (located.length > 1) {
+    out.push('')
+    out.push(s.bold('Stack by location'))
+    for (const entry of located) {
+      out.push(`  ${entry.dir.padEnd(24)} ${entry.stacks.join(', ')} ${s.dim(entry.evidence)}`)
+    }
+  }
 
   if (p.monorepo !== null) {
     out.push('')

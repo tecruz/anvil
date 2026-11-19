@@ -718,6 +718,13 @@ A repository can have more than one real runner for the same kind — `npm test`
 `primary` or `candidate`, and the doctor's JSON carries the full list under `runners`, so
 the suite anvil did not choose is visible instead of silently dropped.
 
+On a polyglot monorepo the flat `Stack` table is hard to read: a Next.js app in `apps/web`
+and a FastAPI service in `services/api` become one list with no location. `anvil doctor`
+therefore also prints a **Stack by location** section when stacks come from more than one
+directory, grouping the same detected stacks by the directory of their evidence. It is a
+presentation of `ProjectProfile.stacks` — the array, playbook matching and `--json` output
+are unchanged. A stack with no evidence is shown as `unknown`, never dropped.
+
 `anvil mcp` is the same control surface for an MCP client. It speaks newline-delimited
 JSON-RPC 2.0 over stdio and exposes three read-only tools: `anvil_doctor`, `anvil_plan`
 and `anvil_crew_status`. Each tool call runs the corresponding CLI command with `--json`

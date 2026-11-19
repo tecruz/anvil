@@ -22,7 +22,10 @@ Five stages, and the order is the design:
    have never seen and cannot modify. This is the only source of truth in the system;
    everything downstream is a function of it.
 2. **Audit** — run the readiness rules over the profile. Every finding carries
-   file:line evidence and a concrete fix.
+   file:line evidence and a concrete fix. `anvil doctor` also presents the profile's
+   repository-wide `Stack` list grouped by evidence directory ("Stack by location") when
+   more than one location is present. That grouping is presentation only: it never adds a
+   stack, changes playbook matching, or changes the JSON contract.
 3. **Plan / brief** — rank the gaps and emit the facts an LLM needs, so the model does
    the prose and anvil does the facts.
 4. **Init** — write the derived context into the repository, through a staging bundle
