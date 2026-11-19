@@ -252,36 +252,17 @@ jobs:
         with:
           artifact-ids: ${{ needs.release.outputs.artifact_id }}
           path: dist
+          # With artifact-ids, the action otherwise nests files under the artifact name.
+          # Keep the single retained tarball and its sidecars directly in dist/.
+          merge-multiple: true
 
       - name: verify the artifact before publication
         env:
+          ARTIFACT_DIR: dist
           EXPECTED_CHECKSUM: ${{ needs.release.outputs.checksum }}
           SOURCE_SHA: ${{ needs.release.outputs.source_sha }}
-        run: |
-          count=$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)
-          if [ "$count" -ne 1 ]; then
-            echo "::error::expected one tarball in the retained evidence, found $count"
-            exit 1
-          fi
-          (cd dist && sha256sum --check SHA256SUMS)
-          tarball=$(realpath dist/*.tgz)
-          # Bind the bytes to the checksum preparation recorded, not only to the sidecar
-          # that travelled with the artifact.
-          printf '%s  %s\n' "$EXPECTED_CHECKSUM" "$(basename "$tarball")" | sha256sum --check -
-          tag=${GITHUB_REF_NAME#v}
-          tar -xOf "$tarball" package/package.json | TAG="$tag" node -e '
-            const fs = require("node:fs")
-            const packed = JSON.parse(fs.readFileSync(0, "utf8"))
-            const tag = process.env.TAG
-            if (packed.name !== "@anvil-workflows/cli") {
-              throw new Error(`refusing to publish ${packed.name}`)
-            }
-            if (packed.version !== tag) {
-              throw new Error(`tarball is ${packed.version}, tag is v${tag}`)
-            }
-            console.log(`publishing ${packed.name}@${packed.version}`)
-          '
-          grep -q "Source commit: \`$SOURCE_SHA\`" dist/RELEASE_NOTES.md
+          TAG_VERSION: ${{ github.ref_name }}
+        run: node scripts/verify-release-artifact.mjs
 
       # Publish the exact bytes that were tested. No build runs in this job: `npm publish` with
       # no argument would repack the working tree and could send a different artifact.
