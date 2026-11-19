@@ -1259,3 +1259,111 @@ describe('per-command help', () => {
     assert.match(res.stdout, /--json/)
   })
 })
+
+describe('anvil init --with-mirrors', () => {
+  const MIRROR_PATHS = ['CLAUDE.md', '.cursor/rules/anvil.mdc', '.github/copilot-instructions.md']
+
+  function dataOf(result: ReturnType<typeof runAnvil>): Record<string, unknown> {
+    const envelope = jsonOf(result)
+    return (envelope.data ?? {}) as Record<string, unknown>
+  }
+
+  function pathsOf(result: ReturnType<typeof runAnvil>): string[] {
+    return (dataOf(result).artifacts as Array<{ path: string }>).map((a) => a.path)
+  }
+
+  function initRepo(): string {
+    const dir = tempDir('anvil-cli-mirrors-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'mirror-fixture', scripts: { test: 'node --test', lint: 'echo lint' } }),
+    )
+    return dir
+  }
+
+  test('off by default: only the three baseline artifacts are staged', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--json'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const paths = pathsOf(res)
+    assert.deepEqual(paths, [
+      'AGENTS.md',
+      '.agents/skills/verify-change/SKILL.md',
+      '.opencode/commands/review-change.md',
+    ])
+    for (const p of MIRROR_PATHS) assert.equal(existsSync(join(dir, p)), false)
+  })
+
+  test('on: mirrors are staged, appear in the diff, and are written only by --apply', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const data = dataOf(res)
+    const paths = pathsOf(res)
+    const diffText = (data.diff as { text: string }).text
+    for (const p of MIRROR_PATHS) {
+      assert.ok(paths.includes(p), `${p} missing from staged artifacts`)
+      assert.equal(existsSync(join(dir, p)), false, `${p} must not be written before --apply`)
+      assert.match(diffText, new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    }
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    for (const p of MIRROR_PATHS) {
+      assert.equal(existsSync(join(dir, p)), true, `${p} missing after --apply`)
+      assert.match(readFileSync(join(dir, p), 'utf8'), /AGENTS\.md/)
+    }
+  })
+
+  test('an existing mirror is diffed and refused when the bundle goes stale', () => {
+    const dir = initRepo()
+    const claude = join(dir, 'CLAUDE.md')
+    writeFileSync(claude, 'Old hand-written instructions.\n')
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    assert.match((dataOf(staged).diff as { text: string }).text, /Old hand-written instructions/)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'mirror-fixture', scripts: { test: 'other' } }))
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(claude, 'utf8'), 'Old hand-written instructions.\n')
+  })
+
+  test('a mirror changed in the repository after staging is refused, not overwritten', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const claude = join(dir, 'CLAUDE.md')
+    writeFileSync(claude, 'Hand-edited after staging.\n')
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(claude, 'utf8'), 'Hand-edited after staging.\n')
+  })
+
+  test('a mirror that stops pointing at AGENTS.md warns, and apply needs --allow-warnings', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files.find((f) => f.path === 'CLAUDE.md')
+    assert.ok(entry !== undefined)
+    // Editing the reviewed staged file is the documented workflow; validation must still
+    // catch a mirror that dropped its source-of-truth pointer.
+    writeFileSync(join(dir, '.anvil', 'staging', ...entry.stagedPath.split('/')), 'No pointer here.\n')
+    const refused = runAnvil(['init', '--apply', '--json'], { cwd: dir })
+    assert.notEqual(refused.code, 0)
+    assert.equal((jsonOf(refused).data as { applied?: boolean }).applied, false)
+    assert.equal(existsSync(join(dir, 'CLAUDE.md')), false)
+    const allowed = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(allowed.code, 0, allowed.stderr)
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), 'No pointer here.\n')
+  })
+
+  test('--only still stages exactly one artifact even with --with-mirrors', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--only', 'agents-file', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const paths = pathsOf(res)
+    assert.deepEqual(paths, ['AGENTS.md'])
+  })
+})

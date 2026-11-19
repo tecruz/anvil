@@ -40,9 +40,12 @@ export {
   type GeneratedArtifact,
   type GenerateOptions,
   generateAgentsFile,
+  generateInstructionMirrors,
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
+  MIRROR_TARGETS,
+  type MirrorTarget,
 } from './generate.ts'
 export {
   type BuildReadyOptions,
