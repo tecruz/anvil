@@ -214,8 +214,27 @@ describe('the dashboard server', () => {
     })
   })
 
+  test('a brief needs an existing snapshot and never starts a CLI load', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      // The page has not loaded yet: no POST may warm the cache by spawning commands.
+      const cold = await authedPost(server, '/api/brief', { text: 'Update README.md' })
+      assert.equal(cold.status, 409)
+      assert.match(((await cold.json()) as { error: string }).error, /No snapshot yet/)
+      assert.equal(calls.length, 0)
+
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const afterLoad = calls.length
+      assert.equal(afterLoad, 6)
+
+      const warm = await authedPost(server, '/api/brief', { text: 'Update README.md' })
+      assert.equal(warm.status, 200)
+      assert.equal(calls.length, afterLoad)
+    })
+  })
+
   test('a brief is built from the snapshot and never runs a command', async () => {
     await withServer(async (server, _invoke, calls) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
       const text = 'Update README.md to document the test command.'
       const response = await authedPost(server, '/api/brief', { text })
       assert.equal(response.status, 200)
@@ -223,6 +242,7 @@ describe('the dashboard server', () => {
         title: string
         startHere: Array<{ path: string }>
         howToCheck: Array<{ cmd: string }>
+        gates: unknown[]
         unknowns: string[]
       }
       assert.equal(brief.title, text)
@@ -246,13 +266,14 @@ describe('the dashboard server', () => {
           id: 'fix:TEST_FAST',
           tier: 'derived',
           title: 'A changed-files test subset is documented',
-          detail: 'Document a changed-files test command.',
+          detail: 'Document a changed-files test command -- no changed-files subset is documented.',
           evidence: ['README.md:3'],
         },
       ],
     })
     await withServer(
       async (server) => {
+        await snapshotOf(await authed(server, '/api/snapshot'))
         const response = await authedPost(server, '/api/brief', { suggestionId: 'fix:TEST_FAST' })
         assert.equal(response.status, 200)
         const brief = (await response.json()) as {
@@ -261,7 +282,7 @@ describe('the dashboard server', () => {
           startHere: Array<{ path: string }>
           unknowns: string[]
         }
-        assert.equal(brief.title, 'A changed-files test subset is documented')
+        assert.equal(brief.title, 'Document a changed-files test command')
         assert.equal(brief.source.suggestionId, 'fix:TEST_FAST')
         assert.equal(brief.source.text, null)
         assert.equal(brief.startHere[0]?.path, 'README.md')
@@ -273,6 +294,7 @@ describe('the dashboard server', () => {
 
   test('the brief route refuses bad input without reading a path or a command', async () => {
     await withServer(async (server) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
       for (const body of [
         {},
         { text: 'x', suggestionId: 'fix:TEST_FAST' },
@@ -449,6 +471,7 @@ describe('the dashboard page', () => {
     dataset: Record<string, string> = {}
     hidden = false
     disabled = false
+    value = ''
     classList = { toggle() {} }
 
     readonly tag: string
@@ -644,7 +667,16 @@ describe('the dashboard page', () => {
         },
       ],
       blockers: [{ label: 'java', status: 'missing', reason: 'not on PATH' }],
-      unknowns: ['Approval gates and ownership cannot be inferred from repository files.'],
+      gates: [
+        {
+          kind: 'approval',
+          startNow: 'audit and proposal',
+          waitFor: 'implementation',
+          evidence: 'The audit and proposal are approved before implementation.',
+        },
+      ],
+      readiness: { ok: true, checked: true, status: 'blocked' },
+      unknowns: ['No approval gate was found in the pasted text.'],
     }
     runInContext(JS.replace('load(false);', ''), context)
     runInContext(
@@ -660,10 +692,13 @@ describe('the dashboard page', () => {
     assert.match(task, /Start here/)
     assert.match(task, /UnvisitedConfirmationDialog\.kt/)
     assert.match(task, /CountryDetailViewModelTest\.kt/)
+    assert.match(task, /Start now:\s+audit and proposal/)
+    assert.match(task, /Wait for approval:\s+implementation/)
+    assert.match(task, /approved before implementation/)
     assert.match(task, /\.\/gradlew testDebugUnitTest/)
     assert.match(task, /Not run/)
     assert.match(task, /java/)
-    assert.match(task, /Approval gates/)
+    assert.match(task, /No approval gate was found/)
 
     const repository = nodes.get('#repository')?.text() ?? ''
     assert.match(repository, /docs\/requirements\.md/)
@@ -680,5 +715,89 @@ describe('the dashboard page', () => {
     const work = nodes.get('#work')?.text() ?? ''
     assert.match(work, /orphaned/)
     assert.doesNotMatch(work, /active/)
+  })
+
+  test('a failed snapshot keeps the entry-point form and says the report is missing', () => {
+    const nodes = new Map<string, FakeElement>(
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'snapshot-error',
+        'repository',
+        'context',
+        'work',
+        'refresh',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
+    ) // The draft a reader already typed; a failed refresh must not delete it.
+    const draft = nodes.get('#task-text')
+    assert.ok(draft !== undefined)
+    draft.value = 'A ticket I am still writing'
+
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document })
+    runInContext(JS.replace('load(false);', ''), context)
+
+    runInContext('showSnapshotError("snapshot request failed: 500")', context)
+    const banner = nodes.get('#snapshot-error')
+    assert.equal(banner?.hidden, false)
+    // A first-load failure has no earlier snapshot, so it must not promise one.
+    assert.match(banner?.text() ?? '', /Could not read the snapshot: snapshot request failed: 500/)
+    assert.match(banner?.text() ?? '', /Nothing is loaded yet/)
+    assert.doesNotMatch(banner?.text() ?? '', /last snapshot/)
+    assert.equal(draft.value, 'A ticket I am still writing')
+
+    runInContext('showSnapshotError(null)', context)
+    assert.equal(banner?.hidden, true)
+  })
+
+  test('a brief with failed readiness says so instead of reporting no blockers', () => {
+    const nodes = new Map<string, FakeElement>(
+      ['task', 'task-text', 'task-submit', 'task-error', 'task-suggestions', 'task-brief', 'refresh'].map((id) => [
+        `#${id}`,
+        new FakeElement('section'),
+      ]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document })
+    runInContext(JS.replace('load(false);', ''), context)
+
+    ;(context as Record<string, unknown>).__failed = {
+      title: 'Update README.md',
+      startHere: [],
+      howToCheck: [],
+      blockers: [],
+      gates: [],
+      readiness: { ok: false, checked: false, status: null },
+      unknowns: [],
+    }
+    runInContext('renderBrief(document.querySelector("#task-brief"), __failed)', context)
+    const failed = nodes.get('#task-brief')?.text() ?? ''
+    assert.match(failed, /anvil ready failed, so blockers and tool availability are unknown/)
+    assert.doesNotMatch(failed, /No blocked requirement is reported/)
+
+    // Unprobed is not failed, and not a clean report either.
+    ;(context as Record<string, unknown>).__unprobed = {
+      ...((context as Record<string, unknown>).__failed as Record<string, unknown>),
+      readiness: { ok: true, checked: false, status: 'unknown' },
+    }
+    runInContext('renderBrief(document.querySelector("#task-brief"), __unprobed)', context)
+    const unprobed = nodes.get('#task-brief')?.text() ?? ''
+    assert.match(unprobed, /environment was not probed/)
+    assert.doesNotMatch(unprobed, /anvil ready failed/)
   })
 })

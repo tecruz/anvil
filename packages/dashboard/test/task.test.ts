@@ -92,7 +92,8 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
             id: 'fix:TEST_FAST',
             tier: 'derived',
             title: 'A changed-files test subset is documented',
-            detail: 'Document a changed-files test command.',
+            detail:
+              'Document a changed-files test command -- A test command is available but no changed-files subset is documented.',
             evidence: ['README.md:3'],
           },
         ],
@@ -154,11 +155,94 @@ describe('buildTaskBrief', () => {
     assert.equal(brief.howToCheck[0]?.source, 'documented')
 
     assert.deepEqual(brief.blockers, [{ label: 'java', status: 'missing', reason: 'not on PATH' }])
+    assert.deepEqual(brief.gates, [])
+    assert.deepEqual(brief.readiness, { ok: true, checked: true, status: 'blocked' })
     const unknowns = brief.unknowns.join('\n')
     assert.match(unknowns, /not validated against a tracker/)
-    assert.match(unknowns, /Approval gates/)
+    assert.match(unknowns, /No approval gate was found/)
     assert.match(unknowns, /read-only/)
     assert.match(unknowns, /Verification history/)
+  })
+
+  test('the approval gate a ticket states is quoted, with what may start first', () => {
+    // The acceptance wording from CountryTracker #132, which allows the audit first.
+    const brief = buildTaskBrief(makeSnapshot(), {
+      text: [
+        'Review the visual experience of the main user flows.',
+        '',
+        '## Acceptance criteria',
+        '- The audit and proposal are approved before implementation; priority improvements are documented.',
+        '- All existing flows remain functional.',
+      ].join('\n'),
+    })
+
+    assert.deepEqual(brief.gates, [
+      {
+        kind: 'approval',
+        startNow: 'audit and proposal',
+        waitFor: 'implementation',
+        evidence: 'The audit and proposal are approved before implementation; priority improvements are documented.',
+      },
+    ])
+    assert.match(brief.unknowns.join('\n'), /quoted from the pasted text/)
+    assert.doesNotMatch(brief.unknowns.join('\n'), /No approval gate was found/)
+  })
+
+  test('a gate that only names approval blocks nothing specific and invents nothing', () => {
+    const brief = buildTaskBrief(makeSnapshot(), {
+      text: 'Update the design system. Implementation requires approval before merge.',
+    })
+    assert.equal(brief.gates.length, 1)
+    assert.equal(brief.gates[0]?.waitFor, null)
+    assert.match(brief.gates[0]?.evidence ?? '', /requires approval/)
+  })
+
+  test('a gate written inside a longer sentence keeps both halves', () => {
+    const brief = buildTaskBrief(makeSnapshot(), {
+      text: 'Note that the audit is approved before implementation, so start there.',
+    })
+    assert.equal(brief.gates.length, 1)
+    assert.equal(brief.gates[0]?.startNow, 'audit')
+    assert.equal(brief.gates[0]?.waitFor, 'implementation')
+  })
+
+  test('ordinary review prose is not turned into an approval gate', () => {
+    const brief = buildTaskBrief(makeSnapshot(), {
+      text: 'Review the list screen and fix the spacing. A reviewer should read the diff.',
+    })
+    assert.deepEqual(brief.gates, [])
+    assert.match(brief.unknowns.join('\n'), /No approval gate was found/)
+  })
+
+  test('a failed readiness source is unknown, not a clean report', () => {
+    const snapshot = makeSnapshot()
+    snapshot.repository.ready = {
+      ok: false,
+      data: null,
+      error: 'ready exploded',
+      fetchedAt: '2026-11-19T10:00:00.000Z',
+      command: 'anvil ready --json',
+    }
+    const brief = buildTaskBrief(snapshot, { text: 'Update README.md' })
+
+    assert.deepEqual(brief.blockers, [])
+    assert.deepEqual(brief.readiness, { ok: false, checked: false, status: null })
+    assert.match(brief.unknowns.join('\n'), /anvil ready. failed|`anvil ready` failed/)
+  })
+
+  test('an exact path outranks a lookalike that only shares its ending', () => {
+    const snapshot = makeSnapshot()
+    const profile = snapshot.repository.profile.data as { files: string[] }
+    profile.files = ['examples/src/auth.ts', 'src/auth.ts']
+
+    const brief = buildTaskBrief(snapshot, { text: 'Change src/auth.ts so the token refresh retries.' })
+
+    assert.deepEqual(
+      brief.startHere.map((item) => item.path),
+      ['src/auth.ts', 'examples/src/auth.ts'],
+    )
+    assert.equal(brief.startHere[0]?.reason, 'named in the task text')
+    assert.equal(brief.startHere[1]?.reason, 'matches the end of a repository path')
   })
 
   test('a pasted ticket is split into a title and body without repeating it', () => {
@@ -178,12 +262,18 @@ describe('buildTaskBrief', () => {
 
     assert.equal(brief.source.suggestionId, 'fix:TEST_FAST')
     assert.equal(brief.source.text, null)
-    assert.equal(brief.title, 'A changed-files test subset is documented')
-    assert.equal(brief.objective, 'Document a changed-files test command.')
+    // The plan's own title is the observed state; the brief names the action instead.
+    assert.equal(brief.title, 'Document a changed-files test command')
+    assert.equal(
+      brief.objective,
+      'Document a changed-files test command -- A test command is available but no changed-files subset is documented.',
+    )
     assert.deepEqual(brief.startHere, [
       { path: 'README.md', reason: 'evidence named by the suggestion', kind: 'evidence' },
     ])
     assert.match(brief.unknowns.join('\n'), /engineering improvement/)
+    assert.match(brief.unknowns.join('\n'), /carries no approval gate or owner/)
+    assert.doesNotMatch(brief.unknowns.join('\n'), /No approval gate was found in the pasted text/)
     assert.doesNotMatch(brief.unknowns.join('\n'), /not validated against a tracker/)
   })
 
@@ -194,10 +284,18 @@ describe('buildTaskBrief', () => {
 
     assert.deepEqual(brief.startHere, [])
     const unknowns = brief.unknowns.join('\n')
-    assert.match(unknowns, /was not probed/)
     assert.match(unknowns, /profile source failed/)
     assert.match(unknowns, /No verification command/)
     assert.match(unknowns, /README\.md/)
+    assert.equal(brief.readiness.checked, false)
+  })
+
+  test('an unprobed environment is reported once, in the blockers section', () => {
+    const brief = buildTaskBrief(makeSnapshot({ checked: false }), { text: 'Update README.md' })
+
+    const unprobed = brief.unknowns.filter((entry) => /was not probed/.test(entry))
+    assert.equal(unprobed.length, 0)
+    assert.deepEqual(brief.readiness, { ok: true, checked: false, status: 'blocked' })
   })
 
   test('a truncated profile says the file index may be incomplete', () => {

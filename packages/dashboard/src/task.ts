@@ -45,6 +45,23 @@ export interface TaskBlocker {
   reason: string
 }
 
+/**
+ * A gate the pasted task states itself.
+ *
+ * It is quoted, never inferred: `evidence` is the sentence the reader wrote, so a wrong
+ * reading is checkable in one line. A suggestions-only brief has no gate, because a
+ * repository finding cannot carry one.
+ */
+export interface TaskGate {
+  kind: 'approval'
+  /** What the sentence allows before approval, when it names it. */
+  startNow: string | null
+  /** What the sentence blocks until approval, when it names it. */
+  waitFor: string | null
+  /** The sentence that stated the gate, as the task wrote it. */
+  evidence: string
+}
+
 export interface TaskBrief {
   schemaVersion: 1
   generatedAt: string
@@ -57,6 +74,18 @@ export interface TaskBrief {
   startHere: TaskStartItem[]
   howToCheck: TaskCheck[]
   blockers: TaskBlocker[]
+  /** Empty when the task stated no gate; the unknowns then say so. */
+  gates: TaskGate[]
+  /**
+   * Whether the blocker list is a measurement or an absence of one.
+   *
+   * `ok: false` means `anvil ready` failed, so "no blockers" must not read as a pass.
+   */
+  readiness: {
+    ok: boolean
+    checked: boolean
+    status: string | null
+  }
   unknowns: string[]
 }
 
@@ -235,27 +264,48 @@ function normalizeReference(value: string): string {
   return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
 }
 
-/** Paths explicitly named in the task, matched case-insensitively against the profile. */
+/**
+ * Paths explicitly named in the task.
+ *
+ * An exact repo-relative path outranks a path that merely ends the same way: `src/auth.ts`
+ * is a different file from `examples/src/auth.ts`, and presenting the lookalike first is how
+ * a brief sends someone to the wrong module. Both are still shown, with a reason that says
+ * which one matched exactly.
+ */
 function explicitMatches(text: string, files: Set<string>): { items: TaskStartItem[]; unmatched: string[] } {
-  const items: TaskStartItem[] = []
   const unmatched: string[] = []
-  const seen = new Set<string>()
   const references = (text.replace(/https?:\/\/\S+/g, ' ').match(FILE_REFERENCE) ?? []).slice(0, 20)
+  const byPath = new Map<string, { path: string; exact: boolean; order: number }>()
+  let order = 0
+
   for (const reference of references) {
     const normalized = normalizeReference(reference).toLowerCase()
     if (normalized === '' || normalized.includes('..')) continue
     let found = false
     for (const path of files) {
       const lower = path.toLowerCase()
-      if (lower !== normalized && !lower.endsWith(`/${normalized}`)) continue
+      const exact = lower === normalized
+      if (!exact && !lower.endsWith(`/${normalized}`)) continue
       found = true
-      if (seen.has(path)) continue
-      seen.add(path)
-      items.push({ path, reason: 'named in the task text', kind: isTestPath(path) ? 'test' : 'source' })
-      if (items.length >= MAX_START_ITEMS) return { items, unmatched }
+      const existing = byPath.get(path)
+      // The same file can be reached by both spellings; keep the stronger reason and the
+      // earliest place the task mentioned it.
+      if (existing === undefined) byPath.set(path, { path, exact, order: order++ })
+      else if (!existing.exact && exact) byPath.set(path, { ...existing, exact })
     }
     if (!found && !unmatched.includes(reference) && unmatched.length < 3) unmatched.push(reference)
   }
+
+  const items = [...byPath.values()]
+    // Exact matches first, then the order the task named them: a reader pasting a ticket
+    // expects the brief to follow the ticket's own sequence, not alphabetical noise.
+    .sort((a, b) => Number(b.exact) - Number(a.exact) || a.order - b.order)
+    .slice(0, MAX_START_ITEMS)
+    .map(({ path, exact }) => ({
+      path,
+      reason: exact ? 'named in the task text' : 'matches the end of a repository path',
+      kind: isTestPath(path) ? ('test' as const) : ('source' as const),
+    }))
   return { items, unmatched }
 }
 
@@ -473,6 +523,122 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
   return found
 }
 
+/**
+ * Sentences that state an approval gate in prose.
+ *
+ * A ticket is where a team writes its own process (`the audit is approved before
+ * implementation`), and that sentence is the one thing in the text a repository cannot
+ * supply. It is read only when it is explicit about approval, so ordinary prose about
+ * reviewing a change does not become a blocker.
+ */
+const APPROVAL_SENTENCE =
+  /(?:\b(?:must|has to|needs? to|should)\s+be\s+approved\b|\bapproved\s+before\b|\brequires?\s+(?:approval|sign-?off)\b|\bwait\s+for\s+approval\b|\bpending\s+approval\b|\bapproval\s+(?:gate|required)\b)/i
+
+/**
+ * The two halves of a gate phrase, each cleaned up for display.
+ *
+ * Both are unanchored and bounded to one clause: a ticket often writes the gate inside a
+ * longer sentence ("Note that the audit is approved before implementation"), and treating
+ * that as "approval required, ordering unknown" would drop information the text does have.
+ */
+const START_NOW =
+  /(?<what>[^.;]{1,80}?)\s+(?:is|are|was|were|must be|needs to be|should be|has to be)\s+(?:reviewed and\s+)?approved\s+before\s+(?<blocked>[^.;]{1,80})/i
+
+const WAIT_FOR =
+  /(?<blocked>[^.;]{1,80}?)\s+(?:must|has to|needs to|should)\s+(?:not\s+)?(?:wait|be held|be delayed)[^.;]{0,40}?approval/i
+
+/** Split prose into sentences without breaking on a filename or an abbreviation. */
+function sentences(text: string): string[] {
+  return text
+    .replace(/\r\n/g, '\n')
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter((part) => part !== '')
+}
+
+/** Strip bullets, checkboxes and emphasis so a quoted gate reads as a sentence. */
+function cleanSentence(value: string): string {
+  return value
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
+    .replace(/^\s*\[[ xX]\]\s*/, '')
+    .replace(/[*_`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** A short noun phrase, not a paragraph, or the display becomes a second copy of the task. */
+function phrase(value: string | undefined): string | null {
+  const cleaned = (value ?? '')
+    // A gate is often introduced mid-sentence; the phrase a reader needs starts after it.
+    .replace(/^(?:note|nb|fyi|caveat|important|reminder)\b[:,]?\s+(?:that\s+)?/i, '')
+    .replace(/^(?:please\s+)?(?:ensure|make sure|remember)\s+(?:that\s+)?/i, '')
+    .replace(/^(?:the|a|an)\s+/i, '')
+    // Keep the clause that names the gate; a following clause is a different statement.
+    .replace(/,\s+(?:so|and|but|then|which|whilst|while)\b[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')
+    .trim()
+  if (cleaned === '' || cleaned.length > 80) return null
+  return cleaned
+}
+
+/**
+ * Find the approval gate the task states, if any.
+ *
+ * Reading is deliberately literal: one sentence, quoted back, with the allowed and blocked
+ * halves only when the sentence spells them out. A sentence that merely says approval is
+ * required yields the evidence and no invented ordering.
+ */
+function approvalGates(text: string): TaskGate[] {
+  for (const raw of sentences(text)) {
+    const sentence = cleanSentence(raw)
+    if (sentence.length > 300 || !APPROVAL_SENTENCE.test(sentence)) continue
+
+    const startFirst = START_NOW.exec(sentence)
+    if (startFirst?.groups !== undefined) {
+      return [
+        {
+          kind: 'approval',
+          startNow: phrase(startFirst.groups.what),
+          // A sentence often lists a second requirement after a semicolon; that is a
+          // different clause, and merging it into "what is blocked" misreads the gate.
+          waitFor: phrase(startFirst.groups.blocked?.split(';')[0]),
+          evidence: sentence,
+        },
+      ]
+    }
+
+    const blockedFirst = WAIT_FOR.exec(sentence)
+    if (blockedFirst?.groups !== undefined) {
+      return [
+        {
+          kind: 'approval',
+          startNow: null,
+          waitFor: phrase(blockedFirst.groups.blocked?.split(';')[0]),
+          evidence: sentence,
+        },
+      ]
+    }
+
+    return [{ kind: 'approval', startNow: null, waitFor: null, evidence: sentence }]
+  }
+  return []
+}
+
+/**
+ * A derived fix reads as `<action> -- <why it is needed>`.
+ *
+ * Its `title` is the finding as an observed state ("Issue template present"), which is the
+ * wrong headline for a task: a brief should name what the reader is about to do.
+ */
+function actionOf(suggestion: Record<string, unknown>): string | null {
+  const detail = asString(suggestion.detail) ?? ''
+  const marker = detail.indexOf(' -- ')
+  if (marker <= 0) return null
+  const action = detail.slice(0, marker).trim()
+  return action === '' ? null : action
+}
+
 function titleAndObjective(text: string): { title: string; objective: string } {
   const lines = text.split(/\r?\n/)
   const headIndex = lines.findIndex((line) => line.trim() !== '')
@@ -550,6 +716,8 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   const checks = commandChecks(snapshot)
   const found = blockers(snapshot)
   const ready = asRecord(snapshot.repository.ready.data)
+  const readyOk = snapshot.repository.ready.ok !== false
+  const gates = suggestion === null ? approvalGates(text) : []
 
   if (suggestion !== null) {
     unknowns.push(
@@ -558,17 +726,25 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   } else {
     unknowns.push('The pasted task text was not validated against a tracker, an owner or the product requirements.')
   }
-  unknowns.push(
-    'Approval gates and ownership cannot be inferred from repository files. Check the ticket before editing.',
-  )
+  if (gates.length > 0) {
+    unknowns.push('The approval gate above is quoted from the pasted text; confirm it with the owner or ticket.')
+  } else if (suggestion !== null) {
+    unknowns.push(
+      'A repository suggestion carries no approval gate or owner: confirm both with the team before implementing.',
+    )
+  } else {
+    unknowns.push(
+      'No approval gate was found in the pasted text. Approval gates and ownership are not inferable from repository files, so check the ticket.',
+    )
+  }
   unknowns.push('This page is read-only: the verification commands were not run and the repository was not changed.')
   unknowns.push('Verification history is unavailable; run a command in a worktree to produce evidence.')
   for (const reference of unmatched) {
     unknowns.push(`The task names ${reference}, which is not in the file index; it may be a new or renamed file.`)
   }
-  if (ready !== null && ready.checked !== true) {
+  if (!readyOk) {
     unknowns.push(
-      'The environment was not probed (`anvil ready --check`), so tool and service availability is unknown.',
+      '`anvil ready` failed, so blockers and tool availability are unknown — this is not a clean readiness report.',
     )
   }
   if (snapshot.repository.profile.ok === false) {
@@ -591,11 +767,13 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   }
 
   const pasted = suggestion === null ? titleAndObjective(text) : null
+  const suggestedTitle =
+    suggestion === null ? '' : (actionOf(suggestion) ?? asString(suggestion.title) ?? 'Suggested contribution')
   return {
     schemaVersion: 1,
     generatedAt: snapshot.fetchedAt,
     source: { suggestionId: suggestionId === '' ? null : suggestionId, text: text === '' ? null : text },
-    title: suggestion !== null ? (asString(suggestion.title) ?? 'Suggested contribution') : (pasted?.title ?? ''),
+    title: suggestion !== null ? suggestedTitle : (pasted?.title ?? ''),
     objective:
       suggestion !== null
         ? (asString(suggestion.detail) ?? asString(suggestion.title) ?? '')
@@ -603,6 +781,12 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     startHere,
     howToCheck: checks,
     blockers: found,
+    gates,
+    readiness: {
+      ok: readyOk,
+      checked: ready !== null && ready.checked === true,
+      status: ready === null ? null : asString(ready.status),
+    },
     unknowns,
   }
 }

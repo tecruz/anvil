@@ -25,6 +25,7 @@ export {
   type TaskBrief,
   type TaskBriefInput,
   type TaskCheck,
+  type TaskGate,
   TaskInputError,
   type TaskStartItem,
 } from './task.ts'

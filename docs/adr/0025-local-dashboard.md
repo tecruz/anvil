@@ -41,6 +41,11 @@ runtime dependency.**
   `ready` reports blocked, and states what it cannot know. It runs nothing and writes
   nothing: `POST /api/brief` takes no command, path or repository, is capped at 4,000
   characters, and stores no request or response.
+- An approval gate is quoted from the pasted text, never inferred. The brief separates what
+  the sentence allows to start from what it blocks, and says so when the text states no gate.
+- The brief reads only the cached snapshot. It never starts a CLI load, and a POST before
+  the first page load is refused with `409` rather than warming the cache. A failed `ready`
+  source is reported as blockers-unknown, not as an empty blocker list.
 - The context view reads `.anvil/staging/` through the same functions `init` uses. It shows
   the diff and whether staged bytes were edited after staging. It never stages, applies, or
   refreshes anything.
@@ -52,7 +57,9 @@ runtime dependency.**
   response. Adding a write action later is a separate decision that must go through the same
   approval boundary the CLI command would use.
 - The brief is built when a person asks for it, from the cached snapshot. A refresh
-  invalidates it, so a brief is never presented as newer than the facts behind it.
+  invalidates it, so a brief is never presented as newer than the facts behind it. The
+  textarea keeps its draft across a refresh: the snapshot is the tool's state, the draft is
+  the reader's.
 
 ## Consequences
 

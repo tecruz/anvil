@@ -700,18 +700,30 @@ The page has four views. **Task brief** is the entry point: paste a ticket or ta
 description, or choose one of the repository suggestions from `anvil plan`. Either way it
 shows the likely files to start from, the verification commands with the source and working
 directory that established them, the required needs `anvil ready` reports as blocked, and
-what the page cannot know — approval gates, ownership, tracker state. The commands are
-printed, never run. **Repository** covers readiness findings, blockers and ranked next steps,
-**Context** covers verified brief gaps and a read-only view of the staged diff, and **Work**
-covers claims, worktrees, uncommitted and unpushed changes, and agent liveness. Each value
-names the CLI command behind it, and every refresh re-reads those commands in offline mode. A
-failed command appears as an error beside the other views; it never renders as an empty
-result.
+what the page cannot know. The commands are printed, never run. **Repository** covers
+readiness findings, blockers and ranked next steps, **Context** covers verified brief gaps
+and a read-only view of the staged diff, and **Work** covers claims, worktrees, uncommitted
+and unpushed changes, and agent liveness. Each value names the CLI command behind it, and
+every refresh re-reads those commands in offline mode. A failed command appears as an error
+beside the other views; it never renders as an empty result.
+
+When the pasted text states an approval gate — "the audit and proposal are approved before
+implementation" — the brief quotes that sentence and separates *start now* from *wait for
+approval*. It never infers a gate from repository files (an issue body or PR template can say
+one). If the ticket states no gate, the brief says so instead of guessing, and a
+repository suggestion says that it carries no gate or owner at all.
+
+The brief is honest about what it could not measure: a failed `anvil ready` is shown as
+*blockers unknown*, not as a clean report, and an unprobed environment is shown as *not
+checked* rather than *nothing missing*. An exact path in the task outranks a file that only
+shares its ending, and both are labelled for what they are. Paths follow the order the ticket
+names them.
 
 Pasted task text stays on the loopback page: it is limited to 4,000 characters, sent to the
 local server only, and not stored. The suggestions are engineering improvements derived from
 this repository's own findings, not a team's priorities. Building a brief does not create a
-tracker ticket, claim a worktree, or modify a file.
+tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
+reads the snapshot the page already loaded, and a reload is required before the first brief.
 
 Verification is deliberately shown as *unavailable*: anvil does not persist verification
 results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`

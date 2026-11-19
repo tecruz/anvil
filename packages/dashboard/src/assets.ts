@@ -30,6 +30,7 @@ export const HTML = `<!doctype html>
 </nav>
 <main>
   <p id="notes" class="notes"></p>
+  <div id="snapshot-error" hidden></div>
   <section id="task">
     <div class="card">
       <h2>Start from a task</h2>
@@ -95,6 +96,8 @@ textarea { width: 100%; padding: 0.5rem; border: 1px solid #8886; border-radius:
 .check { padding: 0.4rem 0; border-top: 1px solid #8884; }
 .check:first-of-type { border-top: 0; }
 .check .path { display: block; margin-top: 0.15rem; }
+.gate { border-left: 4px solid #a608; }
+blockquote { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid #8886; }
 ul { margin: 0.25rem 0; padding-left: 1.25rem; }
 li { margin: 0.2rem 0; }
 `
@@ -372,6 +375,38 @@ function renderBrief(parent, brief) {
     card.appendChild(list);
   }
 
+  // The gate the ticket states, kept separate from the repository's own facts: one is a
+  // team decision quoted from the ticket, the other is measured from this checkout.
+  const gates = Array.isArray(brief.gates) ? brief.gates : [];
+  if (gates.length > 0) {
+    card.appendChild(make('h3', '', 'Approval gate (quoted from the task)'));
+    for (const gate of gates) {
+      const row = make('div', 'card gate');
+      const startLine = make('div', 'row');
+      if (gate.startNow) {
+        startLine.appendChild(badge('ok'));
+        startLine.appendChild(make('strong', '', 'Start now: '));
+        startLine.appendChild(make('span', '', gate.startNow));
+      }
+      if (gate.startNow) row.appendChild(startLine);
+      if (gate.waitFor) {
+        const waitLine = make('div', 'row');
+        waitLine.appendChild(badge('blocker'));
+        waitLine.appendChild(make('strong', '', 'Wait for approval: '));
+        waitLine.appendChild(make('span', '', gate.waitFor));
+        row.appendChild(waitLine);
+      }
+      if (!gate.startNow && !gate.waitFor) {
+        const unknownLine = make('div', 'row');
+        unknownLine.appendChild(badge('unknown'));
+        unknownLine.appendChild(make('span', '', 'Approval is required, but the task does not say what may start first.'));
+        row.appendChild(unknownLine);
+      }
+      row.appendChild(make('blockquote', 'muted', '“' + gate.evidence + '”'));
+      card.appendChild(row);
+    }
+  }
+
   card.appendChild(make('h3', '', 'How to check'));
   const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
   if (checks.length === 0) {
@@ -390,9 +425,11 @@ function renderBrief(parent, brief) {
 
   card.appendChild(make('h3', '', 'Blocked or missing'));
   const blockers = Array.isArray(brief.blockers) ? brief.blockers : [];
-  if (blockers.length === 0) {
-    card.appendChild(make('div', 'muted', 'No blocked requirement is reported by anvil ready.'));
-  } else {
+  const readiness = brief.readiness || {};
+  if (readiness.ok === false) {
+    // A failed readiness report is an absence of evidence, not a clean bill of health.
+    card.appendChild(make('div', 'error', 'anvil ready failed, so blockers and tool availability are unknown. Run anvil ready for a real answer.'));
+  } else if (blockers.length > 0) {
     for (const blocker of blockers) {
       const row = make('div', 'row');
       row.appendChild(badge(blocker.status));
@@ -400,6 +437,10 @@ function renderBrief(parent, brief) {
       if (blocker.reason) row.appendChild(make('span', '', blocker.reason));
       card.appendChild(row);
     }
+  } else if (readiness.checked === false) {
+    card.appendChild(make('div', 'muted', 'No blocker is reported, but the environment was not probed (anvil ready --check), so a missing tool or service would not appear here.'));
+  } else {
+    card.appendChild(make('div', 'muted', 'No blocked requirement is reported by anvil ready.'));
   }
 
   card.appendChild(make('h3', '', 'Unknowns'));
@@ -408,6 +449,14 @@ function renderBrief(parent, brief) {
   for (const unknown of unknowns) list.appendChild(make('li', '', unknown));
   card.appendChild(list);
   parent.appendChild(card);
+}
+
+/** A derived fix reads as "action -- why"; the action is the useful heading for a task. */
+function suggestionAction(suggestion) {
+  const detail = String(suggestion.detail || '');
+  const marker = detail.indexOf(' -- ');
+  if (marker <= 0) return '';
+  return detail.slice(0, marker).trim();
 }
 
 /** Suggested contributions come only from derived plan fixes, never from external reading. */
@@ -428,13 +477,14 @@ function renderSuggestions(parent, snap) {
     const row = make('div', 'suggestion');
     const button = make('button', '', 'Build brief');
     button.dataset.suggestion = suggestion.id || '';
-    button.setAttribute('aria-label', 'Build a brief from: ' + (suggestion.title || suggestion.id || 'this suggestion'));
+    const heading = suggestionAction(suggestion) || suggestion.title || suggestion.id || 'this suggestion';
+    button.setAttribute('aria-label', 'Build a brief from: ' + heading);
     button.addEventListener('click', function () { requestBrief({ suggestionId: suggestion.id || '' }); });
     row.appendChild(button);
     const body = make('div', 'body');
     body.appendChild(badge(suggestion.tier));
     if (suggestion.severity) body.appendChild(badge(suggestion.severity));
-    body.appendChild(make('strong', '', suggestion.title || suggestion.id || 'suggestion'));
+    body.appendChild(make('strong', '', suggestionAction(suggestion) || suggestion.title || suggestion.id || 'suggestion'));
     if (suggestion.detail) body.appendChild(make('div', '', suggestion.detail));
     if (Array.isArray(suggestion.evidence) && suggestion.evidence.length > 0) {
       body.appendChild(make('div', 'muted', suggestion.evidence.join('; ')));
@@ -510,21 +560,39 @@ async function load(refresh) {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
     const next = await response.json();
-    // A brief is bound to the snapshot it was built from; a refresh invalidates it.
+    // A brief is bound to the snapshot it was built from; a refresh invalidates it, but the
+    // draft in the textarea belongs to the reader and is left alone.
     if (state.snapshot) {
       state.brief = null;
       state.taskError = null;
     }
     state.snapshot = next;
+    showSnapshotError(null);
     render();
   } catch (error) {
-    const target = document.querySelector('#' + state.view);
-    target.replaceChildren();
-    target.appendChild(make('div', 'error', error instanceof Error ? error.message : String(error)));
+    // The form stays usable: a failed snapshot must not delete the draft the reader typed.
+    showSnapshotError(error instanceof Error ? error.message : String(error));
   } finally {
     state.loading = false;
     document.querySelector('#refresh').disabled = false;
   }
+}
+
+/** The snapshot error lives in its own node so it can coexist with the entry-point form. */
+function showSnapshotError(message) {
+  const node = document.querySelector('#snapshot-error');
+  if (!node) return;
+  node.replaceChildren();
+  if (!message) {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  // Never claim a fallback that does not exist: a first-load failure has no earlier snapshot.
+  const tail = state.snapshot
+    ? ' The form below still works from the last snapshot it loaded.'
+    : ' Nothing is loaded yet, so a brief cannot be built until a load succeeds. Press Refresh to retry.';
+  node.appendChild(make('div', 'error', 'Could not read the snapshot: ' + message + '.' + tail));
 }
 
 for (const tab of document.querySelectorAll('.tab')) {

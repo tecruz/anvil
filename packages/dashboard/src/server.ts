@@ -173,6 +173,15 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
     return pending
   }
 
+  /**
+   * The brief's read path: the cache, or nothing.
+   *
+   * It never starts a load of its own, and it does not wait on one. A brief is a view over
+   * facts the page already has, so building one cannot become a way to spawn CLI processes
+   * on demand — not even a first load triggered by a POST that races the page.
+   */
+  const cachedSnapshot = (): DashboardSnapshot | null => cache
+
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', `http://${host}`)
@@ -239,7 +248,12 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         }
         try {
           const input = briefInput(body.value)
-          sendJson(res, 200, buildTaskBrief(await snapshot(false), input))
+          const current = cachedSnapshot()
+          if (current === null) {
+            sendJson(res, 409, { error: 'No snapshot yet. Reload the page, then build the brief.' })
+            return
+          }
+          sendJson(res, 200, buildTaskBrief(current, input))
         } catch (thrown) {
           if (!(thrown instanceof TaskInputError)) throw thrown
           sendJson(res, 400, { error: thrown.message })
