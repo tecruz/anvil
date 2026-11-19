@@ -43,6 +43,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # Export what the publish job needs. Job outputs survive a retry of only that job, so a
+    # failed publication can resume against the artifact this job already tested and retained.
+    outputs:
+      artifact_id: ${{ steps.upload_evidence.outputs['artifact-id'] }}
+      checksum: ${{ steps.provenance.outputs.checksum }}
+      source_sha: ${{ steps.provenance.outputs.source_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -200,6 +206,7 @@ jobs:
       # together. These files also supply the notes/checksum for an approved GitHub release.
       # Upload failure is blocking, before publication, not an optional post-publish report.
       - name: retain the tested tarball, checksum and draft release notes
+        id: upload_evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-evidence-${{ github.event_name == 'workflow_dispatch' && 'rehearsal-' || '' }}${{ github.run_id }}-attempt${{ github.run_attempt }}
@@ -239,12 +246,17 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: recover the tested artifact
+        # Download by the id the preparation job uploaded, not by a name rebuilt from this
+        # job's run attempt: retrying only `publish` keeps the earlier artifact and outputs.
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-evidence-${{ github.run_id }}-attempt${{ github.run_attempt }}
+          artifact-ids: ${{ needs.release.outputs.artifact_id }}
           path: dist
 
       - name: verify the artifact before publication
+        env:
+          EXPECTED_CHECKSUM: ${{ needs.release.outputs.checksum }}
+          SOURCE_SHA: ${{ needs.release.outputs.source_sha }}
         run: |
           count=$(find dist -maxdepth 1 -type f -name '*.tgz' | wc -l)
           if [ "$count" -ne 1 ]; then
@@ -253,6 +265,9 @@ jobs:
           fi
           (cd dist && sha256sum --check SHA256SUMS)
           tarball=$(realpath dist/*.tgz)
+          # Bind the bytes to the checksum preparation recorded, not only to the sidecar
+          # that travelled with the artifact.
+          printf '%s  %s\n' "$EXPECTED_CHECKSUM" "$(basename "$tarball")" | sha256sum --check -
           tag=${GITHUB_REF_NAME#v}
           tar -xOf "$tarball" package/package.json | TAG="$tag" node -e '
             const fs = require("node:fs")
@@ -266,8 +281,7 @@ jobs:
             }
             console.log(`publishing ${packed.name}@${packed.version}`)
           '
-          source_sha=$(git rev-parse HEAD)
-          grep -q "Source commit: \`$source_sha\`" dist/RELEASE_NOTES.md
+          grep -q "Source commit: \`$SOURCE_SHA\`" dist/RELEASE_NOTES.md
 
       # Publish the exact bytes that were tested. No build runs in this job: `npm publish` with
       # no argument would repack the working tree and could send a different artifact.

@@ -71,9 +71,25 @@ describe('release workflow rehearsal', () => {
     assert.match(upload, /actions\/upload-artifact@[0-9a-f]{40}/)
     assert.match(download, /actions\/download-artifact@[0-9a-f]{40}/)
     assert.match(download, /path: dist/)
+    assert.match(download, /artifact-ids: \$\{\{ needs\.release\.outputs\.artifact_id \}\}/)
     const publish = job('publish')
     assert.match(publish, /sha256sum --check SHA256SUMS/)
     assert.doesNotMatch(publish, /npm ci|npm run check|npm pack/, 'the publish job must not rebuild')
+  })
+
+  test('a publish-only retry cannot look for an artifact under a new run attempt', () => {
+    const prepare = job('release')
+    for (const output of ['artifact_id', 'checksum', 'source_sha']) {
+      assert.match(prepare, new RegExp(`^ {6}${output}:`, 'm'), `preparation must export ${output}`)
+    }
+    assert.match(prepare, /artifact_id: \$\{\{ steps\.upload_evidence\.outputs\['artifact-id'\] \}\}/)
+    const publish = job('publish')
+    assert.doesNotMatch(publish, /github\.run_attempt/, 'attempt is not part of artifact identity')
+    assert.match(publish, /EXPECTED_CHECKSUM: \$\{\{ needs\.release\.outputs\.checksum \}\}/)
+    assert.match(publish, /SOURCE_SHA: \$\{\{ needs\.release\.outputs\.source_sha \}\}/)
+    const verify = step('verify the artifact before publication')
+    assert.match(verify, /printf '%s {2}%s\\n' "\$EXPECTED_CHECKSUM"/)
+    assert.match(verify, /sha256sum --check -/, 'the published bytes must match preparation, not only its sidecar')
   })
 
   test('a rehearsal takes its candidate version from the manifest, not a tag', () => {
@@ -86,7 +102,8 @@ describe('release workflow rehearsal', () => {
 
   test('rehearsal evidence is named apart from a real release', () => {
     assert.match(step('retain the tested tarball, checksum and draft release notes'), /'rehearsal-'/)
-    assert.doesNotMatch(step('recover the tested artifact'), /'rehearsal-'/, 'a tag has no rehearsal prefix')
+    const publish = job('publish')
+    assert.doesNotMatch(publish, /rehearsal-/, 'publication never consumes rehearsal evidence')
   })
 
   test('the job summary claims retention only after the upload succeeds', () => {
