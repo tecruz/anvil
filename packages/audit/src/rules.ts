@@ -260,6 +260,115 @@ const AGENTS_COMMANDS: Rule = {
 }
 
 /**
+ * Two instruction sources can tell two agents to run different verify commands.
+ *
+ * `AGENTS_COMMANDS` passes as soon as any one file names a command, and
+ * `VERIFY_DOC_COVERAGE` checks those commands against what anvil detected. Neither asks
+ * whether the files agree with each other. A repo with AGENTS.md saying `npm test` and
+ * CLAUDE.md saying `pnpm test` looks healthy while two tools verify differently.
+ *
+ * This rule extracts only explicit commands from recorded instruction files and compares
+ * them per kind. Prose that merely mentions a runner is left alone, and one file alone can
+ * never be a conflict.
+ */
+const INSTRUCTION_CONFLICT: Rule = {
+  id: 'INSTRUCTION_CONFLICT',
+  layer: 'context',
+  severity: 'medium',
+  title: 'Instruction files agree on how to verify',
+  order: 45,
+  evaluate(ctx) {
+    const files = ctx.profile.instructions.filter((i) => !i.path.endsWith('/') && i.path !== '.cursor/rules')
+    if (files.length < 2) return na('Fewer than two instruction files, so they cannot disagree')
+
+    // Test/build/lint/typecheck only: these are the verify commands an agent acts on.
+    const patterns: ReadonlyArray<{ kind: string; re: RegExp }> = [
+      {
+        kind: 'test',
+        re: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\bpytest\b|\bgo test\b|\bcargo test\b|\bdotnet test\b|\bmake test\b|\bjest\b|\bvitest\b|\bmix test\b|\bswift test\b|\bphpunit\b/i,
+      },
+      {
+        kind: 'build',
+        re: /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\bcargo build\b|\bgo build\b|\bdotnet build\b|\bmake (?:build|all)\b|\bgradlew? (?:build|assemble\w*)\b|\bswift build\b/i,
+      },
+      {
+        kind: 'lint',
+        re: /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?lint\b|\beslint\b|\bruff check\b|\bgolangci-lint\b|\bcargo clippy\b|\bmake lint\b|\brubocop\b|\bswiftlint\b|\btflint\b|\bbiome (?:check|lint)\b/i,
+      },
+      { kind: 'typecheck', re: /\btsc --noEmit\b|\btypecheck\b|\bpyright\b|\bmypy\b|\bphpstan\b/i },
+    ]
+
+    const found = new Map<string, Array<{ cmd: string; evidence: string }>>()
+    for (const instruction of files) {
+      let text: string
+      try {
+        text = readFileSync(join(ctx.profile.root, ...instruction.path.split('/')), 'utf8')
+      } catch {
+        continue
+      }
+      for (const [index, raw] of text.split('\n').entries()) {
+        // Strip markdown and shell decoration, then match only the command inside a code
+        // span or a fenced/shell line. Bare prose about a runner is not a command.
+        const line = raw
+          .replace(/`/g, '')
+          .replace(/^\s{0,4}(?:\$|#|>)\s*/, '')
+          .trim()
+        if (line === '' || !mentionsRunner(line)) continue
+        for (const pattern of patterns) {
+          const match = pattern.re.exec(line)
+          if (match === null) continue
+          const cmd = match[0].replace(/\s+/g, ' ').toLowerCase()
+          const key = `${pattern.kind}`
+          const list = found.get(key) ?? []
+          if (!list.some((entry) => entry.cmd === cmd && entry.evidence.startsWith(instruction.path))) {
+            list.push({ cmd, evidence: `${instruction.path}:${index + 1}` })
+          }
+          found.set(key, list)
+          break
+        }
+      }
+    }
+
+    const issues: string[] = []
+    const evidence: string[] = []
+    for (const [kind, entries] of found) {
+      const byFile = new Map<string, string>()
+      for (const entry of entries) {
+        const path = entry.evidence.replace(/:\d+$/, '')
+        if (!byFile.has(path)) byFile.set(path, entry.cmd)
+      }
+      if (byFile.size < 2) continue
+      const distinct = new Set(byFile.values())
+      if (distinct.size < 2) continue
+      issues.push(`${kind}: ${[...byFile].map(([path, cmd]) => `${path} says "${cmd}"`).join('; ')}`)
+      for (const [path, cmd] of byFile) {
+        const line = entries.find((e) => e.evidence.startsWith(path) && e.cmd === cmd)?.evidence ?? path
+        evidence.push(line)
+      }
+    }
+
+    if (issues.length === 0) {
+      return pass(
+        found.size > 0
+          ? `${found.size} verify command kind(s) agree across instruction files`
+          : 'No verify commands in instruction files',
+        files.map((f) => f.path).slice(0, 6),
+      )
+    }
+
+    return warn(
+      `Instruction files disagree on verify commands: ${issues.slice(0, 3).join(' | ')}. Two tools may verify with different commands.`,
+      [...new Set(evidence)].slice(0, 6),
+      derived(
+        files[0]?.path ?? 'AGENTS.md',
+        'Reconcile the verify commands across the instruction files, or point the secondary file at the same runners',
+        0.75,
+      ),
+    )
+  },
+}
+
+/**
  * The instruction file's size, and where its commands are.
  *
  * Two questions, one rule, because they are the same question: is the guidance an agent
@@ -1782,6 +1891,7 @@ const RISK_MAP: Rule = {
 export const RULES: readonly Rule[] = [
   AGENTS_FILE,
   AGENTS_COMMANDS,
+  INSTRUCTION_CONFLICT,
   INSTRUCTION_BUDGET,
   ARCH_DOC,
   MODULE_MAP,

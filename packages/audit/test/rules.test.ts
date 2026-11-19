@@ -96,6 +96,58 @@ describe('a probed MCP file is visible to the rule', () => {
   })
 })
 
+describe('INSTRUCTION_CONFLICT compares verify commands across instruction files', () => {
+  test('different test commands in two files warn with evidence from both', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('AGENTS.md:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('CLAUDE.md:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('matching commands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  test('a single instruction file is na, not a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'na')
+  })
+
+  test('prose that is not a command is left alone', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nWe use npm for packages.\n',
+      'CLAUDE.md': '# Claude\n\nTests are important.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+})
+
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
   const scripts = JSON.stringify({ scripts: { test: 'node --test', lint: 'biome check' } })
 
