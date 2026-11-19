@@ -12,6 +12,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { ServerResponse } from 'node:http'
 import { createServer, type Server } from 'node:http'
+import { actionArgv, actionResult, parseAction } from './actions.ts'
 import { CSS, HTML, JS } from './assets.ts'
 import { type DashboardSnapshot, type LoadSnapshotOptions, loadSnapshot } from './snapshot.ts'
 
@@ -80,6 +81,13 @@ function hostAllowed(host: string | undefined, expectedHost: string, port: numbe
   return allowed.has(host.toLowerCase())
 }
 
+/** POSTs must come from this dashboard's own page, never from another origin or a form. */
+function originAllowed(origin: string | undefined, expectedHost: string, port: number): boolean {
+  if (origin === undefined) return false
+  const allowed = new Set([`http://${expectedHost}:${String(port)}`, `http://localhost:${String(port)}`])
+  return allowed.has(origin.toLowerCase())
+}
+
 export async function createDashboardServer(options: DashboardServerOptions): Promise<DashboardServerHandle> {
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? 0
@@ -115,14 +123,72 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         send(res, 403, 'Forbidden host\n', 'text/plain; charset=utf-8')
         return
       }
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        res.setHeader('allow', 'GET, HEAD')
+      if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
+        res.setHeader('allow', 'GET, HEAD, POST')
         send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
         return
       }
 
-      const supplied = url.searchParams.get('token')
       const cookie = cookieValue(req.headers.cookie, cookieName)
+
+      if (req.method === 'POST') {
+        if (url.pathname !== '/api/action') {
+          res.setHeader('allow', 'GET, HEAD')
+          send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
+          return
+        }
+        const chunks: Buffer[] = []
+        let size = 0
+        for await (const chunk of req) {
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+          size += buf.length
+          if (size > 4096) {
+            send(res, 413, 'Request too large\n', 'text/plain; charset=utf-8')
+            return
+          }
+          chunks.push(buf)
+        }
+        let body: Record<string, unknown>
+        try {
+          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('bad body')
+          body = parsed as Record<string, unknown>
+        } catch {
+          send(res, 400, 'Expected a JSON object\n', 'text/plain; charset=utf-8')
+          return
+        }
+        // The token stays HttpOnly: the browser proves the session with its cookie, and the
+        // Origin + JSON content type prove this came from the dashboard page, not a form or
+        // another site. No token is exposed to page JavaScript.
+        if (cookie === null || !sameToken(cookie, token)) {
+          send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
+          return
+        }
+        if (!originAllowed(req.headers.origin, host, boundPort)) {
+          send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
+          return
+        }
+        if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) {
+          send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
+          return
+        }
+        const parsedAction = parseAction(body.action, body.ref)
+        if (parsedAction === null) {
+          send(res, 400, 'Unknown action or unsafe argument\n', 'text/plain; charset=utf-8')
+          return
+        }
+        const argv = actionArgv(parsedAction.action, parsedAction.ref)
+        const result = await options.invoke(argv, options.cwd)
+        send(
+          res,
+          200,
+          JSON.stringify(actionResult(parsedAction.action, argv, result)),
+          'application/json; charset=utf-8',
+        )
+        return
+      }
+
+      const supplied = url.searchParams.get('token')
       const authorized =
         (supplied !== null && sameToken(supplied, token)) || (cookie !== null && sameToken(cookie, token))
 

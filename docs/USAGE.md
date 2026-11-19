@@ -704,9 +704,14 @@ mode. A failed command appears as an error beside the other views; it never rend
 empty result.
 
 Verification is deliberately shown as *unavailable*: anvil does not persist verification
-results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`
-for a current verdict. The dashboard does not stage, apply, set up, claim, ship, or update a
-tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
+results, and the dashboard does not run `crew verify` on page load. The page is read-only by
+default: it does not stage, apply, set up or update a tracker. The Work view does offer three
+**optional, confirm-gated** actions — Claim, Verify crew and Ship. Each posts only an action
+name (and one bounded ticket reference for Claim); the server maps it to the exact CLI argv
+and runs the same CLI command, so provider resolution, ship verification and approval checks
+are unchanged. A refusal is shown as an error beside the snapshot, never as a green result.
+See [ADR-0025](adr/0025-local-dashboard.md) for the read-only boundary and threat model, and
+[ADR-0026](adr/0026-dashboard-gated-actions.md) for this exception and its limits.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
 `fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
