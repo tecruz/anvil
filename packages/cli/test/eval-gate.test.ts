@@ -11,6 +11,7 @@ import {
   checkRunRecordCompatibility,
   EVAL_SCHEMA_VERSION,
   type EvalBaseline,
+  type EvalExecutionAttestation,
   type EvalLatest,
   type EvalRunRecord,
   type EvalRunRecordResult,
@@ -390,6 +391,48 @@ describe('versioned eval evidence', () => {
     const gate = checkEvalGate(baseline(matrix()), parsed)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /legacy evidence/)
+  })
+
+  test('task failure reasons and retained execution evidence survive a round trip', () => {
+    const reason = 'the agent did not run node verify.js from the project directory'
+    const attestation: EvalExecutionAttestation = {
+      status: 'not-observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      reason,
+    }
+    const summary = latest(matrix())
+    summary.results[0] = { ...summary.results[0]!, taskFailureReason: reason, executionAttestation: attestation }
+    const parsedSummary = parseLatest(JSON.parse(JSON.stringify(summary)))
+    assert.notEqual(typeof parsedSummary, 'string')
+    if (typeof parsedSummary !== 'string') {
+      assert.equal(parsedSummary.results[0]!.taskFailureReason, reason)
+      assert.deepEqual(parsedSummary.results[0]!.executionAttestation, attestation)
+    }
+
+    const record = runRecord()
+    record.results[0] = { ...record.results[0]!, taskFailureReason: reason, executionAttestation: attestation }
+    const parsedRecord = parseRunRecord(JSON.parse(JSON.stringify(record)))
+    assert.notEqual(typeof parsedRecord, 'string')
+    if (typeof parsedRecord !== 'string') {
+      assert.equal(parsedRecord.results[0]!.taskFailureReason, reason)
+      assert.deepEqual(parsedRecord.results[0]!.executionAttestation, attestation)
+    }
+
+    assert.match(
+      parseLatest({
+        ...summary,
+        results: [{ ...summary.results[0]!, executionAttestation: { ...attestation, status: 'forged' } }],
+      }) as string,
+      /executionAttestation is invalid/,
+    )
+    assert.match(
+      parseRunRecord({
+        ...record,
+        results: [{ ...record.results[0]!, taskFailureReason: 7 }],
+      }) as string,
+      /taskFailureReason is invalid/,
+    )
   })
 
   test('reads and round-trips version 1 records without fabricating the initial fixture snapshot', () => {

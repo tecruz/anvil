@@ -117,6 +117,8 @@ export interface EvalScenario {
    * command run from anywhere else does not produce harness-controlled evidence.
    */
   captureDir?: string
+  /** Fixture-relative paths that must still match their pre-agent bytes at grading time. */
+  protectedFiles?: string[]
   /** Files copied in after the agent finishes, to grade the work itself. */
   hidden?: Array<{ from: string; to: string }>
   /** Commands that grade the work, run after the hidden files are in place. */
@@ -188,6 +190,22 @@ export interface EvalBaseline {
 /** The fixture fingerprints captured when a run starts. */
 export type EvalFixtureHashes = Record<string, { scenarioHash: string; sourceHash: string }>
 
+/**
+ * A bounded, transcript-free record of what the harness actually observed.
+ *
+ * The log itself is scratch output. This is the part retained in the result so a reviewer can
+ * audit the check and directory a verdict relied on after the worktree is gone.
+ */
+export interface EvalExecutionAttestation {
+  status: 'observed' | 'not-observed'
+  command: string
+  cwd: string
+  reason?: string
+  exitCode?: number | null
+  sourceHash?: string | null
+  at?: string | null
+}
+
 export interface EvalResultSummary {
   scenario: string
   size: EvalScenarioSize
@@ -211,6 +229,8 @@ export interface EvalResultSummary {
    * A task failure stays in the scored pair; a run error excludes it from the verdict.
    */
   taskFailureReason?: string
+  /** Harness-controlled execution evidence retained with the result. */
+  executionAttestation?: EvalExecutionAttestation
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -289,6 +309,8 @@ export interface EvalRunRecordResult {
   error?: string
   /** Why the agent did not achieve the task when the harness itself worked. */
   taskFailureReason?: string
+  /** Harness-controlled execution evidence retained with the result. */
+  executionAttestation?: EvalExecutionAttestation
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -478,6 +500,7 @@ export function hashScenario(scenario: EvalScenario): string {
     verify: scenario.verify,
     verifyInProjectDir: scenario.verifyInProjectDir ?? false,
     ...(scenario.captureDir === undefined || scenario.captureDir === '' ? {} : { captureDir: scenario.captureDir }),
+    ...(scenario.protectedFiles === undefined ? {} : { protectedFiles: [...scenario.protectedFiles].sort() }),
     hidden: scenario.hidden ?? [],
     hiddenVerify: scenario.hiddenVerify ?? [],
     solution: scenario.solution ?? null,
@@ -737,6 +760,35 @@ function parseFixtureHashes(value: unknown): EvalFixtureHashes | string {
   return hashes
 }
 
+/** Parse retained execution evidence, or explain why it is not one. */
+function parseExecutionAttestation(value: unknown): EvalExecutionAttestation | 'invalid' | undefined {
+  if (value === undefined) return undefined
+  if (!isObject(value)) return 'invalid'
+  if (value.status !== 'observed' && value.status !== 'not-observed') return 'invalid'
+  if (typeof value.command !== 'string' || typeof value.cwd !== 'string') return 'invalid'
+  if (value.reason !== undefined && typeof value.reason !== 'string') return 'invalid'
+  if (
+    value.exitCode !== undefined &&
+    value.exitCode !== null &&
+    (typeof value.exitCode !== 'number' || !Number.isInteger(value.exitCode))
+  ) {
+    return 'invalid'
+  }
+  if (value.sourceHash !== undefined && value.sourceHash !== null && typeof value.sourceHash !== 'string') {
+    return 'invalid'
+  }
+  if (value.at !== undefined && value.at !== null && typeof value.at !== 'string') return 'invalid'
+  return {
+    status: value.status,
+    command: value.command,
+    cwd: value.cwd,
+    ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    ...(typeof value.exitCode === 'number' ? { exitCode: value.exitCode } : {}),
+    ...(typeof value.sourceHash === 'string' ? { sourceHash: value.sourceHash } : {}),
+    ...(typeof value.at === 'string' ? { at: value.at } : {}),
+  }
+}
+
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
@@ -789,6 +841,11 @@ export function parseLatest(value: unknown): EvalLatest | string {
     const verifyExitCodes = parseExitCodes(raw.verifyExitCodes)
     if (verifyExitCodes === null) return `${raw.scenario}: latest verifyExitCodes is invalid`
     if (raw.error !== undefined && typeof raw.error !== 'string') return `${raw.scenario}: latest error is invalid`
+    if (raw.taskFailureReason !== undefined && typeof raw.taskFailureReason !== 'string') {
+      return `${raw.scenario}: latest taskFailureReason is invalid`
+    }
+    const executionAttestation = parseExecutionAttestation(raw.executionAttestation)
+    if (executionAttestation === 'invalid') return `${raw.scenario}: latest executionAttestation is invalid`
     const skillInstall = parseSkillState<EvalSkillInstall>(raw.skillInstall, SKILL_INSTALL_VALUES)
     if (skillInstall === 'invalid') return `${raw.scenario}: latest skillInstall is invalid`
     const skillAccess = parseSkillState<EvalSkillAccess>(raw.skillAccess, SKILL_ACCESS_VALUES)
@@ -812,6 +869,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
       verifyExitCodes,
       repetition,
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+      ...(typeof raw.taskFailureReason === 'string' ? { taskFailureReason: raw.taskFailureReason } : {}),
+      ...(executionAttestation === undefined ? {} : { executionAttestation }),
       ...(skillInstall === undefined ? {} : { skillInstall }),
       ...(skillAccess === undefined ? {} : { skillAccess }),
       ...(skillAccessReason === undefined ? {} : { skillAccessReason }),
@@ -892,6 +951,11 @@ export function parseRunRecordResult(
   if (value.error !== undefined && typeof value.error !== 'string') {
     return `run record result ${key} error is invalid`
   }
+  if (value.taskFailureReason !== undefined && typeof value.taskFailureReason !== 'string') {
+    return `run record result ${key} taskFailureReason is invalid`
+  }
+  const executionAttestation = parseExecutionAttestation(value.executionAttestation)
+  if (executionAttestation === 'invalid') return `run record result ${key} executionAttestation is invalid`
   const skillInstall = parseSkillState<EvalSkillInstall>(value.skillInstall, SKILL_INSTALL_VALUES)
   if (skillInstall === 'invalid') return `run record result ${key} skillInstall is invalid`
   const skillAccess = parseSkillState<EvalSkillAccess>(value.skillAccess, SKILL_ACCESS_VALUES)
@@ -917,6 +981,8 @@ export function parseRunRecordResult(
     durationMs: typeof value.durationMs === 'number' && Number.isFinite(value.durationMs) ? value.durationMs : null,
     transcript: typeof value.transcript === 'string' ? value.transcript : '',
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
+    ...(typeof value.taskFailureReason === 'string' ? { taskFailureReason: value.taskFailureReason } : {}),
+    ...(executionAttestation === undefined ? {} : { executionAttestation }),
     ...(skillInstall === undefined ? {} : { skillInstall }),
     ...(skillAccess === undefined ? {} : { skillAccess }),
     ...(skillAccessReason === undefined ? {} : { skillAccessReason }),

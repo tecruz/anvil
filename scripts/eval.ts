@@ -51,7 +51,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { lookupSessionCosts } from '../packages/cli/src/cost.ts'
 import {
@@ -66,6 +66,7 @@ import {
   type EvalBaseline,
   type EvalBaselineScenario,
   type EvalBenchmarkSummary,
+  type EvalExecutionAttestation,
   type EvalLatest,
   type EvalModel,
   type EvalModelRole,
@@ -187,6 +188,53 @@ export function limitTranscript(text: string): string {
   return limitText(text, 'transcript')
 }
 
+/** Cap structured reason strings so a bounded result cannot absorb a whole transcript. */
+function limitReason(text: string): string {
+  return text.length <= 1024 ? text : `${text.slice(0, 1024)}…[reason truncated]`
+}
+
+function sanitizeAttestation(attestation: EvalExecutionAttestation): EvalExecutionAttestation {
+  return {
+    ...attestation,
+    ...(attestation.reason === undefined ? {} : { reason: limitReason(attestation.reason) }),
+  }
+}
+
+/**
+ * Fingerprint the paths a scenario says must not change.
+ *
+ * The snapshot is taken before the agent runs and handed only to the verifiers. A substring
+ * check in a hidden test cannot tell an untouched file from one an agent rewrote around that
+ * substring; an exact digest can.
+ */
+export function protectedFileDigests(scenario: EvalScenario, workdir: string): Record<string, string> | null {
+  const files = scenario.protectedFiles ?? []
+  if (files.length === 0) return null
+  const digests: Record<string, string> = {}
+  const root = realpathSync.native(workdir)
+  for (const file of files) {
+    if (file === '' || file.startsWith('/') || file.startsWith('\\') || /^[A-Za-z]:/.test(file)) {
+      throw new Error(`protectedFiles entry must be relative, got ${JSON.stringify(file)}`)
+    }
+    const parts = file.split(/[/\\]/)
+    if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+      throw new Error(`protectedFiles entry must be a clean relative path, got ${JSON.stringify(file)}`)
+    }
+    const path = join(root, ...parts)
+    const fromRoot = relative(root, path)
+    if (
+      fromRoot === '..' ||
+      fromRoot.startsWith(`..${'/'}`) ||
+      fromRoot.startsWith(`..${'\\'}`) ||
+      isAbsolute(fromRoot)
+    ) {
+      throw new Error(`protectedFiles entry resolves outside the worktree: ${JSON.stringify(file)}`)
+    }
+    digests[parts.join('/')] = createHash('sha256').update(readFileSync(path)).digest('hex')
+  }
+  return digests
+}
+
 /**
  * Redact and bound every free-text field before it is persisted.
  *
@@ -202,6 +250,12 @@ export function sanitizeResult(result: ScenarioResult): ScenarioResult {
       ? {}
       : { verifyOutput: limitText(redactTranscript(result.verifyOutput), 'verifier output') }),
     ...(result.error === undefined ? {} : { error: limitText(redactTranscript(result.error), 'error') }),
+    ...(result.taskFailureReason === undefined
+      ? {}
+      : { taskFailureReason: limitReason(redactTranscript(result.taskFailureReason)) }),
+    ...(result.executionAttestation === undefined
+      ? {}
+      : { executionAttestation: sanitizeAttestation(result.executionAttestation) }),
   }
 }
 
@@ -914,6 +968,13 @@ async function runScenario(
   try {
     prepareRepo(scenario, workdir)
 
+    // Snapshot before the agent can touch anything, but share the digests only with the
+    // verifiers. `executionEnv` is never given to the agent.
+    const protectedDigests = protectedFileDigests(scenario, workdir)
+    if (protectedDigests !== null) {
+      executionEnv.ANVIL_EVAL_PROTECTED_DIGESTS = JSON.stringify(protectedDigests)
+    }
+
     // The derived context each variant receives. An ordinary scenario gives it to the anvil
     // variant only; a skill scenario gives it to both, so the paired difference is the skill.
     const baselineContext = scenario.baselineContext ?? 'none'
@@ -1080,34 +1141,58 @@ async function runScenario(
       // Shell events prove invocation, not script identity. They must match a
       // broker execution of source captured before the agent started.
       const observedRuns = checkCommands.map((expected) =>
-        agentExecutions.filter((execution) => isCheckCommand(expected, execution.command)),
+        agentExecutions.filter((execution) => isCheckCommand(expected, execution.command, captureDir)),
       )
-      // A skipped, forged or misdirected check is a task failure: the harness worked and
-      // the pair must stay in the verdict. Only a broken harness configuration is a run
-      // error, which excludes the pair rather than scoring an agent for the harness's fault.
-      const failTask = (reason: string): void => {
+      const commandLabel = checkCommands.join(', ')
+      let attestation: EvalExecutionAttestation = {
+        status: 'not-observed',
+        command: commandLabel,
+        cwd: captureDir,
+        reason: 'no harness-controlled execution was observed',
+      }
+      // For a directory-bound pilot a skipped, forged or misdirected check is a scored task
+      // failure, not a run error. Older capture scenarios keep the original run-error
+      // classification so their established contract and tests do not change silently.
+      const failCheck = (reason: string): void => {
         executionEvidenceValid = false
-        result.taskFailureReason = reason
+        attestation = { status: 'not-observed', command: commandLabel, cwd: captureDir, reason }
+        if (captureDir !== '') result.taskFailureReason = reason
+        else addError(result, reason)
       }
       if (checkBroker !== null && checkBroker.integrityError !== null) {
-        failTask(checkBroker.integrityError)
+        failCheck(checkBroker.integrityError)
       } else if (checkCommands.length === 0) {
-        addError(result, 'the scenario declares no check command, so there is no execution evidence to collect')
+        // A scenario with no declared check is a harness configuration failure, never an
+        // agent task failure, regardless of which scenario declared it.
+        const reason = 'the scenario declares no check command, so there is no execution evidence to collect'
+        addError(result, reason)
+        attestation = { status: 'not-observed', command: commandLabel, cwd: captureDir, reason }
       } else if (observedRuns.some((runs) => runs.length === 0)) {
-        failTask(
+        failCheck(
           `the agent did not run ${checkCommands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
         )
       } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
-        failTask('the agent modified a check or verifier script; execution evidence is invalid')
+        failCheck('the agent modified a check or verifier script; execution evidence is invalid')
       } else {
         const executions = checkCommands.map((command) =>
           checkBroker?.executions.findLast((execution) => execution.command === command),
         )
         const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, executions)
         if (disagreement !== null) {
-          failTask(disagreement)
+          failCheck(disagreement)
         } else {
           executionEvidenceValid = true
+          const execution = executions.find((entry) => entry !== undefined)
+          if (execution !== undefined) {
+            attestation = {
+              status: 'observed',
+              command: execution.command,
+              cwd: execution.cwd,
+              exitCode: execution.exitCode,
+              sourceHash: execution.sourceHash,
+              at: execution.at,
+            }
+          }
         }
       }
       // Publish only parent-process records, never append to a file an agent may
@@ -1124,6 +1209,7 @@ async function runScenario(
           : '',
         'utf8',
       )
+      result.executionAttestation = attestation
     }
 
     const verifyCwd = scenario.verifyInProjectDir === true ? projectDirIn(workdir) : workdir
@@ -1293,17 +1379,28 @@ export function parseOpenCodeRunEvents(output: string): {
  * PATH-resolved `node`. Only Node's script operand gets path normalization, so
  * `node ./run-check.js` remains supported without changing other argument values.
  */
-export function isCheckCommand(expected: string, actual: string): boolean {
+export function isCheckCommand(expected: string, actual: string, captureDir = ''): boolean {
   const want = parseEvidenceCommand(expected)
-  const got = parseEvidenceCommand(actual)
-  if (want === null || got === null || want.length === 0 || want.length !== got.length) return false
-  return want.every((arg, index) => {
-    const actualArg = got[index] as string
-    if (index === 1 && want[0] === 'node' && !arg.startsWith('-') && /\.(?:c|m)?js$/.test(arg)) {
-      return normalizeScriptPath(arg) === normalizeScriptPath(actualArg)
-    }
-    return arg === actualArg
-  })
+  const sameCommand = (got: string[] | null): boolean => {
+    if (got === null || want === null || want.length === 0 || want.length !== got.length) return false
+    return want.every((arg, index) => {
+      const actualArg = got[index] as string
+      if (index === 1 && want[0] === 'node' && !arg.startsWith('-') && /\.(?:c|m)?js$/.test(arg)) {
+        return normalizeScriptPath(arg) === normalizeScriptPath(actualArg)
+      }
+      return arg === actualArg
+    })
+  }
+  if (sameCommand(parseEvidenceCommand(actual))) return true
+  // `anvil init` writes `cd <dir> && node verify.js` into the verify skill. Accept that exact
+  // two-part form only when the broker was bound to the same directory, so matching the
+  // recommended command cannot become a way to grade a check run somewhere else.
+  if (captureDir === '') return false
+  const parts = actual.split('&&')
+  if (parts.length !== 2) return false
+  const changeDir = parseEvidenceCommand(parts[0] ?? '')
+  const command = parseEvidenceCommand(parts[1] ?? '')
+  return changeDir?.length === 2 && changeDir[0] === 'cd' && changeDir[1] === captureDir && sameCommand(command)
 }
 
 /**
@@ -1951,6 +2048,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     repetition: result.repetition ?? null,
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
+    ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
@@ -2100,6 +2198,8 @@ export function scoredResultsFromRecord(
         durationMs: prior.durationMs,
         transcript: prior.transcript,
         ...(error === undefined ? {} : { error }),
+        ...(prior.taskFailureReason === undefined ? {} : { taskFailureReason: prior.taskFailureReason }),
+        ...(prior.executionAttestation === undefined ? {} : { executionAttestation: prior.executionAttestation }),
         ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
         ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
         ...(prior.skillAccessReason === undefined ? {} : { skillAccessReason: prior.skillAccessReason }),
@@ -2136,6 +2236,7 @@ function recordResultFrom(
     transcript: result.transcript,
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
+    ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),

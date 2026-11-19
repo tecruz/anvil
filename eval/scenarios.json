@@ -196,6 +196,14 @@
       "verify": ["node verify.js"],
       "captureExecution": true,
       "captureDir": "packages/sub",
+      "protectedFiles": [
+        "README.md",
+        "package.json",
+        "anvil.config.json",
+        "packages/sub/package.json",
+        "packages/sub/config.json",
+        "packages/sub/verify.js"
+      ],
       "solutionRun": ["node verify.js"],
       "hidden": [
         {

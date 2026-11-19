@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -39,10 +40,22 @@ function fixture(scenario: EvalScenario): string {
  * agent's `solutionRun` and by the verifiers.
  */
 function evidenceEnvironment(scenario: EvalScenario): NodeJS.ProcessEnv {
-  if (scenario.captureExecution !== true) return {}
-  const dir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
-  temps.push(dir)
-  return { ANVIL_EVAL_EXECUTION_LOG: join(dir, 'executions.jsonl') }
+  const env: NodeJS.ProcessEnv = {}
+  if (scenario.captureExecution === true) {
+    const dir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
+    temps.push(dir)
+    env.ANVIL_EVAL_EXECUTION_LOG = join(dir, 'executions.jsonl')
+  }
+  if ((scenario.protectedFiles ?? []).length > 0) {
+    const digests: Record<string, string> = {}
+    for (const path of scenario.protectedFiles ?? []) {
+      digests[path] = createHash('sha256')
+        .update(readFileSync(join(source, scenario.repo, path)))
+        .digest('hex')
+    }
+    env.ANVIL_EVAL_PROTECTED_DIGESTS = JSON.stringify(digests)
+  }
+  return env
 }
 
 function projectDir(workdir: string, scenario: EvalScenario): string {
