@@ -67,7 +67,7 @@ table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
 `
 
-export const JS = `const state = { view: 'repository', snapshot: null, loading: false };
+export const JS = `const state = { view: 'repository', snapshot: null, loading: false, actionResult: null };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -312,6 +312,98 @@ function renderWork(root, snap) {
   card.appendChild(badge('unavailable'));
   card.appendChild(make('div', '', snap.verification.reason));
   parent.appendChild(card);
+  renderActions(parent);
+}
+
+/**
+ * Explicit, confirm-gated write actions. The page never builds a command: it posts an action
+ * name and one bounded reference to the closed endpoint. Ship takes an existing claim key
+ * and always runs with --probe on the CLI side, so verification is never skipped. Failures
+ * are printed beside the snapshot and kept across refreshes.
+ */
+function renderActions(parent) {
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Actions'));
+  card.appendChild(make('div', 'muted', 'Optional. Each action re-runs the same CLI command and approval checks; confirm before it starts. Ship verifies with --probe.'));
+
+  const claimRow = make('div');
+  const ticket = make('input');
+  ticket.type = 'text';
+  ticket.placeholder = 'ticket reference';
+  ticket.maxLength = 200;
+  claimRow.appendChild(ticket);
+  const claimButton = make('button', '', 'Claim');
+  claimButton.type = 'button';
+  claimButton.addEventListener('click', function () {
+    runAction({ action: 'claim', ref: ticket.value.trim() }, claimButton);
+  });
+  claimRow.appendChild(claimButton);
+  card.appendChild(claimRow);
+
+  const shipRow = make('div');
+  const claims = state.snapshot && state.snapshot.work.crew.ok && state.snapshot.work.crew.data
+    ? (Array.isArray(state.snapshot.work.crew.data.crew) ? state.snapshot.work.crew.data.crew : [])
+    : [];
+  const keys = claims.map(function (c) { return c.key; }).filter(function (key) { return typeof key === 'string' && key.length > 0; });
+  if (keys.length === 0) {
+    shipRow.appendChild(make('span', 'muted', 'No claim to ship yet.'));
+  } else {
+    const select = make('select');
+    for (const key of keys) {
+      const option = make('option', '', key);
+      option.value = key;
+      select.appendChild(option);
+    }
+    shipRow.appendChild(select);
+    const shipButton = make('button', '', 'Ship (with verification)');
+    shipButton.type = 'button';
+    shipButton.addEventListener('click', function () {
+      runAction({ action: 'ship', ref: select.value }, shipButton);
+    });
+    shipRow.appendChild(shipButton);
+  }
+  card.appendChild(shipRow);
+
+  const verifyButton = make('button', '', 'Verify crew');
+  verifyButton.type = 'button';
+  verifyButton.addEventListener('click', function () {
+    runAction({ action: 'verify' }, verifyButton);
+  });
+  card.appendChild(verifyButton);
+
+  const output = make('div', state.actionResult ? (state.actionResult.ok ? 'muted' : 'error') : 'muted');
+  output.setAttribute('role', 'status');
+  if (state.actionResult) output.textContent = formatActionResult(state.actionResult);
+  card.appendChild(output);
+  parent.appendChild(card);
+}
+
+function formatActionResult(result) {
+  const detail = result.ok ? 'exit ' + result.exitCode : (result.error || 'refused');
+  return result.command + ' - ' + detail;
+}
+
+async function runAction(body, button) {
+  if (!window.confirm('Run anvil ' + body.action + ' with the repository CLI? This may write to the repository.')) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    state.actionResult = response.ok ? result : { ok: false, command: 'anvil ' + body.action, error: result.error || ('HTTP ' + response.status) };
+  } catch (error) {
+    state.actionResult = { ok: false, command: 'anvil ' + body.action, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    button.disabled = false;
+  }
+  // Re-render first so the result is on screen, then refresh in the background; a failed
+  // refresh must not erase the CLI's answer.
+  render();
+  await load(true);
 }
 
 function render() {

@@ -6,6 +6,14 @@
  * widening the distribution's dependency surface.
  */
 
+export {
+  type ActionResult,
+  actionArgv,
+  actionResult,
+  DASHBOARD_ACTIONS,
+  type DashboardAction,
+  parseAction,
+} from './actions.ts'
 export { CSS, HTML, JS } from './assets.ts'
 export { createDashboardServer, type DashboardServerHandle, type DashboardServerOptions } from './server.ts'
 export {

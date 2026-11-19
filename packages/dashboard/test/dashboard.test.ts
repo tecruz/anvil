@@ -345,6 +345,8 @@ describe('the dashboard page', () => {
 
     addEventListener(): void {}
 
+    setAttribute(): void {}
+
     text(): string {
       return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
     }
@@ -494,5 +496,128 @@ describe('the dashboard page', () => {
     const work = nodes.get('#work')?.text() ?? ''
     assert.match(work, /orphaned/)
     assert.doesNotMatch(work, /active/)
+  })
+
+  test('an action result stays visible across a re-render', () => {
+    const nodes = new Map<string, FakeElement>([
+      ['#work', new FakeElement('section')],
+      ['#refresh', new FakeElement('button')],
+    ])
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
+    const snapshot = {
+      schemaVersion: 1 as const,
+      fetchedAt: 'now',
+      repository: { doctor: source({}), ready: source({}), plan: source({}) },
+      context: { brief: source({}), staged: source({}) },
+      work: { crew: source({ crew: [] }) },
+      verification: { status: 'unavailable' as const, reason: 'unavailable' },
+      notes: [],
+    }
+    const context = createContext({ document, console })
+    runInContext(JS.replace('load(false);', ''), context)
+    ;(context as unknown as { __snapshot: DashboardSnapshot }).__snapshot = snapshot as unknown as DashboardSnapshot
+    runInContext(
+      "state.actionResult = { ok: false, command: 'anvil ship local-1 --probe', exitCode: 2, error: 'verify failed' }; renderWork(document, __snapshot); renderWork(document, __snapshot);",
+      context,
+    )
+    const work = nodes.get('#work')?.text() ?? ''
+    assert.match(work, /anvil ship local-1 --probe - verify failed/)
+  })
+})
+
+describe('dashboard gated actions', () => {
+  function post(
+    server: DashboardServerHandle,
+    body: unknown,
+    options: { cookie?: string | null; origin?: string; contentType?: string } = {},
+  ): Promise<Response> {
+    const url = new URL('/api/action', server.url)
+    const headers: Record<string, string> = {
+      'content-type': options.contentType ?? 'application/json',
+      origin: options.origin ?? url.origin,
+    }
+    if (options.cookie !== null) headers.cookie = `${server.cookieName}=${options.cookie ?? TOKEN}`
+    return fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+  }
+
+  test('claim, verify and ship invoke only the fixed CLI argv, with --probe on ship', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      const claim = await post(server, { action: 'claim', ref: 'anvil-88' })
+      const claimText = await claim.text()
+      assert.equal(claim.status, 200, claimText)
+      assert.equal((JSON.parse(claimText) as { command: string }).command, 'anvil claim anvil-88')
+
+      const verify = await post(server, { action: 'verify' })
+      assert.equal(verify.status, 200)
+      const ship = await post(server, { action: 'ship', ref: 'claim-1' })
+      assert.equal(ship.status, 200)
+      assert.deepEqual(calls, [
+        ['claim', 'anvil-88'],
+        ['crew', 'verify'],
+        ['ship', 'claim-1', '--probe'],
+      ])
+    })
+  })
+
+  test('a refused CLI command is shown as a failure, never as green', async () => {
+    await withServer(
+      async (server) => {
+        const res = await post(server, { action: 'ship', ref: 'claim-1' })
+        assert.equal(res.status, 200)
+        const data = (await res.json()) as { ok: boolean; exitCode: number; error: string | null }
+        assert.equal(data.ok, false)
+        assert.notEqual(data.exitCode, 0)
+        assert.match(data.error ?? '', /verify/)
+      },
+      {
+        ship: {
+          exitCode: 2,
+          stdout: JSON.stringify({ ok: false, error: { message: 'Refusing to ship without a passing verify' } }),
+          stderr: '',
+        },
+      },
+    )
+  })
+
+  test('the POST needs the session cookie, a same-origin header and JSON', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      assert.equal((await post(server, { action: 'verify' }, { cookie: null })).status, 401)
+      assert.equal((await post(server, { action: 'verify' }, { cookie: 'wrong' })).status, 401)
+      assert.equal((await post(server, { action: 'verify' }, { origin: 'https://evil.example' })).status, 403)
+      assert.equal((await post(server, { action: 'verify' }, { contentType: 'text/plain' })).status, 415)
+      assert.deepEqual(calls, [])
+    })
+  })
+
+  test('the request cannot choose a command, a path or extra arguments', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      for (const body of [
+        { action: 'claim', ref: 'x; rm -rf /' },
+        { action: 'claim', ref: '../../etc/passwd' },
+        { action: 'claim', ref: '-danger' },
+        { action: 'ship' },
+        { action: 'crew verify' },
+        { action: 'verify', ref: 'x' },
+      ]) {
+        const res = await post(server, body)
+        assert.equal(res.status, 400, JSON.stringify(body))
+      }
+      assert.deepEqual(calls, [])
+    })
+  })
+
+  test('the page never fetches a session token into JavaScript', async () => {
+    await withServer(async (server) => {
+      const res = await fetch(new URL('/api/session-token', server.url), {
+        headers: { cookie: `${server.cookieName}=${TOKEN}` },
+      })
+      assert.equal(res.status, 404)
+      assert.doesNotMatch(JS, /session-token/)
+    })
   })
 })
