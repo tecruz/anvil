@@ -17,7 +17,7 @@ import { after, describe, test } from 'node:test'
 import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
 import { emptyProfile } from '@anvil/profile'
-import { stackLocations } from '../src/commands/doctor.ts'
+import { renderStackLocations, stackLocations } from '../src/commands/doctor.ts'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
 
@@ -1280,6 +1280,35 @@ describe('doctor per-module stack summaries', () => {
     ])
     // The machine-readable array is not replaced by the presentation summary.
     assert.equal(profile.stacks.length, 4)
+  })
+
+  test('a stack shared by two directories appears in both locations', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'node', version: null, evidence: ['apps/web/package.json', 'apps/worker/package.json'] }],
+    }
+    assert.deepEqual(stackLocations(profile), [
+      { dir: 'apps/web', stacks: ['node'], evidence: 'apps/web/package.json' },
+      { dir: 'apps/worker', stacks: ['node'], evidence: 'apps/worker/package.json' },
+    ])
+  })
+
+  test("doctor's human report renders the grouped stacks", () => {
+    // Use the renderer rather than a fixture: today's detectors put stack evidence at the
+    // repository root, and this is a presentation of whatever `ProjectProfile.stacks` holds.
+    const ctx = { style: { bold: (v: string) => v, dim: (v: string) => v } } as never
+    const located = stackLocations({
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [
+        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
+        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
+      ],
+    })
+    const text = renderStackLocations(ctx, located)
+    assert.match(text, /Stack by location/)
+    assert.match(text, /apps\/web\s+nextjs/)
+    assert.match(text, /services\/api\s+fastapi/)
+    assert.equal(renderStackLocations(ctx, located.slice(0, 1)), '')
   })
 
   test('a repo with one stack location has no second table to read', () => {
