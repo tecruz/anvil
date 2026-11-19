@@ -1,8 +1,16 @@
 # Release workflow.
 #
-# Triggered by a version tag (`v0.1.0`, `v0.2.0`, ...). Builds the prebuilt tarball
-# exactly once, installs it into an isolated consumer project and smoke-tests the
-# installed binary, then publishes those same bytes to the registry with provenance.
+# Triggered by a version tag (`v0.1.0`, `v0.2.0`, ...), or by a manual dispatch as a
+# no-publish rehearsal. Both paths build the prebuilt tarball exactly once, install it
+# into an isolated consumer project, smoke-test the installed binary, record its checksum
+# and retain the tested bytes. Only the tag path publishes to the registry.
+#
+# The rehearsal exists because a release cannot be undone: it exercises the GitHub steps
+# that were previously only rehearsed locally -- the artifact upload and the job summary --
+# without ever calling `npm publish`. A dispatch on a branch has no tag, so the candidate
+# version comes from the workspace manifest; a dispatch on a `v*` tag rehearses that tag's
+# identity gate instead. Dispatching is not an approval to publish: publication still
+# requires an explicit version tag push and the maintainer's decision.
 #
 # The bundle is never rebuilt after testing: if the build changes, the tag moves and a
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
@@ -13,31 +21,54 @@
 # target.
 #
 # Secrets:
-#   NPM_TOKEN — an npm auth token with publish access to `@anvil-workflows/cli`. Scoped to
-#     this workflow only; ordinary PR jobs never see it.
+#   NPM_TOKEN — an npm auth token with publish access to `@anvil-workflows/cli`. Read only by
+#     the tag-only publish job; the preparation job and rehearsal never need it.
 
 name: Release
 
 on:
   push:
     tags: ['v*']
+  # Rehearse the exact release steps without publishing. No inputs: a branch dispatch takes
+  # the candidate from the checked-out manifest, and a dispatch on a `v*` tag rehearses that
+  # tag's identity gate.
+  workflow_dispatch:
 
+# Preparation and rehearsal run with read-only permissions. OIDC is granted only to the
+# tag-gated publish job, after the artifact has been tested and retained.
 permissions:
   contents: read
-  id-token: write    # OIDC for npm provenance, when the registry supports it
+
+# One run per ref and event, and never cancel one mid-flight: a tag release in progress must
+# not be killed by a dispatch of the same ref. The event is part of the key so a rehearsal
+# can never replace a queued release (or vice versa) on the same ref.
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    name: Release ${{ github.ref_name }}
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Release rehearsal (no publish)' || format('Release {0}', github.ref_name) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # Export what the publish job needs. Job outputs survive a retry of only that job, so a
+    # failed publication can resume against the artifact this job already tested and retained.
+    outputs:
+      artifact_id: ${{ steps.upload_evidence.outputs['artifact-id'] }}
+      checksum: ${{ steps.provenance.outputs.checksum }}
+      source_sha: ${{ steps.provenance.outputs.source_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # This job never pushes; leaving the token in .git/config only widens exposure.
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: package.json
           cache: npm
-          registry-url: 'https://registry.npmjs.org'
 
       - run: npm ci
 
@@ -89,10 +120,16 @@ jobs:
           tarball=$(realpath dist/*.tgz)
           checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
           source_sha=$(git rev-parse HEAD)
-          version=${GITHUB_REF_NAME#v}
+          # One decision for both outputs: a `v*` tag is the claim being released (or
+          # rehearsed), and anything else -- a branch dispatch -- has no tag to compare
+          # against, so its candidate version comes from the manifest. The script prints
+          # `version` and `rehearsal` together, so the identity gate below cannot compare a
+          # version chosen under a different rule than the one that selected the gate.
+          identity=$(node scripts/resolve-release-ref.mjs)
+          printf '%s\n' "$identity" >> "$GITHUB_OUTPUT"
+          version=$(printf '%s\n' "$identity" | sed -n 's/^version=//p')
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           # Sidecars live outside the tarball: preserving evidence must not repack or
           # change the bytes that the installed-binary smoke test receives.
@@ -108,10 +145,12 @@ jobs:
       # exists so that installing does not run a source build the way the git channel does.
       # If the bundle needed an install step, this is where that would show up.
       - name: smoke-test the installed tarball
+        env:
+          TARBALL: ${{ steps.provenance.outputs.tarball }}
         run: |
           consumer=$(mktemp -d)
           echo '{"name":"consumer","private":true,"scripts":{"test":"node -e \"process.exit(0)\""}}' > "$consumer/package.json"
-          npm install --no-save --ignore-scripts "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
+          npm install --no-save --ignore-scripts "$TARBALL" --prefix "$consumer"
 
           bin="$consumer/node_modules/.bin/anvil"
           case "$(uname)" in
@@ -137,34 +176,19 @@ jobs:
 
       # Publishing cannot be undone, so every identity this release claims must agree
       # first: the tag, the workspace manifest (the package npm receives), and the
-      # packed artifact that was just smoke-tested.
+      # packed artifact that was just smoke-tested. The comparison lives in a script so the
+      # test can run the exact gate, including the tag-versus-manifest case.
       - name: verify the release identity
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
+          TARBALL: ${{ steps.provenance.outputs.tarball }}
+          # Produced by the same step that chose the version, so the two cannot disagree.
+          REHEARSAL: ${{ steps.provenance.outputs.rehearsal }}
         run: |
-          tarball="${{ steps.provenance.outputs.tarball }}"
-          tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" node -e '
-            const fs = require("node:fs")
-            const packed = JSON.parse(fs.readFileSync(0, "utf8"))
-            const manifest = require("./packages/cli/package.json")
-            const tag = process.env.TAG_VERSION
-            if (packed.name !== manifest.name) {
-              throw new Error(`tarball is ${packed.name}, the workspace manifest is ${manifest.name}`)
-            }
-            if (packed.name !== "@anvil-workflows/cli") {
-              throw new Error(`this workflow publishes @anvil-workflows/cli, not ${packed.name}`)
-            }
-            if (packed.version !== manifest.version) {
-              throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)
-            }
-            if (tag !== manifest.version) {
-              throw new Error(`tag is v${tag}, the workspace manifest is ${manifest.version}`)
-            }
-            console.log(`release identity: ${packed.name}@${packed.version} from tag v${tag}`)
-          '
+          tar -xOf "$TARBALL" package/package.json | node scripts/verify-release-identity.mjs
           # The allowlist must actually carry the command the smoke test ran.
           bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
-          tar tzf "$tarball" | grep -qx "package/${bin_path#./}"
+          tar tzf "$TARBALL" | grep -qx "package/${bin_path#./}"
 
       # Check again after every command that exercised the installed artifact. A changed
       # tarball must not be archived as approved evidence or sent to the registry.
@@ -172,16 +196,14 @@ jobs:
         working-directory: dist
         run: sha256sum --check SHA256SUMS
 
-      - name: retain the release evidence in the job summary
-        run: cat dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
-
       # Logs and step outputs expire; keep the exact tested bytes and their source/hash
       # together. These files also supply the notes/checksum for an approved GitHub release.
       # Upload failure is blocking, before publication, not an optional post-publish report.
       - name: retain the tested tarball, checksum and draft release notes
+        id: upload_evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-evidence-${{ github.run_id }}-attempt${{ github.run_attempt }}
+          name: release-evidence-${{ github.event_name == 'workflow_dispatch' && 'rehearsal-' || '' }}${{ github.run_id }}-attempt${{ github.run_attempt }}
           path: |
             dist/*.tgz
             dist/SHA256SUMS
@@ -189,10 +211,61 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      # Publish the exact bytes that were tested. `npm publish` with no argument would
-      # repack the working tree and re-run `prepare`, so the registry could receive a
-      # different build than the one the smoke test approved.
+      # Claim success only after the upload the previous step depends on has succeeded.
+      - name: retain the release evidence in the job summary
+        run: |
+          cat dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+          printf '\n%s\n' 'Evidence retained: the tested tarball, its checksum and the draft notes were uploaded.' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            printf '%s\n' 'Release rehearsal: registry publication was skipped. No registry bytes changed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # No preparation job has the token or OIDC. Only a real version tag can reach publish, and
+  # it receives the exact artifact the preparation job tested and retained.
+  publish:
+    name: Publish ${{ github.ref_name }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: release
+    runs-on: ubuntu-latest
+    # The job that holds NPM_TOKEN: bound how long it can hold it.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write    # OIDC for npm provenance
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: package.json
+          # No `cache: npm`: this job installs nothing, and a miss would save an unrelated
+          # ~/.npm under the lockfile key that CI and `release` restore.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: recover the tested artifact
+        # Download by the id the preparation job uploaded, not by a name rebuilt from this
+        # job's run attempt: retrying only `publish` keeps the earlier artifact and outputs.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.release.outputs.artifact_id }}
+          path: dist
+          # With artifact-ids, the action otherwise nests files under the artifact name.
+          # Keep the single retained tarball and its sidecars directly in dist/.
+          merge-multiple: true
+
+      - name: verify the artifact before publication
+        env:
+          ARTIFACT_DIR: dist
+          EXPECTED_CHECKSUM: ${{ needs.release.outputs.checksum }}
+          SOURCE_SHA: ${{ needs.release.outputs.source_sha }}
+          TAG_VERSION: ${{ github.ref_name }}
+        run: node scripts/verify-release-artifact.mjs
+
+      # Publish the exact bytes that were tested. No build runs in this job: `npm publish` with
+      # no argument would repack the working tree and could send a different artifact.
       - name: publish the tested tarball to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish "${{ steps.provenance.outputs.tarball }}" --provenance --access public
+        run: npm publish "$(realpath dist/*.tgz)" --provenance --access public
