@@ -62,8 +62,13 @@ function applySolution(workdir: string, scenario: EvalScenario): void {
 }
 
 function actLikeFakeAgent(workdir: string, scenario: EvalScenario, env: NodeJS.ProcessEnv): void {
+  // A captured check runs from its declared directory, not the fixture root. The real
+  // harness binds the broker to the same directory; this fixture helper must agree or
+  // the known-good solution never produces the evidence its verifier grades.
+  const parts = scenario.captureDir === undefined ? [] : scenario.captureDir.split('/')
+  const cwd = parts.length === 0 ? workdir : join(workdir, ...parts)
   for (const command of scenario.solutionRun ?? []) {
-    runCommand(command, workdir, env)
+    runCommand(command, cwd, env)
   }
   applySolution(workdir, scenario)
 }

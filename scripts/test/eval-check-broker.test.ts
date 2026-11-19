@@ -195,3 +195,34 @@ process.exit(1)
     watcher.close()
   }
 })
+
+test('a capture directory binds the execution to its own working directory', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'anvil-check-broker-dir-'))
+  const trusted = join(root, 'fixture')
+  const workdir = join(root, 'workdir')
+  const captureDir = 'packages/sub'
+  for (const base of [trusted, workdir]) {
+    const dir = join(base, ...captureDir.split('/'))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'verify.js'), "console.log('from-sub')\n")
+  }
+  const check = captureCheck('node verify.js', 'verify.js', trusted, captureDir)
+  const broker = await startCheckBroker([check], workdir, captureDir)
+  t.after(async () => {
+    await broker.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+
+  const correct = await launch(broker, join(workdir, ...captureDir.split('/')), ['verify.js'])
+  assert.equal(correct.code, 0, correct.stderr)
+  assert.match(correct.stdout, /from-sub/)
+  assert.equal(broker.executions.length, 1)
+  assert.equal(broker.executions[0]?.cwd, captureDir, 'the recorded directory is fixture-relative')
+
+  // The same file from the fixture root runs natively, but creates no harness evidence.
+  const wrong = await launch(broker, workdir, ['packages/sub/verify.js'])
+  assert.equal(wrong.code, 0, wrong.stderr)
+  assert.equal(broker.executions.length, 1, 'a run from another directory must not be attested')
+
+  await assert.rejects(() => startCheckBroker([check], workdir, '../outside'), /clean relative path/)
+})

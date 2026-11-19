@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, isAbsolute, join, relative } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -22,6 +22,8 @@ export interface CheckExecution {
   stdout: string
   stderr: string
   at: string
+  /** Fixture-relative directory the broker ran the check in. Empty for the fixture root. */
+  cwd: string
 }
 
 export interface CheckBroker {
@@ -32,9 +34,25 @@ export interface CheckBroker {
   close(): Promise<void>
 }
 
-export function captureCheck(command: string, script: string, fixtureRoot: string): CapturedCheck {
-  const source = readFileSync(join(fixtureRoot, script), 'utf8')
+export function captureCheck(command: string, script: string, fixtureRoot: string, captureDir = ''): CapturedCheck {
+  const source = readFileSync(join(fixtureRoot, ...segments(captureDir), script), 'utf8')
   return { command, script, source, sourceHash: hashSource(source) }
+}
+
+/**
+ * A fixture-relative directory must stay inside the fixture. The value comes from a checked-in
+ * scenario, but a traversal would make the broker attest to a directory outside the worktree.
+ */
+function segments(captureDir: string): string[] {
+  if (captureDir === '') return []
+  if (captureDir.startsWith('/') || captureDir.startsWith('\\') || /^[A-Za-z]:/.test(captureDir)) {
+    throw new Error(`captureDir must be relative, got ${JSON.stringify(captureDir)}`)
+  }
+  const parts = captureDir.split(/[/\\]/)
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw new Error(`captureDir must be a clean relative path, got ${JSON.stringify(captureDir)}`)
+  }
+  return parts
 }
 
 function hashSource(source: string): string {
@@ -48,10 +66,26 @@ function hashSource(source: string): string {
  * execution record: even a direct HTTP request has to run the captured source.
  * This is a provenance boundary, not an OS sandbox for hostile native processes.
  */
-export async function startCheckBroker(checks: readonly CapturedCheck[], workdir: string): Promise<CheckBroker> {
+export async function startCheckBroker(
+  checks: readonly CapturedCheck[],
+  workdir: string,
+  captureDir = '',
+): Promise<CheckBroker> {
   // macOS temporary paths (/var vs /private/var), Windows short names and shell
   // directory normalization can give the same directory different spellings.
-  const directory = realpathSync.native(workdir)
+  const root = realpathSync.native(workdir)
+  const parts = segments(captureDir)
+  const directory = parts.length === 0 ? root : realpathSync.native(join(root, ...parts))
+  const fromRoot = relative(root, directory)
+  if (
+    fromRoot === '..' ||
+    fromRoot.startsWith(`..${'/'}`) ||
+    fromRoot.startsWith(`..${'\\'}`) ||
+    isAbsolute(fromRoot)
+  ) {
+    throw new Error(`captureDir resolves outside the worktree: ${JSON.stringify(captureDir)}`)
+  }
+  const recordedCwd = parts.join('/')
   const executions: CheckExecution[] = []
   let integrityError: string | null = null
   let closing = false
@@ -134,6 +168,7 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
         stdout,
         stderr,
         at: new Date().toISOString(),
+        cwd: recordedCwd,
       }
       executions.push(execution)
       reply(response, 200, execution)

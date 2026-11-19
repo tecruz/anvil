@@ -111,6 +111,12 @@ export interface EvalScenario {
   verify: string[]
   /** Run the visible verifier from the detected project directory instead of the root. */
   verifyInProjectDir?: boolean
+  /**
+   * Fixture-relative directory whose process cwd the execution broker attests to. Empty or
+   * absent means the fixture root. The directory is captured before the agent starts; a
+   * command run from anywhere else does not produce harness-controlled evidence.
+   */
+  captureDir?: string
   /** Files copied in after the agent finishes, to grade the work itself. */
   hidden?: Array<{ from: string; to: string }>
   /** Commands that grade the work, run after the hidden files are in place. */
@@ -200,6 +206,11 @@ export interface EvalResultSummary {
   hiddenVerified: boolean | null
   verifyExitCodes: number[]
   error?: string
+  /**
+   * Why the agent did not achieve the task, as opposed to why the run itself failed.
+   * A task failure stays in the scored pair; a run error excludes it from the verdict.
+   */
+  taskFailureReason?: string
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -276,6 +287,8 @@ export interface EvalRunRecordResult {
   transcript: string
   /** Any agent error from the last completed attempt. */
   error?: string
+  /** Why the agent did not achieve the task when the harness itself worked. */
+  taskFailureReason?: string
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -464,6 +477,7 @@ export function hashScenario(scenario: EvalScenario): string {
     task: scenario.task,
     verify: scenario.verify,
     verifyInProjectDir: scenario.verifyInProjectDir ?? false,
+    ...(scenario.captureDir === undefined || scenario.captureDir === '' ? {} : { captureDir: scenario.captureDir }),
     hidden: scenario.hidden ?? [],
     hiddenVerify: scenario.hiddenVerify ?? [],
     solution: scenario.solution ?? null,

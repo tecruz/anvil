@@ -869,6 +869,10 @@ async function runScenario(
   repetition: number,
 ): Promise<ScenarioResult> {
   const workdir = mkdtempSync(join(tmpdir(), `anvil-eval-${scenario.id}-${variant}-r${repetition}`))
+  // Fixture-relative directory the check must run from. Attested by the broker before the
+  // agent starts, never inferred from the agent's report or a post-run profile.
+  const captureDir = scenario.captureDir ?? ''
+  const captureWorkdir = captureDir === '' ? workdir : join(workdir, ...captureDir.split('/'))
   // Harness-owned execution evidence directory. The agent never receives this path.
   // Verifiers receive it after the agent finishes, so they can compare the report
   // against the actual execution the harness recorded.
@@ -970,7 +974,7 @@ async function runScenario(
       // makes verify-only evidence real: the check executes and the harness captures it,
       // instead of a canned execution record being copied into the worktree.
       if (scenario.solutionRun !== undefined) {
-        const actions = await runAll(scenario.solutionRun, workdir, executionEnv)
+        const actions = await runAll(scenario.solutionRun, captureWorkdir, executionEnv)
         result.verifyOutput = actions.map((action) => action.output).join('\n')
       }
       const answers = solutionFiles(scenario)
@@ -1005,10 +1009,10 @@ async function runScenario(
           if (args?.length !== 2 || args[0] !== 'node' || !args[1]?.endsWith('.js')) {
             throw new Error(`execution capture supports only a standalone Node ESM script: ${JSON.stringify(command)}`)
           }
-          return captureCheck(command, args[1], fixtureRoot)
+          return captureCheck(command, args[1], fixtureRoot, captureDir)
         })
         if (checks.length === 0) throw new Error('the scenario declares no check command to capture')
-        checkBroker = await startCheckBroker(checks, workdir)
+        checkBroker = await startCheckBroker(checks, workdir, captureDir)
         Object.assign(agentEnv, checkBroker.env)
       }
       // `--auto` because the run is unattended and the workdir is a throwaway copy: a
@@ -1078,24 +1082,30 @@ async function runScenario(
       const observedRuns = checkCommands.map((expected) =>
         agentExecutions.filter((execution) => isCheckCommand(expected, execution.command)),
       )
+      // A skipped, forged or misdirected check is a task failure: the harness worked and
+      // the pair must stay in the verdict. Only a broken harness configuration is a run
+      // error, which excludes the pair rather than scoring an agent for the harness's fault.
+      const failTask = (reason: string): void => {
+        executionEvidenceValid = false
+        result.taskFailureReason = reason
+      }
       if (checkBroker !== null && checkBroker.integrityError !== null) {
-        addError(result, checkBroker.integrityError)
+        failTask(checkBroker.integrityError)
       } else if (checkCommands.length === 0) {
         addError(result, 'the scenario declares no check command, so there is no execution evidence to collect')
       } else if (observedRuns.some((runs) => runs.length === 0)) {
-        addError(
-          result,
+        failTask(
           `the agent did not run ${checkCommands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
         )
       } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
-        addError(result, 'the agent modified a check or verifier script; execution evidence is invalid')
+        failTask('the agent modified a check or verifier script; execution evidence is invalid')
       } else {
         const executions = checkCommands.map((command) =>
           checkBroker?.executions.findLast((execution) => execution.command === command),
         )
         const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, executions)
         if (disagreement !== null) {
-          addError(result, disagreement)
+          failTask(disagreement)
         } else {
           executionEvidenceValid = true
         }
@@ -1107,7 +1117,8 @@ async function runScenario(
         executionEvidenceValid
           ? (checkBroker?.executions ?? [])
               .map(
-                ({ command, exitCode, sourceHash, at }) => `${JSON.stringify({ command, exitCode, sourceHash, at })}\n`,
+                ({ command, exitCode, sourceHash, at, cwd }) =>
+                  `${JSON.stringify({ command, exitCode, sourceHash, at, ...(cwd === '' ? {} : { cwd }) })}\n`,
               )
               .join('')
           : '',
@@ -1365,21 +1376,27 @@ function findEvidenceDisagreement(
 /** Ensure the agent did not alter the check or visible verifier before harness replay. */
 function scenarioEvidenceScriptsUnchanged(scenario: EvalScenario, workdir: string): boolean {
   const fixtureRoot = join(repoRoot, ...scenario.repo.split('/'))
-  const commands = [...(scenario.solutionRun ?? []), ...scenario.verify]
-  const scripts = new Set<string>()
-  for (const command of commands) {
-    const [, ...args] = tokenizeCommand(command)
-    for (const arg of args) {
-      if (/\.(?:c|m)?js$/i.test(arg) && !arg.startsWith('-')) scripts.add(arg)
+  const captureDir = scenario.captureDir ?? ''
+  // A captured check lives in the capture directory; the visible verifier lives at the root.
+  // Resolving both from the root would compare a script against the wrong file and miss a swap.
+  const unchanged = (commands: readonly string[], dir: string): boolean => {
+    const scripts = new Set<string>()
+    for (const command of commands) {
+      const [, ...args] = tokenizeCommand(command)
+      for (const arg of args) {
+        if (/\.(?:c|m)?js$/i.test(arg) && !arg.startsWith('-')) scripts.add(arg)
+      }
     }
+    for (const script of scripts) {
+      const parts = dir === '' ? [] : dir.split('/')
+      const original = join(fixtureRoot, ...parts, ...script.split('/'))
+      const current = join(workdir, ...parts, ...script.split('/'))
+      if (!existsSync(original) || !existsSync(current) || !readFileSync(original).equals(readFileSync(current)))
+        return false
+    }
+    return true
   }
-  for (const script of scripts) {
-    const original = join(fixtureRoot, ...script.split('/'))
-    const current = join(workdir, ...script.split('/'))
-    if (!existsSync(original) || !existsSync(current) || !readFileSync(original).equals(readFileSync(current)))
-      return false
-  }
-  return true
+  return unchanged(scenario.solutionRun ?? [], captureDir) && unchanged(scenario.verify, '')
 }
 
 /**
@@ -1933,6 +1950,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     verifyExitCodes: result.verifyExitCodes,
     repetition: result.repetition ?? null,
     ...(result.error === undefined ? {} : { error: result.error }),
+    ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
@@ -2117,6 +2135,7 @@ function recordResultFrom(
     durationMs: result.durationMs,
     transcript: result.transcript,
     ...(result.error === undefined ? {} : { error: result.error }),
+    ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
