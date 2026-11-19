@@ -2065,6 +2065,18 @@ export function checkEvalGate(
             )}`,
           )
         }
+        const reason = summaryResult.taskFailureReason ?? null
+        const recordReason = recordResult.taskFailureReason ?? null
+        if (reason !== recordReason) {
+          failures.push(
+            `${key}: summary taskFailureReason ${JSON.stringify(reason)} disagrees with run record ${JSON.stringify(recordReason)}`,
+          )
+        }
+        const attestation = JSON.stringify(summaryResult.executionAttestation ?? null)
+        const recordAttestation = JSON.stringify(recordResult.executionAttestation ?? null)
+        if (attestation !== recordAttestation) {
+          failures.push(`${key}: summary executionAttestation disagrees with run record`)
+        }
         if (summaryResult.skillInstall !== recordResult.skillInstall) {
           failures.push(`${key}: summary skillInstall disagrees with run record`)
         }

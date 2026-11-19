@@ -23,6 +23,30 @@ import { basename, delimiter, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import type { AgentExecution } from '../../scripts/eval.ts'
+import { classifyCaptureEvidence } from '../../scripts/eval.ts'
+
+test('a broker fault is a run error, not a scored task failure', () => {
+  const observed: AgentExecution[] = [
+    { command: 'node verify.js', exitCode: 0, at: '2026-01-01T00:00:00.000Z' } as AgentExecution,
+  ]
+  const base = {
+    integrityError: null,
+    commands: ['node verify.js'],
+    observedRuns: [observed],
+    scriptsUnchanged: true,
+    executions: [],
+    captureDir: 'packages/sub',
+  }
+  const fault = classifyCaptureEvidence({ ...base, brokerFault: 'check crashed' })
+  assert.equal(fault.kind, 'run-error')
+  assert.match(fault.attestation.reason ?? '', /broker failed: check crashed/)
+
+  const skipped = classifyCaptureEvidence({ ...base, brokerFault: null })
+  assert.equal(skipped.kind, 'task-failure')
+  assert.match(skipped.attestation.reason ?? '', /harness-controlled execution/)
+})
+
 const MOCK_AGENT = `import { spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -47,11 +71,20 @@ let eventCommand = command
 let exitCode = 0
 let emitEvent = true
 if (mode === 'honest' || mode === 'generated-command' || mode === 'modified-protected') {
-  if (mode === 'generated-command') eventCommand = 'cd packages/sub && node verify.js'
+  if (mode === 'generated-command') {
+    // Run the exact command anvil generates, from the repo root, and report it in the
+    // shell event. PowerShell 5.1 (powershell.exe) does not support the && operator; cmd does.
+    eventCommand = 'cd packages/sub && node verify.js'
+  }
   if (mode === 'modified-protected') {
     writeFileSync(join(root, 'README.md'), readFileSync(join(root, 'README.md'), 'utf8') + '\\nagent was here\\n')
   }
-  exitCode = shell(command, sub).status
+  const run = mode === 'generated-command'
+    ? process.platform === 'win32'
+      ? spawnSync('cmd.exe', ['/c', eventCommand], { cwd: root, encoding: 'utf8' })
+      : spawnSync('/bin/sh', ['-c', eventCommand], { cwd: root, encoding: 'utf8' })
+    : shell(command, sub)
+  exitCode = run.status
   if (exitCode !== 0) process.exit(3)
 } else if (mode === 'wrong-directory') {
   // The script does not exist at the root. The event names the right command but the

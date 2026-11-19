@@ -1150,50 +1150,27 @@ async function runScenario(
         cwd: captureDir,
         reason: 'no harness-controlled execution was observed',
       }
-      // For a directory-bound pilot a skipped, forged or misdirected check is a scored task
-      // failure, not a run error. Older capture scenarios keep the original run-error
-      // classification so their established contract and tests do not change silently.
-      const failCheck = (reason: string): void => {
-        executionEvidenceValid = false
-        attestation = { status: 'not-observed', command: commandLabel, cwd: captureDir, reason }
+      const brokerFault = checkBroker !== null ? checkBroker.fault : null
+      const verdict = classifyCaptureEvidence({
+        brokerFault,
+        integrityError: checkBroker?.integrityError ?? null,
+        commands: checkCommands,
+        observedRuns,
+        scriptsUnchanged: scenarioEvidenceScriptsUnchanged(scenario, workdir),
+        executions: checkCommands.map((command) =>
+          checkBroker?.executions.findLast((execution) => execution.command === command),
+        ),
+        captureDir,
+      })
+      attestation = verdict.attestation
+      executionEvidenceValid = verdict.kind === 'observed'
+      if (verdict.kind === 'run-error') addError(result, verdict.reason ?? 'the capture harness failed')
+      if (verdict.kind === 'task-failure') {
+        // Older capture scenarios keep the run-error contract; the directory-bound pilot
+        // scores the same behaviour as a task failure without excluding the pair.
+        const reason = verdict.reason ?? 'the check was not executed successfully'
         if (captureDir !== '') result.taskFailureReason = reason
         else addError(result, reason)
-      }
-      if (checkBroker !== null && checkBroker.integrityError !== null) {
-        failCheck(checkBroker.integrityError)
-      } else if (checkCommands.length === 0) {
-        // A scenario with no declared check is a harness configuration failure, never an
-        // agent task failure, regardless of which scenario declared it.
-        const reason = 'the scenario declares no check command, so there is no execution evidence to collect'
-        addError(result, reason)
-        attestation = { status: 'not-observed', command: commandLabel, cwd: captureDir, reason }
-      } else if (observedRuns.some((runs) => runs.length === 0)) {
-        failCheck(
-          `the agent did not run ${checkCommands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
-        )
-      } else if (!scenarioEvidenceScriptsUnchanged(scenario, workdir)) {
-        failCheck('the agent modified a check or verifier script; execution evidence is invalid')
-      } else {
-        const executions = checkCommands.map((command) =>
-          checkBroker?.executions.findLast((execution) => execution.command === command),
-        )
-        const disagreement = findEvidenceDisagreement(checkCommands, observedRuns, executions)
-        if (disagreement !== null) {
-          failCheck(disagreement)
-        } else {
-          executionEvidenceValid = true
-          const execution = executions.find((entry) => entry !== undefined)
-          if (execution !== undefined) {
-            attestation = {
-              status: 'observed',
-              command: execution.command,
-              cwd: execution.cwd,
-              exitCode: execution.exitCode,
-              sourceHash: execution.sourceHash,
-              at: execution.at,
-            }
-          }
-        }
       }
       // Publish only parent-process records, never append to a file an agent may
       // have found and forged. Invalid evidence also vetoes verifier verdicts.
@@ -1468,6 +1445,81 @@ function findEvidenceDisagreement(
     }
   }
   return null
+}
+
+export interface CaptureVerdict {
+  kind: 'observed' | 'task-failure' | 'run-error'
+  reason?: string
+  execution?: CheckExecution
+  attestation: EvalExecutionAttestation
+}
+
+/**
+ * Decide what a capture run proves. Pure so the classification can be tested directly:
+ * a broker fault is a harness error, an agent-caused gap is a task failure for a
+ * directory-bound scenario, and only a matching shell event plus broker execution is a pass.
+ */
+export function classifyCaptureEvidence(input: {
+  brokerFault: string | null
+  integrityError: string | null
+  commands: readonly string[]
+  observedRuns: readonly (readonly AgentExecution[])[]
+  scriptsUnchanged: boolean
+  executions: readonly (CheckExecution | undefined)[]
+  captureDir: string
+}): CaptureVerdict {
+  const { brokerFault, integrityError, commands, observedRuns, scriptsUnchanged, executions, captureDir } = input
+  const commandLabel = commands.join(', ')
+  const notObserved = (reason: string): Pick<CaptureVerdict, 'reason' | 'attestation'> => ({
+    reason,
+    attestation: { status: 'not-observed', command: commandLabel, cwd: captureDir, reason },
+  })
+  if (brokerFault !== null) {
+    const verdict = notObserved(`the check broker failed: ${brokerFault}`)
+    return { ...verdict, kind: 'run-error' }
+  }
+  if (integrityError !== null) return { ...notObserved(integrityError), kind: 'task-failure' }
+  if (commands.length === 0) {
+    return {
+      ...notObserved('the scenario declares no check command, so there is no execution evidence to collect'),
+      kind: 'run-error',
+    }
+  }
+  if (observedRuns.some((runs) => runs.length === 0)) {
+    return {
+      ...notObserved(
+        `the agent did not run ${commands.map((command) => JSON.stringify(command)).join(', ')} as a command on its own; a report without execution evidence is not evidence`,
+      ),
+      kind: 'task-failure',
+    }
+  }
+  if (!scriptsUnchanged) {
+    return {
+      ...notObserved('the agent modified a check or verifier script; execution evidence is invalid'),
+      kind: 'task-failure',
+    }
+  }
+  const disagreement = findEvidenceDisagreement(commands, observedRuns, executions)
+  if (disagreement !== null) return { ...notObserved(disagreement), kind: 'task-failure' }
+  const execution = executions.find((entry) => entry !== undefined)
+  if (execution === undefined) {
+    return {
+      ...notObserved('no harness-controlled execution of the check was captured'),
+      kind: 'task-failure',
+    }
+  }
+  return {
+    kind: 'observed',
+    execution,
+    attestation: {
+      status: 'observed',
+      command: execution.command,
+      cwd: execution.cwd,
+      exitCode: execution.exitCode,
+      sourceHash: execution.sourceHash,
+      at: execution.at,
+    },
+  }
 }
 
 /** Ensure the agent did not alter the check or visible verifier before harness replay. */

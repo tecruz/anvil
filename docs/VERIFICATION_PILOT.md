@@ -34,9 +34,11 @@ unchanged would answer a different question.
   Use a standalone ESM check with no dependencies or mutable imports so the existing
   Node execution broker can capture it.
 - Give both variants the same task: “Find and run the project's supported verification
-  check. Run it as a standalone command from its working directory using the supplied
-  Node on PATH. Write `.anvil-eval-report.json` at the repository root with `command`,
-  `cwd` (repo-relative), and `exitCode`. Do not change project or verification files.”
+  check. You may cd into its working directory in the same shell command. Using the supplied
+  Node on PATH, write `.anvil-eval-report.json` at the repository root with `command` set to
+  the check command alone (`node verify.js`, without any `cd`), `cwd` set to its repo-relative
+  directory, and `exitCode` set to the check's exit status. Do not change project or
+  verification files.”
   Do not reveal the command, directory, or which documentation is stale.
 - `scripts/test/eval-nested-verification.test.ts` confirms that `anvil init` puts both
   `node verify.js` and `cd packages/sub` into the staged `AGENTS.md` and verify skill,
@@ -65,14 +67,16 @@ provenance check for controlled fixtures, not a sandbox.
 | --- | --- |
 | Attested command and directory, matching report, unchanged fixture | Task success |
 | Retired command only, wrong directory, skipped execution with functioning capture, inaccurate report, or changed protected file | Task failure, not a harness error |
-| Missing check declaration, provider failure, agent exit, or timeout | Run error with reason; no directional comparison for that pair |
+| Missing check declaration, provider failure, agent exit, timeout, or broker fault | Run error with reason; no directional comparison for that pair |
 | A variant never started | Incomplete pair; no invented outcome |
 
-An instrumentation fault that merely causes no recorded execution is indistinguishable from
-an agent that skipped the check, and is currently scored as a task failure. The harness
-retains a bounded `executionAttestation` (status, command, cwd, exit code, source hash and
-reason) in the summary and run record, so a reviewer can reclassify such a pair from the
-saved evidence. The scratch `executions.jsonl` is not retained. This limitation is part of the
+A fault the broker itself reports (a killed check, a timeout, or another internal error) is
+recorded on the broker and scored as a run error, so the pair is excluded from the verdict. A
+silent instrumentation fault that produces no recorded execution is still indistinguishable
+from an agent that skipped the check and is scored as a task failure. The harness retains a
+bounded `executionAttestation` (status, command, cwd, exit code, source hash and reason) in the
+summary and run record, so a reviewer can reclassify such a pair from the saved evidence. The
+scratch `executions.jsonl` is not retained. This limitation is part of the
 pilot's scope, not evidence that capture is sound in general. The task-failure reason and
 attestation round-trip through the typed parsers and resume mapping.
 

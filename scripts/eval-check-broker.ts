@@ -31,6 +31,8 @@ export interface CheckBroker {
   env: NodeJS.ProcessEnv
   executions: readonly CheckExecution[]
   readonly integrityError: string | null
+  /** An unexpected broker failure, which is a harness fault rather than an agent outcome. */
+  readonly fault: string | null
   close(): Promise<void>
 }
 
@@ -88,6 +90,7 @@ export async function startCheckBroker(
   const recordedCwd = parts.join('/')
   const executions: CheckExecution[] = []
   let integrityError: string | null = null
+  let fault: string | null = null
   let closing = false
   let requests = 0
   const route = `/${randomUUID()}`
@@ -105,12 +108,23 @@ export async function startCheckBroker(
       }
       const chunks: Buffer[] = []
       let bytes = 0
-      for await (const chunk of request) {
-        bytes += chunk.length
-        if (bytes > 8192) throw new Error('check request is too large')
-        chunks.push(Buffer.from(chunk))
+      try {
+        for await (const chunk of request) {
+          bytes += chunk.length
+          if (bytes > 8192) throw new Error('check request is too large')
+          chunks.push(Buffer.from(chunk))
+        }
+      } catch {
+        reply(response, 400, { error: 'check request is too large' })
+        return
       }
-      const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { command?: unknown; cwd?: unknown }
+      let input: { command?: unknown; cwd?: unknown }
+      try {
+        input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { command?: unknown; cwd?: unknown }
+      } catch {
+        reply(response, 400, { error: 'check request is not valid JSON' })
+        return
+      }
       const check = checks.find((entry) => entry.command === input?.command)
       let requestDirectory: string | null = null
       if (typeof input?.cwd === 'string') {
@@ -174,7 +188,8 @@ export async function startCheckBroker(
       reply(response, 200, execution)
     }
     const task = handle().catch((error: unknown) => {
-      reply(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      fault = error instanceof Error ? error.message || error.name : String(error)
+      reply(response, 500, { error: fault })
     })
     pending.add(task)
     void task.finally(() => pending.delete(task))
@@ -251,6 +266,9 @@ if (check === undefined) {
       executions,
       get integrityError() {
         return integrityError
+      },
+      get fault() {
+        return fault
       },
       close,
     }

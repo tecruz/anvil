@@ -229,6 +229,40 @@ describe('the eval gate', () => {
     assert.match(gate.message, /tiny-verify-only\/anvil.*reports 1 visible verifier commands.*defines 2/)
   })
 
+  test('the gate rejects a summary whose execution evidence disagrees with its run record', () => {
+    const scenarios = matrix()
+    const run = latest(scenarios)
+    run.implementation = 'impl-hash'
+    run.results[0]!.taskFailureReason = 'the agent skipped the check'
+    run.results[0]!.executionAttestation = {
+      status: 'observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      exitCode: 0,
+    }
+    const record = runRecordFor(run)
+    const expected = baseline(scenarios)
+    const check = (summary: EvalLatest): ReturnType<typeof checkEvalGate> =>
+      checkEvalGate(expected, summary, expected.scenarios, 'impl-hash', record, 'harness-hash')
+    assert.equal(check(run).ok, true, `a matching summary and record must pass: ${check(run).message}`)
+    const forged = structuredClone(run) as EvalLatest
+    forged.results[0]!.taskFailureReason = 'a different reason'
+    let gate = check(forged)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /taskFailureReason/)
+
+    const forgedAttestation = structuredClone(run) as EvalLatest
+    forgedAttestation.results[0]!.executionAttestation = {
+      status: 'not-observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      reason: 'forged',
+    }
+    gate = check(forgedAttestation)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /executionAttestation/)
+  })
+
   test('fails when the latest run does not record the implementation it evaluated', () => {
     const expected = baseline(matrix())
     const gate = checkEvalGate(expected, latest(matrix()), expected.scenarios, 'impl-hash')
@@ -667,6 +701,8 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       durationMs: 0,
       transcript: '',
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
+      ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
       ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
       ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
       ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),

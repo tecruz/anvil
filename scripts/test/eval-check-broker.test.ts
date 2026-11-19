@@ -147,6 +147,19 @@ test('broker requests accept equivalent directory aliases but reject a different
   assert.equal(broker.executions.length, 2)
 })
 
+test('an unexpected broker failure is exposed separately from agent-caused evidence failures', async (t) => {
+  // Exceeding the broker's stdout bound makes execFile fail with a non-numeric code. That is
+  // a harness fault, not an agent outcome, so it must be visible as `fault` and not as an
+  // execution record or an integrity error.
+  const source = `console.log('x'.repeat(1024 * 1024 + 10))\n`
+  const { workdir, broker } = await fixture(t, source)
+  const result = await launch(broker, workdir, ['run-check.js'])
+  assert.equal(result.code, 2)
+  assert.ok(broker.fault !== null, 'the broker must expose the internal failure')
+  assert.equal(broker.executions.length, 0)
+  assert.equal(broker.integrityError, null, 'a broker fault is not an agent file tamper')
+})
+
 test('a client can request execution but cannot submit source or attest to an exit status', async (t) => {
   const { workdir, check, broker } = await fixture(t)
   const response = await fetch(endpoint(broker), {
