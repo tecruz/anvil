@@ -264,10 +264,7 @@ describe('buildTaskBrief', () => {
     assert.equal(brief.source.text, null)
     // The plan's own title is the observed state; the brief names the action instead.
     assert.equal(brief.title, 'Document a changed-files test command')
-    assert.equal(
-      brief.objective,
-      'Document a changed-files test command -- A test command is available but no changed-files subset is documented.',
-    )
+    assert.equal(brief.objective, 'A test command is available but no changed-files subset is documented.')
     assert.deepEqual(brief.startHere, [
       { path: 'README.md', reason: 'evidence named by the suggestion', kind: 'evidence' },
     ])

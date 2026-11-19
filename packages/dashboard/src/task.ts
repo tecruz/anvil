@@ -631,12 +631,12 @@ function approvalGates(text: string): TaskGate[] {
  * Its `title` is the finding as an observed state ("Issue template present"), which is the
  * wrong headline for a task: a brief should name what the reader is about to do.
  */
-function actionOf(suggestion: Record<string, unknown>): string | null {
-  const detail = asString(suggestion.detail) ?? ''
+function splitDetail(detail: string): { action: string | null; reason: string } {
   const marker = detail.indexOf(' -- ')
-  if (marker <= 0) return null
+  if (marker <= 0) return { action: null, reason: detail }
   const action = detail.slice(0, marker).trim()
-  return action === '' ? null : action
+  const reason = detail.slice(marker + 4).trim()
+  return { action: action === '' ? null : action, reason: reason === '' ? detail : reason }
 }
 
 function titleAndObjective(text: string): { title: string; objective: string } {
@@ -767,17 +767,18 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   }
 
   const pasted = suggestion === null ? titleAndObjective(text) : null
-  const suggestedTitle =
-    suggestion === null ? '' : (actionOf(suggestion) ?? asString(suggestion.title) ?? 'Suggested contribution')
+  const suggested =
+    suggestion === null ? null : splitDetail(asString(suggestion.detail) ?? asString(suggestion.title) ?? '')
   return {
     schemaVersion: 1,
     generatedAt: snapshot.fetchedAt,
     source: { suggestionId: suggestionId === '' ? null : suggestionId, text: text === '' ? null : text },
-    title: suggestion !== null ? suggestedTitle : (pasted?.title ?? ''),
-    objective:
+    title:
       suggestion !== null
-        ? (asString(suggestion.detail) ?? asString(suggestion.title) ?? '')
-        : (pasted?.objective ?? ''),
+        ? (suggested?.action ?? asString(suggestion.title) ?? 'Suggested contribution')
+        : (pasted?.title ?? ''),
+    // The action is already the title; repeating it in the objective adds nothing.
+    objective: suggestion !== null ? (suggested?.reason ?? '') : (pasted?.objective ?? ''),
     startHere,
     howToCheck: checks,
     blockers: found,
