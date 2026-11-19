@@ -198,7 +198,12 @@ describe('buildTaskBrief', () => {
   })
 
   test('an explicit "before" gate names what waits without inventing what may start', () => {
-    for (const text of ['Approval is required before merge.', 'Sign-off required before merge.']) {
+    for (const text of [
+      'Approval is required before merge.',
+      'Sign-off required before merge.',
+      'Do not merge without approval.',
+      'Do not merge without approval; no approval required for the audit.',
+    ]) {
       const brief = buildTaskBrief(makeSnapshot(), { text })
       assert.equal(brief.gates.length, 1, text)
       assert.equal(brief.gates[0]?.startNow, null, text)
@@ -216,9 +221,8 @@ describe('buildTaskBrief', () => {
       const brief = buildTaskBrief(makeSnapshot(), { text })
       assert.deepEqual(brief.gates, [], text)
       assert.match(brief.unknowns.join('\n'), /says approval is not required/, text)
-      assert.match(
-        brief.unknowns.join('\n'),
-        new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 12)),
+      assert.ok(
+        brief.unknowns.some((note) => note.includes(text)),
         text,
       )
       assert.doesNotMatch(brief.unknowns.join('\n'), /No approval gate was found/, text)
@@ -226,12 +230,22 @@ describe('buildTaskBrief', () => {
   })
 
   test('uncertain approval wording is shown without assigning a gate', () => {
-    const brief = buildTaskBrief(makeSnapshot(), {
-      text: 'Approval might be needed before implementation; check with the team.',
-    })
-    assert.deepEqual(brief.gates, [])
-    assert.match(brief.unknowns.join('\n'), /mentioned but not stated as a requirement/)
-    assert.match(brief.unknowns.join('\n'), /Approval might be needed/)
+    for (const text of [
+      'Approval might be needed before implementation.',
+      'Implementation may require approval.',
+      'Is approval required before merge?',
+      'If approval is required before merge, ask the team.',
+      'The proposal was approved before implementation.',
+      'The proposal was not approved before implementation.',
+    ]) {
+      const brief = buildTaskBrief(makeSnapshot(), { text })
+      assert.deepEqual(brief.gates, [], text)
+      assert.match(brief.unknowns.join('\n'), /mentioned but not stated as a requirement/, text)
+      assert.ok(
+        brief.unknowns.some((note) => note.includes(text)),
+        text,
+      )
+    }
   })
 
   test('a gate written inside a longer sentence keeps both halves', () => {

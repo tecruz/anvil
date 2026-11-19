@@ -536,25 +536,23 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
  * matters here — treating "no approval required" as a gate would send someone to wait for a
  * permission the ticket explicitly says they do not need.
  */
-const UNCERTAIN_APPROVAL = /\bapprov\w*\b|\bsign-?off\b/i
+const APPROVAL_MENTION = /\bapprov\w*\b|\bsign-?off\b/i
+const UNCERTAIN_WORDING = /\b(?:if|whether|unless|may|might|could|maybe|possibly|perhaps|potentially)\b/i
 
 /** One of these must be present before any sentence is treated as a requirement. */
 const GATE_PATTERNS: RegExp[] = [
   /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
-  /\bapproved\s+before\b/i,
   /\brequires?\s+(?:approval|sign-?off)\b/i,
   /\b(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?required\b/i,
   /\bpending\s+approval\b/i,
-  /\bapproval\b[^.;]{0,20}\b(?:is|are)\s+required\b/i,
-  /\b(?:wait|waits|waiting)\s+for\s+approval\b/i,
+  /^(?:please\s+)?wait\s+for\s+(?:approval|sign-?off)\b/i,
 ]
 
 /** Checked before the requirement patterns: a waiver must never become a gate. */
 const NO_APPROVAL_PATTERNS: RegExp[] = [
-  /\b(?:no|not|never)\s+(?:\w+\s+){0,3}?(?:approval|sign-?off)\b/i,
-  /\b(?:doesn't|does not|don't|do not|isn't|is not|aren't|are not|won't|will not|shouldn't|should not|need not|no need to)\s+(?:require|need|wait for|be required|be needed|get|seek|obtain)\b[^.;]{0,30}\b(?:approval|sign-?off)\b/i,
-  /\b(?:approval|sign-?off)\b[^.;]{0,20}\b(?:(?:is\s+)?optional|not required|not needed|waived)\b/i,
-  /\b(?:skip|without)\s+(?:the\s+)?(?:approval|sign-?off)\b/i,
+  /\bno\s+(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?(?:required|needed|necessary)\b/i,
+  /\b(?:doesn['’]t|does not|don['’]t|do not|will not|won['’]t|shouldn['’]t|should not|need not|no need to)\s+(?:require|need|wait for|get|seek|obtain)\s+(?:any\s+)?(?:approval|sign-?off)\b/i,
+  /\b(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?(?:optional|not required|not needed|waived)\b/i,
 ]
 
 /**
@@ -567,13 +565,17 @@ const NO_APPROVAL_PATTERNS: RegExp[] = [
  * is caught by `NO_APPROVAL_PATTERNS` before this runs.
  */
 const START_NOW =
-  /(?<what>[^.;]{1,80}?)\s+(?:is|are|was|were|must be|needs to be|should be|has to be)\s+(?:reviewed and\s+)?approved\s+before\s+(?<blocked>[^.;]{1,80})/i
+  /(?<what>[^.;]{1,80}?)\s+(?:is|are|must be|needs to be|should be|has to be)\s+(?:reviewed and\s+)?approved\s+before\s+(?<blocked>[^.;]{1,80})/i
 
 const WAIT_FOR =
-  /(?<blocked>[^.;]{1,80}?)\s+(?:must|has to|needs to|should)\s+(?:wait|be held|be delayed)[^.;]{0,40}?approval/i
+  /(?<blocked>[^.;]{1,80}?)\s+(?:must|has to|needs to|should)\s+(?:wait for|be held until|be delayed until)\s+(?:approval|sign-?off)\b/i
+
+/** A negated action is the requirement, not a waiver of approval. */
+const NOT_WITHOUT =
+  /^(?:please\s+)?(?:do not|don['’]t|never|[^.;]+?\s+(?:must not|cannot|can['’]t))\s+(?<blocked>[^.;]{1,80}?)\s+without\s+(?:prior\s+)?(?:approval|sign-?off)\b/i
 
 /** Fallback for "approval is required before X": it names what waits, not what may start. */
-const BLOCKED_BEFORE = /\bbefore\s+(?<blocked>[^.;]{1,80})/i
+const BLOCKED_BEFORE = /\b(?:approval|sign-?off)\s+(?:(?:(?:is|are)\s+)?required\s+)?before\s+(?<blocked>[^.;]{1,80})/i
 
 /** Split prose into sentences without breaking on a filename or an abbreviation. */
 function sentences(text: string): string[] {
@@ -630,43 +632,32 @@ function readApproval(text: string): ApprovalReading {
   const notes: string[] = []
   for (const raw of sentences(text)) {
     const sentence = cleanSentence(raw)
-    if (sentence.length > 300 || !UNCERTAIN_APPROVAL.test(sentence)) continue
+    if (sentence.length > 300 || !APPROVAL_MENTION.test(sentence)) continue
 
-    if (NO_APPROVAL_PATTERNS.some((pattern) => pattern.test(sentence))) {
-      if (notes.length < 3) {
-        notes.push(`The task says approval is not required: "${sentence}". Confirm with the owner if that is current.`)
+    // Classify each clause independently; a waiver of one step doesn't waive another.
+    for (const part of sentence.split(';')) {
+      const clause = part.trim()
+      if (!APPROVAL_MENTION.test(clause)) continue
+      const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)
+      if (!uncertain && NO_APPROVAL_PATTERNS.some((pattern) => pattern.test(clause))) {
+        if (notes.length < 3) {
+          notes.push(`The task says approval is not required: “${clause}” Confirm with the owner if that is current.`)
+        }
+        continue
       }
-      continue
-    }
-    if (!GATE_PATTERNS.some((pattern) => pattern.test(sentence))) {
-      if (notes.length < 3) {
-        notes.push(`Approval is mentioned but not stated as a requirement: "${sentence}".`)
-      }
-      continue
-    }
 
-    const startFirst = START_NOW.exec(sentence)
-    if (startFirst?.groups !== undefined) {
+      const order = START_NOW.exec(clause)?.groups
+      const blocked = NOT_WITHOUT.exec(clause)?.groups ?? WAIT_FOR.exec(clause)?.groups
+      if (uncertain || (!order && !blocked && !GATE_PATTERNS.some((pattern) => pattern.test(clause)))) {
+        if (notes.length < 3) notes.push(`Approval is mentioned but not stated as a requirement: “${clause}”`)
+        continue
+      }
+
       if (gates.length >= 2) continue
       gates.push({
         kind: 'approval',
-        startNow: phrase(startFirst.groups.what),
-        // A sentence often lists a second requirement after a semicolon; that is a
-        // different clause, and merging it into "what is blocked" misreads the gate.
-        waitFor: phrase(startFirst.groups.blocked?.split(';')[0]),
-        evidence: sentence,
-      })
-      continue
-    }
-
-    const blockedFirst = WAIT_FOR.exec(sentence)
-    const before = BLOCKED_BEFORE.exec(sentence)
-    const named = blockedFirst?.groups?.blocked ?? before?.groups?.blocked
-    if (gates.length < 2) {
-      gates.push({
-        kind: 'approval',
-        startNow: null,
-        waitFor: named === undefined ? null : phrase(named.split(';')[0]),
+        startNow: phrase(order?.what),
+        waitFor: phrase(order?.blocked ?? blocked?.blocked ?? BLOCKED_BEFORE.exec(clause)?.groups?.blocked),
         evidence: sentence,
       })
     }
