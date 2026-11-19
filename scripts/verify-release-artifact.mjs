@@ -9,6 +9,7 @@
  *   EXPECTED_CHECKSUM  SHA-256 preparation recorded for the tarball
  *   SOURCE_SHA         commit preparation built from
  *   TAG_VERSION        version from the release tag
+ *   GITHUB_SHA         commit this run checked out; must be SOURCE_SHA
  */
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
@@ -19,8 +20,9 @@ const artifactDir = process.env.ARTIFACT_DIR
 const expectedChecksum = process.env.EXPECTED_CHECKSUM
 const sourceSha = process.env.SOURCE_SHA
 const tagVersion = process.env.TAG_VERSION
-if (!artifactDir || !expectedChecksum || !sourceSha || !tagVersion) {
-  throw new Error('ARTIFACT_DIR, EXPECTED_CHECKSUM, SOURCE_SHA and TAG_VERSION are required')
+const commitSha = process.env.GITHUB_SHA
+if (!artifactDir || !expectedChecksum || !sourceSha || !tagVersion || !commitSha) {
+  throw new Error('ARTIFACT_DIR, EXPECTED_CHECKSUM, SOURCE_SHA, TAG_VERSION and GITHUB_SHA are required')
 }
 
 const cwd = process.cwd()
@@ -86,6 +88,11 @@ const tag = tagVersion.startsWith('v') ? tagVersion.slice(1) : tagVersion
 if (packed.version !== tag) throw new Error(`tarball is ${packed.version}, tag is v${tag}`)
 
 const notes = readFileSync(join(dir, 'RELEASE_NOTES.md'), 'utf8')
-if (!notes.includes(`Source commit: \`${sourceSha}\``)) throw new Error('retained source commit does not match')
+const sourceLines = notes.split(/\r?\n/).filter((line) => line.startsWith('Source commit:'))
+const expectedLine = `Source commit: \`${sourceSha}\``
+if (sourceLines.length !== 1 || sourceLines[0] !== expectedLine) {
+  throw new Error('retained source commit does not match')
+}
+if (sourceSha !== commitSha) throw new Error('preparation commit does not match the tag commit')
 
 console.log(`verified ${packed.name}@${packed.version} (${actual.slice(0, 12)}) in ${relative(cwd, tarball)}`)

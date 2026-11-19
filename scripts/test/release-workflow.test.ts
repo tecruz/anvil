@@ -136,6 +136,7 @@ describe('release workflow rehearsal', () => {
         EXPECTED_CHECKSUM: checksum,
         SOURCE_SHA: 'source-sha',
         TAG_VERSION: 'v0.1.0',
+        GITHUB_SHA: 'source-sha',
       }
       const run = (): { status: number | null; output: string } => {
         const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'verify-release-artifact.mjs')], {
@@ -193,17 +194,63 @@ describe('release workflow rehearsal', () => {
       const wrongSource = run()
       assert.notEqual(wrongSource.status, 0, 'a mismatched source commit must fail')
       assert.match(wrongSource.output, /source commit does not match/)
+
+      writeFileSync(join(artifactDir, 'RELEASE_NOTES.md'), 'Source commit: `source-sha`extra\n')
+      const appended = run()
+      assert.notEqual(appended.status, 0, 'a source line with extra text must fail')
+      assert.match(appended.output, /source commit does not match/)
+
+      writeFileSync(join(artifactDir, 'RELEASE_NOTES.md'), 'Source commit: `source-sha`\n')
+      env.GITHUB_SHA = 'other-sha'
+      const wrongCommit = run()
+      assert.notEqual(wrongCommit.status, 0, 'a preparation commit other than the checked-out one must fail')
+      assert.match(wrongCommit.output, /does not match the tag commit/)
+      env.GITHUB_SHA = 'source-sha'
     } finally {
       rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
     }
   })
 
-  test('a rehearsal takes its candidate version from the manifest, not a tag', () => {
-    assert.ok(workflow.includes('GITHUB_EVENT_NAME'), 'the provenance step must read the event name')
+  test('a branch dispatch takes its version from the manifest, a tag dispatch from the ref', () => {
+    const provenance = step('record checksum and provenance')
+    assert.match(provenance, /GITHUB_REF\b/, 'the ref decides whether a tag exists')
+    assert.doesNotMatch(provenance, /GITHUB_EVENT_NAME/, 'a dispatch on a tag still has a tag')
     assert.ok(
       workflow.includes("require('./packages/cli/package.json').version"),
-      'a dispatch has no tag, so the manifest is the candidate version',
+      'a branch dispatch has no tag, so the manifest is the candidate version',
     )
+    const identity = step('verify the release identity')
+    assert.match(identity, /REHEARSAL: \$\{\{ !startsWith\(github\.ref, 'refs\/tags\/v'\) && '1' \|\| '0' \}\}/)
+  })
+
+  test('both jobs are bounded and cannot cancel an in-flight release', () => {
+    assert.match(workflow, /^concurrency:\n {2}group: release-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: false$/m)
+    assert.match(job('release'), /^\s{4}timeout-minutes: 30$/m)
+    assert.match(job('publish'), /^\s{4}timeout-minutes: 15$/m)
+    const checkouts =
+      workflow.match(
+        /- uses: actions\/checkout@[0-9a-f]{40}[^\n]*\n\s+with:\n(?:\s*#[^\n]*\n)*\s+persist-credentials: false/g,
+      ) ?? []
+    assert.equal(checkouts.length, 2, 'both checkouts drop the persisted token')
+  })
+
+  test('step outputs reach the shell through env, not string interpolation', () => {
+    const scriptOf = (text: string): string => {
+      const marker = text.indexOf('run: |')
+      return marker === -1 ? text.slice(text.indexOf('run:')) : text.slice(marker)
+    }
+    const identity = step('verify the release identity')
+    assert.match(identity, /TARBALL: \$\{\{ steps\.provenance\.outputs\.tarball \}\}/)
+    assert.doesNotMatch(scriptOf(identity), /\$\{\{/, 'the identity script must not interpolate expressions')
+    const smoke = step('smoke-test the installed tarball')
+    assert.match(smoke, /TARBALL: \$\{\{ steps\.provenance\.outputs\.tarball \}\}/)
+    assert.doesNotMatch(scriptOf(smoke), /\$\{\{/, 'the smoke-test script must not interpolate expressions')
+  })
+
+  test('the publish job installs nothing and restores no cache', () => {
+    const publish = job('publish')
+    assert.match(publish, /registry-url: 'https:\/\/registry\.npmjs\.org'/)
+    assert.doesNotMatch(publish, /^\s+cache: npm$/m, 'a job that installs nothing must not save a cache entry')
   })
 
   test('rehearsal evidence is named apart from a real release', () => {

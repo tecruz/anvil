@@ -37,10 +37,18 @@ on:
 permissions:
   contents: read
 
+# One run per ref, and never cancel one mid-flight: a tag release in progress must not be
+# killed by a dispatch of the same ref. A dispatch on a branch uses a different ref, so it
+# cannot queue behind a tag release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     name: ${{ github.event_name == 'workflow_dispatch' && 'Release rehearsal (no publish)' || format('Release {0}', github.ref_name) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     # Export what the publish job needs. Job outputs survive a retry of only that job, so a
@@ -51,6 +59,9 @@ jobs:
       source_sha: ${{ steps.provenance.outputs.source_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # This job never pushes; leaving the token in .git/config only widens exposure.
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -107,12 +118,13 @@ jobs:
           tarball=$(realpath dist/*.tgz)
           checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
           source_sha=$(git rev-parse HEAD)
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            # A rehearsal has no tag. The manifest version is the candidate the tag would
-            # name, and the identity step below still checks the tarball against it.
-            version=$(node -p "require('./packages/cli/package.json').version")
-          else
+          # The ref decides the version, not the event: a dispatch can target a tag, and then
+          # the tag is the claim being rehearsed. Only a branch dispatch -- which has no tag
+          # to compare against -- takes the candidate from the manifest.
+          if [ "$GITHUB_REF" != "${GITHUB_REF#refs/tags/v}" ]; then
             version=${GITHUB_REF_NAME#v}
+          else
+            version=$(node -p "require('./packages/cli/package.json').version")
           fi
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
@@ -132,10 +144,12 @@ jobs:
       # exists so that installing does not run a source build the way the git channel does.
       # If the bundle needed an install step, this is where that would show up.
       - name: smoke-test the installed tarball
+        env:
+          TARBALL: ${{ steps.provenance.outputs.tarball }}
         run: |
           consumer=$(mktemp -d)
           echo '{"name":"consumer","private":true,"scripts":{"test":"node -e \"process.exit(0)\""}}' > "$consumer/package.json"
-          npm install --no-save --ignore-scripts "${{ steps.provenance.outputs.tarball }}" --prefix "$consumer"
+          npm install --no-save --ignore-scripts "$TARBALL" --prefix "$consumer"
 
           bin="$consumer/node_modules/.bin/anvil"
           case "$(uname)" in
@@ -165,10 +179,12 @@ jobs:
       - name: verify the release identity
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
-          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          TARBALL: ${{ steps.provenance.outputs.tarball }}
+          # A branch dispatch has no tag to compare against; a dispatch on a `v*` tag does,
+          # so the same gate runs for it as for a tag push.
+          REHEARSAL: ${{ !startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
         run: |
-          tarball="${{ steps.provenance.outputs.tarball }}"
-          tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" REHEARSAL="$REHEARSAL" node -e '
+          tar -xOf "$TARBALL" package/package.json | TAG_VERSION="$TAG_VERSION" REHEARSAL="$REHEARSAL" node -e '
             const fs = require("node:fs")
             const packed = JSON.parse(fs.readFileSync(0, "utf8"))
             const manifest = require("./packages/cli/package.json")
@@ -183,8 +199,8 @@ jobs:
             if (packed.version !== manifest.version) {
               throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)
             }
-            // Only a real tag can disagree with the manifest. A dispatch has no tag, so the
-            // tarball-against-manifest check above is the identity evidence for a rehearsal.
+            // A branch dispatch has no tag. A dispatch on a `v*` tag rehearses the same
+            // tag-versus-manifest gate that a tag push runs.
             if (!rehearsal && tag !== manifest.version) {
               throw new Error(`tag is v${tag}, the workspace manifest is ${manifest.version}`)
             }
@@ -194,7 +210,7 @@ jobs:
           '
           # The allowlist must actually carry the command the smoke test ran.
           bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
-          tar tzf "$tarball" | grep -qx "package/${bin_path#./}"
+          tar tzf "$TARBALL" | grep -qx "package/${bin_path#./}"
 
       # Check again after every command that exercised the installed artifact. A changed
       # tarball must not be archived as approved evidence or sent to the registry.
@@ -233,16 +249,21 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: release
     runs-on: ubuntu-latest
+    # The job that holds NPM_TOKEN: bound how long it can hold it.
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write    # OIDC for npm provenance
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: package.json
-          cache: npm
+          # No `cache: npm`: this job installs nothing, and a miss would save an unrelated
+          # ~/.npm under the lockfile key that CI and `release` restore.
           registry-url: 'https://registry.npmjs.org'
 
       - name: recover the tested artifact
