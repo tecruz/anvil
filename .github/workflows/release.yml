@@ -122,22 +122,14 @@ jobs:
           source_sha=$(git rev-parse HEAD)
           # One decision for both outputs: a `v*` tag is the claim being released (or
           # rehearsed), and anything else -- a branch dispatch -- has no tag to compare
-          # against, so its candidate version comes from the manifest. Deriving `rehearsal`
-          # here keeps it from disagreeing with the version the identity step compares.
-          case "$GITHUB_REF" in
-            refs/tags/v*)
-              version=${GITHUB_REF_NAME#v}
-              rehearsal=0
-              ;;
-            *)
-              version=$(node -p "require('./packages/cli/package.json').version")
-              rehearsal=1
-              ;;
-          esac
-          echo "rehearsal=$rehearsal" >> "$GITHUB_OUTPUT"
+          # against, so its candidate version comes from the manifest. The script prints
+          # `version` and `rehearsal` together, so the identity gate below cannot compare a
+          # version chosen under a different rule than the one that selected the gate.
+          identity=$(node scripts/resolve-release-ref.mjs)
+          printf '%s\n' "$identity" >> "$GITHUB_OUTPUT"
+          version=$(printf '%s\n' "$identity" | sed -n 's/^version=//p')
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           # Sidecars live outside the tarball: preserving evidence must not repack or
           # change the bytes that the installed-binary smoke test receives.
@@ -184,7 +176,8 @@ jobs:
 
       # Publishing cannot be undone, so every identity this release claims must agree
       # first: the tag, the workspace manifest (the package npm receives), and the
-      # packed artifact that was just smoke-tested.
+      # packed artifact that was just smoke-tested. The comparison lives in a script so the
+      # test can run the exact gate, including the tag-versus-manifest case.
       - name: verify the release identity
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
@@ -192,30 +185,7 @@ jobs:
           # Produced by the same step that chose the version, so the two cannot disagree.
           REHEARSAL: ${{ steps.provenance.outputs.rehearsal }}
         run: |
-          tar -xOf "$TARBALL" package/package.json | TAG_VERSION="$TAG_VERSION" REHEARSAL="$REHEARSAL" node -e '
-            const fs = require("node:fs")
-            const packed = JSON.parse(fs.readFileSync(0, "utf8"))
-            const manifest = require("./packages/cli/package.json")
-            const tag = process.env.TAG_VERSION
-            const rehearsal = process.env.REHEARSAL === "1"
-            if (packed.name !== manifest.name) {
-              throw new Error(`tarball is ${packed.name}, the workspace manifest is ${manifest.name}`)
-            }
-            if (packed.name !== "@anvil-workflows/cli") {
-              throw new Error(`this workflow publishes @anvil-workflows/cli, not ${packed.name}`)
-            }
-            if (packed.version !== manifest.version) {
-              throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)
-            }
-            // A branch dispatch has no tag. A dispatch on a `v*` tag rehearses the same
-            // tag-versus-manifest gate that a tag push runs.
-            if (!rehearsal && tag !== manifest.version) {
-              throw new Error(`tag is v${tag}, the workspace manifest is ${manifest.version}`)
-            }
-            console.log(rehearsal
-              ? `release identity: ${packed.name}@${packed.version} (rehearsal; no tag)`
-              : `release identity: ${packed.name}@${packed.version} from tag v${tag}`)
-          '
+          tar -xOf "$TARBALL" package/package.json | node scripts/verify-release-identity.mjs
           # The allowlist must actually carry the command the smoke test ran.
           bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
           tar tzf "$TARBALL" | grep -qx "package/${bin_path#./}"

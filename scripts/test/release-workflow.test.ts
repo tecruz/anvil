@@ -213,17 +213,62 @@ describe('release workflow rehearsal', () => {
 
   test('a branch dispatch takes its version from the manifest, a tag dispatch from the ref', () => {
     const provenance = step('record checksum and provenance')
-    assert.match(provenance, /case "\$GITHUB_REF" in/, 'the ref decides whether a tag exists')
-    assert.match(provenance, /refs\/tags\/v\*\)[\s\S]*?rehearsal=0/, 'a release tag is not a rehearsal')
-    assert.match(provenance, /rehearsal=1/, 'a branch dispatch marks itself a rehearsal')
+    assert.match(provenance, /node scripts\/resolve-release-ref\.mjs/, 'the ref decides the version')
     assert.doesNotMatch(provenance, /GITHUB_EVENT_NAME/, 'a dispatch on a tag still has a tag')
-    assert.ok(
-      workflow.includes("require('./packages/cli/package.json').version"),
-      'a branch dispatch has no tag, so the manifest is the candidate version',
-    )
     const identity = step('verify the release identity')
-    assert.match(identity, /REHEARSAL: \$\{\{ steps\.provenance\.outputs\.rehearsal \}\}/)
+    assert.match(identity, /node scripts\/verify-release-identity\.mjs/, 'the gate lives where the test runs it')
     assert.doesNotMatch(identity, /startsWith\(github\.ref/, 'the identity step cannot re-derive the tag check')
+    assert.match(identity, /REHEARSAL: \$\{\{ steps\.provenance\.outputs\.rehearsal \}\}/)
+  })
+
+  test('the ref resolver and identity gate agree on what a tag claims', () => {
+    const manifest = JSON.parse(readFileSync(join(repoRoot, 'packages/cli/package.json'), 'utf8')) as {
+      name: string
+      version: string
+    }
+    const resolve = (ref: string): { version: string; rehearsal: string } => {
+      const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'resolve-release-ref.mjs')], {
+        cwd: repoRoot,
+        env: { ...process.env, GITHUB_REF: ref },
+        encoding: 'utf8',
+      })
+      assert.equal(result.status, 0, `resolving ${ref} failed: ${result.stderr}`)
+      const pairs = (result.stdout ?? '')
+        .trim()
+        .split('\n')
+        .map((line) => line.split('='))
+      return Object.fromEntries(pairs) as { version: string; rehearsal: string }
+    }
+    const identity = (
+      packed: unknown,
+      tagVersion: string,
+      rehearsal: string,
+    ): { status: number | null; output: string } => {
+      const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'verify-release-identity.mjs')], {
+        cwd: repoRoot,
+        env: { ...process.env, TAG_VERSION: tagVersion, REHEARSAL: rehearsal },
+        input: JSON.stringify(packed),
+        encoding: 'utf8',
+      })
+      return { status: result.status, output: `${result.stdout ?? ''}\n${result.stderr ?? ''}` }
+    }
+    const packed = { name: manifest.name, version: manifest.version }
+
+    const branch = resolve('refs/heads/main')
+    assert.deepEqual(branch, { version: manifest.version, rehearsal: '1' }, 'a branch has no tag to claim')
+    assert.equal(identity(packed, branch.version, branch.rehearsal).status, 0)
+
+    const matching = resolve(`refs/tags/v${manifest.version}`)
+    assert.deepEqual(matching, { version: manifest.version, rehearsal: '0' }, 'a release tag is not a rehearsal')
+    assert.equal(identity(packed, matching.version, matching.rehearsal).status, 0)
+
+    // The tag arm must take its version from the ref: the gate has to reject the mismatch,
+    // which it cannot do if the resolver handed it the manifest version instead.
+    const mismatched = resolve('refs/tags/v9.9.9')
+    assert.deepEqual(mismatched, { version: '9.9.9', rehearsal: '0' })
+    const rejected = identity(packed, mismatched.version, mismatched.rehearsal)
+    assert.notEqual(rejected.status, 0, 'a tag that disagrees with the manifest must fail')
+    assert.match(rejected.output, /tag is v9\.9\.9/)
   })
 
   test('both jobs are bounded and cannot cancel an in-flight release', () => {
