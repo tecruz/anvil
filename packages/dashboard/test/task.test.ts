@@ -190,11 +190,48 @@ describe('buildTaskBrief', () => {
 
   test('a gate that only names approval blocks nothing specific and invents nothing', () => {
     const brief = buildTaskBrief(makeSnapshot(), {
-      text: 'Update the design system. Implementation requires approval before merge.',
+      text: 'Update the design system. Implementation requires approval from the security team.',
     })
     assert.equal(brief.gates.length, 1)
     assert.equal(brief.gates[0]?.waitFor, null)
     assert.match(brief.gates[0]?.evidence ?? '', /requires approval/)
+  })
+
+  test('an explicit "before" gate names what waits without inventing what may start', () => {
+    for (const text of ['Approval is required before merge.', 'Sign-off required before merge.']) {
+      const brief = buildTaskBrief(makeSnapshot(), { text })
+      assert.equal(brief.gates.length, 1, text)
+      assert.equal(brief.gates[0]?.startNow, null, text)
+      assert.equal(brief.gates[0]?.waitFor, 'merge', text)
+    }
+  })
+
+  test('a waiver is quoted as an absence, never applied as a gate', () => {
+    for (const text of [
+      'Implementation should not wait for approval.',
+      'No approval required for implementation.',
+      'Approval is not required for this change.',
+      "We don't need approval to ship this.",
+    ]) {
+      const brief = buildTaskBrief(makeSnapshot(), { text })
+      assert.deepEqual(brief.gates, [], text)
+      assert.match(brief.unknowns.join('\n'), /says approval is not required/, text)
+      assert.match(
+        brief.unknowns.join('\n'),
+        new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 12)),
+        text,
+      )
+      assert.doesNotMatch(brief.unknowns.join('\n'), /No approval gate was found/, text)
+    }
+  })
+
+  test('uncertain approval wording is shown without assigning a gate', () => {
+    const brief = buildTaskBrief(makeSnapshot(), {
+      text: 'Approval might be needed before implementation; check with the team.',
+    })
+    assert.deepEqual(brief.gates, [])
+    assert.match(brief.unknowns.join('\n'), /mentioned but not stated as a requirement/)
+    assert.match(brief.unknowns.join('\n'), /Approval might be needed/)
   })
 
   test('a gate written inside a longer sentence keeps both halves', () => {

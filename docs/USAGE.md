@@ -713,6 +713,12 @@ approval*. It never infers a gate from repository files (an issue body or PR tem
 one). If the ticket states no gate, the brief says so instead of guessing, and a
 repository suggestion says that it carries no gate or owner at all.
 
+The reader is three-valued and conservative. An explicit waiver such as "no approval
+required" or "should not wait for approval" is quoted as *approval is not required*, never
+applied as a gate. Wording that merely mentions approval without requiring it is quoted as
+*mentioned but not stated as a requirement*. That distinction matters: a false gate would
+tell someone to wait for permission the ticket says they do not need.
+
 The brief is honest about what it could not measure: a failed `anvil ready` is shown as
 *blockers unknown*, not as a clean report, and an unprobed environment is shown as *not
 checked* rather than *nothing missing*. An exact path in the task outranks a file that only

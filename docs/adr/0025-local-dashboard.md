@@ -43,6 +43,9 @@ runtime dependency.**
   characters, and stores no request or response.
 - An approval gate is quoted from the pasted text, never inferred. The brief separates what
   the sentence allows to start from what it blocks, and says so when the text states no gate.
+  An explicit waiver is quoted as approval-not-required; an uncertain mention is quoted but
+  never applied. The reader fails toward *no gate*, because applying a waiver as a gate would
+  tell someone to wait for permission the ticket says they do not need.
 - The brief reads only the cached snapshot. It never starts a CLI load, and a POST before
   the first page load is refused with `409` rather than warming the cache. A failed `ready`
   source is reported as blockers-unknown, not as an empty blocker list.

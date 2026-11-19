@@ -530,9 +530,32 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
  * implementation`), and that sentence is the one thing in the text a repository cannot
  * supply. It is read only when it is explicit about approval, so ordinary prose about
  * reviewing a change does not become a blocker.
+ *
+ * Reading is deliberately three-valued: a requirement becomes a gate, a waiver becomes a
+ * quoted note, and an uncertain mention becomes a note with no gate. The failure direction
+ * matters here — treating "no approval required" as a gate would send someone to wait for a
+ * permission the ticket explicitly says they do not need.
  */
-const APPROVAL_SENTENCE =
-  /(?:\b(?:must|has to|needs? to|should)\s+be\s+approved\b|\bapproved\s+before\b|\brequires?\s+(?:approval|sign-?off)\b|\bwait\s+for\s+approval\b|\bpending\s+approval\b|\bapproval\s+(?:gate|required)\b)/i
+const UNCERTAIN_APPROVAL = /\bapprov\w*\b|\bsign-?off\b/i
+
+/** One of these must be present before any sentence is treated as a requirement. */
+const GATE_PATTERNS: RegExp[] = [
+  /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
+  /\bapproved\s+before\b/i,
+  /\brequires?\s+(?:approval|sign-?off)\b/i,
+  /\b(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?required\b/i,
+  /\bpending\s+approval\b/i,
+  /\bapproval\b[^.;]{0,20}\b(?:is|are)\s+required\b/i,
+  /\b(?:wait|waits|waiting)\s+for\s+approval\b/i,
+]
+
+/** Checked before the requirement patterns: a waiver must never become a gate. */
+const NO_APPROVAL_PATTERNS: RegExp[] = [
+  /\b(?:no|not|never)\s+(?:\w+\s+){0,3}?(?:approval|sign-?off)\b/i,
+  /\b(?:doesn't|does not|don't|do not|isn't|is not|aren't|are not|won't|will not|shouldn't|should not|need not|no need to)\s+(?:require|need|wait for|be required|be needed|get|seek|obtain)\b[^.;]{0,30}\b(?:approval|sign-?off)\b/i,
+  /\b(?:approval|sign-?off)\b[^.;]{0,20}\b(?:(?:is\s+)?optional|not required|not needed|waived)\b/i,
+  /\b(?:skip|without)\s+(?:the\s+)?(?:approval|sign-?off)\b/i,
+]
 
 /**
  * The two halves of a gate phrase, each cleaned up for display.
@@ -540,12 +563,17 @@ const APPROVAL_SENTENCE =
  * Both are unanchored and bounded to one clause: a ticket often writes the gate inside a
  * longer sentence ("Note that the audit is approved before implementation"), and treating
  * that as "approval required, ordering unknown" would drop information the text does have.
+ * A negation is not allowed in `WAIT_FOR` — "should not wait for approval" is a waiver and
+ * is caught by `NO_APPROVAL_PATTERNS` before this runs.
  */
 const START_NOW =
   /(?<what>[^.;]{1,80}?)\s+(?:is|are|was|were|must be|needs to be|should be|has to be)\s+(?:reviewed and\s+)?approved\s+before\s+(?<blocked>[^.;]{1,80})/i
 
 const WAIT_FOR =
-  /(?<blocked>[^.;]{1,80}?)\s+(?:must|has to|needs to|should)\s+(?:not\s+)?(?:wait|be held|be delayed)[^.;]{0,40}?approval/i
+  /(?<blocked>[^.;]{1,80}?)\s+(?:must|has to|needs to|should)\s+(?:wait|be held|be delayed)[^.;]{0,40}?approval/i
+
+/** Fallback for "approval is required before X": it names what waits, not what may start. */
+const BLOCKED_BEFORE = /\bbefore\s+(?<blocked>[^.;]{1,80})/i
 
 /** Split prose into sentences without breaking on a filename or an abbreviation. */
 function sentences(text: string): string[] {
@@ -582,47 +610,68 @@ function phrase(value: string | undefined): string | null {
   return cleaned
 }
 
+interface ApprovalReading {
+  /** Explicit requirements only. Never populated by a waiver or an uncertain mention. */
+  gates: TaskGate[]
+  /** Quoted sentences the reader should check, without applying them as gates. */
+  notes: string[]
+}
+
 /**
- * Find the approval gate the task states, if any.
+ * Read approval statements in the task.
  *
- * Reading is deliberately literal: one sentence, quoted back, with the allowed and blocked
- * halves only when the sentence spells them out. A sentence that merely says approval is
- * required yields the evidence and no invented ordering.
+ * The reader is conservative on purpose. A sentence becomes a gate only when it clearly
+ * requires approval; "no approval required" and "should not wait for approval" become
+ * notes, and "approval may be needed" becomes a note too. A wrong gate would send someone
+ * to wait for permission the ticket says they do not need.
  */
-function approvalGates(text: string): TaskGate[] {
+function readApproval(text: string): ApprovalReading {
+  const gates: TaskGate[] = []
+  const notes: string[] = []
   for (const raw of sentences(text)) {
     const sentence = cleanSentence(raw)
-    if (sentence.length > 300 || !APPROVAL_SENTENCE.test(sentence)) continue
+    if (sentence.length > 300 || !UNCERTAIN_APPROVAL.test(sentence)) continue
+
+    if (NO_APPROVAL_PATTERNS.some((pattern) => pattern.test(sentence))) {
+      if (notes.length < 3) {
+        notes.push(`The task says approval is not required: "${sentence}". Confirm with the owner if that is current.`)
+      }
+      continue
+    }
+    if (!GATE_PATTERNS.some((pattern) => pattern.test(sentence))) {
+      if (notes.length < 3) {
+        notes.push(`Approval is mentioned but not stated as a requirement: "${sentence}".`)
+      }
+      continue
+    }
 
     const startFirst = START_NOW.exec(sentence)
     if (startFirst?.groups !== undefined) {
-      return [
-        {
-          kind: 'approval',
-          startNow: phrase(startFirst.groups.what),
-          // A sentence often lists a second requirement after a semicolon; that is a
-          // different clause, and merging it into "what is blocked" misreads the gate.
-          waitFor: phrase(startFirst.groups.blocked?.split(';')[0]),
-          evidence: sentence,
-        },
-      ]
+      if (gates.length >= 2) continue
+      gates.push({
+        kind: 'approval',
+        startNow: phrase(startFirst.groups.what),
+        // A sentence often lists a second requirement after a semicolon; that is a
+        // different clause, and merging it into "what is blocked" misreads the gate.
+        waitFor: phrase(startFirst.groups.blocked?.split(';')[0]),
+        evidence: sentence,
+      })
+      continue
     }
 
     const blockedFirst = WAIT_FOR.exec(sentence)
-    if (blockedFirst?.groups !== undefined) {
-      return [
-        {
-          kind: 'approval',
-          startNow: null,
-          waitFor: phrase(blockedFirst.groups.blocked?.split(';')[0]),
-          evidence: sentence,
-        },
-      ]
+    const before = BLOCKED_BEFORE.exec(sentence)
+    const named = blockedFirst?.groups?.blocked ?? before?.groups?.blocked
+    if (gates.length < 2) {
+      gates.push({
+        kind: 'approval',
+        startNow: null,
+        waitFor: named === undefined ? null : phrase(named.split(';')[0]),
+        evidence: sentence,
+      })
     }
-
-    return [{ kind: 'approval', startNow: null, waitFor: null, evidence: sentence }]
   }
-  return []
+  return { gates, notes }
 }
 
 /**
@@ -717,7 +766,8 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   const found = blockers(snapshot)
   const ready = asRecord(snapshot.repository.ready.data)
   const readyOk = snapshot.repository.ready.ok !== false
-  const gates = suggestion === null ? approvalGates(text) : []
+  const approval = suggestion === null ? readApproval(text) : { gates: [] as TaskGate[], notes: [] as string[] }
+  const gates = approval.gates
 
   if (suggestion !== null) {
     unknowns.push(
@@ -732,11 +782,12 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     unknowns.push(
       'A repository suggestion carries no approval gate or owner: confirm both with the team before implementing.',
     )
-  } else {
+  } else if (approval.notes.length === 0) {
     unknowns.push(
       'No approval gate was found in the pasted text. Approval gates and ownership are not inferable from repository files, so check the ticket.',
     )
   }
+  unknowns.push(...approval.notes)
   unknowns.push('This page is read-only: the verification commands were not run and the repository was not changed.')
   unknowns.push('Verification history is unavailable; run a command in a worktree to produce evidence.')
   for (const reference of unmatched) {
