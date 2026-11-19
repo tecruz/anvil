@@ -149,6 +149,17 @@ describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions'
     assert.match(f.detail, /test/)
   })
 
+  test('a different runner does not count as documenting the detected command', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `pnpm test`, `pnpm lint`, `pnpm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test/)
+  })
+
   test('a docs-only repo reports na', () => {
     const profile = profileOf({ 'README.md': '# Docs\n' })
     assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')

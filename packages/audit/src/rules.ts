@@ -300,30 +300,23 @@ const VERIFY_DOC_COVERAGE: Rule = {
         // optional `run` but keep the runner: a bare `test` would match any prose.
         .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
         .trim()
+    const instructionText = canonical(text)
     for (const kind of kinds) {
       const entries = ctx.profile.commands[kind]
       if (entries === undefined || entries.length === 0) continue
-      const entry = entries[0]
-      if (entry === undefined) continue
+      // Only a command anvil found in this repository earns a coverage claim. An inferred
+      // convention is not a fact the instructions failed to document.
+      const entry = entries.find((candidate) => candidate.source === 'detected') ?? entries[0]
+      if (entry === undefined || entry.source !== 'detected') continue
       const cmd = entry.cmd.trim()
       if (cmd === '') continue
-      // Compare the command's own tokens, not just the runner name. "run npm test" is not
-      // evidence that `npm run test:changed` is documented.
+      // Compare the whole command token sequence, not just its distinctive tail. `pnpm test`
+      // must not stand in for a detected `npm test`: the runner is part of the command.
+      // Word boundaries stop `npm test` matching inside `pnpm test`.
       const normalized = canonical(cmd)
-      const instructionText = canonical(text)
-      if (instructionText.includes(normalized)) {
-        documented.push(kind)
-        continue
-      }
-      // A runner alone (`npm`, `cargo`, `go`) is not the command. Require the distinctive
-      // tail of the command in the instructions before accepting a partial match. Keep
-      // the runner out of the tail so `npm test` matches `npm run test` too.
-      const tail = normalized
-        .split(/\s+/)
-        .filter((part) => part.length > 2 && !/^(?:npm|pnpm|yarn|bun)$/.test(part))
-        .slice(-2)
-        .join(' ')
-      if (tail !== '' && instructionText.includes(tail)) {
+      const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const pattern = new RegExp(`(^|[^a-z0-9_-])${escaped}([^a-z0-9_-]|$)`, 'i')
+      if (pattern.test(instructionText)) {
         documented.push(kind)
         continue
       }
