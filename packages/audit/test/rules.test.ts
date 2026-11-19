@@ -96,6 +96,76 @@ describe('a probed MCP file is visible to the rule', () => {
   })
 })
 
+describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions', () => {
+  const scripts = JSON.stringify({
+    scripts: { test: 'node --test', lint: 'biome check', build: 'tsc -p tsconfig.json' },
+  })
+
+  test('a detected command absent from instructions is named with its evidence', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun the checks before shipping.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+    assert.match(f.detail, /npm run test/)
+    assert.ok(
+      f.evidence.some((e) => /package\.json:\d+/.test(e)),
+      `expected file:line evidence, got ${f.evidence.join(', ')}`,
+    )
+    assert.equal(f.fix?.target, 'AGENTS.md')
+  })
+
+  test('equivalent npm shorthands count as documented', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm lint`, `npm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  test('instructions naming the detected commands pass', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm run lint`, `npm run build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  test('an unrelated runnable command does not hide a missing detected one', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm run typecheck` before shipping.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+  })
+
+  test('a different runner does not count as documenting the detected command', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `pnpm test`, `pnpm lint`, `pnpm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test/)
+  })
+
+  test('a docs-only repo reports na', () => {
+    const profile = profileOf({ 'README.md': '# Docs\n' })
+    assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')
+  })
+})
+
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
   const scripts = JSON.stringify({ scripts: { test: 'node --test', lint: 'biome check' } })
 
