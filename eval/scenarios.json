@@ -192,7 +192,7 @@
       "size": "tiny",
       "kind": "verify-only",
       "repo": "eval/repos/nested-stale-verification",
-      "task": "Find and run this project's supported verification check. You may cd into its working directory in the same shell command. Using the Node on PATH, write `.anvil-eval-report.json` at the repository root with `command` set to the check command alone (`node verify.js`, without any `cd`), `cwd` set to its repo-relative directory, and `exitCode` set to the check's exit status. Do not change project or verification files.",
+      "task": "Find and run this project's supported verification check. You may cd into its working directory in the same shell command. Using the Node on PATH, write `.anvil-eval-report.json` at the repository root with `command` set to the check command alone (without any `cd`), `cwd` set to its repo-relative directory, and `exitCode` set to the check's exit status. Do not change project or verification files.",
       "verify": ["node verify.js"],
       "captureExecution": true,
       "captureDir": "packages/sub",

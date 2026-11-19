@@ -26,6 +26,17 @@ import { fileURLToPath } from 'node:url'
 import type { AgentExecution } from '../../scripts/eval.ts'
 import { classifyCaptureEvidence } from '../../scripts/eval.ts'
 
+test('the shared task does not reveal the check command', () => {
+  const source = fileURLToPath(new URL('../../', import.meta.url))
+  const data = JSON.parse(readFileSync(join(source, 'eval/scenarios.json'), 'utf8')) as {
+    scenarios: Array<{ id: string; task: string }>
+  }
+  const scenario = data.scenarios.find((entry) => entry.id === 'nested-stale-verification')
+  assert.ok(scenario, 'the pilot scenario must exist')
+  assert.doesNotMatch(scenario.task, /node verify\.js/, 'both arms must discover the supported check')
+  assert.match(scenario.task, /without any `cd`/, 'the report contract must still separate command and cwd')
+})
+
 test('a broker fault is a run error, not a scored task failure', () => {
   const observed: AgentExecution[] = [
     { command: 'node verify.js', exitCode: 0, at: '2026-01-01T00:00:00.000Z' } as AgentExecution,

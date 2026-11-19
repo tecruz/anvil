@@ -156,6 +156,8 @@ test('an unexpected broker failure is exposed separately from agent-caused evide
   const result = await launch(broker, workdir, ['run-check.js'])
   assert.equal(result.code, 2)
   assert.ok(broker.fault !== null, 'the broker must expose the internal failure')
+  assert.match(broker.fault, /too much output/)
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /node\.exe|--input-type=module/)
   assert.equal(broker.executions.length, 0)
   assert.equal(broker.integrityError, null, 'a broker fault is not an agent file tamper')
 })

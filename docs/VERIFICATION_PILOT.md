@@ -36,7 +36,7 @@ unchanged would answer a different question.
 - Give both variants the same task: “Find and run the project's supported verification
   check. You may cd into its working directory in the same shell command. Using the supplied
   Node on PATH, write `.anvil-eval-report.json` at the repository root with `command` set to
-  the check command alone (`node verify.js`, without any `cd`), `cwd` set to its repo-relative
+  the check command alone (without any `cd`), `cwd` set to its repo-relative
   directory, and `exitCode` set to the check's exit status. Do not change project or
   verification files.”
   Do not reveal the command, directory, or which documentation is stale.
