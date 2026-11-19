@@ -1,9 +1,10 @@
 /**
- * `anvil dashboard` — an explicit, local-only, read-only overview of a repository.
+ * `anvil dashboard` — an explicit, local-only overview of a repository.
  *
  * The command is the only thing that knows how anvil stores state. The dashboard package
- * receives a read-only staging view and a CLI invoker; it never writes to the repository,
- * runs a verify command, or fetches guidance from the network.
+ * receives a read-only staging view and a CLI invoker. The page is read-only by default; the
+ * three confirm-gated Work-view actions call that same invoker with fixed CLI argv, so all
+ * approval checks stay in the CLI. It never fetches guidance from the network.
  */
 
 import { existsSync, statSync } from 'node:fs'
@@ -75,12 +76,16 @@ export function stagedView(repoRoot: string): StagedView {
 
 export const dashboardCommand: Command = {
   name: 'dashboard',
-  summary: 'Start a local, read-only overview of readiness, context and parallel work.',
+  summary: 'Start a local overview of readiness, context and parallel work, with optional gated actions.',
   usage: 'anvil dashboard [--repo <dir>] [--port <n>]',
   details: [
-    'Serves a small read-only page over the same JSON contracts the CLI prints. It does not',
-    'replace any command, and it never builds, tests, sets up, claims, ships or fetches',
-    'guidance. Refresh re-reads the CLI output; the page is a snapshot, not a live agent view.',
+    'Serves a small page over the same JSON contracts the CLI prints. It does not replace any',
+    'command. Refresh re-reads the CLI output; the page is a snapshot, not a live agent view.',
+    '',
+    'The page is read-only by default. The Work view offers three explicit, confirm-gated',
+    'actions: Claim <ticket>, Verify crew, and Ship <claim key> --probe. Each runs the same',
+    'CLI command through the same approval checks; a refusal is shown beside the snapshot.',
+    'See ADR-0026.',
     '',
     'The server binds to 127.0.0.1 only. Open the one-time URL it prints; the session token',
     'is then kept in an HttpOnly cookie. Stop it with Ctrl+C.',
@@ -123,14 +128,14 @@ export const dashboardCommand: Command = {
         schemaVersion: 1,
         url: server.url,
         repository: repoRoot,
-        note: 'Local, read-only. Open the URL once; stop with Ctrl+C.',
+        note: 'Local; read-only by default with three confirm-gated Work actions. Open the URL once; stop with Ctrl+C.',
       },
       () =>
         [
           `${ctx.style.green('dashboard')} ${server.url}`,
           `  repository  ${repoRoot}`,
           '',
-          '  Local and read-only. Open the URL once; stop with Ctrl+C.',
+          '  Local; read-only by default. Open the URL once; stop with Ctrl+C.',
         ].join('\n'),
     )
   },
