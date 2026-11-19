@@ -42,7 +42,7 @@ function job(name: string): string {
 }
 
 /** Build a minimal gzipped tar containing one package/package.json entry. */
-function tarballWithSummary(pkg: { name: string; version: string }): Buffer {
+function tarballWithSummary(pkg: { name: string; version: string; description?: string }): Buffer {
   const body = Buffer.from(JSON.stringify(pkg))
   const header = Buffer.alloc(512)
   header.write('package/package.json', 0, 100, 'utf8')
@@ -174,8 +174,13 @@ describe('release workflow rehearsal', () => {
       assert.match(extra.output, /exactly one entry/)
 
       // Matching a forged sidecar to tampered bytes is not enough: preparation's checksum is
-      // the authority. Append a byte so the package name, version and tag still agree.
-      const tampered = Buffer.concat([bytes, Buffer.from('\n')])
+      // the authority. This archive is valid and keeps the name and version, so only the
+      // checksum recorded during preparation can reject it.
+      const tampered = tarballWithSummary({
+        name: '@anvil-workflows/cli',
+        version: '0.1.0',
+        description: 'tampered bytes',
+      })
       writeFileSync(tarball, tampered)
       writeFileSync(sidecar, `${createHash('sha256').update(tampered).digest('hex')}  anvil-workflows-cli-0.1.0.tgz\n`)
       const forged = run()
