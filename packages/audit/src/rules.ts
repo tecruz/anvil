@@ -288,6 +288,18 @@ const VERIFY_DOC_COVERAGE: Rule = {
 
     const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
     const documented: string[] = []
+    // `npm test` and `npm run test` are the same command; so are `npm run lint` and
+    // `npm lint`. The profile records whichever form the manifest produced, but a human
+    // may document the shorthand. Normalize the script invocation before comparing, or
+    // the rule warns on a repository whose instructions are correct.
+    const canonical = (value: string): string =>
+      value
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        // `npm run test` and `npm test` are the same script invocation. Strip the
+        // optional `run` but keep the runner: a bare `test` would match any prose.
+        .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
+        .trim()
     for (const kind of kinds) {
       const entries = ctx.profile.commands[kind]
       if (entries === undefined || entries.length === 0) continue
@@ -297,19 +309,21 @@ const VERIFY_DOC_COVERAGE: Rule = {
       if (cmd === '') continue
       // Compare the command's own tokens, not just the runner name. "run npm test" is not
       // evidence that `npm run test:changed` is documented.
-      const normalized = cmd.toLowerCase().replace(/\s+/g, ' ')
-      if (text.toLowerCase().replace(/\s+/g, ' ').includes(normalized)) {
+      const normalized = canonical(cmd)
+      const instructionText = canonical(text)
+      if (instructionText.includes(normalized)) {
         documented.push(kind)
         continue
       }
       // A runner alone (`npm`, `cargo`, `go`) is not the command. Require the distinctive
-      // tail of the command in the instructions before accepting a partial match.
+      // tail of the command in the instructions before accepting a partial match. Keep
+      // the runner out of the tail so `npm test` matches `npm run test` too.
       const tail = normalized
         .split(/\s+/)
-        .filter((part) => part.length > 2)
+        .filter((part) => part.length > 2 && !/^(?:npm|pnpm|yarn|bun)$/.test(part))
         .slice(-2)
         .join(' ')
-      if (tail !== '' && text.toLowerCase().includes(tail)) {
+      if (tail !== '' && instructionText.includes(tail)) {
         documented.push(kind)
         continue
       }

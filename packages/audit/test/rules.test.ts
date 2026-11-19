@@ -118,6 +118,16 @@ describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions'
     assert.equal(f.fix?.target, 'AGENTS.md')
   })
 
+  test('equivalent npm shorthands count as documented', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm lint`, `npm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
   test('instructions naming the detected commands pass', () => {
     const profile = profileOf({
       'package.json': scripts,
