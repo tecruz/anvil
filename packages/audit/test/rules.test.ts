@@ -140,11 +140,54 @@ describe('INSTRUCTION_CONFLICT compares verify commands across instruction files
   test('prose that is not a command is left alone', () => {
     const profile = profileOf({
       'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nWe use npm for packages.\n',
-      'CLAUDE.md': '# Claude\n\nTests are important.\n',
+      'AGENTS.md': '# App\n\nWe use npm for packages and npm test is mentioned in prose.\n',
+      'CLAUDE.md': '# Claude\n\nTests are important. Use pnpm for speed.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').status,
+      'pass',
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').detail,
+    )
+  })
+
+  test('equivalent npm shorthands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm run test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
     assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('two Cursor rule files under .cursor/rules are compared', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      '.cursor/rules/a.mdc': '---\ndescription: a\n---\n\nRun `npm test`.\n',
+      '.cursor/rules/b.mdc': '---\ndescription: b\n---\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/a.mdc:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/b.mdc:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('a command inside a fenced shell block counts', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```bash\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```bash\npnpm test\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'warn')
   })
 })
 
