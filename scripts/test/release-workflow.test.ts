@@ -159,7 +159,22 @@ describe('release workflow rehearsal', () => {
       assert.notEqual(changed.status, 0, 'modified bytes must fail')
       assert.match(changed.output, /checksum/i)
 
+      const sidecar = join(artifactDir, 'SHA256SUMS')
+      const line = `${checksum}  anvil-workflows-cli-0.1.0.tgz\n`
+      writeFileSync(sidecar, `${checksum}  other.tgz\n`)
+      assert.notEqual(run().status, 0, 'a sidecar naming another file must fail')
+      writeFileSync(sidecar, `${line}${'0'.repeat(64)}  other.tgz\n`)
+      assert.notEqual(run().status, 0, 'an extra sidecar entry must fail')
+
+      // Matching a forged sidecar to changed bytes is not enough: preparation's checksum is
+      // the authority, so the publication must still stop.
+      const tampered = tarballWithSummary({ name: '@anvil-workflows/cli', version: '0.1.2' })
+      writeFileSync(tarball, tampered)
+      writeFileSync(sidecar, `${createHash('sha256').update(tampered).digest('hex')}  anvil-workflows-cli-0.1.0.tgz\n`)
+      assert.notEqual(run().status, 0, 'changed bytes with a matching sidecar must fail')
+
       writeFileSync(tarball, bytes)
+      writeFileSync(sidecar, line)
       writeFileSync(join(artifactDir, 'RELEASE_NOTES.md'), 'Source commit: `other-sha`\n')
       assert.notEqual(run().status, 0, 'a mismatched source commit must fail')
     } finally {

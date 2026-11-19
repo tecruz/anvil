@@ -12,7 +12,7 @@
  */
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { basename, join, relative, resolve } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 
 const artifactDir = process.env.ARTIFACT_DIR
@@ -33,7 +33,14 @@ if (tarballs.length !== 1) {
 }
 const tarball = tarballs[0]
 const checksums = readFileSync(join(dir, 'SHA256SUMS'), 'utf8')
-const expectedBySidecar = checksums.trim().split(/\s+/)[0]
+const lines = checksums.split(/\r?\n/).filter((line) => line.trim() !== '')
+if (lines.length !== 1) {
+  throw new Error(`SHA256SUMS must contain exactly one entry, found ${lines.length}`)
+}
+const entry = /^([0-9a-f]{64}) {2}(.+)$/i.exec(lines[0] ?? '')
+if (entry === null) throw new Error('SHA256SUMS has an invalid entry')
+if (entry[2] !== basename(tarball)) throw new Error('SHA256SUMS names a different tarball')
+const expectedBySidecar = (entry[1] ?? '').toLowerCase()
 const bytes = readFileSync(tarball)
 const actual = createHash('sha256').update(bytes).digest('hex')
 if (actual !== expectedBySidecar || actual !== expectedChecksum.toLowerCase()) {
