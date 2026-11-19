@@ -25,11 +25,13 @@ import {
   type FileDiff,
   type GeneratedArtifact,
   generateAgentsFile,
+  generateInstructionMirrors,
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
   hashInputs,
   inspectStaging,
+  MIRROR_TARGETS,
   readManifest,
   readRepoFile,
   readStaged,
@@ -262,7 +264,7 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
 export const initCommand: Command = {
   name: 'init',
   summary: 'Derive AGENTS.md, skills and commands from detected facts.',
-  usage: 'anvil init [--apply] [--profile <dir>] [--only <artifact>] [--json]',
+  usage: 'anvil init [--apply] [--profile <dir>] [--only <artifact>] [--with-mirrors] [--json]',
   details: [
     'Without --apply, nothing is written to the repository: artifacts are built into',
     '.anvil/staging/ and a unified diff is printed.',
@@ -276,6 +278,10 @@ export const initCommand: Command = {
     'changed in the meantime is detected instead of silently overwritten.',
     '',
     '--only agents-file|verify-skill|review-command',
+    '',
+    '--with-mirrors additionally stages thin CLAUDE.md, Cursor-rule and Copilot-instructions',
+    'mirrors of the same verify commands. Off by default; AGENTS.md remains the source of',
+    'truth. Existing targets go through the same diff and stale-bundle checks.',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -283,6 +289,7 @@ export const initCommand: Command = {
     profile: { type: 'string' },
     only: { type: 'string' },
     apply: { type: 'boolean' },
+    'with-mirrors': { type: 'boolean' },
     'allow-warnings': { type: 'boolean' },
   },
 
@@ -292,6 +299,7 @@ export const initCommand: Command = {
     const loaded = await loadAll(ctx, dir)
     const { root, profile, matches, playbooks, declared } = loaded
 
+    const withMirrors = args.values['with-mirrors'] === true
     const only = (args.values.only as string | undefined) ?? null
     if (only !== null && !['agents-file', 'verify-skill', 'review-command'].includes(only)) {
       throw new AnvilError(ErrorCode.Usage, `Unknown --only artifact: ${only}`, {
@@ -310,7 +318,7 @@ export const initCommand: Command = {
       return applyFlow(ctx, root, currentHash, args.values.json === true, args.values['allow-warnings'] === true)
 
     // ---- build and stage ----
-    const artifacts = buildArtifacts(profile, matches, declared, only)
+    const artifacts = buildArtifacts(profile, matches, declared, only, withMirrors)
     if (artifacts.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'Nothing to generate for this repository', {
         hint: 'A root AGENTS.md is always generated. The others need a test or lint command; check `anvil profile`.',
@@ -372,6 +380,7 @@ function buildArtifacts(
   matches: readonly MatchResult[],
   declared: ProjectConfig | undefined,
   only: string | null,
+  withMirrors: boolean,
 ): GeneratedArtifact[] {
   const options = declared === undefined ? { profile, matches } : { profile, matches, declared }
   const out: GeneratedArtifact[] = []
@@ -384,6 +393,10 @@ function buildArtifacts(
     const cmd = generateReviewCommand(options)
     if (cmd !== null) out.push(cmd)
   }
+  // Mirrors are opt-in and never produced by --only: they are a separate bundle choice,
+  // not an artifact kind. They use the same options object, so the commands in them are
+  // exactly the ones the root AGENTS.md got.
+  if (withMirrors && only === null) out.push(...generateInstructionMirrors(options, MIRROR_TARGETS))
   return out
 }
 
