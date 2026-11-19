@@ -498,12 +498,17 @@ The release workflow now writes `SHA256SUMS` and draft release notes containing 
 source SHA, verifies the checksum after smoke testing, and retains those sidecars with
 the tested tarball for 90 days. Upload failure blocks publication. Actionlint passes,
 and a local rehearsal of the exact provenance/checksum commands accepts unchanged bytes
-and rejects tampering; the GitHub artifact upload and publication remain unexercised.
+and rejects tampering. The GitHub artifact upload can now be exercised by the no-publish
+dispatch rehearsal described below; publication remains unexercised.
 
 Still not done: approving and publishing a first release, and recording a published checksum
 and source SHA in the release notes. Name control is confirmed by the authenticated owner
-check recorded below; that confirmation does not authorize publication. No release workflow
-has run, so the workflow itself remains unproven end to end.
+check recorded below; that confirmation does not authorize publication. The workflow now has
+a no-publish `workflow_dispatch` rehearsal that runs the same build, allowlist, smoke test,
+checksum guard and artifact upload but stops before `npm publish`; it is documented in
+[CONTRIBUTING.md](../CONTRIBUTING.md#rehearsing-a-release-without-publishing). The rehearsal
+has not been dispatched yet, and no release workflow has published anything, so the publish
+step itself remains unproven end to end.
 
 ### Decisions before implementation
 

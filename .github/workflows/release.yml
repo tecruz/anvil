@@ -1,8 +1,15 @@
 # Release workflow.
 #
-# Triggered by a version tag (`v0.1.0`, `v0.2.0`, ...). Builds the prebuilt tarball
-# exactly once, installs it into an isolated consumer project and smoke-tests the
-# installed binary, then publishes those same bytes to the registry with provenance.
+# Triggered by a version tag (`v0.1.0`, `v0.2.0`, ...), or by a manual dispatch as a
+# no-publish rehearsal. Both paths build the prebuilt tarball exactly once, install it
+# into an isolated consumer project, smoke-test the installed binary, record its checksum
+# and retain the tested bytes. Only the tag path publishes to the registry.
+#
+# The rehearsal exists because a release cannot be undone: it exercises the GitHub steps
+# that were previously only rehearsed locally -- the artifact upload and the job summary --
+# without ever calling `npm publish`. A dispatch has no tag, so the candidate version comes
+# from the workspace manifest. Dispatching is not an approval to publish: publication still
+# requires an explicit version tag and the maintainer's decision.
 #
 # The bundle is never rebuilt after testing: if the build changes, the tag moves and a
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
@@ -21,6 +28,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Rehearse the exact release steps without publishing. No inputs: the candidate is the
+  # checked-out manifest, which is the version a subsequent tag would release.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,7 +38,7 @@ permissions:
 
 jobs:
   release:
-    name: Release ${{ github.ref_name }}
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Release rehearsal (no publish)' || format('Release {0}', github.ref_name) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -89,7 +99,13 @@ jobs:
           tarball=$(realpath dist/*.tgz)
           checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
           source_sha=$(git rev-parse HEAD)
-          version=${GITHUB_REF_NAME#v}
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # A rehearsal has no tag. The manifest version is the candidate the tag would
+            # name, and the identity step below still checks the tarball against it.
+            version=$(node -p "require('./packages/cli/package.json').version")
+          else
+            version=${GITHUB_REF_NAME#v}
+          fi
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -141,13 +157,15 @@ jobs:
       - name: verify the release identity
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
+          REHEARSAL: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           tarball="${{ steps.provenance.outputs.tarball }}"
-          tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" node -e '
+          tar -xOf "$tarball" package/package.json | TAG_VERSION="$TAG_VERSION" REHEARSAL="$REHEARSAL" node -e '
             const fs = require("node:fs")
             const packed = JSON.parse(fs.readFileSync(0, "utf8"))
             const manifest = require("./packages/cli/package.json")
             const tag = process.env.TAG_VERSION
+            const rehearsal = process.env.REHEARSAL === "1"
             if (packed.name !== manifest.name) {
               throw new Error(`tarball is ${packed.name}, the workspace manifest is ${manifest.name}`)
             }
@@ -157,10 +175,14 @@ jobs:
             if (packed.version !== manifest.version) {
               throw new Error(`tarball is ${packed.version}, the workspace manifest is ${manifest.version}`)
             }
-            if (tag !== manifest.version) {
+            // Only a real tag can disagree with the manifest. A dispatch has no tag, so the
+            // tarball-against-manifest check above is the identity evidence for a rehearsal.
+            if (!rehearsal && tag !== manifest.version) {
               throw new Error(`tag is v${tag}, the workspace manifest is ${manifest.version}`)
             }
-            console.log(`release identity: ${packed.name}@${packed.version} from tag v${tag}`)
+            console.log(rehearsal
+              ? `release identity: ${packed.name}@${packed.version} (rehearsal; no tag)`
+              : `release identity: ${packed.name}@${packed.version} from tag v${tag}`)
           '
           # The allowlist must actually carry the command the smoke test ran.
           bin_path=$(node -p "require('./packages/cli/package.json').bin.anvil")
@@ -173,7 +195,11 @@ jobs:
         run: sha256sum --check SHA256SUMS
 
       - name: retain the release evidence in the job summary
-        run: cat dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          cat dist/RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            printf '\n%s\n' 'Release rehearsal: the build, tarball, checksum and retention steps ran, but `npm publish` was skipped. No registry bytes changed.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # Logs and step outputs expire; keep the exact tested bytes and their source/hash
       # together. These files also supply the notes/checksum for an approved GitHub release.
@@ -181,7 +207,7 @@ jobs:
       - name: retain the tested tarball, checksum and draft release notes
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-evidence-${{ github.run_id }}-attempt${{ github.run_attempt }}
+          name: release-evidence-${{ github.event_name == 'workflow_dispatch' && 'rehearsal-' || '' }}${{ github.run_id }}-attempt${{ github.run_attempt }}
           path: |
             dist/*.tgz
             dist/SHA256SUMS
@@ -192,7 +218,13 @@ jobs:
       # Publish the exact bytes that were tested. `npm publish` with no argument would
       # repack the working tree and re-run `prepare`, so the registry could receive a
       # different build than the one the smoke test approved.
+      #
+      # A dispatch is a rehearsal and stops here. The guard is on the publish step itself,
+      # not on the job: every earlier step must run so the rehearsal proves the same bytes
+      # would be published. Keeping publication on the tag path means a manual run cannot
+      # release anything, whatever inputs or credentials are present.
       - name: publish the tested tarball to npm
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish "${{ steps.provenance.outputs.tarball }}" --provenance --access public

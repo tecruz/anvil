@@ -254,6 +254,23 @@ Real-model runs require OpenCode 2. The harness runs `opencode run --standalone 
 from each scenario's directory so its private server receives the provider credentials
 from the environment, without depending on a shared background service.
 
+### Rehearsing a release without publishing
+
+`.github/workflows/release.yml` also runs on manual dispatch as a no-publish rehearsal:
+
+```bash
+gh workflow run release.yml
+```
+
+It builds once, enforces the tarball allowlist, installs the artifact with scripts disabled,
+smoke-tests the installed CLI, records the checksum and retains the tested bytes — the same
+steps as a tag-triggered release — then stops before `npm publish`. A dispatch has no tag, so
+the candidate version comes from `packages/cli/package.json`, and its evidence artifact is
+named `release-evidence-rehearsal-*` so it cannot be mistaken for a release.
+
+Publication remains exclusively on a `v*` tag and needs the maintainer's explicit approval.
+A dispatch never publishes, whatever inputs or credentials are present.
+
 ## The one suite that needs `gh`
 
 ```bash
