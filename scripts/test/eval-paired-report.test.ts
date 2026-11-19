@@ -71,6 +71,17 @@ describe('paired comparison', () => {
     assert.equal(summary.totals.successfulDurationMs.pairs, 0)
   })
 
+  test('a task failure with no run error stays in the scored verdict', () => {
+    const failed = result({ variant: 'bare', verified: false, taskFailureReason: 'the agent did not run the check' })
+    const summary = summarizePairs([failed, result({ variant: 'anvil' })])
+
+    assert.equal(taskSucceeded(failed), false)
+    assert.equal(summary.totals.pairs, 1)
+    assert.equal(summary.totals.errorPairs.pairs, 0, 'a functioning harness did not fail the run')
+    assert.equal(summary.totals.runErrors.bare, 0)
+    assert.equal(summary.totals.onlyAnvil, 1)
+  })
+
   test('a setup failure is reported as a run error, not as an agent failure', () => {
     const summary = summarizePairs([
       result({ variant: 'bare' }),

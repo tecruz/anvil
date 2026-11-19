@@ -1,0 +1,5 @@
+{
+  "command": "node verify.js",
+  "cwd": "packages/sub",
+  "exitCode": 0
+}

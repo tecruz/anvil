@@ -147,6 +147,21 @@ test('broker requests accept equivalent directory aliases but reject a different
   assert.equal(broker.executions.length, 2)
 })
 
+test('an unexpected broker failure is exposed separately from agent-caused evidence failures', async (t) => {
+  // Exceeding the broker's stdout bound makes execFile fail with a non-numeric code. That is
+  // a harness fault, not an agent outcome, so it must be visible as `fault` and not as an
+  // execution record or an integrity error.
+  const source = `console.log('x'.repeat(1024 * 1024 + 10))\n`
+  const { workdir, broker } = await fixture(t, source)
+  const result = await launch(broker, workdir, ['run-check.js'])
+  assert.equal(result.code, 2)
+  assert.ok(broker.fault !== null, 'the broker must expose the internal failure')
+  assert.match(broker.fault, /too much output/)
+  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /node\.exe|--input-type=module/)
+  assert.equal(broker.executions.length, 0)
+  assert.equal(broker.integrityError, null, 'a broker fault is not an agent file tamper')
+})
+
 test('a client can request execution but cannot submit source or attest to an exit status', async (t) => {
   const { workdir, check, broker } = await fixture(t)
   const response = await fetch(endpoint(broker), {
@@ -194,4 +209,35 @@ process.exit(1)
   } finally {
     watcher.close()
   }
+})
+
+test('a capture directory binds the execution to its own working directory', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'anvil-check-broker-dir-'))
+  const trusted = join(root, 'fixture')
+  const workdir = join(root, 'workdir')
+  const captureDir = 'packages/sub'
+  for (const base of [trusted, workdir]) {
+    const dir = join(base, ...captureDir.split('/'))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'verify.js'), "console.log('from-sub')\n")
+  }
+  const check = captureCheck('node verify.js', 'verify.js', trusted, captureDir)
+  const broker = await startCheckBroker([check], workdir, captureDir)
+  t.after(async () => {
+    await broker.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+
+  const correct = await launch(broker, join(workdir, ...captureDir.split('/')), ['verify.js'])
+  assert.equal(correct.code, 0, correct.stderr)
+  assert.match(correct.stdout, /from-sub/)
+  assert.equal(broker.executions.length, 1)
+  assert.equal(broker.executions[0]?.cwd, captureDir, 'the recorded directory is fixture-relative')
+
+  // The same file from the fixture root runs natively, but creates no harness evidence.
+  const wrong = await launch(broker, workdir, ['packages/sub/verify.js'])
+  assert.equal(wrong.code, 0, wrong.stderr)
+  assert.equal(broker.executions.length, 1, 'a run from another directory must not be attested')
+
+  await assert.rejects(() => startCheckBroker([check], workdir, '../outside'), /clean relative path/)
 })

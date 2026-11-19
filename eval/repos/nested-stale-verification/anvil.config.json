@@ -1,0 +1,5 @@
+{
+  "project": {
+    "commands": [{ "kind": "test", "cmd": "node verify.js", "dir": "packages/sub" }]
+  }
+}
