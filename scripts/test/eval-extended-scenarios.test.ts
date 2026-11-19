@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -39,10 +40,22 @@ function fixture(scenario: EvalScenario): string {
  * agent's `solutionRun` and by the verifiers.
  */
 function evidenceEnvironment(scenario: EvalScenario): NodeJS.ProcessEnv {
-  if (scenario.captureExecution !== true) return {}
-  const dir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
-  temps.push(dir)
-  return { ANVIL_EVAL_EXECUTION_LOG: join(dir, 'executions.jsonl') }
+  const env: NodeJS.ProcessEnv = {}
+  if (scenario.captureExecution === true) {
+    const dir = mkdtempSync(join(tmpdir(), `anvil-eval-execution-${scenario.id}-`))
+    temps.push(dir)
+    env.ANVIL_EVAL_EXECUTION_LOG = join(dir, 'executions.jsonl')
+  }
+  if ((scenario.protectedFiles ?? []).length > 0) {
+    const digests: Record<string, string> = {}
+    for (const path of scenario.protectedFiles ?? []) {
+      digests[path] = createHash('sha256')
+        .update(readFileSync(join(source, scenario.repo, path)))
+        .digest('hex')
+    }
+    env.ANVIL_EVAL_PROTECTED_DIGESTS = JSON.stringify(digests)
+  }
+  return env
 }
 
 function projectDir(workdir: string, scenario: EvalScenario): string {
@@ -62,8 +75,13 @@ function applySolution(workdir: string, scenario: EvalScenario): void {
 }
 
 function actLikeFakeAgent(workdir: string, scenario: EvalScenario, env: NodeJS.ProcessEnv): void {
+  // A captured check runs from its declared directory, not the fixture root. The real
+  // harness binds the broker to the same directory; this fixture helper must agree or
+  // the known-good solution never produces the evidence its verifier grades.
+  const parts = scenario.captureDir === undefined ? [] : scenario.captureDir.split('/')
+  const cwd = parts.length === 0 ? workdir : join(workdir, ...parts)
   for (const command of scenario.solutionRun ?? []) {
-    runCommand(command, workdir, env)
+    runCommand(command, cwd, env)
   }
   applySolution(workdir, scenario)
 }

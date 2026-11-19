@@ -364,6 +364,11 @@ outcomes without replacing that hermetic summary: task success tied in all three
 and cost and skill access remained unknown. Its 3 tied pairs are `insufficient evidence`
 under the report's direction rule, not an improvement or regression.
 
+The [nested verification pilot](VERIFICATION_PILOT.md) compares generated Anvil context with
+a bare fixture and requires evidence that the agent actually ran the supported command in the
+correct directory. Its scenario and offline controls are implemented; no real-model run has
+been authorized.
+
 ## Delivery order
 
 1. Explicit project capabilities and unsupported-technology fallbacks.

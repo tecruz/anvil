@@ -11,6 +11,7 @@ import {
   checkRunRecordCompatibility,
   EVAL_SCHEMA_VERSION,
   type EvalBaseline,
+  type EvalExecutionAttestation,
   type EvalLatest,
   type EvalRunRecord,
   type EvalRunRecordResult,
@@ -228,6 +229,40 @@ describe('the eval gate', () => {
     assert.match(gate.message, /tiny-verify-only\/anvil.*reports 1 visible verifier commands.*defines 2/)
   })
 
+  test('the gate rejects a summary whose execution evidence disagrees with its run record', () => {
+    const scenarios = matrix()
+    const run = latest(scenarios)
+    run.implementation = 'impl-hash'
+    run.results[0]!.taskFailureReason = 'the agent skipped the check'
+    run.results[0]!.executionAttestation = {
+      status: 'observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      exitCode: 0,
+    }
+    const record = runRecordFor(run)
+    const expected = baseline(scenarios)
+    const check = (summary: EvalLatest): ReturnType<typeof checkEvalGate> =>
+      checkEvalGate(expected, summary, expected.scenarios, 'impl-hash', record, 'harness-hash')
+    assert.equal(check(run).ok, true, `a matching summary and record must pass: ${check(run).message}`)
+    const forged = structuredClone(run) as EvalLatest
+    forged.results[0]!.taskFailureReason = 'a different reason'
+    let gate = check(forged)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /taskFailureReason/)
+
+    const forgedAttestation = structuredClone(run) as EvalLatest
+    forgedAttestation.results[0]!.executionAttestation = {
+      status: 'not-observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      reason: 'forged',
+    }
+    gate = check(forgedAttestation)
+    assert.equal(gate.ok, false)
+    assert.match(gate.message, /executionAttestation/)
+  })
+
   test('fails when the latest run does not record the implementation it evaluated', () => {
     const expected = baseline(matrix())
     const gate = checkEvalGate(expected, latest(matrix()), expected.scenarios, 'impl-hash')
@@ -390,6 +425,48 @@ describe('versioned eval evidence', () => {
     const gate = checkEvalGate(baseline(matrix()), parsed)
     assert.equal(gate.ok, false)
     assert.match(gate.message, /legacy evidence/)
+  })
+
+  test('task failure reasons and retained execution evidence survive a round trip', () => {
+    const reason = 'the agent did not run node verify.js from the project directory'
+    const attestation: EvalExecutionAttestation = {
+      status: 'not-observed',
+      command: 'node verify.js',
+      cwd: 'packages/sub',
+      reason,
+    }
+    const summary = latest(matrix())
+    summary.results[0] = { ...summary.results[0]!, taskFailureReason: reason, executionAttestation: attestation }
+    const parsedSummary = parseLatest(JSON.parse(JSON.stringify(summary)))
+    assert.notEqual(typeof parsedSummary, 'string')
+    if (typeof parsedSummary !== 'string') {
+      assert.equal(parsedSummary.results[0]!.taskFailureReason, reason)
+      assert.deepEqual(parsedSummary.results[0]!.executionAttestation, attestation)
+    }
+
+    const record = runRecord()
+    record.results[0] = { ...record.results[0]!, taskFailureReason: reason, executionAttestation: attestation }
+    const parsedRecord = parseRunRecord(JSON.parse(JSON.stringify(record)))
+    assert.notEqual(typeof parsedRecord, 'string')
+    if (typeof parsedRecord !== 'string') {
+      assert.equal(parsedRecord.results[0]!.taskFailureReason, reason)
+      assert.deepEqual(parsedRecord.results[0]!.executionAttestation, attestation)
+    }
+
+    assert.match(
+      parseLatest({
+        ...summary,
+        results: [{ ...summary.results[0]!, executionAttestation: { ...attestation, status: 'forged' } }],
+      }) as string,
+      /executionAttestation is invalid/,
+    )
+    assert.match(
+      parseRunRecord({
+        ...record,
+        results: [{ ...record.results[0]!, taskFailureReason: 7 }],
+      }) as string,
+      /taskFailureReason is invalid/,
+    )
   })
 
   test('reads and round-trips version 1 records without fabricating the initial fixture snapshot', () => {
@@ -624,6 +701,8 @@ function runRecordFor(run: EvalLatest): EvalRunRecord {
       durationMs: 0,
       transcript: '',
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
+      ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
       ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
       ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
       ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),

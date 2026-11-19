@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, isAbsolute, join, relative } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -22,6 +22,8 @@ export interface CheckExecution {
   stdout: string
   stderr: string
   at: string
+  /** Fixture-relative directory the broker ran the check in. Empty for the fixture root. */
+  cwd: string
 }
 
 export interface CheckBroker {
@@ -29,16 +31,46 @@ export interface CheckBroker {
   env: NodeJS.ProcessEnv
   executions: readonly CheckExecution[]
   readonly integrityError: string | null
+  /** An unexpected broker failure, which is a harness fault rather than an agent outcome. */
+  readonly fault: string | null
   close(): Promise<void>
 }
 
-export function captureCheck(command: string, script: string, fixtureRoot: string): CapturedCheck {
-  const source = readFileSync(join(fixtureRoot, script), 'utf8')
+export function captureCheck(command: string, script: string, fixtureRoot: string, captureDir = ''): CapturedCheck {
+  const source = readFileSync(join(fixtureRoot, ...segments(captureDir), script), 'utf8')
   return { command, script, source, sourceHash: hashSource(source) }
+}
+
+/**
+ * A fixture-relative directory must stay inside the fixture. The value comes from a checked-in
+ * scenario, but a traversal would make the broker attest to a directory outside the worktree.
+ */
+function segments(captureDir: string): string[] {
+  if (captureDir === '') return []
+  if (captureDir.startsWith('/') || captureDir.startsWith('\\') || /^[A-Za-z]:/.test(captureDir)) {
+    throw new Error(`captureDir must be relative, got ${JSON.stringify(captureDir)}`)
+  }
+  const parts = captureDir.split(/[/\\]/)
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) {
+    throw new Error(`captureDir must be a clean relative path, got ${JSON.stringify(captureDir)}`)
+  }
+  return parts
 }
 
 function hashSource(source: string): string {
   return createHash('sha256').update(source, 'utf8').digest('hex')
+}
+
+/**
+ * A broker fault must not carry a raw Node error: `error.message` includes the runtime path
+ * and the `--eval` source, neither of which belongs in retained evidence. Return a small
+ * fixed category instead.
+ */
+function faultCategory(error: unknown): string {
+  const failure = error as { code?: unknown; killed?: boolean }
+  if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'the check produced too much output'
+  if (failure.killed === true) return 'the check was stopped by the harness'
+  return 'the check could not be executed'
 }
 
 /**
@@ -48,12 +80,29 @@ function hashSource(source: string): string {
  * execution record: even a direct HTTP request has to run the captured source.
  * This is a provenance boundary, not an OS sandbox for hostile native processes.
  */
-export async function startCheckBroker(checks: readonly CapturedCheck[], workdir: string): Promise<CheckBroker> {
+export async function startCheckBroker(
+  checks: readonly CapturedCheck[],
+  workdir: string,
+  captureDir = '',
+): Promise<CheckBroker> {
   // macOS temporary paths (/var vs /private/var), Windows short names and shell
   // directory normalization can give the same directory different spellings.
-  const directory = realpathSync.native(workdir)
+  const root = realpathSync.native(workdir)
+  const parts = segments(captureDir)
+  const directory = parts.length === 0 ? root : realpathSync.native(join(root, ...parts))
+  const fromRoot = relative(root, directory)
+  if (
+    fromRoot === '..' ||
+    fromRoot.startsWith(`..${'/'}`) ||
+    fromRoot.startsWith(`..${'\\'}`) ||
+    isAbsolute(fromRoot)
+  ) {
+    throw new Error(`captureDir resolves outside the worktree: ${JSON.stringify(captureDir)}`)
+  }
+  const recordedCwd = parts.join('/')
   const executions: CheckExecution[] = []
   let integrityError: string | null = null
+  let fault: string | null = null
   let closing = false
   let requests = 0
   const route = `/${randomUUID()}`
@@ -71,12 +120,23 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
       }
       const chunks: Buffer[] = []
       let bytes = 0
-      for await (const chunk of request) {
-        bytes += chunk.length
-        if (bytes > 8192) throw new Error('check request is too large')
-        chunks.push(Buffer.from(chunk))
+      try {
+        for await (const chunk of request) {
+          bytes += chunk.length
+          if (bytes > 8192) throw new Error('check request is too large')
+          chunks.push(Buffer.from(chunk))
+        }
+      } catch {
+        reply(response, 400, { error: 'check request is too large' })
+        return
       }
-      const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { command?: unknown; cwd?: unknown }
+      let input: { command?: unknown; cwd?: unknown }
+      try {
+        input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { command?: unknown; cwd?: unknown }
+      } catch {
+        reply(response, 400, { error: 'check request is not valid JSON' })
+        return
+      }
       const check = checks.find((entry) => entry.command === input?.command)
       let requestDirectory: string | null = null
       if (typeof input?.cwd === 'string') {
@@ -134,12 +194,16 @@ export async function startCheckBroker(checks: readonly CapturedCheck[], workdir
         stdout,
         stderr,
         at: new Date().toISOString(),
+        cwd: recordedCwd,
       }
       executions.push(execution)
       reply(response, 200, execution)
     }
     const task = handle().catch((error: unknown) => {
-      reply(response, 500, { error: error instanceof Error ? error.message : String(error) })
+      // Never persist a raw Node error: its message embeds the executable path and the
+      // captured source passed to `--eval`. Keep a bounded category for the harness record.
+      fault = faultCategory(error)
+      reply(response, 500, { error: fault })
     })
     pending.add(task)
     void task.finally(() => pending.delete(task))
@@ -216,6 +280,9 @@ if (check === undefined) {
       executions,
       get integrityError() {
         return integrityError
+      },
+      get fault() {
+        return fault
       },
       close,
     }
