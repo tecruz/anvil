@@ -278,7 +278,26 @@ const INSTRUCTION_CONFLICT: Rule = {
   title: 'Instruction files agree on how to verify',
   order: 45,
   evaluate(ctx) {
-    const files = ctx.profile.instructions.filter((i) => !i.path.endsWith('/') && i.path !== '.cursor/rules')
+    // The profile records `.cursor/rules` as one directory entry, not the rule files the
+    // agent actually reads. Expand it so two Cursor rules can disagree with each other too.
+    const files: string[] = []
+    for (const instruction of ctx.profile.instructions) {
+      const path = instruction.path.replace(/\\/g, '/')
+      if (path.endsWith('/') || path === '.cursor/rules') {
+        let names: string[]
+        try {
+          names = readdirSync(join(ctx.profile.root, ...path.split('/').filter((p) => p !== '')))
+        } catch {
+          continue
+        }
+        for (const name of names) {
+          if (!/\.(md|mdc|rules)$/i.test(name)) continue
+          files.push(`${path.replace(/\/$/, '')}/${name}`)
+        }
+        continue
+      }
+      files.push(path)
+    }
     if (files.length < 2) return na('Fewer than two instruction files, so they cannot disagree')
 
     // Test/build/lint/typecheck only: these are the verify commands an agent acts on.
@@ -302,29 +321,50 @@ const INSTRUCTION_CONFLICT: Rule = {
     for (const instruction of files) {
       let text: string
       try {
-        text = readFileSync(join(ctx.profile.root, ...instruction.path.split('/')), 'utf8')
+        text = readFileSync(join(ctx.profile.root, ...instruction.split('/')), 'utf8')
       } catch {
         continue
       }
+      let fenced = false
       for (const [index, raw] of text.split('\n').entries()) {
-        // Strip markdown and shell decoration, then match only the command inside a code
-        // span or a fenced/shell line. Bare prose about a runner is not a command.
-        const line = raw
-          .replace(/`/g, '')
-          .replace(/^\s{0,4}(?:\$|#|>)\s*/, '')
-          .trim()
-        if (line === '' || !mentionsRunner(line)) continue
-        for (const pattern of patterns) {
-          const match = pattern.re.exec(line)
-          if (match === null) continue
-          const cmd = match[0].replace(/\s+/g, ' ').toLowerCase()
-          const key = `${pattern.kind}`
-          const list = found.get(key) ?? []
-          if (!list.some((entry) => entry.cmd === cmd && entry.evidence.startsWith(instruction.path))) {
-            list.push({ cmd, evidence: `${instruction.path}:${index + 1}` })
+        if (/^\s*```/.test(raw)) {
+          fenced = !fenced
+          continue
+        }
+        // Only explicit commands count: a backtick code span, a line inside a fenced shell
+        // block, or a `$` prompt. Prose such as "we use npm for tests" is not a command, so
+        // it must never be reported as one file disagreeing with another.
+        const candidates: string[] = []
+        if (fenced) {
+          const shell = raw.trim()
+          if (shell !== '' && !shell.startsWith('#')) candidates.push(shell.replace(/^\$\s*/, ''))
+        } else {
+          for (const span of raw.matchAll(/`([^`]+)`/g)) {
+            if (span[1] !== undefined) candidates.push(span[1])
           }
-          found.set(key, list)
-          break
+          const prompt = /^\s*\$\s+(.+)$/.exec(raw)
+          if (prompt?.[1] !== undefined) candidates.push(prompt[1])
+        }
+        for (const candidate of candidates) {
+          const line = candidate.trim().replace(/\s+/g, ' ')
+          if (line === '' || !mentionsRunner(line)) continue
+          for (const pattern of patterns) {
+            const match = pattern.re.exec(line)
+            if (match === null) continue
+            // `npm run test` and `npm test` are the same command; the runner stays part of
+            // it so `pnpm test` cannot be mistaken for `npm test`.
+            const cmd = match[0]
+              .replace(/\s+/g, ' ')
+              .toLowerCase()
+              .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
+            const key = `${pattern.kind}`
+            const list = found.get(key) ?? []
+            if (!list.some((entry) => entry.cmd === cmd && entry.evidence.startsWith(instruction))) {
+              list.push({ cmd, evidence: `${instruction}:${index + 1}` })
+            }
+            found.set(key, list)
+            break
+          }
         }
       }
     }
@@ -352,7 +392,7 @@ const INSTRUCTION_CONFLICT: Rule = {
         found.size > 0
           ? `${found.size} verify command kind(s) agree across instruction files`
           : 'No verify commands in instruction files',
-        files.map((f) => f.path).slice(0, 6),
+        files.slice(0, 6),
       )
     }
 
@@ -360,7 +400,7 @@ const INSTRUCTION_CONFLICT: Rule = {
       `Instruction files disagree on verify commands: ${issues.slice(0, 3).join(' | ')}. Two tools may verify with different commands.`,
       [...new Set(evidence)].slice(0, 6),
       derived(
-        files[0]?.path ?? 'AGENTS.md',
+        files[0] ?? 'AGENTS.md',
         'Reconcile the verify commands across the instruction files, or point the secondary file at the same runners',
         0.75,
       ),
