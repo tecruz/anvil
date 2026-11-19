@@ -36,7 +36,9 @@
  *     minutes of tests it did not need to run.
  *
  * Env:
- *   ANVIL_TEST_BASE=ref   compare against this ref instead of the merge base with main
+ *   ANVIL_TEST_BASE=ref   compare against this ref instead of the merge base with main; a ref
+ *                         that does not resolve to a commit fails the command rather than
+ *                         silently reporting that nothing changed
  *   ANVIL_TEST_FULL=1     always run the whole suite, whatever changed
  */
 
@@ -67,9 +69,33 @@ function git(args: readonly string[], root: string): string | null {
  */
 function gitRaw(args: readonly string[], root: string): string | null {
   try {
-    return execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+    return execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 8 * 1024 * 1024,
+      // Capture stderr instead of leaking it to the console: a failed optional probe is
+      // normal, and callers already treat a null return as "this command did not succeed".
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
   } catch {
     return null
+  }
+}
+
+/**
+ * Run git and report only whether it succeeded.
+ *
+ * `gitRaw` deliberately turns a failed command into `null`, which is right for optional probes
+ * (`rev-parse` of a candidate ref that may not exist) but wrong when a failure must not be
+ * mistaken for "no changes". An invalid `ANVIL_TEST_BASE` makes `git diff` fail just as surely
+ * as a clean tree makes it print nothing; only the exit code tells them apart.
+ */
+function gitSucceeds(args: readonly string[], root: string): boolean {
+  try {
+    execFileSync('git', args, { cwd: root, stdio: 'ignore' })
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -110,15 +136,31 @@ export function porcelainPaths(output: string): string[] {
 }
 
 /** Repo-relative paths changed since the base, including uncommitted work. */
-export function changedFiles(base: string | null, root: string = repoRoot): string[] {
+export interface ChangeSet {
+  files: string[]
+  /** False when a git command failed, so an empty `files` is not proof of a clean tree. */
+  ok: boolean
+  /** The failing invocation, for a clear error or fallback reason. Null on success. */
+  error: string | null
+}
+
+/**
+ * Compute the change set, reporting git failures separately from a genuinely empty result.
+ *
+ * The old `changedFiles` swallowed every git error and returned an empty array, so an invalid
+ * base or a broken repository produced the same green "nothing to run" as a clean tree. A
+ * caller that will claim verification must be able to tell those apart.
+ */
+export function changeSet(base: string | null, root: string = repoRoot): ChangeSet {
   const out = new Set<string>()
   if (base !== null) {
     // `--no-renames` because `git diff` reports a rename as the new path alone. A suite that
     // still imports or spawns the old file would then not be selected, even though the
     // rename deleted it.
-    for (const path of (gitRaw(['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`], root) ?? '').split(
-      '\0',
-    )) {
+    const args = ['diff', '--name-only', '--no-renames', '-z', `${base}...HEAD`]
+    const diff = gitRaw(args, root)
+    if (diff === null) return { files: [...out], ok: false, error: `git ${args.join(' ')}` }
+    for (const path of diff.split('\0')) {
       if (path.trim() !== '') out.add(path.trim())
     }
   }
@@ -128,10 +170,18 @@ export function changedFiles(base: string | null, root: string = repoRoot): stri
   // (`?? scripts/test/new/`). No suite is named `scripts/test/new/`, so a suite added in a
   // new subdirectory -- the exact case `allRootTests` enumerates recursively -- would be
   // discovered and then never selected.
-  for (const path of porcelainPaths(gitRaw(['status', '--porcelain', '-z', '--untracked-files=all'], root) ?? '')) {
+  const statusArgs = ['status', '--porcelain', '-z', '--untracked-files=all']
+  const status = gitRaw(statusArgs, root)
+  if (status === null) return { files: [...out], ok: false, error: `git ${statusArgs.join(' ')}` }
+  for (const path of porcelainPaths(status)) {
     out.add(path)
   }
-  return [...out]
+  return { files: [...out], ok: true, error: null }
+}
+
+/** Repo-relative paths changed since the base, including uncommitted work. */
+export function changedFiles(base: string | null, root: string = repoRoot): string[] {
+  return changeSet(base, root).files
 }
 
 /** One workspace package, its internal dependencies, and where its tests live. */
@@ -623,15 +673,32 @@ export function main(): number {
   let reason = 'full suite'
 
   if (!wantsFull) {
-    const base = baseRef()
-    const changed = changedFiles(base)
-    if (base === null) {
-      reason = 'no base ref to compare against; full suite'
+    const override = process.env.ANVIL_TEST_BASE
+    const base = baseRef(repoRoot)
+    // An explicit base that does not resolve is a caller error, not a clean tree. Fail loudly
+    // rather than reporting a green run that verified nothing. Autodetected refs are different:
+    // they were already probed with `rev-parse`, and a failed probe simply moves to the next
+    // candidate (or leaves no base at all), which the full-suite fallback below handles.
+    if (
+      override !== undefined &&
+      override !== '' &&
+      !gitSucceeds(['rev-parse', '--verify', '--quiet', `${override}^{commit}`], repoRoot)
+    ) {
+      console.error(`test:changed: ANVIL_TEST_BASE=${override} does not resolve to a commit`)
+      return 1
+    }
+    const changes = changeSet(base, repoRoot)
+    if (base === null || !changes.ok) {
+      reason =
+        base === null
+          ? 'no base ref to compare against; full suite'
+          : `could not determine changed files (${changes.error}); full suite`
       rootTests = allRootTests(repoRoot)
-    } else if (changed.length === 0) {
+    } else if (changes.files.length === 0) {
       console.log(`${color('test:changed:')} no changes since ${base}; nothing to run`)
       return 0
     } else {
+      const changed = changes.files
       const affected = affectedPackages(changed, graph, repoRoot)
       rootTests = rootTestsFor(changed, repoRoot)
       if (affected.length === 0 && rootTests.length === 0) {
