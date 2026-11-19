@@ -7,9 +7,10 @@
 #
 # The rehearsal exists because a release cannot be undone: it exercises the GitHub steps
 # that were previously only rehearsed locally -- the artifact upload and the job summary --
-# without ever calling `npm publish`. A dispatch has no tag, so the candidate version comes
-# from the workspace manifest. Dispatching is not an approval to publish: publication still
-# requires an explicit version tag and the maintainer's decision.
+# without ever calling `npm publish`. A dispatch on a branch has no tag, so the candidate
+# version comes from the workspace manifest; a dispatch on a `v*` tag rehearses that tag's
+# identity gate instead. Dispatching is not an approval to publish: publication still
+# requires an explicit version tag push and the maintainer's decision.
 #
 # The bundle is never rebuilt after testing: if the build changes, the tag moves and a
 # new release is cut. Pull-request CI has no publish credentials and cannot publish.
@@ -28,8 +29,9 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Rehearse the exact release steps without publishing. No inputs: the candidate is the
-  # checked-out manifest, which is the version a subsequent tag would release.
+  # Rehearse the exact release steps without publishing. No inputs: a branch dispatch takes
+  # the candidate from the checked-out manifest, and a dispatch on a `v*` tag rehearses that
+  # tag's identity gate.
   workflow_dispatch:
 
 # Preparation and rehearsal run with read-only permissions. OIDC is granted only to the
@@ -37,11 +39,11 @@ on:
 permissions:
   contents: read
 
-# One run per ref, and never cancel one mid-flight: a tag release in progress must not be
-# killed by a dispatch of the same ref. A dispatch on a branch uses a different ref, so it
-# cannot queue behind a tag release.
+# One run per ref and event, and never cancel one mid-flight: a tag release in progress must
+# not be killed by a dispatch of the same ref. The event is part of the key so a rehearsal
+# can never replace a queued release (or vice versa) on the same ref.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -118,14 +120,21 @@ jobs:
           tarball=$(realpath dist/*.tgz)
           checksum=$(sha256sum "$tarball" | cut -d' ' -f1)
           source_sha=$(git rev-parse HEAD)
-          # The ref decides the version, not the event: a dispatch can target a tag, and then
-          # the tag is the claim being rehearsed. Only a branch dispatch -- which has no tag
-          # to compare against -- takes the candidate from the manifest.
-          if [ "$GITHUB_REF" != "${GITHUB_REF#refs/tags/v}" ]; then
-            version=${GITHUB_REF_NAME#v}
-          else
-            version=$(node -p "require('./packages/cli/package.json').version")
-          fi
+          # One decision for both outputs: a `v*` tag is the claim being released (or
+          # rehearsed), and anything else -- a branch dispatch -- has no tag to compare
+          # against, so its candidate version comes from the manifest. Deriving `rehearsal`
+          # here keeps it from disagreeing with the version the identity step compares.
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              version=${GITHUB_REF_NAME#v}
+              rehearsal=0
+              ;;
+            *)
+              version=$(node -p "require('./packages/cli/package.json').version")
+              rehearsal=1
+              ;;
+          esac
+          echo "rehearsal=$rehearsal" >> "$GITHUB_OUTPUT"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -180,9 +189,8 @@ jobs:
         env:
           TAG_VERSION: ${{ steps.provenance.outputs.version }}
           TARBALL: ${{ steps.provenance.outputs.tarball }}
-          # A branch dispatch has no tag to compare against; a dispatch on a `v*` tag does,
-          # so the same gate runs for it as for a tag push.
-          REHEARSAL: ${{ !startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
+          # Produced by the same step that chose the version, so the two cannot disagree.
+          REHEARSAL: ${{ steps.provenance.outputs.rehearsal }}
         run: |
           tar -xOf "$TARBALL" package/package.json | TAG_VERSION="$TAG_VERSION" REHEARSAL="$REHEARSAL" node -e '
             const fs = require("node:fs")

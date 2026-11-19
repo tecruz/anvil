@@ -213,18 +213,24 @@ describe('release workflow rehearsal', () => {
 
   test('a branch dispatch takes its version from the manifest, a tag dispatch from the ref', () => {
     const provenance = step('record checksum and provenance')
-    assert.match(provenance, /GITHUB_REF\b/, 'the ref decides whether a tag exists')
+    assert.match(provenance, /case "\$GITHUB_REF" in/, 'the ref decides whether a tag exists')
+    assert.match(provenance, /refs\/tags\/v\*\)[\s\S]*?rehearsal=0/, 'a release tag is not a rehearsal')
+    assert.match(provenance, /rehearsal=1/, 'a branch dispatch marks itself a rehearsal')
     assert.doesNotMatch(provenance, /GITHUB_EVENT_NAME/, 'a dispatch on a tag still has a tag')
     assert.ok(
       workflow.includes("require('./packages/cli/package.json').version"),
       'a branch dispatch has no tag, so the manifest is the candidate version',
     )
     const identity = step('verify the release identity')
-    assert.match(identity, /REHEARSAL: \$\{\{ !startsWith\(github\.ref, 'refs\/tags\/v'\) && '1' \|\| '0' \}\}/)
+    assert.match(identity, /REHEARSAL: \$\{\{ steps\.provenance\.outputs\.rehearsal \}\}/)
+    assert.doesNotMatch(identity, /startsWith\(github\.ref/, 'the identity step cannot re-derive the tag check')
   })
 
   test('both jobs are bounded and cannot cancel an in-flight release', () => {
-    assert.match(workflow, /^concurrency:\n {2}group: release-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: false$/m)
+    assert.match(
+      workflow,
+      /^concurrency:\n {2}group: release-\$\{\{ github\.event_name \}\}-\$\{\{ github\.ref \}\}\n {2}cancel-in-progress: false$/m,
+    )
     assert.match(job('release'), /^\s{4}timeout-minutes: 30$/m)
     assert.match(job('publish'), /^\s{4}timeout-minutes: 15$/m)
     const checkouts =

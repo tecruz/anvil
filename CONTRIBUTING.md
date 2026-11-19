@@ -264,9 +264,10 @@ gh workflow run release.yml
 
 It builds once, enforces the tarball allowlist, installs the artifact with scripts disabled,
 smoke-tests the installed CLI, records the checksum and retains the tested bytes — the same
-steps as a tag-triggered release — then stops before `npm publish`. A dispatch has no tag, so
-the candidate version comes from `packages/cli/package.json`, and its evidence artifact is
-named `release-evidence-rehearsal-*` so it cannot be mistaken for a release.
+steps as a tag-triggered release — then stops before `npm publish`. A dispatch on a branch has
+no tag, so the candidate version comes from `packages/cli/package.json`; a dispatch on a `v*`
+tag rehearses that tag's identity gate instead. Its evidence artifact is named
+`release-evidence-rehearsal-*` so it cannot be mistaken for a release.
 
 Publication remains exclusively on a `v*` tag and needs the maintainer's explicit approval.
 A dispatch never publishes, whatever inputs or credentials are present.
