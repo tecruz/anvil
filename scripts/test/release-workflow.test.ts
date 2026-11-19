@@ -226,14 +226,19 @@ describe('release workflow rehearsal', () => {
       name: string
       version: string
     }
-    const resolve = (ref: string): { version: string; rehearsal: string } => {
+    const resolveRaw = (ref: string): { status: number | null; stdout: string; output: string } => {
       const result = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'resolve-release-ref.mjs')], {
         cwd: repoRoot,
         env: { ...process.env, GITHUB_REF: ref },
         encoding: 'utf8',
       })
-      assert.equal(result.status, 0, `resolving ${ref} failed: ${result.stderr}`)
-      const pairs = (result.stdout ?? '')
+      const stdout = result.stdout ?? ''
+      return { status: result.status, stdout, output: `${stdout}\n${result.stderr ?? ''}` }
+    }
+    const resolve = (ref: string): { version: string; rehearsal: string } => {
+      const result = resolveRaw(ref)
+      assert.equal(result.status, 0, `resolving ${ref} failed: ${result.output}`)
+      const pairs = result.stdout
         .trim()
         .split('\n')
         .map((line) => line.split('='))
@@ -269,6 +274,12 @@ describe('release workflow rehearsal', () => {
     const rejected = identity(packed, mismatched.version, mismatched.rehearsal)
     assert.notEqual(rejected.status, 0, 'a tag that disagrees with the manifest must fail')
     assert.match(rejected.output, /tag is v9\.9\.9/)
+
+    // `tags: ['v*']` also matches the bare tag `v`, which claims no version. Falling back to
+    // the manifest would make preparation retain evidence for a tag it never checked.
+    const bare = resolveRaw('refs/tags/v')
+    assert.notEqual(bare.status, 0, 'a tag that claims no version must fail before evidence is retained')
+    assert.match(bare.output, /claims no version/)
   })
 
   test('both jobs are bounded and cannot cancel an in-flight release', () => {
