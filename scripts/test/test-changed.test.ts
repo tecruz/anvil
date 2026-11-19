@@ -8,7 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import {
   globSync,
   mkdirSync,
@@ -29,9 +29,13 @@ import {
   affectedPackages,
   allRootTests,
   changedFiles,
+  changeSet,
+  type GitRunner,
+  main,
   porcelainPaths,
   readGraph,
   rootTestsFor,
+  type TestRunner,
   testFilesFor,
   testFilesForSelection,
 } from '../test-changed.ts'
@@ -168,6 +172,72 @@ describe('changed-file parsing', () => {
       `expected the file, not the directory, in ${JSON.stringify(changed)}`,
     )
     assert.deepEqual(rootTestsFor(changed, root), ['scripts/test/nested/new.test.ts'])
+  })
+})
+
+describe('git failures are never a green run', () => {
+  test('an invalid base is a failed change set, not an empty one', () => {
+    const root = gitFixture({ 'README.md': '# demo\n' })
+    const result = changeSet('refs/heads/this-ref-does-not-exist', root)
+    assert.equal(result.ok, false, 'a ref that does not resolve must not look like a clean tree')
+    assert.deepEqual(result.files, [])
+    assert.match(result.error ?? '', /git diff/)
+  })
+
+  test('a valid base produces a trustworthy change set', () => {
+    const root = gitFixture({ 'README.md': '# demo\n' })
+    const result = changeSet('HEAD', root)
+    assert.equal(result.ok, true)
+    assert.equal(result.error, null)
+    assert.deepEqual(result.files, [])
+  })
+
+  test('an invalid ANVIL_TEST_BASE fails the command instead of running nothing', () => {
+    const bogus = `refs/heads/anvil-missing-${process.pid}`
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'test-changed.ts')], {
+      cwd: ROOT,
+      env: { ...process.env, ANVIL_TEST_BASE: bogus },
+      encoding: 'utf8',
+    })
+    assert.notEqual(result.status, 0, 'a caller error must not exit successfully')
+    assert.match(result.stderr ?? '', /does not resolve to a commit/)
+  })
+
+  test('a failed automatic diff runs the full suite and propagates its exit status', () => {
+    const savedBase = process.env.ANVIL_TEST_BASE
+    const savedFull = process.env.ANVIL_TEST_FULL
+    delete process.env.ANVIL_TEST_BASE
+    delete process.env.ANVIL_TEST_FULL
+    let invoked: readonly string[] | null = null
+    const git: GitRunner = {
+      raw: (args) => {
+        if (args[0] === 'rev-parse') return 'base'
+        if (args[0] === 'merge-base') return 'base'
+        // Both change sources fail: this is a broken git run, not a clean tree.
+        return null
+      },
+      succeeds: () => true,
+    }
+    const runTests: TestRunner = (_command, args) => {
+      invoked = args
+      return { status: 7 }
+    }
+    try {
+      assert.equal(main({ git, runTests }), 7)
+    } finally {
+      if (savedBase === undefined) delete process.env.ANVIL_TEST_BASE
+      else process.env.ANVIL_TEST_BASE = savedBase
+      if (savedFull === undefined) delete process.env.ANVIL_TEST_FULL
+      else process.env.ANVIL_TEST_FULL = savedFull
+    }
+
+    assert.ok(invoked !== null, 'the selector must still run tests when git fails')
+    const files = (invoked as readonly string[]).slice(2)
+    assert.deepEqual(
+      [...files].sort(),
+      [...testFilesForSelection(graph.packages, allRootTests(ROOT), graph, ROOT)].sort(),
+      'a failed git probe must select every package and root test',
+    )
   })
 })
 
