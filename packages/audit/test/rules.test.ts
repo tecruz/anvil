@@ -96,6 +96,101 @@ describe('a probed MCP file is visible to the rule', () => {
   })
 })
 
+describe('INSTRUCTION_CONFLICT compares verify commands across instruction files', () => {
+  test('different test commands in two files warn with evidence from both', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('AGENTS.md:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('CLAUDE.md:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('matching commands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  test('a single instruction file is na, not a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'na')
+  })
+
+  test('prose that is not a command is left alone', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nWe use npm for packages and npm test is mentioned in prose.\n',
+      'CLAUDE.md': '# Claude\n\nTests are important. Use pnpm for speed.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').status,
+      'pass',
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').detail,
+    )
+  })
+
+  test('equivalent npm shorthands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm run test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('two Cursor rule files under .cursor/rules are compared', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      '.cursor/rules/a.mdc': '---\ndescription: a\n---\n\nRun `npm test`.\n',
+      '.cursor/rules/b.mdc': '---\ndescription: b\n---\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/a.mdc:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/b.mdc:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('a command inside a fenced shell block counts', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```bash\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```bash\npnpm test\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'warn')
+  })
+})
+
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
   const scripts = JSON.stringify({ scripts: { test: 'node --test', lint: 'biome check' } })
 
