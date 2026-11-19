@@ -260,6 +260,95 @@ const AGENTS_COMMANDS: Rule = {
 }
 
 /**
+ * A repository can name one generic command in its instructions and still leave the
+ * commands anvil actually detected undocumented.
+ *
+ * `AGENTS_COMMANDS` answers "does the text name any runnable command?" This rule answers
+ * the sharper question: "does it name the specific test/build/lint/typecheck commands this
+ * repository uses?" An agent that sees only `npm test` in prose but a detected
+ * `cargo test --workspace` will invent the wrong verify step. `anvil init` already stages
+ * those commands into AGENTS.md; this finding says when an existing file has not caught up.
+ *
+ * Deliberately narrow: only the primary detected command of each kind is required, declared
+ * commands are considered only when already present in the report, and a bare `npm test`
+ * in prose does not stand in for a specific detected runner. No command is invented.
+ */
+const VERIFY_DOC_COVERAGE: Rule = {
+  id: 'VERIFY_DOC_COVERAGE',
+  layer: 'context',
+  severity: 'medium',
+  title: 'Instructions document the detected verify commands',
+  order: 44,
+  evaluate(ctx) {
+    if (!ctx.hasCode) return na('No source files, so there are no verify commands to document')
+
+    const kinds = ['test', 'build', 'lint', 'typecheck'] as const
+    const text = ctx.instructionsText
+    if (text.trim() === '') return na('No instruction text to compare against detected commands')
+
+    const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    const documented: string[] = []
+    for (const kind of kinds) {
+      const entries = ctx.profile.commands[kind]
+      if (entries === undefined || entries.length === 0) continue
+      const entry = entries[0]
+      if (entry === undefined) continue
+      const cmd = entry.cmd.trim()
+      if (cmd === '') continue
+      // Compare the command's own tokens, not just the runner name. "run npm test" is not
+      // evidence that `npm run test:changed` is documented.
+      const normalized = cmd.toLowerCase().replace(/\s+/g, ' ')
+      if (text.toLowerCase().replace(/\s+/g, ' ').includes(normalized)) {
+        documented.push(kind)
+        continue
+      }
+      // A runner alone (`npm`, `cargo`, `go`) is not the command. Require the distinctive
+      // tail of the command in the instructions before accepting a partial match.
+      const tail = normalized
+        .split(/\s+/)
+        .filter((part) => part.length > 2)
+        .slice(-2)
+        .join(' ')
+      if (tail !== '' && text.toLowerCase().includes(tail)) {
+        documented.push(kind)
+        continue
+      }
+      missing.push({ kind, cmd, evidence: entry.evidence ?? null })
+    }
+
+    if (missing.length === 0) {
+      if (documented.length === 0) return na('No detected verify command to document')
+      return pass(
+        `${documented.length} detected verify command kind(s) appear in the instructions`,
+        ctx.profile.instructions.map((i) => i.path).slice(0, 6),
+      )
+    }
+
+    const names = missing.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+    const evidence: string[] = []
+    for (const entry of missing) {
+      if (entry.evidence) evidence.push(entry.evidence)
+    }
+    for (const instruction of ctx.profile.instructions.slice(0, 4)) evidence.push(instruction.path)
+    const target =
+      ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
+      ctx.profile.instructions[0]?.path ??
+      'AGENTS.md'
+    const prefix =
+      documented.length > 0
+        ? `Some verify commands are documented, but ${names} are not.`
+        : `Detected verify commands are not documented: ${names}.`
+    return warn(
+      `${prefix} An agent that cannot see the real command will invent or omit the verify step.`,
+      [...new Set(evidence)].slice(0, 6),
+      {
+        ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+      },
+    )
+  },
+}
+
+/**
  * The instruction file's size, and where its commands are.
  *
  * Two questions, one rule, because they are the same question: is the guidance an agent
@@ -1774,6 +1863,7 @@ const RISK_MAP: Rule = {
 export const RULES: readonly Rule[] = [
   AGENTS_FILE,
   AGENTS_COMMANDS,
+  VERIFY_DOC_COVERAGE,
   INSTRUCTION_BUDGET,
   ARCH_DOC,
   MODULE_MAP,
