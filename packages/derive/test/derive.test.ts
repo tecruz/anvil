@@ -27,6 +27,7 @@ import {
   clearStaging,
   type GeneratedArtifact,
   generateAgentsFile,
+  generateInstructionMirrors,
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
@@ -34,6 +35,7 @@ import {
   INTENDED_BEHAVIOR_QUESTION,
   INTENDED_BEHAVIOR_QUESTION_ID,
   inspectStaging,
+  MIRROR_TARGETS,
   readManifest,
   readRepoFile,
   readStaged,
@@ -44,7 +46,7 @@ import {
   writeStaging,
 } from '@anvil/derive'
 import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, emptyProfile, type ProjectProfile } from '@anvil/profile'
 import { excerptKey } from '../src/brief.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -1074,6 +1076,10 @@ describe('artifact validation', () => {
       ['.opencode/commands/c.md', 'command'],
       ['.agents/skills/s/SKILL.md', 'skill'],
       ['AGENTS.md', 'agents-file'],
+      ['CLAUDE.md', 'mirror'],
+      ['.cursorrules', 'mirror'],
+      ['.cursor/rules/anvil.mdc', 'mirror'],
+      ['.github/copilot-instructions.md', 'mirror'],
     ] as const) {
       const v = validateArtifact(path, '---\nname: s\ndescription: d\n---\n\nbody\n')
       assert.equal(v.kind, kind, path)
@@ -1102,6 +1108,74 @@ describe('generated artifacts are valid', () => {
       assert.ok(summary.ok, `${fixture}: ${summary.errors.map((e) => `${e.path} ${e.message}`).join('; ')}`)
     })
   }
+})
+
+describe('opt-in instruction mirrors', () => {
+  test('generates one thin mirror per tool, all naming AGENTS.md as the source of truth', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const options = { profile, matches: matchesFor(profile) }
+    const mirrors = generateInstructionMirrors(options)
+    assert.deepEqual(
+      mirrors.map((m) => m.path),
+      ['CLAUDE.md', '.cursor/rules/anvil.mdc', '.github/copilot-instructions.md'],
+    )
+    assert.deepEqual(MIRROR_TARGETS, ['claude', 'cursor', 'copilot'])
+    for (const mirror of mirrors) {
+      assert.match(mirror.content, /AGENTS\.md/)
+      assert.match(mirror.content, /source of truth/)
+      assert.equal(validateArtifact(mirror.path, mirror.content).ok, true, mirror.path)
+    }
+  })
+
+  test('mirrors never copy a command string or a working directory', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const options = { profile, matches: matchesFor(profile) }
+    const agents = generateAgentsFile(options).content
+    const commandRows = agents
+      .split('\n')
+      .filter((l) => l.startsWith('- **'))
+      .map((l) => l.trim())
+    assert.ok(commandRows.length > 0, 'fixture must have command rows to protect against')
+    for (const mirror of generateInstructionMirrors(options)) {
+      for (const row of commandRows) {
+        assert.equal(mirror.content.includes(row), false, `${mirror.path} copied a command row: ${row}`)
+      }
+      assert.equal(mirror.content.includes('cd '), false, `${mirror.path} copied a directory-sensitive command`)
+      assert.match(mirror.content, /Read `AGENTS\.md` for each exact command/)
+    }
+  })
+
+  test('mirrors name only the verify kinds the same command set produced', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const mirrors = generateInstructionMirrors({ profile, matches: matchesFor(profile) })
+    for (const mirror of mirrors) {
+      assert.match(mirror.content, /test/)
+      assert.equal(mirror.content.includes('npm run test'), false)
+    }
+    // A docs-only repo has no verify kinds, so the mirror says so instead of inventing one.
+    const empty = emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' })
+    const emptyMirrors = generateInstructionMirrors({ profile: empty, matches: [] }, ['claude'])
+    assert.match(emptyMirrors[0]?.content ?? '', /No verify commands were detected/)
+  })
+
+  test('a subset of tools can be requested', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const mirrors = generateInstructionMirrors({ profile, matches: matchesFor(profile) }, ['copilot'])
+    assert.deepEqual(
+      mirrors.map((m) => m.path),
+      ['.github/copilot-instructions.md'],
+    )
+  })
+
+  test('a mirror without a pointer to AGENTS.md warns instead of passing silently', () => {
+    const v = validateArtifact('CLAUDE.md', 'Do whatever the README says.\n')
+    assert.equal(v.ok, true)
+    assert.ok(v.warnings.some((w) => w.includes('AGENTS.md')))
+  })
 })
 
 describe('generated AGENTS.md contains only verifiable claims', () => {
