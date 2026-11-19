@@ -687,7 +687,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
-| `anvil dashboard` | Loopback-only read-only overview of readiness, context and work. `--repo <dir>`, `--port <n>`. |
+| `anvil dashboard` | Loopback-only overview of a task brief, readiness, context and work. `--repo <dir>`, `--port <n>`. |
 | `anvil version` | The anvil version and the JSON schema version. |
 
 ### The local dashboard
@@ -696,12 +696,22 @@ accepts. This table is the summary; the help text is the contract.
 one-time URL it prints; the session token is then held in an HttpOnly cookie. The server
 binds to `127.0.0.1`, never to a network interface, and is stopped with Ctrl+C.
 
-The page has three views: **Repository** (readiness findings, blockers and ranked next
-steps), **Context** (verified brief gaps and a read-only view of the staged diff), and
-**Work** (claims, worktrees, uncommitted and unpushed changes, and agent liveness). Each
-value names the CLI command behind it, and every refresh re-reads those commands in offline
-mode. A failed command appears as an error beside the other views; it never renders as an
-empty result.
+The page has four views. **Task brief** is the entry point: paste a ticket or task
+description, or choose one of the repository suggestions from `anvil plan`. Either way it
+shows the likely files to start from, the verification commands with the source and working
+directory that established them, the required needs `anvil ready` reports as blocked, and
+what the page cannot know — approval gates, ownership, tracker state. The commands are
+printed, never run. **Repository** covers readiness findings, blockers and ranked next steps,
+**Context** covers verified brief gaps and a read-only view of the staged diff, and **Work**
+covers claims, worktrees, uncommitted and unpushed changes, and agent liveness. Each value
+names the CLI command behind it, and every refresh re-reads those commands in offline mode. A
+failed command appears as an error beside the other views; it never renders as an empty
+result.
+
+Pasted task text stays on the loopback page: it is limited to 4,000 characters, sent to the
+local server only, and not stored. The suggestions are engineering improvements derived from
+this repository's own findings, not a team's priorities. Building a brief does not create a
+tracker ticket, claim a worktree, or modify a file.
 
 Verification is deliberately shown as *unavailable*: anvil does not persist verification
 results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`

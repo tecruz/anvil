@@ -23,13 +23,32 @@ export const HTML = `<!doctype html>
   <button id="refresh" type="button">Refresh</button>
 </header>
 <nav>
-  <button class="tab active" data-view="repository" type="button">Repository</button>
+  <button class="tab active" data-view="task" type="button">Task brief</button>
+  <button class="tab" data-view="repository" type="button">Repository</button>
   <button class="tab" data-view="context" type="button">Context</button>
   <button class="tab" data-view="work" type="button">Work</button>
 </nav>
 <main>
   <p id="notes" class="notes"></p>
-  <section id="repository"></section>
+  <section id="task">
+    <div class="card">
+      <h2>Start from a task</h2>
+      <p class="muted">Paste a ticket or a task description. The brief is built from this repository's snapshot; the text is not sent anywhere else, and nothing is created in a tracker.</p>
+      <label class="muted" for="task-text">Task text</label>
+      <textarea id="task-text" rows="6" maxlength="4000" placeholder="Paste the ticket title and body, or describe the change you want to make."></textarea>
+      <div class="row">
+        <button id="task-submit" type="button">Build brief</button>
+        <span id="task-error" class="muted" role="status"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Or start from a repository suggestion</h2>
+      <p class="muted">From <code>anvil plan</code>, which reads this repository's own findings. These are engineering improvements, not confirmed team priorities.</p>
+      <div id="task-suggestions"></div>
+    </div>
+    <div id="task-brief"></div>
+  </section>
+  <section id="repository" hidden></section>
   <section id="context" hidden></section>
   <section id="work" hidden></section>
 </main>
@@ -46,11 +65,12 @@ h1 { margin: 0; font-size: 1.4rem; }
 #scope { color: #888; }
 #stamp { color: #888; font-size: 0.85rem; }
 #refresh { margin-left: auto; }
-nav { display: flex; gap: 0.5rem; padding: 1rem 0; }
+nav { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 1rem 0; }
 button { cursor: pointer; }
 .tab.active { font-weight: bold; text-decoration: underline; }
 section { max-width: 70rem; }
 h2 { font-size: 1.1rem; margin-top: 1.5rem; }
+h3 { font-size: 0.95rem; margin: 1rem 0 0.35rem; }
 .notes { color: #888; font-size: 0.85rem; }
 .card { border: 1px solid #8886; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
 .error { border-left: 4px solid #c33; background: #c33110; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
@@ -65,9 +85,21 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding
 code { font-family: ui-monospace, monospace; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
+label { display: block; margin: 0.5rem 0 0.25rem; }
+textarea { width: 100%; padding: 0.5rem; border: 1px solid #8886; border-radius: 4px; background: transparent; color: inherit; font: inherit; resize: vertical; }
+.objective { white-space: pre-wrap; overflow-wrap: anywhere; }
+.path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.suggestion { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; padding: 0.5rem 0; border-top: 1px solid #8884; }
+.suggestion:first-child { border-top: 0; }
+.suggestion .body { flex: 1 1 24rem; min-width: 0; }
+.check { padding: 0.4rem 0; border-top: 1px solid #8884; }
+.check:first-of-type { border-top: 0; }
+.check .path { display: block; margin-top: 0.15rem; }
+ul { margin: 0.25rem 0; padding-left: 1.25rem; }
+li { margin: 0.2rem 0; }
 `
 
-export const JS = `const state = { view: 'repository', snapshot: null, loading: false };
+export const JS = `const state = { view: 'task', snapshot: null, loading: false, brief: null, taskError: null, taskPending: false };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -314,6 +346,119 @@ function renderWork(root, snap) {
   parent.appendChild(card);
 }
 
+/** The brief itself: what to do, where to look, how to check, and what is still unknown. */
+function renderBrief(parent, brief) {
+  parent.replaceChildren();
+  if (!brief) return;
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Task brief'));
+  card.appendChild(make('div', 'muted', 'From the snapshot at ' + brief.generatedAt + '. Nothing was run, written or sent to a tracker.'));
+  card.appendChild(make('strong', '', brief.title));
+  if (brief.objective) card.appendChild(make('div', 'objective', brief.objective));
+
+  card.appendChild(make('h3', '', 'Start here'));
+  const start = Array.isArray(brief.startHere) ? brief.startHere : [];
+  if (start.length === 0) {
+    card.appendChild(make('div', 'muted', 'No file in this repository matched the task. It may be a new file, or the task needs more context.'));
+  } else {
+    const list = make('ul');
+    for (const item of start) {
+      const entry = make('li');
+      entry.appendChild(badge(item.kind));
+      entry.appendChild(make('code', 'path', item.path));
+      entry.appendChild(make('span', 'muted', ' · ' + item.reason));
+      list.appendChild(entry);
+    }
+    card.appendChild(list);
+  }
+
+  card.appendChild(make('h3', '', 'How to check'));
+  const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
+  if (checks.length === 0) {
+    card.appendChild(make('div', 'muted', 'No verification command was detected or declared for this repository.'));
+  } else {
+    for (const check of checks) {
+      const row = make('div', 'check');
+      row.appendChild(make('strong', '', check.kind));
+      row.appendChild(make('code', 'path', check.cmd));
+      const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
+      row.appendChild(make('div', 'muted', detail));
+      card.appendChild(row);
+    }
+  }
+  card.appendChild(make('div', 'muted', 'Not run: this page cannot execute commands. Run one in a worktree to produce evidence.'));
+
+  card.appendChild(make('h3', '', 'Blocked or missing'));
+  const blockers = Array.isArray(brief.blockers) ? brief.blockers : [];
+  if (blockers.length === 0) {
+    card.appendChild(make('div', 'muted', 'No blocked requirement is reported by anvil ready.'));
+  } else {
+    for (const blocker of blockers) {
+      const row = make('div', 'row');
+      row.appendChild(badge(blocker.status));
+      row.appendChild(make('strong', '', blocker.label));
+      if (blocker.reason) row.appendChild(make('span', '', blocker.reason));
+      card.appendChild(row);
+    }
+  }
+
+  card.appendChild(make('h3', '', 'Unknowns'));
+  const unknowns = Array.isArray(brief.unknowns) ? brief.unknowns : [];
+  const list = make('ul');
+  for (const unknown of unknowns) list.appendChild(make('li', '', unknown));
+  card.appendChild(list);
+  parent.appendChild(card);
+}
+
+/** Suggested contributions come only from derived plan fixes, never from external reading. */
+function renderSuggestions(parent, snap) {
+  parent.replaceChildren();
+  const plan = snap.repository.plan;
+  if (!plan || plan.ok === false) {
+    parent.appendChild(make('div', 'error', (plan && plan.error) || 'The plan source is unavailable.'));
+    return;
+  }
+  const all = plan.data && Array.isArray(plan.data.suggestions) ? plan.data.suggestions : [];
+  const suggestions = all.filter((entry) => entry && entry.tier === 'derived' && entry.external !== true).slice(0, 8);
+  if (suggestions.length === 0) {
+    parent.appendChild(make('div', 'muted', 'No repository suggestion is open. Paste a task above instead.'));
+    return;
+  }
+  for (const suggestion of suggestions) {
+    const row = make('div', 'suggestion');
+    const button = make('button', '', 'Build brief');
+    button.dataset.suggestion = suggestion.id || '';
+    button.setAttribute('aria-label', 'Build a brief from: ' + (suggestion.title || suggestion.id || 'this suggestion'));
+    button.addEventListener('click', function () { requestBrief({ suggestionId: suggestion.id || '' }); });
+    row.appendChild(button);
+    const body = make('div', 'body');
+    body.appendChild(badge(suggestion.tier));
+    if (suggestion.severity) body.appendChild(badge(suggestion.severity));
+    body.appendChild(make('strong', '', suggestion.title || suggestion.id || 'suggestion'));
+    if (suggestion.detail) body.appendChild(make('div', '', suggestion.detail));
+    if (Array.isArray(suggestion.evidence) && suggestion.evidence.length > 0) {
+      body.appendChild(make('div', 'muted', suggestion.evidence.join('; ')));
+    }
+    row.appendChild(body);
+    parent.appendChild(row);
+  }
+}
+
+function renderTask(root, snap) {
+  const submit = root.querySelector('#task-submit');
+  if (submit) {
+    submit.disabled = state.taskPending || !snap;
+    submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
+  }
+  if (!snap) return;
+  const suggestions = root.querySelector('#task-suggestions');
+  if (suggestions) renderSuggestions(suggestions, snap);
+  const target = root.querySelector('#task-brief');
+  if (target) renderBrief(target, state.brief);
+  const error = root.querySelector('#task-error');
+  if (error) error.textContent = state.taskError || '';
+}
+
 function render() {
   const snap = state.snapshot;
   const root = document;
@@ -322,14 +467,38 @@ function render() {
   const ready = snap.repository.ready;
   if (ready && ready.ok && ready.data && ready.data.root) root.querySelector('#scope').textContent = ready.data.root;
   root.querySelector('#notes').textContent = snap.notes.join(' ');
+  renderTask(root, snap);
   renderRepository(root, snap);
   renderContext(root, snap);
   renderWork(root, snap);
-  for (const section of ['repository', 'context', 'work']) {
+  for (const section of ['task', 'repository', 'context', 'work']) {
     root.querySelector('#' + section).hidden = section !== state.view;
   }
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.view === state.view);
+  }
+}
+
+async function requestBrief(input) {
+  if (state.taskPending) return;
+  state.taskPending = true;
+  state.taskError = null;
+  renderTask(document, state.snapshot);
+  try {
+    const response = await fetch('/api/brief', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const payload = await response.json().catch(function () { return null; });
+    if (!response.ok) throw new Error((payload && payload.error) || 'brief request failed: ' + response.status);
+    state.brief = payload;
+  } catch (error) {
+    state.taskError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.taskPending = false;
+    renderTask(document, state.snapshot);
   }
 }
 
@@ -340,7 +509,13 @@ async function load(refresh) {
   try {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
-    state.snapshot = await response.json();
+    const next = await response.json();
+    // A brief is bound to the snapshot it was built from; a refresh invalidates it.
+    if (state.snapshot) {
+      state.brief = null;
+      state.taskError = null;
+    }
+    state.snapshot = next;
     render();
   } catch (error) {
     const target = document.querySelector('#' + state.view);
@@ -359,5 +534,9 @@ for (const tab of document.querySelectorAll('.tab')) {
   });
 }
 document.querySelector('#refresh').addEventListener('click', function () { load(true); });
+document.querySelector('#task-submit').addEventListener('click', function () {
+  const field = document.querySelector('#task-text');
+  requestBrief({ text: field && typeof field.value === 'string' ? field.value : '' });
+});
 load(false);
 `

@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-17
+- Amended: 2026-11-19 (task brief)
 - Milestone: Phase 4 follow-on (#67)
 
 ## Context
@@ -28,11 +29,18 @@ runtime dependency.**
 - `anvil dashboard [--repo <dir>] [--port <n>]` binds to `127.0.0.1`, prints a one-time URL
   with a random session token, and keeps that token in an HttpOnly `SameSite=Strict` cookie.
 - The server rejects unknown `Host` headers, serves a strict content security policy, has no
-  inline script or style, and exposes exactly three GET routes: the page, two static assets,
-  and `/api/snapshot`. There is no route that takes a command or a path from a request.
+  inline script or style, and exposes the page, two static assets, `GET /api/snapshot` and
+  `POST /api/brief`. A request can name bounded task text or a plan suggestion id; it can
+  never name a command, a path or a repository.
 - Each refresh spawns the same CLI commands a human would run with `--json`, all in offline
   mode for guidance. A failing command is recorded beside the others as a source error; it
   never makes the rest of the overview look empty.
+- The task brief has two entry points: a pasted ticket and a derived `plan` suggestion. It
+  maps the text to files through the `profile` file index, prints the verification commands
+  with the source and working directory that established them, lists required needs that
+  `ready` reports blocked, and states what it cannot know. It runs nothing and writes
+  nothing: `POST /api/brief` takes no command, path or repository, is capped at 4,000
+  characters, and stores no request or response.
 - The context view reads `.anvil/staging/` through the same functions `init` uses. It shows
   the diff and whether staged bytes were edited after staging. It never stages, applies, or
   refreshes anything.
@@ -40,15 +48,18 @@ runtime dependency.**
   persist verification results, and the dashboard does not run `crew verify` on page load.
 - The page is a snapshot with an explicit timestamp and a manual refresh. It does not claim
   to be a live view of an agent, a tracker, or a CI run.
-- No write actions are wired. Adding one later is a separate decision that must go through
-  the same approval boundary the CLI command would use.
+- No write actions are wired. The brief route is a derivation with no side effect beyond its
+  response. Adding a write action later is a separate decision that must go through the same
+  approval boundary the CLI command would use.
+- The brief is built when a person asks for it, from the cached snapshot. A refresh
+  invalidates it, so a brief is never presented as newer than the facts behind it.
 
 ## Consequences
 
 - The CLI remains the product and every value on the page can be reproduced with one
   command from the source line the page prints. The dashboard cannot disagree with the CLI
   because it does not implement the rules.
-- One refresh costs five CLI processes, as MCP tool calls already do. That is acceptable for
+- One refresh costs six CLI processes, as MCP tool calls already do. That is acceptable for
   an on-demand human view and keeps the single-file bundle free of a web framework.
 - The browser page needs no build step, no CDN and no telemetry. It works in a locked-down
   network because it only talks to its own loopback server.

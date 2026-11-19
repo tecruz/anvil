@@ -4,18 +4,25 @@
  * The threat model is a local user's browser visiting a URL they did not intend: the server
  * binds to 127.0.0.1, rejects unknown Host headers (DNS rebinding), requires a random
  * session token delivered once in the start URL and kept in an HttpOnly cookie, serves a
- * strict content security policy, and exposes three fixed GET endpoints. There is no route
- * that takes a command, a path, or a repository from a request, so a dashboard page cannot
+ * strict content security policy, and exposes a small fixed API. There is no route that
+ * takes a command, a path, or a repository from a request, so a dashboard page cannot
  * become an arbitrary command-execution endpoint.
+ *
+ * The one route that accepts user content is `POST /api/brief`: it takes bounded task text
+ * or a plan suggestion id, returns a brief derived from the cached snapshot, and stores
+ * nothing. It cannot name a command or a path, and its only effect is the response.
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import type { ServerResponse } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer, type Server } from 'node:http'
 import { CSS, HTML, JS } from './assets.ts'
 import { type DashboardSnapshot, type LoadSnapshotOptions, loadSnapshot } from './snapshot.ts'
+import { buildTaskBrief, type TaskBriefInput, TaskInputError } from './task.ts'
 
 const COOKIE_PREFIX = 'anvil_dashboard'
+/** Enough for a 4,000-character task plus JSON escaping; never an unbounded upload. */
+const MAX_BODY_BYTES = 32 * 1024
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
@@ -57,6 +64,64 @@ function send(res: ServerResponse, status: number, body: string, contentType: st
     'referrer-policy': 'no-referrer',
   })
   res.end(body)
+}
+
+function sendJson(res: ServerResponse, status: number, value: unknown): void {
+  send(res, status, JSON.stringify(value), 'application/json; charset=utf-8')
+}
+
+type BodyRead = { ok: true; value: unknown } | { ok: false; status: number; message: string }
+
+/** Read a bounded JSON body. An oversize upload is consumed and then refused, never stored. */
+function readJsonBody(req: IncomingMessage, limit: number): Promise<BodyRead> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let tooLarge = false
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length
+      if (size > limit) {
+        tooLarge = true
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      if (tooLarge) {
+        resolve({ ok: false, status: 413, message: `Request body is limited to ${String(limit)} bytes.` })
+        return
+      }
+      try {
+        resolve({ ok: true, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+      } catch {
+        resolve({ ok: false, status: 400, message: 'Request body must be a JSON object.' })
+      }
+    })
+    req.on('error', (error: Error) => {
+      resolve({ ok: false, status: 400, message: `Could not read the request body: ${error.message}` })
+    })
+  })
+}
+
+/** The brief route's whole input contract. Unknown fields are refused, not ignored. */
+function briefInput(value: unknown): TaskBriefInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TaskInputError('Request body must be a JSON object.')
+  }
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (key !== 'text' && key !== 'suggestionId') throw new TaskInputError(`Unknown field: ${key}`)
+  }
+  if (record.text !== undefined && typeof record.text !== 'string') {
+    throw new TaskInputError('`text` must be a string.')
+  }
+  if (record.suggestionId !== undefined && typeof record.suggestionId !== 'string') {
+    throw new TaskInputError('`suggestionId` must be a string.')
+  }
+  const input: TaskBriefInput = {}
+  if (record.text !== undefined) input.text = record.text as string
+  if (record.suggestionId !== undefined) input.suggestionId = record.suggestionId as string
+  return input
 }
 
 function cookieValue(header: string | undefined, name: string): string | null {
@@ -115,11 +180,6 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         send(res, 403, 'Forbidden host\n', 'text/plain; charset=utf-8')
         return
       }
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        res.setHeader('allow', 'GET, HEAD')
-        send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
-        return
-      }
 
       const supplied = url.searchParams.get('token')
       const cookie = cookieValue(req.headers.cookie, cookieName)
@@ -127,6 +187,11 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         (supplied !== null && sameToken(supplied, token)) || (cookie !== null && sameToken(cookie, token))
 
       if (url.pathname === '/') {
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          res.setHeader('allow', 'GET, HEAD')
+          send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
+          return
+        }
         if (supplied !== null && sameToken(supplied, token)) {
           res.writeHead(302, {
             location: '/',
@@ -156,6 +221,38 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         return
       }
 
+      if (url.pathname === '/api/brief') {
+        if (req.method !== 'POST') {
+          res.setHeader('allow', 'POST')
+          send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
+          return
+        }
+        const contentType = req.headers['content-type'] ?? ''
+        if (!/^application\/json(?:;|$)/i.test(contentType)) {
+          sendJson(res, 415, { error: 'Use Content-Type: application/json.' })
+          return
+        }
+        const body = await readJsonBody(req, MAX_BODY_BYTES)
+        if (!body.ok) {
+          sendJson(res, body.status, { error: body.message })
+          return
+        }
+        try {
+          const input = briefInput(body.value)
+          sendJson(res, 200, buildTaskBrief(await snapshot(false), input))
+        } catch (thrown) {
+          if (!(thrown instanceof TaskInputError)) throw thrown
+          sendJson(res, 400, { error: thrown.message })
+        }
+        return
+      }
+
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.setHeader('allow', 'GET, HEAD')
+        send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
+        return
+      }
+
       if (url.pathname === '/app.js') {
         send(res, 200, JS, 'text/javascript; charset=utf-8')
         return
@@ -166,7 +263,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
       }
       if (url.pathname === '/api/snapshot') {
         const value = await snapshot(url.searchParams.get('refresh') === '1')
-        send(res, 200, JSON.stringify(value), 'application/json; charset=utf-8')
+        sendJson(res, 200, value)
         return
       }
       send(res, 404, 'Not found\n', 'text/plain; charset=utf-8')
