@@ -143,6 +143,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     commands: {},
     files: fileSet,
     depsAnalysed: new Set<string>(),
+    depsUnknownReasons: new Map<string, string>(),
   }
 
   const detectors = [...ecosystemDetectors, ...additionalDetectors, ...(options.extraDetectors ?? [])]
@@ -198,7 +199,11 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
       failedDetectors: failedDetectors.map((d) => ({ ...d })),
       unanalysedDeps: draft.modules
         .filter((m) => !draft.depsAnalysed.has(m.id))
-        .map((m) => ({ id: m.id, path: m.path, reason: 'no dependency resolver for this ecosystem' })),
+        .map((m) => ({
+          id: m.id,
+          path: m.path,
+          reason: draft.depsUnknownReasons.get(m.id) ?? 'no dependency resolver for this ecosystem',
+        })),
     },
   }
 

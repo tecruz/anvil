@@ -1735,6 +1735,111 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
   })
 
+  test('uv workspace sources create edges; a matching name alone does not', () => {
+    const profile = profileOf({
+      'pyproject.toml': [
+        '[project]',
+        'name = "root"',
+        'dependencies = []',
+        '',
+        '[tool.uv.workspace]',
+        'members = ["services/*"]',
+        'exclude = ["services/ignored"]',
+        '',
+        '[tool.uv.sources]',
+        'worker = { workspace = true }',
+        '',
+      ].join('\n'),
+      'services/api/pyproject.toml': [
+        '[project]',
+        'name = "api"',
+        'dependencies = ["worker>=0.1", "requests>=2.0", "root"]',
+        '',
+        '[tool.uv.sources]',
+        'root = { workspace = true }',
+        '',
+      ].join('\n'),
+      'services/api/src/api.py': 'pass\n',
+      'services/worker/pyproject.toml': '[project]\nname = "worker"\ndependencies = []\n',
+      'services/worker/src/worker.py': 'pass\n',
+      'services/ignored/pyproject.toml': '[project]\nname = "ignored"\ndependencies = []\n',
+      'services/ignored/src/ignored.py': 'pass\n',
+      'examples/demo/pyproject.toml': '[project]\nname = "demo"\ndependencies = []\n',
+      'examples/demo/src/demo.py': 'pass\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['api', 'root', 'worker'])
+    // `worker` comes from the root source table; `root` is overridden by the member table.
+    // `requests` matches no member and has no local source, so it is not an edge.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['root', 'worker'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    assert.deepEqual(profile.monorepo?.members.sort(), ['api', 'root', 'worker'])
+  })
+
+  test('a uv member source with a path resolves against the declaring member', () => {
+    const profile = profileOf({
+      'pyproject.toml': [
+        '[project]',
+        'name = "root"',
+        'dependencies = []',
+        '',
+        '[tool.uv.workspace]',
+        'members = ["services/*"]',
+        '',
+      ].join('\n'),
+      'services/api/pyproject.toml': [
+        '[project]',
+        'name = "api"',
+        'dependencies = ["helper"]',
+        '',
+        '[tool.uv.sources]',
+        'helper = { path = "../helper" }',
+        '',
+      ].join('\n'),
+      'services/api/src/api.py': 'pass\n',
+      'services/helper/pyproject.toml': '[project]\nname = "helper"\ndependencies = []\n',
+      'services/helper/src/helper.py': 'pass\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['helper'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('unsupported uv dependency syntax leaves coverage unknown, not empty', () => {
+    const profile = profileOf({
+      'pyproject.toml': [
+        '[project]',
+        'name = "root"',
+        'dependencies = []',
+        '',
+        '[tool.uv.workspace]',
+        'members = ["services/api"]',
+        '',
+      ].join('\n'),
+      'services/api/pyproject.toml': ['[project]', 'name = "api"', 'dependencies = ["worker[cli]>=0.1"]', ''].join(
+        '\n',
+      ),
+      'services/api/src/api.py': 'pass\n',
+    })
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'api',
+        path: 'services/api',
+        reason: 'unsupported dependency syntax; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('an unreadable uv member manifest stays unknown', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[project]\nname = "root"\n\n[tool.uv.workspace]\nmembers = ["services/api"]\n',
+      'services/api/pyproject.toml': '[project]\nname = "api"\n\0binary\n',
+      'services/api/src/api.py': 'pass\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'services/api')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      { id: 'services/api', path: 'services/api', reason: 'no dependency resolver for this ecosystem' },
+    ])
+  })
+
   test('an unreadable Cargo manifest stays unknown', () => {
     const profile = profileOf({
       'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',

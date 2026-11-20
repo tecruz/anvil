@@ -7,7 +7,7 @@
  * stays conservative -- it reports a command only when it can point at the definition.
  */
 
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import {
   addCommand,
   addStack,
@@ -17,9 +17,11 @@ import {
   hasFile,
   hasFileUnder,
   hookFramework,
+  markDepsAnalysed,
   type ProfileDraft,
   setMonorepo,
 } from '../detector.ts'
+import { matchesGlob } from '../general.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 
@@ -42,6 +44,163 @@ function depVersion(text: string, dep: string): string | null {
   const re = new RegExp(`["'\\[]?${escaped}\\s*(?:[<>=!~]=?\\s*([0-9][^"'\\s,\\]]*))?`)
   const m = re.exec(text)
   return looseVersion(m?.[1] ?? null)
+}
+
+/** The body of one TOML table, without the header, or null when absent. */
+function tomlSection(text: string, header: RegExp): string | null {
+  const lines = text.split('\n')
+  let active = false
+  const out: string[] = []
+  for (const line of lines) {
+    if (/^\s*\[/.test(line)) {
+      if (active) return out.join('\n')
+      active = header.test(line)
+      continue
+    }
+    if (active) out.push(line)
+  }
+  return active ? out.join('\n') : null
+}
+
+/** The string items of a TOML array assigned to `key` in `section`. */
+function tomlArray(section: string, key: string): string[] {
+  const match = new RegExp(`^\\s*${key}\\s*=\\s*\\[`, 'm').exec(section)
+  if (match === null) return []
+  // A plain `[\s\S]*?\]` stops at a `]` inside a quoted string, so a dependency such as
+  // `"worker[cli]>=0.1"` would be truncated before it can be recognized as unsupported.
+  // Scan to the bracket that closes the array while respecting quotes.
+  let depth = 1
+  let quote: string | null = null
+  let body = ''
+  for (let i = match.index + match[0].length; i < section.length; i++) {
+    const ch = section[i] as string
+    if (quote !== null) {
+      body += ch
+      if (ch === '\\' && i + 1 < section.length) {
+        body += section[i + 1]
+        i++
+      } else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      body += ch
+      continue
+    }
+    if (ch === '[') depth++
+    if (ch === ']') {
+      depth--
+      if (depth === 0) break
+    }
+    body += ch
+  }
+  return [...body.matchAll(/["']((?:[^"'\\]|\\.)*)["']/g)].map((item) => item[1] as string)
+}
+
+/** PEP 503 normalisation: dependency names are case- and separator-insensitive. */
+function pythonName(name: string): string {
+  return name.toLowerCase().replace(/[-_.]+/g, '-')
+}
+
+/** The directories a uv workspace declares, after its `exclude` globs. */
+function uvMembers(ctx: DetectorContext, text: string): string[] {
+  const section = tomlSection(text, /^\[tool\.uv\.workspace\]/)
+  if (section === null) return []
+  const declared = tomlArray(section, 'members')
+  const excluded = tomlArray(section, 'exclude')
+  const projects = [...ctx.files]
+    .filter((file) => file === 'pyproject.toml' || file.endsWith('/pyproject.toml'))
+    .map((file) => (file === 'pyproject.toml' ? '.' : file.slice(0, -'/pyproject.toml'.length)))
+  const out = new Set<string>()
+  // uv's root project is always a workspace member, even when no glob names it.
+  if (tomlSection(text, /^\[project\]/) !== null) out.add('.')
+  for (const pattern of declared) {
+    for (const dir of projects) {
+      if (dir !== '.' && matchesGlob(dir, pattern)) out.add(dir)
+    }
+  }
+  for (const pattern of excluded) {
+    for (const dir of [...out]) {
+      if (dir !== '.' && matchesGlob(dir, pattern)) out.delete(dir)
+    }
+  }
+  return [...out].sort()
+}
+
+interface UvSource {
+  workspace: boolean | string | null
+  path: string | null
+}
+
+/** `[tool.uv.sources]`: only `workspace = true` or a path names a local dependency. */
+function uvSources(manifest: string): Map<string, UvSource> {
+  const section = tomlSection(manifest, /^\[tool\.uv\.sources\]/)
+  const out = new Map<string, UvSource>()
+  if (section === null) return out
+  const entry = /(?:^|\n)\s*(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*\{([\s\S]*?)\}/g
+  for (const match of section.matchAll(entry)) {
+    const key = match[1] ?? match[2] ?? match[3]
+    const body = match[4] ?? ''
+    if (key === undefined) continue
+    const workspace = /workspace\s*=\s*(?:true|"([^"]+)"|'([^']+)')/.exec(body)
+    const path = /path\s*=\s*["']([^"']+)["']/.exec(body)
+    out.set(pythonName(key), {
+      workspace: workspace === null ? null : (workspace[1] ?? workspace[2] ?? true),
+      path: path?.[1] ?? null,
+    })
+  }
+  return out
+}
+
+interface UvDependencies {
+  deps: string[]
+  /** True when the manifest uses syntax this reader cannot decide safely. */
+  unsupported: boolean
+}
+
+/**
+ * Internal edges from uv sources. A name that merely matches a workspace member is not an
+ * edge: uv only resolves a dependency locally when `tool.uv.sources` says so. Member sources
+ * override root sources, matching uv's own precedence.
+ */
+function uvDependencies(
+  manifest: string,
+  names: ReadonlyMap<string, string>,
+  idsByPath: ReadonlyMap<string, string>,
+  self: string,
+  memberPath: string,
+  rootSources: ReadonlyMap<string, UvSource>,
+): UvDependencies {
+  const project = tomlSection(manifest, /^\[project\]/)
+  if (project === null) return { deps: [], unsupported: false }
+  if (tomlArray(project, 'dynamic').some((field) => pythonName(field) === 'dependencies')) {
+    return { deps: [], unsupported: true }
+  }
+  const raw = tomlArray(project, 'dependencies')
+  // Extras, direct URLs and environment markers change what a dependency resolves to. Do not
+  // silently read them as a plain package name; leave coverage unknown instead.
+  if (raw.some((entry) => /[[{@;]/.test(entry))) return { deps: [], unsupported: true }
+  const memberSources = uvSources(manifest)
+  const out = new Set<string>()
+  for (const dep of raw) {
+    const name = /^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)/.exec(dep)?.[1]
+    if (name === undefined) continue
+    const key = pythonName(name)
+    const source = memberSources.get(key) ?? rootSources.get(key)
+    if (source === undefined) continue
+    if (source.workspace !== null) {
+      const id = names.get(key)
+      if (id !== undefined && id !== self) out.add(id)
+      continue
+    }
+    if (source.path !== null) {
+      const base = memberSources.has(key) ? memberPath : '.'
+      const target = posix.normalize(posix.join(base, source.path)).replace(/\/+$/, '')
+      const id = idsByPath.get(target)
+      if (id !== undefined && id !== self) out.add(id)
+    }
+  }
+  return { deps: [...out].sort(), unsupported: false }
 }
 
 export const pythonDetector: Detector = {
@@ -187,20 +346,46 @@ export const pythonDetector: Detector = {
       if (f.startsWith('.github/workflows/') && f.endsWith('.yml')) addTool(draft, 'ci', f)
     }
 
-    // uv workspaces: members are sibling directories with their own pyproject.toml.
+    // uv workspaces: only directories named by `members` are modules. A pyproject.toml in
+    // an unrelated example directory must not silently enter the graph.
     if (pyproject !== null && findLine(pyproject, /\[tool\.uv\.workspace\]/) !== null) {
       setMonorepo(draft, {
         tool: 'uv',
         evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.uv\.workspace\]/)),
         members: [],
       })
-      for (const f of ctx.files) {
-        if (!f.endsWith('/pyproject.toml')) continue
-        const path = f.slice(0, -'/pyproject.toml'.length)
-        const inner = readTomlish(ctx, f)
+      const members: Array<{ id: string; path: string; manifest: string | null }> = []
+      for (const path of uvMembers(ctx, pyproject)) {
+        const manifest = path === '.' ? 'pyproject.toml' : `${path}/pyproject.toml`
+        if (!ctx.files.has(ctx.resolve(manifest))) continue
+        const inner = readTomlish(ctx, manifest)
         const name = inner === null ? null : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? null)
-        addModulePy(draft, name ?? path, path)
+        const id = name ?? path
+        addModulePy(draft, id, path)
+        members.push({ id, path, manifest: inner })
       }
+      // A dependency is internal only when tool.uv.sources marks it local. Root sources
+      // apply to every member; a member's own sources override them. An unreadable manifest
+      // or unsupported dependency syntax stays unknown rather than analysed-empty.
+      const names = new Map<string, string>()
+      const idsByPath = new Map<string, string>()
+      for (const member of members) {
+        names.set(pythonName(member.id), member.id)
+        idsByPath.set(member.path, member.id)
+      }
+      const rootSources = uvSources(pyproject)
+      for (const member of members) {
+        if (member.manifest === null) continue
+        const resolved = uvDependencies(member.manifest, names, idsByPath, member.id, member.path, rootSources)
+        if (resolved.unsupported) {
+          draft.depsUnknownReasons.set(member.id, 'unsupported dependency syntax; dependencies left unknown')
+          continue
+        }
+        const existing = draft.modules.find((module) => module.id === member.id)
+        if (existing !== undefined) existing.deps = resolved.deps
+        markDepsAnalysed(draft, member.id)
+      }
+      if (draft.monorepo !== null) draft.monorepo.members = members.map((member) => member.id)
     }
   },
 }
