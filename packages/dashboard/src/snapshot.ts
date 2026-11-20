@@ -44,6 +44,8 @@ export interface DashboardSnapshot {
     doctor: DashboardSource<unknown>
     ready: DashboardSource<unknown>
     plan: DashboardSource<unknown>
+    /** The detected file index and commands behind a task brief. */
+    profile: DashboardSource<unknown>
   }
   context: {
     brief: DashboardSource<unknown>
@@ -152,10 +154,11 @@ function stagedSource(options: LoadSnapshotOptions, fetchedAt: string): Dashboar
 export async function loadSnapshot(options: LoadSnapshotOptions): Promise<DashboardSnapshot> {
   const now = options.now ?? (() => new Date())
   const fetchedAt = now().toISOString()
-  const [doctor, ready, plan, brief, crew] = await Promise.all([
+  const [doctor, ready, plan, profile, brief, crew] = await Promise.all([
     callSource(['doctor', '--json'], options, fetchedAt),
     callSource(['ready', '--json'], options, fetchedAt),
     callSource(['plan', '--offline', '--json'], options, fetchedAt),
+    callSource(['profile', '--json'], options, fetchedAt),
     callSource(['brief', '--offline', '--json'], options, fetchedAt),
     callSource(['crew', 'status', '--json'], options, fetchedAt),
   ])
@@ -163,7 +166,7 @@ export async function loadSnapshot(options: LoadSnapshotOptions): Promise<Dashbo
   return {
     schemaVersion: 1,
     fetchedAt,
-    repository: { doctor, ready, plan },
+    repository: { doctor, ready, plan, profile },
     context: { brief, staged: stagedSource(options, fetchedAt) },
     work: { crew },
     verification: {
