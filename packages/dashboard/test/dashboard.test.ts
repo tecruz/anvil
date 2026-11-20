@@ -472,7 +472,14 @@ describe('the dashboard page', () => {
     hidden = false
     disabled = false
     value = ''
+    focused = false
     classList = { toggle() {} }
+
+    focus(): void {
+      this.focused = true
+    }
+
+    setSelectionRange(): void {}
 
     readonly tag: string
 
@@ -799,5 +806,71 @@ describe('the dashboard page', () => {
     const unprobed = nodes.get('#task-brief')?.text() ?? ''
     assert.match(unprobed, /environment was not probed/)
     assert.doesNotMatch(unprobed, /anvil ready failed/)
+  })
+
+  test('a selected edge shows the edge evidence, not its destination node', () => {
+    const target = new FakeElement('div')
+    const brief = {
+      title: 'Task',
+      map: {
+        schemaVersion: 1,
+        focus: 'Task',
+        nodes: [
+          {
+            id: 'file:a',
+            label: 'a.ts',
+            kind: 'file',
+            reason: 'matched',
+            evidence: 'anvil profile --json: files[a.ts]',
+          },
+          {
+            id: 'module:x',
+            label: 'x',
+            kind: 'module',
+            reason: 'dependency',
+            evidence: 'anvil profile --json: modules[x]',
+          },
+        ],
+        edges: [
+          { from: 'file:a', to: 'module:x', label: 'located in', evidence: 'anvil profile --json: edge-evidence' },
+        ],
+        hasUnknown: false,
+      },
+    }
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext("state.mapSelection = 'edge:0'; renderTaskMap(__target, __brief)", context)
+    const text = target.text()
+    assert.match(text, /edge-evidence/)
+    assert.match(text, /file:a → module:x/)
+  })
+
+  test('filtering restores focus to the search input', () => {
+    const target = new FakeElement('div')
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = { map: { nodes: [], edges: [], focus: '', hasUnknown: false } }
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext('renderTaskMap(__target, __brief, true)', context)
+    const inputs: FakeElement[] = []
+    const visit = (node: FakeElement): void => {
+      if (node.tag === 'input') inputs.push(node)
+      for (const child of node.children) visit(child)
+    }
+    visit(target)
+    assert.equal(inputs.length, 1)
+    assert.equal(inputs[0]?.focused, true)
   })
 })

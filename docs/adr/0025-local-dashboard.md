@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-17
 - Amended: 2026-11-19 (task brief)
+- Amended: 2026-11-20 (task-centred 2D map)
 - Milestone: Phase 4 follow-on (#67)
 
 ## Context
@@ -41,6 +42,12 @@ runtime dependency.**
   `ready` reports blocked, and states what it cannot know. It runs nothing and writes
   nothing: `POST /api/brief` takes no command, path or repository, is capped at 4,000
   characters, and stores no request or response.
+- The brief also returns a task-centred **2D map** built from the same cached profile and
+  brief. Its nodes are the matched files, the modules containing them, their declared one-hop
+  dependencies and the verify commands; every node and edge names the CLI value behind it.
+  The page filters it to the task, offers a list view for keyboard use, and shows an
+  unanalysed dependency as `unknown` rather than as an absent edge. It adds no second source
+  of truth and no new route. A 3D projection remains a separate experiment behind a flag.
 - An approval gate is quoted from the pasted text, never inferred. The brief separates what
   the sentence allows to start from what it blocks, and says so when the text states no gate.
   An explicit waiver is quoted as approval-not-required; an uncertain mention is quoted but

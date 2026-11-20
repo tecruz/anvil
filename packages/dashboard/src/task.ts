@@ -45,6 +45,33 @@ export interface TaskBlocker {
   reason: string
 }
 
+export interface TaskMapNode {
+  id: string
+  label: string
+  kind: 'file' | 'module' | 'check' | 'unknown'
+  /** Why this node is in the task subgraph. */
+  reason: string
+  /** The CLI value or `file:line` that proves it; null is displayed as unknown. */
+  evidence: string | null
+}
+
+export interface TaskMapEdge {
+  from: string
+  to: string
+  label: string
+  evidence: string | null
+}
+
+/** A task-focused subgraph, never a whole-repository diagram. */
+export interface TaskMap {
+  schemaVersion: 1
+  focus: string
+  nodes: TaskMapNode[]
+  edges: TaskMapEdge[]
+  /** True when the profile did not resolve dependencies for a relevant module. */
+  hasUnknown: boolean
+}
+
 /**
  * A gate the pasted task states itself.
  *
@@ -72,6 +99,8 @@ export interface TaskBrief {
   title: string
   objective: string
   startHere: TaskStartItem[]
+  /** The same task, as a reproducible 2D subgraph. */
+  map: TaskMap
   howToCheck: TaskCheck[]
   blockers: TaskBlocker[]
   /** Empty when the task stated no gate; the unknowns then say so. */
@@ -697,6 +726,168 @@ function titleAndObjective(text: string): { title: string; objective: string } {
 }
 
 /**
+ * Build a task-centred 2D map from the same snapshot as the brief.
+ *
+ * Nodes are files the task matched, modules whose paths contain them, their declared
+ * one-hop dependencies and the verify commands. Every node and edge names the CLI value it
+ * came from; an unanalysed dependency is a visible unknown node, never an absent edge.
+ */
+export function buildTaskMap(
+  snapshot: DashboardSnapshot,
+  brief: Pick<TaskBrief, 'title' | 'startHere' | 'howToCheck'>,
+): TaskMap {
+  const profile = asRecord(snapshot.repository.profile.data)
+  const modules = (profile === null ? [] : asArray(profile.modules))
+    .map((value) => asRecord(value))
+    .filter((value): value is Record<string, unknown> => value !== null)
+  const diagnostics = profile === null ? null : asRecord(profile.diagnostics)
+  const unanalysed = (diagnostics === null ? [] : asArray(diagnostics.unanalysedDeps))
+    .map((value) => asRecord(value))
+    .filter((value): value is Record<string, unknown> => value !== null)
+    .map((value) => asString(value.id))
+    .filter((value): value is string => value !== null)
+  const unanalysedIds = new Set(unanalysed)
+  // An older profile has no coverage field at all. Absence of a field is not evidence that
+  // every module was analysed, so the map must say coverage is unknown.
+  const coverageUnknown =
+    snapshot.repository.profile.ok === false ||
+    profile === null ||
+    diagnostics === null ||
+    !Object.hasOwn(diagnostics, 'unanalysedDeps')
+
+  const moduleId = (value: Record<string, unknown>): string => asString(value.id) ?? asString(value.path) ?? 'unknown'
+  const modulePath = (value: Record<string, unknown>): string => asString(value.path) ?? 'unknown'
+  const relevance = (value: Record<string, unknown>): string | null => {
+    const path = modulePath(value)
+    for (const item of brief.startHere) {
+      if (path !== '.' && (item.path === path || item.path.startsWith(`${path}/`))) {
+        return `path matches task file ${item.path}`
+      }
+      if (path === '.' && !item.path.includes('/')) return `root module contains task file ${item.path}`
+    }
+    return null
+  }
+
+  const nodes = new Map<string, TaskMapNode>()
+  const edges: TaskMapEdge[] = []
+  const addNode = (node: TaskMapNode): void => {
+    if (!nodes.has(node.id)) nodes.set(node.id, node)
+  }
+
+  for (const item of brief.startHere) {
+    addNode({
+      id: `file:${item.path}`,
+      label: item.path,
+      kind: 'file',
+      reason: item.reason,
+      evidence: `anvil profile --json: files[${item.path}]`,
+    })
+  }
+
+  const relevant = modules.filter((module) => relevance(module) !== null)
+  const byId = new Map(modules.map((module) => [moduleId(module), module]))
+  const included = new Set<string>()
+  for (const module of relevant) included.add(moduleId(module))
+
+  for (const module of relevant) {
+    const id = moduleId(module)
+    addNode({
+      id: `module:${id}`,
+      label: modulePath(module),
+      kind: 'module',
+      reason: relevance(module) ?? 'module in the task subgraph',
+      evidence: `anvil profile --json: modules[${id}]`,
+    })
+    for (const item of brief.startHere) {
+      const path = modulePath(module)
+      if (path === '.' ? item.path.includes('/') : !(item.path === path || item.path.startsWith(`${path}/`))) continue
+      edges.push({
+        from: `file:${item.path}`,
+        to: `module:${id}`,
+        label: 'located in',
+        evidence: `anvil profile --json: files[${item.path}], modules[${id}].path`,
+      })
+    }
+
+    for (const dep of asArray(module.deps)) {
+      const depId = typeof dep === 'string' ? dep : null
+      if (depId === null || depId === id) continue
+      included.add(depId)
+      addNode({
+        id: `module:${depId}`,
+        label: modulePath(byId.get(depId) ?? { id: depId }),
+        kind: 'module',
+        reason: `declared dependency of ${id}`,
+        evidence: `anvil profile --json: modules[${id}].deps`,
+      })
+      edges.push({
+        from: `module:${id}`,
+        to: `module:${depId}`,
+        label: 'depends on',
+        evidence: `anvil profile --json: modules[${id}].deps`,
+      })
+    }
+
+    if (unanalysedIds.has(id)) {
+      addNode({
+        id: `unknown:${id}`,
+        label: `unknown dependencies for ${modulePath(module)}`,
+        kind: 'unknown',
+        reason: 'no dependency resolver ran for this module',
+        evidence: `anvil profile --json: diagnostics.unanalysedDeps[${id}]`,
+      })
+      edges.push({
+        from: `module:${id}`,
+        to: `unknown:${id}`,
+        label: 'dependencies unknown',
+        evidence: `anvil profile --json: diagnostics.unanalysedDeps[${id}]`,
+      })
+    }
+  }
+
+  // A dep can name a module the profile did not record; that is an edge to an unknown node,
+  // not an invented module. Keep it after the known nodes so the list reads predictably.
+  for (const depId of included) {
+    if (byId.has(depId)) continue
+    addNode({
+      id: `module:${depId}`,
+      label: depId,
+      kind: 'unknown',
+      reason: 'declared dependency with no module record in the profile',
+      evidence: null,
+    })
+  }
+
+  if (coverageUnknown) {
+    addNode({
+      id: 'unknown:coverage',
+      label: 'unknown dependency coverage',
+      kind: 'unknown',
+      reason: 'the profile does not say which modules had their dependencies analysed',
+      evidence: null,
+    })
+  }
+
+  for (const [index, check] of brief.howToCheck.entries()) {
+    addNode({
+      id: `check:${String(index)}`,
+      label: `${check.kind}: ${check.cmd}`,
+      kind: 'check',
+      reason: `${check.source}${check.cwd === '' ? '' : ` from ${check.cwd}`}`,
+      evidence: check.evidence ?? `anvil ready --json: commands[${String(index)}]`,
+    })
+  }
+
+  return {
+    schemaVersion: 1,
+    focus: brief.title,
+    nodes: [...nodes.values()],
+    edges,
+    hasUnknown: [...nodes.values()].some((node) => node.kind === 'unknown'),
+  }
+}
+
+/**
  * Build the brief. Missing input, both entry points or an unknown suggestion is a
  * `TaskInputError`; every other absence is represented in `unknowns` rather than turned
  * into a fact.
@@ -811,17 +1002,21 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   const pasted = suggestion === null ? titleAndObjective(text) : null
   const suggested =
     suggestion === null ? null : splitDetail(asString(suggestion.detail) ?? asString(suggestion.title) ?? '')
+  const title =
+    suggestion !== null
+      ? (suggested?.action ?? asString(suggestion.title) ?? 'Suggested contribution')
+      : (pasted?.title ?? '')
+  const objective = suggestion !== null ? (suggested?.reason ?? '') : (pasted?.objective ?? '')
+  const map = buildTaskMap(snapshot, { title, startHere, howToCheck: checks })
   return {
     schemaVersion: 1,
     generatedAt: snapshot.fetchedAt,
     source: { suggestionId: suggestionId === '' ? null : suggestionId, text: text === '' ? null : text },
-    title:
-      suggestion !== null
-        ? (suggested?.action ?? asString(suggestion.title) ?? 'Suggested contribution')
-        : (pasted?.title ?? ''),
+    title,
     // The action is already the title; repeating it in the objective adds nothing.
-    objective: suggestion !== null ? (suggested?.reason ?? '') : (pasted?.objective ?? ''),
+    objective,
     startHere,
+    map,
     howToCheck: checks,
     blockers: found,
     gates,

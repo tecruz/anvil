@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import {
   buildTaskBrief,
+  buildTaskMap,
   type DashboardSnapshot,
   type DashboardSource,
   MAX_TASK_TEXT,
@@ -41,6 +42,8 @@ interface SnapshotOptions {
   failedDetectors?: number
   commands?: unknown[]
   suggestions?: unknown[]
+  modules?: unknown[]
+  unanalysedDeps?: unknown[]
 }
 
 function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
@@ -49,8 +52,10 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
     root: '/repo',
     projectDir: 'app',
     files: FILES,
+    modules: options.modules ?? [],
     commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'README.md:3' }] },
     diagnostics: {
+      unanalysedDeps: options.unanalysedDeps ?? [],
       truncated: options.truncated ?? false,
       fileLimit: 20000,
       failedDetectors: Array.from({ length: options.failedDetectors ?? 0 }, (_, index) => ({
@@ -370,5 +375,74 @@ describe('buildTaskBrief', () => {
       ['README.md'],
     )
     assert.match(brief.unknowns.join('\n'), /src\/new-widget\.tsx.*not in the file index/)
+  })
+})
+
+describe('the task-centred 2D map', () => {
+  const modules = [
+    { id: 'app', path: 'app', kind: 'package', deps: ['core'] },
+    { id: 'core', path: 'core', kind: 'package', deps: [] },
+    { id: 'tools', path: 'tools', kind: 'package', deps: [] },
+  ]
+
+  test('shows the task subgraph plus one hop, with evidence on every node', () => {
+    const snapshot = makeSnapshot({ modules })
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    const map = buildTaskMap(snapshot, brief)
+    const labels = map.nodes.map((node) => node.label)
+    assert.ok(labels.includes('app/src/main/kotlin/com/example/CountryDetailScreen.kt'), labels.join(', '))
+    assert.ok(labels.includes('app'), labels.join(', '))
+    assert.ok(labels.includes('core'), labels.join(', '))
+    assert.ok(!labels.includes('tools'), 'an unrelated module must not enter the task subgraph')
+    assert.ok(
+      map.nodes.some((node) => node.kind === 'check'),
+      labels.join(', '),
+    )
+    assert.ok(
+      map.nodes.every((node) => node.evidence !== null),
+      JSON.stringify(map.nodes),
+    )
+    assert.ok(
+      map.edges.some((edge) => edge.from === 'module:app' && edge.to === 'module:core' && edge.evidence !== null),
+      JSON.stringify(map.edges),
+    )
+  })
+
+  test('an unanalysed module is a visible unknown, not an absent dependency', () => {
+    const snapshot = makeSnapshot({
+      modules,
+      unanalysedDeps: [{ id: 'app', path: 'app', reason: 'no dependency resolver for this ecosystem' }],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    const map = buildTaskMap(snapshot, brief)
+    assert.equal(map.hasUnknown, true)
+    assert.ok(map.nodes.some((node) => node.kind === 'unknown' && node.label.includes('unknown dependencies for app')))
+    assert.ok(map.edges.some((edge) => edge.label === 'dependencies unknown'))
+  })
+
+  test('an older profile without coverage data says dependency coverage is unknown', () => {
+    const snapshot = makeSnapshot({ modules })
+    const profile = snapshot.repository.profile.data as Record<string, unknown>
+    delete profile.diagnostics
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    const map = buildTaskMap(snapshot, brief)
+    assert.equal(map.hasUnknown, true)
+    assert.ok(map.nodes.some((node) => node.id === 'unknown:coverage' && node.evidence === null))
+  })
+
+  test('a failed profile adds no invented module nodes', () => {
+    const snapshot = makeSnapshot({ profileOk: false, modules })
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    const map = buildTaskMap(snapshot, brief)
+    assert.equal(
+      map.nodes.some((node) => node.kind === 'module'),
+      false,
+    )
+    assert.equal(
+      map.nodes.some((node) => node.kind === 'file'),
+      false,
+    )
+    assert.ok(map.nodes.some((node) => node.kind === 'check'))
+    assert.ok(map.nodes.some((node) => node.id === 'unknown:coverage'))
   })
 })

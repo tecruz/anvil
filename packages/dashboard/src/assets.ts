@@ -48,6 +48,7 @@ export const HTML = `<!doctype html>
       <div id="task-suggestions"></div>
     </div>
     <div id="task-brief"></div>
+    <div id="task-map"></div>
   </section>
   <section id="repository" hidden></section>
   <section id="context" hidden></section>
@@ -100,9 +101,15 @@ textarea { width: 100%; padding: 0.5rem; border: 1px solid #8886; border-radius:
 blockquote { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid #8886; }
 ul { margin: 0.25rem 0; padding-left: 1.25rem; }
 li { margin: 0.2rem 0; }
+.mapgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.6rem; }
+.mapcolumn { border: 1px solid #8884; border-radius: 4px; padding: 0.5rem; }
+.mapnode { display: block; width: 100%; text-align: left; margin: 0.25rem 0; padding: 0.35rem 0.5rem; border: 1px solid #8886; border-radius: 4px; background: transparent; color: inherit; overflow-wrap: anywhere; }
+.mapnode.selected { outline: 2px solid #282; }
+.mapnode.unknown { border-style: dashed; }
+.mapedge { padding: 0.2rem 0; border-top: 1px solid #8884; overflow-wrap: anywhere; }
 `
 
-export const JS = `const state = { view: 'task', snapshot: null, loading: false, brief: null, taskError: null, taskPending: false };
+export const JS = `const state = { view: 'task', snapshot: null, loading: false, brief: null, taskError: null, taskPending: false, mapView: 'map', mapSearch: '', mapSelection: null };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -451,6 +458,117 @@ function renderBrief(parent, brief) {
   parent.appendChild(card);
 }
 
+/**
+ * The task's 2D map. It is built from the brief's own file matches and the profile's module
+ * graph; selecting a node or edge shows the CLI value behind it. A list view stays available
+ * for scanning and keyboard use.
+ */
+function renderTaskMap(target, brief, restoreSearchFocus) {
+  target.replaceChildren();
+  if (!brief || !brief.map) return;
+  const map = brief.map;
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Task map'));
+  card.appendChild(make('div', 'muted', map.focus + ' — subgraph plus one hop. Every node names the CLI value behind it.'));
+
+  const controls = make('div', 'row');
+  const search = make('input');
+  search.type = 'search';
+  search.placeholder = 'Filter modules, files and checks';
+  search.value = state.mapSearch;
+  search.addEventListener('input', function () {
+    state.mapSearch = search.value;
+    renderTaskMap(target, brief, true);
+  });
+  controls.appendChild(search);
+  for (const mode of ['map', 'list']) {
+    const button = make('button', '', mode === 'map' ? 'Map' : 'List');
+    button.type = 'button';
+    button.addEventListener('click', function () {
+      state.mapView = mode;
+      renderTaskMap(target, brief);
+    });
+    controls.appendChild(button);
+  }
+  card.appendChild(controls);
+
+  const query = state.mapSearch.trim().toLowerCase();
+  const nodes = (Array.isArray(map.nodes) ? map.nodes : []).filter(function (node) {
+    return query === '' || (node.label + ' ' + node.reason + ' ' + (node.evidence || '')).toLowerCase().includes(query);
+  });
+  const nodeIds = new Set(nodes.map(function (node) { return node.id; }));
+  const edges = (Array.isArray(map.edges) ? map.edges : []).filter(function (edge) {
+    return nodeIds.has(edge.from) && nodeIds.has(edge.to);
+  });
+
+  if (nodes.length === 0) {
+    card.appendChild(make('div', 'muted', 'No node matches that search.'));
+  } else if (state.mapView === 'list') {
+    const table = make('table');
+    const head = make('tr');
+    for (const label of ['node', 'kind', 'why', 'evidence']) head.appendChild(make('th', '', label));
+    table.appendChild(head);
+    for (const node of nodes) {
+      const row = make('tr');
+      for (const value of [node.label, node.kind, node.reason, node.evidence || 'unknown']) {
+        row.appendChild(make('td', '', value));
+      }
+      table.appendChild(row);
+    }
+    card.appendChild(table);
+  } else {
+    const grid = make('div', 'mapgrid');
+    for (const kind of ['file', 'module', 'check', 'unknown']) {
+      const column = make('div', 'mapcolumn');
+      column.appendChild(make('h3', '', kind));
+      for (const node of nodes.filter(function (n) { return n.kind === kind; })) {
+        const button = make('button', 'mapnode' + (node.kind === 'unknown' ? ' unknown' : '') + (state.mapSelection === node.id ? ' selected' : ''), node.label);
+        button.type = 'button';
+        button.addEventListener('click', function () {
+          state.mapSelection = node.id;
+          renderTaskMap(target, brief);
+        });
+        column.appendChild(button);
+      }
+      grid.appendChild(column);
+    }
+    card.appendChild(grid);
+    const edgeList = make('div');
+    for (const [edgeIndex, edge] of edges.entries()) {
+      const row = make('div', 'mapedge', edge.from + '  →  ' + edge.to + '  (' + edge.label + ')');
+      row.addEventListener('click', function () {
+        state.mapSelection = 'edge:' + String(edgeIndex);
+        renderTaskMap(target, brief);
+      });
+      edgeList.appendChild(row);
+    }
+    card.appendChild(edgeList);
+  }
+
+  const detail = make('div', 'muted');
+  const selectedNode = nodes.find(function (node) { return node.id === state.mapSelection; });
+  const selectedEdge =
+    typeof state.mapSelection === 'string' && state.mapSelection.startsWith('edge:')
+      ? edges[Number(state.mapSelection.slice(5))]
+      : null;
+  if (selectedNode) {
+    detail.textContent = selectedNode.label + ' — ' + selectedNode.reason + ' Evidence: ' + (selectedNode.evidence || 'unknown');
+  } else if (selectedEdge) {
+    detail.textContent = selectedEdge.from + ' → ' + selectedEdge.to + ' (' + selectedEdge.label + ') Evidence: ' + (selectedEdge.evidence || 'unknown');
+  } else {
+    detail.textContent = 'Select a node or edge to see its evidence.';
+  }
+  card.appendChild(detail);
+  if (map.hasUnknown) {
+    card.appendChild(make('div', 'muted', 'Dashed nodes are unknown, not "no dependency". The profile did not analyse them.'));
+  }
+  target.appendChild(card);
+  if (restoreSearchFocus && typeof search.focus === 'function') {
+    search.focus();
+    if (typeof search.setSelectionRange === 'function') search.setSelectionRange(search.value.length, search.value.length);
+  }
+}
+
 /** A derived fix reads as "action -- why"; the action is the useful heading for a task. */
 function suggestionAction(suggestion) {
   const detail = String(suggestion.detail || '');
@@ -505,6 +623,8 @@ function renderTask(root, snap) {
   if (suggestions) renderSuggestions(suggestions, snap);
   const target = root.querySelector('#task-brief');
   if (target) renderBrief(target, state.brief);
+  const mapTarget = root.querySelector('#task-map');
+  if (mapTarget) renderTaskMap(mapTarget, state.brief);
   const error = root.querySelector('#task-error');
   if (error) error.textContent = state.taskError || '';
 }
@@ -544,6 +664,8 @@ async function requestBrief(input) {
     const payload = await response.json().catch(function () { return null; });
     if (!response.ok) throw new Error((payload && payload.error) || 'brief request failed: ' + response.status);
     state.brief = payload;
+    state.mapSelection = null;
+    state.mapSearch = '';
   } catch (error) {
     state.taskError = error instanceof Error ? error.message : String(error);
   } finally {

@@ -700,7 +700,13 @@ The page has four views. **Task brief** is the entry point: paste a ticket or ta
 description, or choose one of the repository suggestions from `anvil plan`. Either way it
 shows the likely files to start from, the verification commands with the source and working
 directory that established them, the required needs `anvil ready` reports as blocked, and
-what the page cannot know. The commands are printed, never run. **Repository** covers
+what the page cannot know. The same brief includes a **task map**: a 2D subgraph of the
+matched files, the modules containing them, their declared one-hop dependencies and the
+verify commands. It opens filtered to the task, supports a text filter and a list view, and
+shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
+a dashed *unknown* node, not as "no dependency". No edge is inferred from import statements,
+and the map adds no fact that the brief could not cite. The commands are printed, never run.
+**Repository** covers
 readiness findings, blockers and ranked next steps, **Context** covers verified brief gaps
 and a read-only view of the staged diff, and **Work** covers claims, worktrees, uncommitted
 and unpushed changes, and agent liveness. Each value names the CLI command behind it, and
