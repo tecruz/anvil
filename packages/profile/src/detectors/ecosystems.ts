@@ -1389,6 +1389,305 @@ export const jvmDetector: Detector = {
 // .NET
 // ---------------------------------------------------------------------------
 
+type DotnetReferences = { deps: string[]; unsupported: boolean }
+
+/** A parsed MSBuild element. Attributes are read structurally, so duplicates and bare tokens fail. */
+interface DotnetNode {
+  name: string
+  attrs: Map<string, string>
+  children: DotnetNode[]
+  text: string
+  parent: DotnetNode | null
+}
+
+/** The index of the `>` closing the tag at `start`, respecting quoted attribute values. */
+function dotnetTagEnd(text: string, start: number): number {
+  let quote: string | null = null
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i] as string
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") quote = ch
+    else if (ch === '>') return i
+  }
+  return -1
+}
+
+/** A small non-executing XML reader that rejects malformed documents instead of recovering. */
+function dotnetParseXml(text: string): { root: DotnetNode | null; roots: DotnetNode[]; unsupported: boolean } {
+  const content = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
+    .replace(/<\?[\s\S]*?\?>/g, '')
+  const roots: DotnetNode[] = []
+  const stack: DotnetNode[] = []
+  let unsupported = false
+  let i = 0
+  while (i < content.length) {
+    if (content[i] !== '<') {
+      const next = content.indexOf('<', i)
+      const stop = next < 0 ? content.length : next
+      if (stack.length > 0) (stack[stack.length - 1] as DotnetNode).text += content.slice(i, stop)
+      i = stop
+      continue
+    }
+    if (content.startsWith('</', i)) {
+      const end = dotnetTagEnd(content, i + 1)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      const name = content.slice(i + 2, end).trim()
+      const node = stack.pop()
+      if (node === undefined || node.name !== name) unsupported = true
+      i = end + 1
+      continue
+    }
+    const end = dotnetTagEnd(content, i)
+    if (end < 0) {
+      unsupported = true
+      break
+    }
+    const raw = content.slice(i + 1, end).trim()
+    const selfClosing = raw.endsWith('/')
+    const body = (selfClosing ? raw.slice(0, -1) : raw).trim()
+    const nameMatch = /^([A-Za-z_][\w:.-]*)/.exec(body)
+    if (nameMatch === null) {
+      unsupported = true
+      i = end + 1
+      continue
+    }
+    const name = nameMatch[1] as string
+    const attrText = body.slice(name.length)
+    const attrs = new Map<string, string>()
+    const attrRe = /([A-Za-z_:][\w:.-]*)\s*=\s*(["'])([^"']*)\2/g
+    for (const match of attrText.matchAll(attrRe)) {
+      const key = match[1] as string
+      if (attrs.has(key)) unsupported = true
+      attrs.set(key, match[3] as string)
+    }
+    if (attrText.replace(attrRe, '').trim() !== '') unsupported = true
+    const node: DotnetNode = {
+      name,
+      attrs,
+      children: [],
+      text: '',
+      parent: stack.length > 0 ? (stack[stack.length - 1] as DotnetNode) : null,
+    }
+    if (node.parent !== null) node.parent.children.push(node)
+    else roots.push(node)
+    if (!selfClosing) stack.push(node)
+    i = end + 1
+  }
+  if (stack.length > 0) unsupported = true
+  return { root: roots.length === 1 ? (roots[0] as DotnetNode) : null, roots, unsupported }
+}
+
+function dotnetWalk(node: DotnetNode, visit: (node: DotnetNode) => void): void {
+  visit(node)
+  for (const child of node.children) dotnetWalk(child, visit)
+}
+
+function dotnetProperties(root: DotnetNode): Map<string, string> {
+  const properties = new Map<string, string>()
+  for (const group of root.children.filter((child) => child.name === 'PropertyGroup')) {
+    for (const child of group.children) properties.set(child.name.toLowerCase(), child.text.trim())
+  }
+  return properties
+}
+
+type DotnetImportSettings = {
+  props: boolean
+  targets: boolean
+  propsPath: string | null
+  targetsPath: string | null
+  unsupported: boolean
+}
+
+/** MSBuild property overrides that change or disable the implicit Directory.Build imports. */
+function dotnetImportSettings(text: string): DotnetImportSettings {
+  const parsed = dotnetParseXml(text)
+  const settings: DotnetImportSettings = {
+    props: true,
+    targets: true,
+    propsPath: null,
+    targetsPath: null,
+    unsupported: parsed.unsupported,
+  }
+  if (parsed.root === null || parsed.root.name !== 'Project' || parsed.roots.length !== 1) {
+    settings.unsupported = true
+    return settings
+  }
+  const props = dotnetProperties(parsed.root)
+  if (props.get('importdirectorybuildprops') === 'false') settings.props = false
+  if (props.get('importdirectorybuildtargets') === 'false') settings.targets = false
+  const customProps = props.get('directorybuildpropspath')
+  const customTargets = props.get('directorybuildtargetspath')
+  if (customProps !== undefined) {
+    if (customProps.includes('$')) settings.unsupported = true
+    else settings.propsPath = customProps
+  }
+  if (customTargets !== undefined) {
+    if (customTargets.includes('$')) settings.unsupported = true
+    else settings.targetsPath = customTargets
+  }
+  return settings
+}
+
+/** The files MSBuild actually imports for a project, after property overrides and nearest-file rules. */
+function dotnetImportSources(
+  projectDir: string,
+  ctx: DetectorContext,
+  settings: DotnetImportSettings,
+): { sources: Array<{ path: string; dir: string }>; unsupported: boolean } {
+  const directories: string[] = []
+  let dir = projectDir
+  for (;;) {
+    directories.push(dir)
+    if (dir === '.' || dir === '') break
+    const slash = dir.lastIndexOf('/')
+    dir = slash < 0 ? '.' : dir.slice(0, slash)
+  }
+  const sources: Array<{ path: string; dir: string }> = []
+  let unsupported = false
+  for (const [name, enabled, custom] of [
+    ['Directory.Build.props', settings.props, settings.propsPath],
+    ['Directory.Build.targets', settings.targets, settings.targetsPath],
+  ] as const) {
+    if (!enabled) continue
+    if (custom !== null) {
+      const path = posix.normalize(projectDir === '.' ? custom : posix.join(projectDir, custom))
+      if (!ctx.files.has(path)) unsupported = true
+      else sources.push({ path, dir: projectDir })
+      continue
+    }
+    for (const directory of directories) {
+      const path = directory === '.' ? name : `${directory}/${name}`
+      if (ctx.files.has(path)) {
+        sources.push({ path, dir: directory })
+        break
+      }
+    }
+  }
+  return { sources, unsupported }
+}
+
+/**
+ * Internal edges declared by `<ProjectReference Include="..." />` in an SDK-style project.
+ *
+ * Comments, CDATA and processing instructions are removed before structure is read, so
+ * documentation cannot create an edge. Only unconditional `ProjectReference` items in an
+ * `ItemGroup` are resolved: conditions, `Choose`, `Target`-scoped items and other imports cannot
+ * be decided from the file alone and leave coverage unknown. Malformed XML does the same.
+ * `Include` paths resolve against the consuming project directory even in an imported file, as
+ * MSBuild does; a sibling `../` reference is still internal, while computed or unresolved paths
+ * are unknown rather than an empty dependency list.
+ */
+/**
+ * Conservative gate: only a plain SDK-style project with literal, unconditional ProjectReference
+ * items and no imports is resolved into edges. Anything else keeps its module but reports unknown.
+ */
+function dotnetFullyLiteral(text: string): boolean {
+  // Comments, CDATA and any other markup inside an attribute change what MSBuild reads.
+  if (/<!--|<!\[CDATA\[/.test(text)) return false
+  const parsed = dotnetParseXml(text)
+  if (parsed.unsupported || parsed.roots.length !== 1 || parsed.root === null || parsed.root.name !== 'Project') {
+    return false
+  }
+  // No leading or trailing content outside the single root element.
+  const content = text
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
+    .replace(/<\?[\s\S]*?\?>/g, '')
+  if (!/^\s*<Project[\s>]/.test(content)) return false
+  if (/^\s*<Project[^>]*\/>\s*$/.test(content)) return true
+  // Only the standard SDK and plain ItemGroups of ProjectReference items are accepted.
+  const sdk = parsed.root.attrs.get('Sdk')
+  if (sdk !== undefined && sdk !== 'Microsoft.NET.Sdk') return false
+  for (const child of parsed.root.children) {
+    if (child.name !== 'ItemGroup' || child.attrs.size > 0) return false
+    for (const item of child.children) {
+      if (item.name !== 'ProjectReference' || item.attrs.size !== 1) return false
+      const include = item.attrs.get('Include')
+      if (include === undefined || !/^(?:\.\.[/\\])?[A-Za-z0-9._/\\-]+\.(?:cs|fs)proj$/.test(include)) return false
+    }
+  }
+  return true
+}
+
+function dotnetProjectReferences(text: string, projectDir: string, projects: ReadonlySet<string>): DotnetReferences {
+  const empty = (unsupported: boolean): DotnetReferences => ({ deps: [], unsupported })
+  const parsed = dotnetParseXml(text)
+  if (parsed.unsupported || parsed.root === null || parsed.root.name !== 'Project') return empty(true)
+
+  const nodes: DotnetNode[] = []
+  dotnetWalk(parsed.root, (node) => nodes.push(node))
+  if (nodes.some((node) => ['Choose', 'Import'].includes(node.name))) return empty(true)
+
+  const deps = new Set<string>()
+  let unsupported = false
+  for (const node of nodes.filter((candidate) => candidate.name === 'ProjectReference')) {
+    const ancestors: DotnetNode[] = []
+    for (let parent = node.parent; parent !== null; parent = parent.parent) ancestors.push(parent)
+    const group = ancestors.find((candidate) => candidate.name === 'ItemGroup')
+    // A reference created during target execution is not a declared dependency. It cannot be
+    // resolved without running the build, so its coverage is unknown rather than an empty graph.
+    if (ancestors.some((candidate) => candidate.name === 'Target') || group === undefined) {
+      unsupported = true
+      continue
+    }
+    if (
+      ancestors.some((candidate) => candidate.attrs.has('Condition')) ||
+      group.attrs.has('Condition') ||
+      node.attrs.has('Condition') ||
+      node.attrs.has('Update') ||
+      node.attrs.has('Remove')
+    ) {
+      unsupported = true
+      continue
+    }
+    const include = node.attrs.get('Include')
+    if (include === undefined || include === '') {
+      unsupported = true
+      continue
+    }
+    const exclude = node.attrs.get('Exclude') ?? ''
+    if (exclude.includes('$') || exclude.includes('*') || exclude.includes('?')) {
+      unsupported = true
+      continue
+    }
+    const excluded = new Set(
+      exclude
+        .split(';')
+        .map((item) => item.trim().replace(/\\/g, '/'))
+        .filter((item) => item !== ''),
+    )
+    for (const raw of include.split(';')) {
+      const item = raw.trim()
+      if (item === '') continue
+      if (item.includes('$') || item.includes('*') || item.includes('?')) {
+        unsupported = true
+        continue
+      }
+      const normalized = item.replace(/\\/g, '/')
+      // Absolute, UNC and drive-qualified paths name projects outside this repository.
+      if (/^[A-Za-z]:/.test(normalized) || normalized.startsWith('/') || normalized.startsWith('//')) continue
+      const target = posix
+        .normalize(projectDir === '.' ? normalized : posix.join(projectDir, normalized))
+        .replace(/^\.\//, '')
+      if (target.split('/')[0] === '..' || excluded.has(normalized) || excluded.has(target)) continue
+      if (!projects.has(target)) {
+        unsupported = true
+        continue
+      }
+      deps.add(target.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
+    }
+  }
+  return { deps: [...deps].sort(), unsupported }
+}
+
 export const dotnetDetector: Detector = {
   id: 'dotnet',
   title: '.NET',
@@ -1403,10 +1702,53 @@ export const dotnetDetector: Detector = {
       evidence: [projects[0] ?? 'global.json'],
     })
 
+    const projectFiles = new Set(projects)
+    const projectIds = projects.map((p) => p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
+    const duplicateIds = new Set(projectIds.filter((id, index) => projectIds.indexOf(id) !== index))
     for (const p of projects) {
-      const dir = p.slice(0, p.lastIndexOf('/') + 1) || '.'
+      const dir = p.slice(0, p.lastIndexOf('/')) || '.'
       const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
       addModule(draft, { id, path: dir, kind: 'project', deps: [] })
+    }
+    const moduleById = new Map(draft.modules.map((module) => [module.id, module]))
+    for (const p of projects) {
+      const dir = p.slice(0, p.lastIndexOf('/')) || '.'
+      const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
+      const text = read(ctx, p)
+      if (text === null) continue
+      // SDK-style projects implicitly import Directory.Build.props and .targets, but properties
+      // can disable or redirect them. Only files MSBuild actually imports contribute references.
+      const settings = dotnetImportSettings(text)
+      const imports = dotnetImportSources(dir, ctx, settings)
+      if (
+        settings.unsupported ||
+        imports.unsupported ||
+        !dotnetFullyLiteral(text) ||
+        imports.sources.length > 0 ||
+        duplicateIds.has(id)
+      ) {
+        draft.depsUnknownReasons.set(id, 'unsupported .NET project reference; dependencies left unknown')
+        continue
+      }
+      const sources = [{ path: p, dir }, ...imports.sources]
+      const resolved: DotnetReferences = { deps: [], unsupported: false }
+      for (const source of sources) {
+        const sourceText = source.path === p ? text : read(ctx, source.path)
+        if (sourceText === null) {
+          resolved.unsupported = true
+          continue
+        }
+        const part = dotnetProjectReferences(sourceText, dir, projectFiles)
+        if (part.unsupported) resolved.unsupported = true
+        resolved.deps.push(...part.deps)
+      }
+      if (resolved.unsupported) {
+        draft.depsUnknownReasons.set(id, 'unsupported .NET project reference; dependencies left unknown')
+        continue
+      }
+      const module = moduleById.get(id)
+      if (module !== undefined) module.deps = [...new Set(resolved.deps)].sort()
+      markDepsAnalysed(draft, id)
     }
 
     // ASP.NET Core is a .NET workload with its own SDK marker. A plain .NET project is not a web

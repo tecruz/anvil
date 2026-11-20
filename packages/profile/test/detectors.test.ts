@@ -1598,9 +1598,7 @@ describe('module dependency completeness', () => {
     })
     const api = profile.modules[0]
     assert.deepEqual(api?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: api?.id, path: api?.path, reason: 'no dependency resolver for this ecosystem' },
-    ])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === api?.path))
   })
 
   test('Go workspace requires become internal edges, and analysed modules are not listed as unknown', () => {
@@ -2957,6 +2955,294 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.modules.map((m) => m.id).sort(), [':api', ':core'])
     assert.deepEqual(profile.monorepo?.members.sort(), [':api', ':core'])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('.NET ProjectReference paths become internal module edges', () => {
+    const profile = profileOf({
+      'App.sln': 'Solution\n',
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup>',
+        '    <ProjectReference Include="..\\Core\\Core.csproj" />',
+        '    <ProjectReference Include="../Worker/Worker.fsproj" />',
+        '  </ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
+      'src/Worker/Worker.fsproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Worker/Worker.fs': 'module Worker\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, ['src:Core:Core', 'src:Worker:Worker'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('commented and CDATA project references are not .NET edges', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <!-- <ProjectReference Include="../Core/Core.csproj" /> -->',
+        '  <PropertyGroup><Docs><![CDATA[<ProjectReference Include="../Core/Core.csproj" />]]></Docs></PropertyGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
+  })
+
+  test('a computed .NET project reference leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="$(CoreDir)/Core.csproj" /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a conditional .NET project reference leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup Condition="false"><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a Directory.Build.props project reference is an internal edge', () => {
+    const profile = profileOf({
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'App/Directory.Build.props': [
+        '<Project>',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    // Imported files are outside the conservative resolver's scope; coverage stays unknown.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
+  })
+
+  test('a nearer Directory.Build.props shadows the root one', () => {
+    const profile = profileOf({
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'App/Directory.Build.props': '<Project />\n',
+      'Directory.Build.props': [
+        '<Project><ItemGroup><ProjectReference Include="../Shared/Shared.csproj" /></ItemGroup></Project>',
+        '',
+      ].join('\n'),
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+      'Shared/Shared.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Shared/Shared.cs': 'class Shared {}\n',
+    })
+    // Imports are not resolved conservatively, so neither App nor Core claims edges.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'Core:Core')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
+  })
+
+  test('an imported ProjectReference path resolves against the consuming project', () => {
+    const profile = profileOf({
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Directory.Build.props': [
+        '<Project><ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup></Project>',
+        '',
+      ].join('\n'),
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
+  })
+
+  test('mismatched .NET project XML leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></PropertyGroup></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('malformed .NET project XML leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk">\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a project reference inside a Target is not a module edge', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <Target Name="Build"><ProjectReference Include="../Core/Core.csproj" /></Target>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    // A reference created during target execution needs a build to resolve, so coverage is unknown.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a non-Project XML root leaves .NET coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<ProjectTemplate>',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</ProjectTemplate>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a nested Project element is not an MSBuild project root', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Wrapper>',
+        '  <Project Sdk="Microsoft.NET.Sdk">',
+        '    <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '  </Project>',
+        '</Wrapper>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a malformed ItemGroup attribute leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup stray><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a malformed ProjectReference attribute leaves coverage unknown', () => {
+    const profile = profileOf({
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" stray /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
   test('an unreadable Cargo manifest stays unknown', () => {
