@@ -496,11 +496,21 @@ function maskGradleComments(text: string): string {
       continue
     }
     if (ch === '/' && text[i + 1] === '*') {
+      // Kotlin block comments nest. Stopping at the first `*/` treats the rest of the real
+      // comment as code, so a dependency written after it can become a false edge.
       const start = i
+      let depth = 1
       i += 2
-      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++
-      i = Math.min(n, i + 2)
-      blank(start, i)
+      while (i < n && depth > 0) {
+        if (text[i] === '/' && text[i + 1] === '*') {
+          depth++
+          i += 2
+        } else if (text[i] === '*' && text[i + 1] === '/') {
+          depth--
+          i += 2
+        } else i++
+      }
+      blank(start, Math.min(n, i))
       continue
     }
     if (ch === '"' || ch === "'") {
@@ -541,6 +551,30 @@ function maskGradleStrings(text: string): string {
   let i = 0
   while (i < n) {
     const ch = text[i] as string
+    // Groovy slashy strings use `/.../`. Without masking them, a documented dependency inside a
+    // string becomes a real edge. Only a slash in string position is treated this way, so normal
+    // division is not mistaken for a literal.
+    if (ch === '/' && text[i + 1] !== '/' && text[i + 1] !== '*') {
+      let previous = i - 1
+      while (previous >= 0 && /[ \t]/.test(text[previous] as string)) previous--
+      const before = previous < 0 ? '' : (text[previous] as string)
+      if (before === '' || '=(:,'.includes(before)) {
+        let end = i + 1
+        while (end < n && text[end] !== '\n') {
+          if (text[end] === '\\') {
+            end += 2
+            continue
+          }
+          if (text[end] === '/') break
+          end++
+        }
+        if (end < n && text[end] === '/') {
+          blank(i + 1, end)
+          i = end + 1
+          continue
+        }
+      }
+    }
     if (ch !== '"' && ch !== "'") {
       i++
       continue
@@ -675,6 +709,298 @@ function gradleProjectDirs(text: string, baseDir: string): Map<string, string | 
     out.set(path, value === null ? null : normalize(value))
   }
   return out
+}
+
+/** Gradle dependency configurations whose `project(...)` arguments are internal edges. */
+function gradleDependencyCall(name: string): boolean {
+  const known = new Set([
+    'add',
+    'implementation',
+    'api',
+    'compileOnly',
+    'runtimeOnly',
+    'annotationProcessor',
+    'kapt',
+    'ksp',
+    'testImplementation',
+    'testCompileOnly',
+    'testRuntimeOnly',
+    'androidTestImplementation',
+    'androidTestCompileOnly',
+    'androidTestRuntimeOnly',
+  ])
+  return known.has(name) || /(?:Implementation|CompileOnly|RuntimeOnly|Api)$/.test(name)
+}
+
+/** The index of the `)` closing the `(` at `open`, or -1. */
+function gradleMatchingParen(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '(') depth++
+    else if (ch === ')') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+type GradleDeps = { deps: string[]; unsupported: boolean }
+
+/**
+ * Read one `dependencies { ... }` body.
+ *
+ * Strings are masked before structure is read, so a `dependencies` block, a `}` or a
+ * `project(":x")` inside a literal cannot create an edge or end a block early. Masking preserves
+ * offsets, so literal values are read from the original source by index.
+ *
+ * Only a `project(...)` inside a dependency configuration call is an edge. A lookup assigned to
+ * a variable and then passed to a configuration, an interpolated path, an unknown configuration
+ * and a non-literal argument leave coverage unknown rather than a confident empty list.
+ */
+function gradleDependenciesBody(
+  text: string,
+  bodyStart: number,
+  body: string,
+  target: string,
+  members: ReadonlySet<string>,
+): GradleDeps {
+  const out = new Set<string>()
+  let unsupported = false
+  const literal = /(['"])(\u0000*)\1\s*\)/
+  const namedLiteral = /path\s*=\s*(['"])(\u0000*)\1\s*\)/
+  const literalProject = /\bproject\s*\(\s*(['"])(\u0000*)\1\s*\)/dg
+  const namedProject = /\bproject\s*\(\s*path\s*=\s*(['"])(\u0000*)\1\s*\)/dg
+  const isLookup = (before: string): boolean => /(?:=|\bval\b|\bvar\b)\s*$/.test(before)
+
+  // A lookup stored in a variable and later passed to a configuration cannot be resolved
+  // without evaluating code; record it so that use can be reported as unknown.
+  const assigned = new Map<string, string>()
+  for (const match of body.matchAll(/\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*project\s*\(\s*(['"])(\u0000*)\2\s*\)/dg)) {
+    const span = match.indices?.[3]
+    if (span === undefined) continue
+    assigned.set(match[1] ?? '', text.slice(bodyStart + span[0], bodyStart + span[1]))
+  }
+
+  const addProjectArgument = (raw: string, before: string, after: string, config: string): void => {
+    // A project call inside a larger expression is a lookup used to build some other value,
+    // not a direct dependency argument.
+    if (before.trim() !== '' && !/,$/.test(before.trim())) {
+      unsupported = true
+      return
+    }
+    if (after.trim() !== '' && !/^[,)]/.test(after.trim())) {
+      // A project lookup used in an expression is not an edge, but it may feed a dependency;
+      // leave coverage unknown instead of claiming a confident empty list.
+      unsupported = true
+      return
+    }
+    if (raw.includes('$')) {
+      unsupported = true // interpolated Kotlin/Groovy string
+      return
+    }
+    if (!gradleDependencyCall(config)) {
+      // An unknown configuration could hide a dependency; never report a confident negative.
+      unsupported = true
+      return
+    }
+    const id = gradlePath(raw)
+    if (id === target || !members.has(id)) return
+    out.add(id)
+  }
+
+  for (const call of body.matchAll(/\b([A-Za-z_][\w.-]*)\s*\(/g)) {
+    const name = call[1] ?? ''
+    const callAt = call.index ?? 0
+    // A bare project lookup (`val other = project(":x")`) is not a dependency declaration.
+    if (name === 'project' && isLookup(body.slice(0, callAt))) continue
+    const open = callAt + call[0].length - 1
+    const close = gradleMatchingParen(body, open)
+    if (close < 0) {
+      unsupported = true
+      continue
+    }
+    const argsStart = open + 1
+    const args = body.slice(argsStart, close)
+    const recognized = gradleDependencyCall(name)
+
+    for (const pattern of [literalProject, namedProject]) {
+      for (const match of args.matchAll(pattern)) {
+        const span = match.indices?.[2]
+        if (span === undefined) continue
+        const raw = text.slice(bodyStart + argsStart + span[0], bodyStart + argsStart + span[1])
+        addProjectArgument(raw, args.slice(0, match.index), args.slice(match.index + match[0].length), name)
+      }
+    }
+
+    for (const match of args.matchAll(/\bproject\s*\(\s*/g)) {
+      const rest = args.slice(match.index + match[0].length)
+      if (literal.test(rest) || namedLiteral.test(rest)) continue
+      unsupported = true
+    }
+    if (recognized) {
+      // Gradle's type-safe `projects.core` accessors cannot be resolved without evaluating the
+      // generated model; do not silently report "no dependencies".
+      if (/\bprojects\s*\./.test(args)) unsupported = true
+      for (const variable of assigned.keys()) {
+        if (new RegExp(`\\b${variable}\\b`).test(args)) unsupported = true
+      }
+    }
+  }
+
+  // Groovy also allows `implementation project(":core")` without parentheses around the call.
+  for (const pattern of [
+    /\b([A-Za-z_][\w.-]*)\s+project\s*\(\s*(['"])(\u0000*)\2\s*\)/dg,
+    /\b([A-Za-z_][\w.-]*)\s+project\s*\(\s*path\s*=\s*(['"])(\u0000*)\3\s*\)/dg,
+  ]) {
+    for (const match of body.matchAll(pattern)) {
+      const span = match.indices?.[3]
+      if (span === undefined) continue
+      const raw = text.slice(bodyStart + span[0], bodyStart + span[1])
+      // Groovy statements have no closing parenthesis; the declaration ends at the newline or
+      // semicolon, which is what the "whole argument" check must look at.
+      const after = body.slice(match.index + match[0].length).split(/[\n;]/, 1)[0] ?? ''
+      addProjectArgument(raw, '', after, match[1] ?? '')
+    }
+  }
+
+  // Groovy command expressions also allow `implementation projects.core`.
+  for (const match of body.matchAll(/\b([A-Za-z_][\w.-]*)\s+(projects\s*\.[A-Za-z_][\w.]*)/g)) {
+    if (gradleDependencyCall(match[1] ?? '')) unsupported = true
+  }
+  return { deps: [...out].sort(), unsupported }
+}
+
+/** Parse the `dependencies` blocks in a region of masked Gradle source. */
+function gradleDependenciesIn(
+  text: string,
+  content: string,
+  from: number,
+  to: number,
+  target: string,
+  members: ReadonlySet<string>,
+  skipRanges: ReadonlyArray<readonly [number, number]> = [],
+): GradleDeps {
+  const out = new Set<string>()
+  let unsupported = false
+  const region = content.slice(from, to)
+  for (const block of region.matchAll(/\bdependencies\s*\{/g)) {
+    const open = from + (block.index ?? 0) + block[0].length - 1
+    if (skipRanges.some(([start, end]) => open >= start && open <= end)) continue
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0 || close > to) {
+      unsupported = true
+      continue
+    }
+    const parsed = gradleDependenciesBody(text, open + 1, content.slice(open + 1, close), target, members)
+    for (const dep of parsed.deps) out.add(dep)
+    unsupported ||= parsed.unsupported
+  }
+  return { deps: [...out].sort(), unsupported }
+}
+
+/** Internal edges declared in a Gradle build file, including `project(":api") { ... }` blocks. */
+function gradleProjectDependencies(
+  text: string,
+  members: ReadonlySet<string>,
+  self: string,
+  includeOwn = true,
+): GradleDeps {
+  const content = maskGradleStrings(maskGradleComments(text))
+  // A `project("...") { ... }` block configures a different module; its nested `dependencies`
+  // block must not be attributed to the script that happens to contain it.
+  const ranges: Array<readonly [number, number]> = []
+  for (const block of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000+)\1\s*\)\s*\{/dg)) {
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close >= 0) ranges.push([open, close])
+  }
+  const own = includeOwn
+    ? gradleDependenciesIn(text, content, 0, content.length, self, members, ranges)
+    : { deps: [] as string[], unsupported: false }
+  for (const block of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000+)\1\s*\)\s*\{/dg)) {
+    const span = block.indices?.[2]
+    if (span === undefined) continue
+    const id = text.slice(span[0], span[1])
+    if (id.includes('$')) {
+      // An interpolated selector cannot be resolved statically.
+      own.unsupported = true
+      continue
+    }
+    // A block configures one named project. Never attribute its dependencies to every member.
+    if (id !== self || !members.has(id)) continue
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0) continue
+    const nested = gradleDependenciesIn(text, content, open + 1, close, id, members)
+    for (const dep of nested.deps) own.deps.push(dep)
+    own.unsupported ||= nested.unsupported
+  }
+  own.deps = [...new Set(own.deps)].sort()
+  return own
+}
+
+/**
+ * True when a root build file declares project dependencies for an unknown set of modules
+ * (`subprojects { ... }` / `allprojects { ... }`). Those edges cannot be attributed safely, so
+ * every member's coverage must stay unknown rather than becoming a confident empty list.
+ */
+/** True when a root script selects a project with a computed rather than literal name. */
+function gradleRootComputedProjectSelector(text: string): boolean {
+  const content = maskGradleStrings(maskGradleComments(text))
+  for (const match of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000*)\1\s*\)/dg)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    if (!/^\s*\{/.test(content.slice(open + 1))) continue
+    const span = match.indices?.[2]
+    if (span === undefined) return true
+    // A masked literal can hide interpolation; read the original value to see it.
+    if (text.slice(span[0], span[1]).includes('$')) return true
+  }
+  for (const match of content.matchAll(/\bproject\s*\(/g)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    const close = gradleMatchingParen(content, open)
+    if (close < 0 || !/^\s*\{/.test(content.slice(close + 1))) continue
+    if (!/^\s*(['"])\u0000+\1\s*$/.test(content.slice(open + 1, close))) return true
+  }
+  return false
+}
+
+/**
+ * Project-specific `buildFileName` declarations in a settings file.
+ *
+ * A `null` value means the name is computed and the effective build script is unknown, so no
+ * module's dependency list can be trusted. The ordinary DSL and the `project(":x") { ... }`
+ * form are both read; a script that renames the default is not parsed from the default name.
+ */
+type GradleScriptSelection = { names: Map<string, string | null>; ambiguous: boolean }
+
+/**
+ * Custom script selection is read-only but deliberately conservative.
+ *
+ * A settings file that writes `buildFileName` changes which script Gradle evaluates. Resolving
+ * that write safely would require evaluating arbitrary Kotlin/Groovy, so any write makes every
+ * module's dependency coverage unknown. Comparisons (`==`) are not writes and are ignored.
+ */
+function gradleBuildFileNameSelection(text: string): GradleScriptSelection {
+  const masked = maskGradleStrings(maskGradleComments(text))
+  const writes = [...masked.matchAll(/\bbuildFileName\s*=\s*(?!=)/g)].length
+  const compound = [...masked.matchAll(/\bbuildFileName\s*[+*/-]=/g)].length
+  // Groovy allows command-style calls without parentheses, so the method name alone is the signal.
+  const setters = [...masked.matchAll(/\bsetBuildFileName\b/g)].length
+  return { names: new Map(), ambiguous: writes > 0 || compound > 0 || setters > 0 }
+}
+
+function gradleRootWideProjectDeps(text: string, members: ReadonlySet<string>): boolean {
+  const content = maskGradleStrings(maskGradleComments(text))
+  for (const block of content.matchAll(/\b(?:subprojects|allprojects)\s*\{/g)) {
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0) continue
+    const parsed = gradleDependenciesIn(text, content, open + 1, close, '', members)
+    if (parsed.deps.length > 0 || parsed.unsupported) return true
+  }
+  return false
 }
 
 /**
@@ -850,13 +1176,99 @@ export const jvmDetector: Detector = {
           const settingsPath = ctx.resolve(settings)
           const settingsDir = settingsPath.includes('/') ? settingsPath.slice(0, settingsPath.lastIndexOf('/')) : ''
           const remaps = gradleProjectDirs(text, settingsDir)
-          const members = gradleIncludes(text)
-          for (const m of members) {
-            addModule(draft, { id: m, path: remaps.get(gradlePath(m)) ?? m, kind: 'project', deps: [] })
+          // Membership, module ids and build-file paths all use the same canonical `:a:b` form.
+          // Without this, `include("api")` reports `api` in the workspace but `:api` in the graph.
+          const members = gradleIncludes(text).map(gradlePath)
+          const ids = new Set(members)
+          // A project's directory defaults to the path implied by its Gradle id, relative to the
+          // settings file. A computed projectDir is unknown: do not fall back to the default path,
+          // which may name a decoy outside this build.
+          const directories = new Map<string, string | null>()
+          for (const id of members) {
+            const declared = id.replace(/^:+/, '').replace(/:/g, '/')
+            const dir = remaps.has(id) ? (remaps.get(id) ?? null) : posix.join(settingsDir, declared)
+            directories.set(id, dir === null ? null : posix.normalize(dir).replace(/^\.\//, '').replace(/\/+$/, ''))
+          }
+          for (const [id, dir] of directories) {
+            addModule(draft, { id, path: dir ?? '', kind: 'project', deps: [] })
+          }
+          // Gradle evaluates exactly one script per project. When both DSL variants exist, or a
+          // computed buildFileName is used, the chosen script cannot be determined safely.
+          const scriptSelection = gradleBuildFileNameSelection(text)
+          const buildFileNames = scriptSelection.names
+          const chooseScript = (dir: string | null, id: string): { file: string | undefined; ambiguous: boolean } => {
+            if (dir === null) return { file: undefined, ambiguous: true }
+            // The project directory may be nested under the detected root; resolve every probe
+            // through the detector context rather than assuming repository-root paths.
+            const has = (file: string): boolean => ctx.files.has(ctx.resolve(file))
+            const resolve = (file: string): string => ctx.resolve(file)
+            const prefix = dir === '' || dir === '.' ? '' : `${dir}/`
+            const explicit = buildFileNames.get(id)
+            if (explicit === null) return { file: undefined, ambiguous: true }
+            if (explicit !== undefined) {
+              const file = `${prefix}${explicit}`
+              return has(file) ? { file: resolve(file), ambiguous: false } : { file: undefined, ambiguous: true }
+            }
+            const candidates = ['build.gradle.kts', 'build.gradle'].map((name) => `${prefix}${name}`).filter(has)
+            if (candidates.length > 1) return { file: undefined, ambiguous: true }
+            return { file: candidates[0] === undefined ? undefined : resolve(candidates[0]), ambiguous: false }
+          }
+          const rootChoice = chooseScript('', '')
+          const effectiveScripts = new Set<string>()
+          if (rootChoice.file !== undefined) effectiveScripts.add(rootChoice.file)
+          const choices = new Map<string, ReturnType<typeof chooseScript>>()
+          for (const [id, dir] of directories) {
+            const choice = chooseScript(dir, id)
+            choices.set(id, choice)
+            if (choice.file !== undefined) effectiveScripts.add(choice.file)
+          }
+          // If any custom-script write was seen, no script can be trusted; do not even read them.
+          const buildTexts = scriptSelection.ambiguous
+            ? []
+            : [...effectiveScripts]
+                .sort()
+                .map((file) => read(ctx, file))
+                .filter((value): value is string => value !== null)
+          // A wide or computed selector can add dependencies to an unknown set of modules, so no
+          // module's empty list can be trusted in that case.
+          const rootWide =
+            scriptSelection.ambiguous ||
+            buildTexts.some((body) => gradleRootWideProjectDeps(body, ids) || gradleRootComputedProjectSelector(body))
+          // An unresolved script for any project can configure any other project, so every
+          // member's dependency list becomes untrustworthy.
+          const scriptAmbiguous =
+            rootChoice.ambiguous ||
+            [...directories].filter(([, dir]) => dir !== null).some(([id]) => choices.get(id)?.ambiguous === true)
+          for (const [id, dir] of directories) {
+            const deps = new Set<string>()
+            const choice = choices.get(id) ?? { file: undefined, ambiguous: true }
+            let unsupported = rootWide || scriptAmbiguous || (dir !== null && choice.ambiguous)
+            let ownReadable = false
+            if (!scriptSelection.ambiguous && choice.file !== undefined) {
+              const body = read(ctx, choice.file)
+              if (body !== null) {
+                ownReadable = true
+                const resolved = gradleProjectDependencies(body, ids, id)
+                for (const dep of resolved.deps) deps.add(dep)
+                unsupported ||= resolved.unsupported
+              }
+            }
+            for (const body of buildTexts) {
+              const fromBlock = gradleProjectDependencies(body, ids, id, false)
+              for (const dep of fromBlock.deps) deps.add(dep)
+              unsupported ||= fromBlock.unsupported
+            }
+            if (unsupported) {
+              draft.depsUnknownReasons.set(id, 'unsupported Gradle dependency syntax; dependencies left unknown')
+              continue
+            }
+            const existing = draft.modules.find((module) => module.id === id)
+            if (existing !== undefined) existing.deps = [...deps].sort()
+            if (ownReadable) markDepsAnalysed(draft, id)
           }
           if (draft.monorepo !== null) draft.monorepo.members = members
           gradleMembers = members
-          for (const [id, dir] of remaps) gradleRemaps.set(id, dir)
+          for (const [id, dir] of directories) gradleRemaps.set(id, dir)
         }
       }
       if (!wrapper) {
