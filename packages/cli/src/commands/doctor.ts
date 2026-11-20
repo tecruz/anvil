@@ -204,10 +204,19 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   if (p.modules.length > 0) {
     out.push('')
     out.push(s.bold('Modules'))
+    const unanalysed = new Set((p.diagnostics.unanalysedDeps ?? []).map((m) => m.id))
     out.push(
       renderTable(
         ['id', 'path', 'depends on'],
-        p.modules.map((m) => [m.id, m.path, m.deps.length === 0 ? s.dim('-') : m.deps.join(', ')]),
+        p.modules.map((m) => [
+          m.id,
+          m.path,
+          unanalysed.has(m.id)
+            ? s.dim('unknown (not analysed)')
+            : m.deps.length === 0
+              ? s.dim('none detected')
+              : m.deps.join(', '),
+        ]),
         s,
       ),
     )

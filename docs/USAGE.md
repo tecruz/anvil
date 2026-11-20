@@ -709,9 +709,13 @@ for a current verdict. The dashboard does not stage, apply, set up, claim, ship,
 tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
-`fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
-reasons under `degraded`, and `--strict` fails when the profile is incomplete. Raise
-`--max-files` when a real repository exceeds the default 20,000-file cap.
+`fileLimit` that was in force, any `failedDetectors`, and `unanalysedDeps` — modules whose
+internal dependency edges no detector could resolve from a manifest. `anvil doctor` repeats
+these reasons under `degraded` and prints `unknown (not analysed)` in the Modules table where
+it would otherwise print an empty dependency list. An empty `deps` array means "none found"
+only for analysed ecosystems (currently Node workspaces and Go workspaces); for every other
+module it means "not analysed". `anvil doctor --strict` fails while any of these diagnostics
+stand. Raise `--max-files` when a real repository exceeds the default 20,000-file cap.
 
 A repository can have more than one real runner for the same kind — `npm test` and
 `npx playwright test`, for example. `anvil profile` and `anvil doctor` label every runner

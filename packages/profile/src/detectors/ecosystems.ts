@@ -19,6 +19,7 @@ import {
   type DetectorContext,
   filesUnder,
   hasFile,
+  markDepsAnalysed,
   setMonorepo,
 } from '../detector.ts'
 import { evidence, findLine, maskXmlComments } from '../manifest.ts'
@@ -186,6 +187,63 @@ export const kotlinMultiplatformDetector: Detector = {
 // Go
 // ---------------------------------------------------------------------------
 
+/**
+ * Workspace-internal `require` edges from one `go.mod`.
+ *
+ * Only module paths already present in this workspace count, and the current module is never
+ * its own dependency. A `require` inside a commented line is ignored, so a commented-out
+ * edge cannot silently appear in the module graph.
+ */
+function goWorkspaceRequires(mod: string, members: ReadonlySet<string>, self: string): string[] {
+  const out = new Set<string>()
+  let block = false
+  for (const raw of mod.split('\n')) {
+    const line = raw.replace(/\/\/.*$/, '').trim()
+    if (line === '') continue
+    if (/^require\s*\(/.test(line)) {
+      block = true
+      continue
+    }
+    if (block && line === ')') {
+      block = false
+      continue
+    }
+    const name = /^require\s+(\S+)/.exec(line)?.[1] ?? (block ? /^(\S+)\s+v\S+/.exec(line)?.[1] : undefined)
+    if (name === undefined || name === self || !members.has(name)) continue
+    out.add(name)
+  }
+  return [...out].sort()
+}
+
+/**
+ * Directories named by `use` in a `go.work`.
+ *
+ * Only these are workspace members. Scanning every `go.mod` in the tree would add an
+ * unrelated checkout or an example module to the graph, and would let a `require` create a
+ * dependency edge to one. Both spellings are read: `use ./one` and a parenthesised block.
+ */
+function goWorkMembers(text: string): string[] {
+  const out: string[] = []
+  let block = false
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\/\/.*$/, '').trim()
+    if (line === '') continue
+    if (/^use\s*\(/.test(line)) {
+      block = true
+      continue
+    }
+    if (block && line === ')') {
+      block = false
+      continue
+    }
+    const value = /^use\s+(\S+)/.exec(line)?.[1] ?? (block ? line.split(/\s+/)[0] : undefined)
+    if (value === undefined) continue
+    const path = posix.normalize(value.replace(/\\/g, '/')).replace(/\/+$/, '')
+    out.push(path === '.' || path === '' ? '.' : path)
+  }
+  return [...new Set(out)]
+}
+
 export const goDetector: Detector = {
   id: 'go',
   title: 'Go',
@@ -204,13 +262,29 @@ export const goDetector: Detector = {
     }
     if (hasFile(ctx, 'go.work')) {
       setMonorepo(draft, { tool: 'go-work', evidence: 'go.work', members: [] })
-      for (const f of ctx.files) {
-        if (!f.endsWith('/go.mod')) continue
-        const path = f === 'go.mod' ? '.' : f.slice(0, -'/go.mod'.length)
-        const inner = read(ctx, f)
+      const work = read(ctx, 'go.work')
+      const modules: Array<{ id: string; path: string; mod: string | null }> = []
+      for (const path of work === null ? [] : goWorkMembers(work)) {
+        const manifest = path === '.' ? 'go.mod' : `${path}/go.mod`
+        // A declared member with no manifest is not a module. A manifest that exists but cannot
+        // be read is different: keep it as a module with unknown deps, never mark it analysed.
+        if (!ctx.files.has(ctx.resolve(manifest))) continue
+        const inner = read(ctx, manifest)
         const name = inner === null ? path : (/^module\s+(\S+)/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'package', deps: [] })
+        modules.push({ id: name, path, mod: inner })
       }
+      // A `require` of another declared member is an internal edge. External requirements are
+      // deliberately not inferred as graph nodes: they are not modules here.
+      const ids = new Set(modules.map((m) => m.id))
+      for (const module of modules) {
+        if (module.mod === null) continue
+        const deps = goWorkspaceRequires(module.mod, ids, module.id)
+        const existing = draft.modules.find((m) => m.id === module.id)
+        if (existing !== undefined) existing.deps = deps
+        markDepsAnalysed(draft, module.id)
+      }
+      if (draft.monorepo !== null) draft.monorepo.members = [...ids]
     }
 
     // A fast subset exists only if the project says so: `go test -short`, or a

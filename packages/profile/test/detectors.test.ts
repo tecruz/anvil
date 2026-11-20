@@ -1589,3 +1589,85 @@ describe('AI and backend frameworks are matched from their own marker', () => {
     assert.ok(!ids.includes('aspnet'), ids.join(', '))
   })
 })
+
+describe('module dependency completeness', () => {
+  test('an unresolvable ecosystem reports unknown instead of an empty dependency list', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
+      'crates/api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n',
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+    })
+    const api = profile.modules.find((m) => m.id === 'api')
+    assert.deepEqual(api?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      { id: 'api', path: 'crates/api', reason: 'no dependency resolver for this ecosystem' },
+    ])
+  })
+
+  test('Go workspace requires become internal edges, and analysed modules are not listed as unknown', () => {
+    const profile = profileOf({
+      'go.work': 'go 1.23\n\nuse (\n  ./services/api\n  ./services/worker\n)\n',
+      'services/api/go.mod': [
+        'module example.com/api',
+        '',
+        'go 1.23',
+        '',
+        'require example.com/worker v0.0.0',
+        '',
+        'require (',
+        '  github.com/external/lib v1.2.3 // indirect',
+        '  // require example.com/self v0.0.0',
+        ')',
+        '',
+      ].join('\n'),
+      'services/api/main.go': 'package main\n',
+      'services/worker/go.mod': 'module example.com/worker\n\ngo 1.23\n',
+      'services/worker/main.go': 'package main\n',
+    })
+    const api = profile.modules.find((m) => m.id === 'example.com/api')
+    assert.deepEqual(api?.deps, ['example.com/worker'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('only members declared in go.work enter the graph', () => {
+    const profile = profileOf({
+      'go.work': 'go 1.23\n\nuse (\n  .\n  ./services/worker\n)\n',
+      'go.mod': 'module example.com/root\n\ngo 1.23\n\nrequire example.com/worker v0.0.0\n',
+      'main.go': 'package main\n',
+      'services/worker/go.mod': 'module example.com/worker\n\ngo 1.23\n',
+      'services/worker/main.go': 'package main\n',
+      'examples/demo/go.mod': 'module example.com/demo\n\ngo 1.23\n',
+      'examples/demo/main.go': 'package main\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['example.com/root', 'example.com/worker'])
+    assert.equal(profile.monorepo?.tool, 'go-work')
+    assert.deepEqual(profile.monorepo?.members.sort(), ['example.com/root', 'example.com/worker'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'example.com/root')?.deps, ['example.com/worker'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('an unreadable member manifest stays unknown, not analysed with no dependencies', () => {
+    const profile = profileOf({
+      'go.work': 'go 1.23\n\nuse ./services/api\n',
+      'services/api/go.mod': 'module example.com/api\n\0binary\n',
+      'services/api/main.go': 'package main\n',
+    })
+    const api = profile.modules.find((m) => m.path === 'services/api')
+    assert.equal(api?.id, 'services/api')
+    assert.deepEqual(api?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      { id: 'services/api', path: 'services/api', reason: 'no dependency resolver for this ecosystem' },
+    ])
+  })
+
+  test('a Node workspace dependency list means none found, not unknown', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ name: 'root', workspaces: ['packages/*'] }),
+      'packages/a/package.json': JSON.stringify({ name: 'a', dependencies: { b: '1.0.0', external: '2.0.0' } }),
+      'packages/b/package.json': JSON.stringify({ name: 'b' }),
+    })
+    const a = profile.modules.find((m) => m.id === 'a')
+    assert.deepEqual(a?.deps, ['b'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+})

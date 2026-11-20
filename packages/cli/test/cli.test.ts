@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
@@ -1325,5 +1325,26 @@ describe('doctor per-module stack summaries', () => {
       stacks: [{ id: 'unknown', version: null, evidence: [] }],
     }
     assert.deepEqual(stackLocations(profile), [{ dir: '.', stacks: ['unknown'], evidence: 'unknown' }])
+  })
+})
+
+describe('doctor module dependency diagnostics', () => {
+  test('an unanalysed module is printed as unknown, not as an empty dependency list', () => {
+    const dir = tempDir('anvil-profile-unanalysed-')
+    for (const [rel, content] of Object.entries({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
+      'crates/api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n',
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+    })) {
+      const target = join(dir, ...rel.split('/'))
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, content, 'utf8')
+    }
+    const res = runAnvil(['profile', '--profile', dir])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /unknown \(not analysed\)/)
+    const doctor = runAnvil(['doctor', '--profile', dir, '--json'])
+    const report = jsonOf(doctor).data as { degraded: Array<{ reason: string }> }
+    assert.ok(report.degraded.some((d) => /dependency graph incomplete/.test(d.reason)))
   })
 })

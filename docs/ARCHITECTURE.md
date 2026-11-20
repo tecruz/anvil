@@ -25,7 +25,11 @@ Five stages, and the order is the design:
    file:line evidence and a concrete fix. `anvil doctor` also presents the profile's
    repository-wide `Stack` list grouped by evidence directory ("Stack by location") when
    more than one location is present. That grouping is presentation only: it never adds a
-   stack, changes playbook matching, or changes the JSON contract.
+   stack, changes playbook matching, or changes the JSON contract. The profile also reports
+   `diagnostics.unanalysedDeps`: a module with `deps: []` is either analysed (a manifest was
+   read and no internal edge was found) or unknown, and only the first is allowed to look
+   like a negative finding. Go workspace `require` edges and Node workspace dependencies are
+   currently resolved; other ecosystems are declared unanalysed rather than silently empty.
 3. **Plan / brief** — rank the gaps and emit the facts an LLM needs, so the model does
    the prose and anvil does the facts.
 4. **Init** — write the derived context into the repository, through a staging bundle
