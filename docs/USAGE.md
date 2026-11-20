@@ -713,7 +713,8 @@ tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat
 internal dependency edges no detector could resolve from a manifest. `anvil doctor` repeats
 these reasons under `degraded` and prints `unknown (not analysed)` in the Modules table where
 it would otherwise print an empty dependency list. An empty `deps` array means "none found"
-only for analysed ecosystems (currently Node workspaces and Go workspaces); for every other
+only for analysed ecosystems (currently Node workspaces, Go workspaces and Cargo path
+dependencies); for every other
 module it means "not analysed". `anvil doctor --strict` fails while any of these diagnostics
 stand. Raise `--max-files` when a real repository exceeds the default 20,000-file cap.
 

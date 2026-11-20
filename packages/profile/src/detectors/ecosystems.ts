@@ -329,6 +329,42 @@ export const goDetector: Detector = {
 // Rust
 // ---------------------------------------------------------------------------
 
+/**
+ * Internal edges declared as Cargo path dependencies.
+ *
+ * Only a literal `path = "..."` inside a dependency table counts: it names a directory in
+ * this workspace, so the edge is declared rather than inferred. Registry dependencies are
+ * not workspace nodes and are deliberately ignored. The name of the crate is not trusted as
+ * an edge; the resolved directory is.
+ */
+function cargoPathDependencies(manifest: string, cratePath: string, paths: ReadonlySet<string>): string[] {
+  const out = new Set<string>()
+  const lines = manifest.split('\n')
+  let section: string | null = null
+  let entry = ''
+  const flush = (): void => {
+    const match = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(entry)
+    const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1]
+    if (match === null || path === undefined) return
+    const normalized = posix.normalize(posix.join(cratePath, path)).replace(/\/+$/, '')
+    if (normalized !== '' && paths.has(normalized)) out.add(normalized)
+  }
+  for (const raw of lines) {
+    const line = raw.replace(/#.*$/, '').trim()
+    if (line.startsWith('[')) {
+      flush()
+      entry = ''
+      section = /dependencies\]/.test(line) ? line : null
+      continue
+    }
+    if (section === null || line === '') continue
+    if (/^[A-Za-z0-9_-]+\s*=/.test(line)) flush()
+    entry += `${entry === '' ? '' : '\n'}${line}`
+  }
+  flush()
+  return [...out].sort()
+}
+
 export const rustDetector: Detector = {
   id: 'rust',
   title: 'Rust',
@@ -348,13 +384,28 @@ export const rustDetector: Detector = {
         evidence: evidence('Cargo.toml', findLine(cargo, /\[workspace\]/)),
         members: [],
       })
+      const crates: Array<{ id: string; path: string; manifest: string | null }> = []
       for (const f of ctx.files) {
         if (!f.endsWith('/Cargo.toml')) continue
         const path = f === 'Cargo.toml' ? '.' : f.slice(0, -'/Cargo.toml'.length)
         const inner = read(ctx, f)
         const name = inner === null ? path : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'crate', deps: [] })
+        crates.push({ id: name, path, manifest: inner })
       }
+      // A path dependency on another crate in this workspace is a declared internal edge.
+      // A manifest that cannot be read stays unknown rather than becoming an empty list.
+      const paths = new Set(crates.map((crate) => crate.path))
+      const idByPath = new Map(crates.map((crate) => [crate.path, crate.id]))
+      for (const crate of crates) {
+        if (crate.manifest === null) continue
+        const pathsFound = cargoPathDependencies(crate.manifest, crate.path, paths)
+        const deps = [...new Set(pathsFound.map((path) => idByPath.get(path) ?? path))].filter((id) => id !== crate.id)
+        const existing = draft.modules.find((module) => module.id === crate.id)
+        if (existing !== undefined) existing.deps = deps.sort()
+        markDepsAnalysed(draft, crate.id)
+      }
+      if (draft.monorepo !== null) draft.monorepo.members = crates.map((crate) => crate.id)
     }
 
     const commands: Array<['build' | 'test' | 'testFast' | 'lint' | 'format', CommandEntry]> = [

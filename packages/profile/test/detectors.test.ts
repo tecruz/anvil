@@ -1593,14 +1593,13 @@ describe('AI and backend frameworks are matched from their own marker', () => {
 describe('module dependency completeness', () => {
   test('an unresolvable ecosystem reports unknown instead of an empty dependency list', () => {
     const profile = profileOf({
-      'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
-      'crates/api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n',
-      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+      'services/api.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
     })
-    const api = profile.modules.find((m) => m.id === 'api')
+    const api = profile.modules[0]
     assert.deepEqual(api?.deps, [])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: 'api', path: 'crates/api', reason: 'no dependency resolver for this ecosystem' },
+      { id: api?.id, path: api?.path, reason: 'no dependency resolver for this ecosystem' },
     ])
   })
 
@@ -1669,5 +1668,82 @@ describe('module dependency completeness', () => {
     const a = profile.modules.find((m) => m.id === 'a')
     assert.deepEqual(a?.deps, ['b'])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('Cargo path dependencies become internal crate edges; registry dependencies do not', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',
+      'crates/api/Cargo.toml': [
+        '[package]',
+        'name = "api"',
+        'version = "0.1.0"',
+        '',
+        '[dependencies]',
+        'core = { path = "../core" }',
+        'serde = "1.0"',
+        '',
+        '[dev-dependencies]',
+        '# inline = { path = "../core" }',
+        '',
+      ].join('\n'),
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'crates/core/src/lib.rs': 'pub fn run() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'core')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    assert.deepEqual(profile.monorepo?.members.sort(), ['api', 'core'])
+  })
+
+  test('Cargo crate names do not become graph edges without a path declaration', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',
+      'crates/api/Cargo.toml': [
+        '[package]',
+        'name = "api"',
+        'version = "0.1.0"',
+        '',
+        '[dependencies]',
+        'core = "1.0"',
+        '',
+      ].join('\n'),
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'crates/core/src/lib.rs': 'pub fn run() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('Cargo dependency tables in target sections still produce path edges', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',
+      'crates/api/Cargo.toml': [
+        '[package]',
+        'name = "api"',
+        'version = "0.1.0"',
+        '',
+        "[target.'cfg(unix)'.dependencies]",
+        'core = { path = "../core" }',
+        '',
+      ].join('\n'),
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'crates/core/src/lib.rs': 'pub fn run() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+  })
+
+  test('an unreadable Cargo manifest stays unknown', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
+      'crates/api/Cargo.toml': '[package]\nname = "api"\n\0binary\n',
+      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'crates/api')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      { id: 'crates/api', path: 'crates/api', reason: 'no dependency resolver for this ecosystem' },
+    ])
   })
 })

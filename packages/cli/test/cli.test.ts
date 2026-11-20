@@ -1332,9 +1332,8 @@ describe('doctor module dependency diagnostics', () => {
   test('an unanalysed module is printed as unknown, not as an empty dependency list', () => {
     const dir = tempDir('anvil-profile-unanalysed-')
     for (const [rel, content] of Object.entries({
-      'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
-      'crates/api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n',
-      'crates/api/src/lib.rs': 'pub fn run() {}\n',
+      'services/api.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
     })) {
       const target = join(dir, ...rel.split('/'))
       mkdirSync(dirname(target), { recursive: true })
