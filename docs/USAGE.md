@@ -709,14 +709,26 @@ for a current verdict. The dashboard does not stage, apply, set up, claim, ship,
 tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
-`fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
-reasons under `degraded`, and `--strict` fails when the profile is incomplete. Raise
-`--max-files` when a real repository exceeds the default 20,000-file cap.
+`fileLimit` that was in force, any `failedDetectors`, and `unanalysedDeps` — modules whose
+internal dependency edges no detector could resolve from a manifest. `anvil doctor` repeats
+these reasons under `degraded` and prints `unknown (not analysed)` in the Modules table where
+it would otherwise print an empty dependency list. An empty `deps` array means "none found"
+only for analysed ecosystems (currently Node workspaces, Go workspaces, Cargo path
+dependencies, uv workspace sources and Gradle projects); for every other
+module it means "not analysed". `anvil doctor --strict` fails while any of these diagnostics
+stand. Raise `--max-files` when a real repository exceeds the default 20,000-file cap.
 
 A repository can have more than one real runner for the same kind — `npm test` and
 `npx playwright test`, for example. `anvil profile` and `anvil doctor` label every runner
 `primary` or `candidate`, and the doctor's JSON carries the full list under `runners`, so
 the suite anvil did not choose is visible instead of silently dropped.
+
+On a polyglot monorepo the flat `Stack` table is hard to read: a Next.js app in `apps/web`
+and a FastAPI service in `services/api` become one list with no location. `anvil doctor`
+therefore also prints a **Stack by location** section when stacks come from more than one
+directory, grouping the same detected stacks by the directory of their evidence. It is a
+presentation of `ProjectProfile.stacks` — the array, playbook matching and `--json` output
+are unchanged. A stack with no evidence is shown as `unknown`, never dropped.
 
 `anvil mcp` is the same control surface for an MCP client. It speaks newline-delimited
 JSON-RPC 2.0 over stdio and exposes three read-only tools: `anvil_doctor`, `anvil_plan`
