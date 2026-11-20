@@ -43,6 +43,17 @@ export interface TaskBlocker {
   label: string
   status: string
   reason: string
+  /** A contact the owner declared in the readiness report, never inferred. */
+  grantedBy?: string | null
+}
+
+/** A copyable handoff for a task that cannot proceed. It names only declared blockers. */
+export interface TaskHandoff {
+  schemaVersion: 1
+  /** False when there is no measured blocker to hand off. */
+  available: boolean
+  text: string
+  sources: string[]
 }
 
 export interface TaskMapNode {
@@ -103,6 +114,8 @@ export interface TaskBrief {
   map: TaskMap
   howToCheck: TaskCheck[]
   blockers: TaskBlocker[]
+  /** Copyable handoff, or an explicit reason why none can be produced. */
+  handoff: TaskHandoff
   /** Empty when the task stated no gate; the unknowns then say so. */
   gates: TaskGate[]
   /**
@@ -491,10 +504,10 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
   const ready = asRecord(snapshot.repository.ready.data)
   if (ready === null) return []
   const found: TaskBlocker[] = []
-  const add = (label: string, status: string, reason: string): void => {
+  const add = (label: string, status: string, reason: string, grantedBy: string | null = null): void => {
     if (found.length >= 6) return
     if (found.some((item) => item.label === label && item.status === status)) return
-    found.push({ label, status, reason })
+    found.push({ label, status, reason, grantedBy })
   }
   const required = (entry: Record<string, unknown>): boolean => entry.required !== false
   const reasonOf = (entry: Record<string, unknown>): string => asString(entry.reason) ?? asString(entry.detail) ?? ''
@@ -531,7 +544,7 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
       if (record === null || !required(record)) continue
       const status = asString(record.status) ?? 'unknown'
       if (!['missing', 'empty'].includes(status)) continue
-      add(asString(record.id) ?? asString(record.kind) ?? key, status, reasonOf(record))
+      add(asString(record.id) ?? asString(record.kind) ?? key, status, reasonOf(record), asString(record.grantedBy))
     }
   }
   for (const entry of asArray(ready.hardware)) {
@@ -547,9 +560,72 @@ function blockers(snapshot: DashboardSnapshot): TaskBlocker[] {
     add(asString(record.label) ?? asString(record.id) ?? 'context', 'blocked', reasonOf(record))
   }
   if (found.length === 0 && asString(ready.status) === 'blocked') {
-    add('environment', 'blocked', 'anvil ready reports blocked, but no individual need named a cause.')
+    add('environment', 'unknown', 'anvil ready reports blocked, but no individual need named a cause.')
   }
   return found
+}
+
+/**
+ * Build a handoff from the brief's measured blockers.
+ *
+ * Ownership is never inferred from a task, a file path or a stack. When the snapshot names a
+ * CODEOWNERS file it is cited as review routing to open, not as an owner. A failed or unprobed
+ * readiness source is an absence of evidence, so the handoff says that instead of inventing a
+ * clean answer.
+ */
+export function buildTaskHandoff(
+  snapshot: DashboardSnapshot,
+  brief: Pick<TaskBrief, 'title' | 'blockers' | 'readiness'>,
+): TaskHandoff {
+  const sources = ['anvil ready --json']
+  const profile = asRecord(snapshot.repository.profile.data)
+  const docs = profile === null ? null : asRecord(profile.docs)
+  const codeowners = docs === null ? null : asString(docs.codeowners)
+  if (codeowners !== null) sources.push(`anvil profile --json: docs.codeowners (${codeowners})`)
+  const contacts = [
+    ...new Set(
+      brief.blockers
+        .map((blocker) => blocker.grantedBy)
+        .filter((value): value is string => typeof value === 'string' && value !== ''),
+    ),
+  ]
+  const contactLine =
+    contacts.length > 0
+      ? `Declared contact: ${contacts.join(', ')} (stated in anvil ready, not inferred).`
+      : codeowners === null
+        ? 'Owner: unknown — this snapshot declares no owner. Confirm the owner from the ticket or team process.'
+        : `Owner: unknown — open the declared review routing at ${codeowners} to identify one.`
+
+  const lines = [`Blocker handoff: ${brief.title}`, '']
+  if (brief.readiness.ok === false) {
+    lines.push(
+      'Cannot identify blockers: anvil ready failed. Re-run `anvil ready --check` before handing this task off.',
+      '',
+      contactLine,
+      '',
+      `Sources: ${sources.join('; ')}`,
+    )
+    return { schemaVersion: 1, available: false, text: lines.join('\n'), sources }
+  }
+
+  const measured = brief.blockers.filter((blocker) => blocker.status !== 'unknown')
+  if (measured.length === 0) {
+    const cause =
+      brief.blockers.find((blocker) => blocker.status === 'unknown')?.reason ??
+      (brief.readiness.checked
+        ? 'No blocker was reported by anvil ready.'
+        : 'No blocker can be reported: the environment was not probed. Re-run `anvil ready --check` before handing this task off.')
+    lines.push(cause, '', contactLine, '', `Sources: ${sources.join('; ')}`)
+    return { schemaVersion: 1, available: false, text: lines.join('\n'), sources }
+  }
+
+  lines.push('Missing or blocked capabilities:')
+  for (const blocker of measured) {
+    lines.push(`- ${blocker.label} (${blocker.status}): ${blocker.reason || 'no reason was reported'}`)
+  }
+  lines.push('', contactLine, '', 'Next step: provide the capabilities above, then re-run `anvil ready --check`.', '')
+  lines.push(`Sources: ${sources.join('; ')}`)
+  return { schemaVersion: 1, available: true, text: lines.join('\n'), sources }
 }
 
 /**
@@ -1008,6 +1084,15 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
       : (pasted?.title ?? '')
   const objective = suggestion !== null ? (suggested?.reason ?? '') : (pasted?.objective ?? '')
   const map = buildTaskMap(snapshot, { title, startHere, howToCheck: checks })
+  const handoff = buildTaskHandoff(snapshot, {
+    title,
+    blockers: found,
+    readiness: {
+      ok: readyOk,
+      checked: ready !== null && ready.checked === true,
+      status: ready === null ? null : asString(ready.status),
+    },
+  })
   return {
     schemaVersion: 1,
     generatedAt: snapshot.fetchedAt,
@@ -1019,6 +1104,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     map,
     howToCheck: checks,
     blockers: found,
+    handoff,
     gates,
     readiness: {
       ok: readyOk,

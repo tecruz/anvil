@@ -450,6 +450,32 @@ function renderBrief(parent, brief) {
     card.appendChild(make('div', 'muted', 'No blocked requirement is reported by anvil ready.'));
   }
 
+  const handoff = brief.handoff;
+  if (handoff) {
+    card.appendChild(make('h3', '', 'Blocker handoff'));
+    const area = make('textarea');
+    area.rows = 12;
+    area.readOnly = true;
+    area.value = handoff.text || '';
+    card.appendChild(area);
+    const copy = make('button', '', 'Copy handoff');
+    copy.type = 'button';
+    copy.addEventListener('click', function () {
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(area.value).then(function () {
+          copy.textContent = 'Copied';
+        }, function () {
+          copy.textContent = 'Copy failed — select the text';
+        });
+        return;
+      }
+      if (typeof area.select === 'function') area.select();
+      copy.textContent = 'Selected — press Ctrl+C';
+    });
+    card.appendChild(copy);
+    card.appendChild(make('div', 'muted', handoff.available ? 'Copy this to the owner named in the ticket. The owner is never guessed from repository files.' : 'No measured blocker is available to hand off yet.'));
+  }
+
   card.appendChild(make('h3', '', 'Unknowns'));
   const unknowns = Array.isArray(brief.unknowns) ? brief.unknowns : [];
   const list = make('ul');

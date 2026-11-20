@@ -705,7 +705,13 @@ matched files, the modules containing them, their declared one-hop dependencies 
 verify commands. It opens filtered to the task, supports a text filter and a list view, and
 shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
 a dashed *unknown* node, not as "no dependency". No edge is inferred from import statements,
-and the map adds no fact that the brief could not cite. The commands are printed, never run.
+and the map adds no fact that the brief could not cite.
+
+When `anvil ready` reports a blocked capability, the brief also offers a **copyable blocker
+handoff**. It lists only measured blockers with their status and reason, carries a contact
+only when `anvil ready` explicitly declared one, says the owner is unknown rather than guessing
+one, and cites a CODEOWNERS path as review routing to open when the profile declares one. A failed or unprobed readiness source produces an explicit
+"not available yet" handoff, not a clean one. The commands are printed, never run.
 **Repository** covers
 readiness findings, blockers and ranked next steps, **Context** covers verified brief gaps
 and a read-only view of the staged diff, and **Work** covers claims, worktrees, uncommitted

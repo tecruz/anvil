@@ -496,9 +496,17 @@ describe('the dashboard page', () => {
       this.children = nodes
     }
 
-    addEventListener(): void {}
+    listeners: Record<string, Array<() => void>> = {}
+
+    addEventListener(type: string, callback: () => void): void {
+      const list = this.listeners[type] ?? []
+      list.push(callback)
+      this.listeners[type] = list
+    }
 
     setAttribute(): void {}
+
+    select(): void {}
 
     text(): string {
       return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
@@ -872,5 +880,45 @@ describe('the dashboard page', () => {
     visit(target)
     assert.equal(inputs.length, 1)
     assert.equal(inputs[0]?.focused, true)
+  })
+
+  test('the blocker handoff is copyable and keeps its measured text', () => {
+    const target = new FakeElement('div')
+    const brief = {
+      title: 'Blocked task',
+      startHere: [],
+      howToCheck: [],
+      blockers: [{ label: 'java', status: 'missing', reason: 'not on PATH' }],
+      readiness: { ok: true, checked: true, status: 'blocked' },
+      gates: [],
+      unknowns: [],
+      handoff: {
+        available: true,
+        text: 'Blocker handoff: Blocked task\n\n- java (missing): not on PATH',
+      },
+    }
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    runInContext(JS.replace('load(false);', ''), context)
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext('renderBrief(__target, __brief)', context)
+    const all: FakeElement[] = []
+    const visit = (node: FakeElement): void => {
+      all.push(node)
+      for (const child of node.children) visit(child)
+    }
+    visit(target)
+    const area = all.find((node) => node.tag === 'textarea')
+    const copy = all.find((node) => node.tag === 'button' && node.textContent === 'Copy handoff')
+    assert.ok(area)
+    assert.ok(copy)
+    assert.match(area?.value ?? '', /java \(missing\): not on PATH/)
+    copy?.listeners.click?.[0]?.()
+    assert.equal(copy?.textContent, 'Selected — press Ctrl+C')
   })
 })

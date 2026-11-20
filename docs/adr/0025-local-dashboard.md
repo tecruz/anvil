@@ -42,6 +42,11 @@ runtime dependency.**
   `ready` reports blocked, and states what it cannot know. It runs nothing and writes
   nothing: `POST /api/brief` takes no command, path or repository, is capped at 4,000
   characters, and stores no request or response.
+- A blocked task also returns a **copyable handoff** built from measured `ready` blockers. It
+  names what is missing, quotes the reported reason, carries a contact only when `ready`
+  declared one, and says the owner is unknown rather than inferring one. A CODEOWNERS path from
+  the profile is cited as routing to open, never as an
+  owner. A failed or unprobed readiness source yields an explicit unavailable handoff.
 - The brief also returns a task-centred **2D map** built from the same cached profile and
   brief. Its nodes are the matched files, the modules containing them, their declared one-hop
   dependencies and the verify commands; every node and edge names the CLI value behind it.

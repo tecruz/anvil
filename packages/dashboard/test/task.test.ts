@@ -159,7 +159,7 @@ describe('buildTaskBrief', () => {
     assert.equal(brief.howToCheck[0]?.cwd, 'app')
     assert.equal(brief.howToCheck[0]?.source, 'documented')
 
-    assert.deepEqual(brief.blockers, [{ label: 'java', status: 'missing', reason: 'not on PATH' }])
+    assert.deepEqual(brief.blockers, [{ label: 'java', status: 'missing', reason: 'not on PATH', grantedBy: null }])
     assert.deepEqual(brief.gates, [])
     assert.deepEqual(brief.readiness, { ok: true, checked: true, status: 'blocked' })
     const unknowns = brief.unknowns.join('\n')
@@ -444,5 +444,68 @@ describe('the task-centred 2D map', () => {
     )
     assert.ok(map.nodes.some((node) => node.kind === 'check'))
     assert.ok(map.nodes.some((node) => node.id === 'unknown:coverage'))
+  })
+})
+
+describe('the blocker handoff', () => {
+  test('names only measured blockers and never guesses an owner', () => {
+    const snapshot = makeSnapshot()
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.equal(brief.handoff.available, true)
+    assert.match(brief.handoff.text, /Blocker handoff/)
+    assert.match(brief.handoff.text, /java \(missing\): not on PATH/)
+    assert.match(brief.handoff.text, /Owner: unknown/)
+    assert.doesNotMatch(brief.handoff.text, /@/)
+    assert.ok(brief.handoff.sources.includes('anvil ready --json'))
+  })
+
+  test('a failed readiness source says so instead of producing a clean handoff', () => {
+    const snapshot = makeSnapshot({ checked: false })
+    snapshot.repository.ready = { ...snapshot.repository.ready, ok: false }
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.equal(brief.handoff.available, false)
+    assert.match(brief.handoff.text, /anvil ready failed/)
+    assert.match(brief.handoff.text, /Owner: unknown/)
+  })
+
+  test('a contact declared in the readiness report is carried into the handoff', () => {
+    const snapshot = makeSnapshot()
+    const ready = snapshot.repository.ready.data as Record<string, unknown>
+    ready.credentials = [{ id: 'npm-token', status: 'missing', required: true, grantedBy: 'platform team', env: [] }]
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.ok(brief.blockers.some((blocker) => blocker.grantedBy === 'platform team'))
+    assert.match(brief.handoff.text, /Declared contact: platform team/)
+    assert.match(brief.handoff.text, /not inferred/)
+  })
+
+  test('an aggregate blocked status with no named cause is not a measured handoff', () => {
+    const snapshot = makeSnapshot({ checked: true, commands: [] })
+    const ready = snapshot.repository.ready.data as Record<string, unknown>
+    ready.status = 'blocked'
+    ready.tools = []
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.equal(brief.handoff.available, false)
+    assert.match(brief.handoff.text, /no individual need named a cause/)
+  })
+
+  test('a declared CODEOWNERS path is cited as routing, not as an owner', () => {
+    const snapshot = makeSnapshot()
+    const profile = snapshot.repository.profile.data as Record<string, unknown>
+    profile.docs = { codeowners: '.github/CODEOWNERS' }
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.match(brief.handoff.text, /declared review routing at \.github\/CODEOWNERS/)
+    assert.match(brief.handoff.text, /Owner: unknown/)
+    assert.ok(brief.handoff.sources.some((source) => source.includes('docs.codeowners')))
+  })
+
+  test('an unprobed environment produces no measured handoff', () => {
+    const snapshot = makeSnapshot({ checked: false, commands: [] })
+    const ready = snapshot.repository.ready.data as Record<string, unknown>
+    ready.status = 'unknown'
+    ready.tools = []
+    const brief = buildTaskBrief(snapshot, { text: 'Fix CountryDetailScreen.kt dialog state' })
+    assert.equal(brief.blockers.length, 0)
+    assert.equal(brief.handoff.available, false)
+    assert.match(brief.handoff.text, /environment was not probed/)
   })
 })

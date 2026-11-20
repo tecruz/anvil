@@ -20,6 +20,7 @@ export {
 } from './snapshot.ts'
 export {
   buildTaskBrief,
+  buildTaskHandoff,
   buildTaskMap,
   MAX_TASK_TEXT,
   type TaskBlocker,
@@ -27,6 +28,7 @@ export {
   type TaskBriefInput,
   type TaskCheck,
   type TaskGate,
+  type TaskHandoff,
   TaskInputError,
   type TaskMap,
   type TaskMapEdge,
