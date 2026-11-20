@@ -2959,6 +2959,548 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
+  test('Maven reactor dependencies use declared coordinates', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency><dependency><groupId>org.example</groupId><artifactId>external</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>core</artifactId></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['com.acme:api:1', 'com.acme:core:1', 'com.acme:root:1'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, ['com.acme:core:1'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.path, 'api')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:root:1')?.path, '.')
+    assert.deepEqual(profile.monorepo?.members.sort(), ['com.acme:api:1', 'com.acme:core:1', 'com.acme:root:1'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('a Maven dependency version must match the reactor module', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('a Maven dependencyManagement entry is not a module edge', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencyManagement><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></dependencyManagement>',
+        '<dependencies><dependency><groupId>org.example</groupId><artifactId>external</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a Maven dependency with property coordinates stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>$' +
+          '{dep.group}</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a Maven profile-only module is not added to the graph', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<modules><module>api</module></modules>',
+        '<profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'extra/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>extra</artifactId><version>1</version></project>\n',
+      'extra/src/main/java/Extra.java': 'class Extra {}\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['com.acme:api:1', 'com.acme:root:1'])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('dependency-shaped text inside CDATA is not a Maven edge', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<properties><example><![CDATA[<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>]]></example></properties>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
+  test('an unresolved Maven parent version leaves coverage unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><parent><groupId>com.acme</groupId><artifactId>external-parent</artifactId><version>1</version></parent><artifactId>api</artifactId>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'com.acme:api:1',
+        path: 'api',
+        reason: 'unsupported Maven dependency syntax; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a parent with a non-literal version leaves child coverage unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>$' + '{revision}</version></parent>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    // The default relativePath resolves the parent to the indexed root POM, which declares no
+    // dependencies, so the child's empty list is known even though the parent version is computed.
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a Maven version-range dependency leaves coverage unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>[1,2)</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a child dependency overrides an inherited reactor dependency', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/pom.xml': [
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('Maven dependency type and classifier distinguish inherited entries', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': [
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    // The child's plain jar override does not replace the parent's test-jar entry.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, ['com.acme:core:1'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('a system-scoped child override removes the inherited reactor edge', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': [
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version><scope>system</scope><systemPath>/opt/core.jar</systemPath></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('an inherited dependency on unresolved coordinates stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml':
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
+        '<version>$' + '{revision}</version>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('an inherited test-jar dependency on an unresolved reactor module stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml':
+        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
+        '<version>$' + '{revision}</version>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a jar and a test-jar dependency produce one module edge', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies>',
+        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency>',
+        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency>',
+        '</dependencies></project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('a reactor target with a non-literal group leaves dependants unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': [
+        '<project><groupId>$' + '{group}</groupId><artifactId>core</artifactId><version>1</version></project>',
+        '',
+      ].join('\n'),
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a dependency on an unreadable reactor POM stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': '\u0000not a readable pom',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('an uncertain reactor group does not hide a dependency on another module', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module><module>ui</module></modules>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>ui</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>$' + '{group}</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+      'ui/pom.xml': '<project><groupId>com.acme</groupId><artifactId>ui</artifactId><version>1</version></project>\n',
+      'ui/src/main/java/Ui.java': 'class Ui {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a dependency on a target with unresolved coordinates stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
+        '<version>$' + '{revision}</version>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a dependency on a profile-only reactor module stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<modules><module>api</module></modules>',
+        '<profiles><profile><id>extra</id><modules><module>core</module></modules></profile></profiles>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a Maven POM with unresolved coordinates stays unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>$' +
+        '{module.artifact}</artifactId><version>1</version></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+    })
+    const api = profile.modules.find((m) => m.path === 'api')
+    assert.deepEqual(api?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('a declared reactor POM missing from the index leaves its consumer unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      // `core` is declared as a module but the walker omits its directory, so the POM is unreadable.
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
+  test('an explicit parent relativePath leaves the child unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><relativePath>../elsewhere/pom.xml</relativePath></parent>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
+  test('the last duplicate dependency identity wins', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies>',
+        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency>',
+        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency>',
+        '</dependencies></project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
+  test('a profile-only target with a different version does not suppress an active edge', () => {
+    const profile = profileOf({
+      'pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
+        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
+        '<profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+      'extra/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></project>\n',
+      'extra/src/main/java/Extra.java': 'class Extra {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+  })
+
+  test('computed scope or type leaves Maven coverage unknown', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><scope>$' +
+          '{dependencyScope}</scope><type>$' +
+          '{dependencyType}</type></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
   test('an unreadable Cargo manifest stays unknown', () => {
     const profile = profileOf({
       'Cargo.toml': '[workspace]\nmembers = ["crates/api"]\n',
