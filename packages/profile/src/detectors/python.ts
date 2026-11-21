@@ -137,6 +137,8 @@ function uvMembers(ctx: DetectorContext, text: string): string[] {
 interface UvSource {
   workspace: boolean | string | null
   path: string | null
+  /** Sentinel for source syntax this reader cannot decide safely. */
+  unsupported?: boolean
 }
 
 /** `[tool.uv.sources]`: only `workspace = true` or a path names a local dependency. */
@@ -156,6 +158,12 @@ function uvSources(manifest: string): Map<string, UvSource> {
       path: path?.[1] ?? null,
     })
   }
+  // A list of tables or a marker changes which source applies; reading it as absent would report
+  // a confident empty graph. Mark the whole manifest's sources as undecidable instead.
+  const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some(
+    (match) => /^\s*\[/.test(match[1] ?? '') || /\bmarker\s*=/.test(match[1] ?? ''),
+  )
+  if (undecidable) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
 }
 
@@ -188,6 +196,11 @@ function uvDependencies(
   // silently read them as a plain package name; leave coverage unknown instead.
   if (raw.some((entry) => /[[{@;]/.test(entry))) return { deps: [], unsupported: true }
   const memberSources = uvSources(manifest)
+  if (
+    memberSources.get('__unsupported__')?.unsupported === true ||
+    rootSources.get('__unsupported__')?.unsupported === true
+  )
+    return { deps: [], unsupported: true }
   const out = new Set<string>()
   for (const dep of raw) {
     const name = /^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)/.exec(dep)?.[1]

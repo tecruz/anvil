@@ -1892,6 +1892,26 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
   })
 
+  test('a uv source with a marker or list leaves coverage unknown', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
+      'services/api/pyproject.toml': [
+        '[project]',
+        'name = "api"',
+        'version = "0.1.0"',
+        'dependencies = ["worker"]',
+        '[tool.uv.sources]',
+        'worker = [{ workspace = true, marker = "sys_platform == \'linux\'" }]',
+        '',
+      ].join('\n'),
+      'services/api/src/api.py': 'value = 1\n',
+      'services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
+      'services/worker/src/worker.py': 'value = 1\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'services/api'))
+  })
+
   test('an apostrophe in a uv comment does not create an edge', () => {
     const profile = profileOf({
       'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
