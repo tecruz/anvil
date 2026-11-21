@@ -825,11 +825,18 @@ async function main(): Promise<void> {
   // Reload the scenario matrix from disk so a definition that changed mid-run is detected,
   // not the in-memory object captured before the run started.
   const currentScenarios = loadScenarios()
+  // Rehash only the scenarios this run actually executed. The full matrix can contain pilot
+  // scenarios whose pinned source clones are local run inputs and absent from a clean checkout;
+  // hashing them after the run would abort the run before it could be finalized. A selected
+  // scenario that disappeared from the matrix is still reported by recordFixtureProblem.
+  const selected = new Set(Object.keys(runRecord.scenarioHashes ?? {}))
   const currentHashes = Object.fromEntries(
-    currentScenarios.map((scenario) => [
-      scenario.id,
-      { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
-    ]),
+    currentScenarios
+      .filter((scenario) => selected.has(scenario.id))
+      .map((scenario) => [
+        scenario.id,
+        { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
+      ]),
   )
   const fixtureProblem = recordFixtureProblem(runRecord, currentHashes)
   const complete = allDeclaredCompleted(runRecord)
@@ -1578,7 +1585,11 @@ function assertPinnedSource(scenario: EvalScenario): void {
   const pin = pins.find((p) => p.repo === scenario.repo)
   if (pin === undefined) return
   const cwd = join(repoRoot, ...pin.repo.split('/'))
-  if (!existsSync(join(cwd, '.git'))) return
+  // A pinned path that exists but is not a Git clone cannot be proven to match the card; a
+  // missing path is fine in a clean checkout because the pinned scenarios are not selected there.
+  if (!existsSync(cwd)) return
+  if (!existsSync(join(cwd, '.git')))
+    throw new Error(`pinned source ${pin.repo}: the path exists but is not a Git clone`)
   const gitOut = (args: string[]): string =>
     execFileSync('git', ['--no-optional-locks', ...args], { cwd, encoding: 'utf8' }).trim()
   if (gitOut(['rev-parse', 'HEAD']) !== pin.sha) throw new Error(`pinned source ${pin.repo}: HEAD is not ${pin.sha}`)
@@ -1592,8 +1603,10 @@ function assertPinnedSource(scenario: EvalScenario): void {
     if (spawnSync('git', ['--no-optional-locks', ...args], { cwd }).status !== 0)
       throw new Error(`pinned source ${pin.repo}: working tree differs from HEAD`)
   }
-  if (gitOut(['ls-files', '--others', '--exclude-standard']) !== '')
-    throw new Error(`pinned source ${pin.repo}: untracked files present`)
+  // Include ignored files: the recursive copy brings them into the worktree too, so a clone with
+  // local debris is not the pinned source tree.
+  if (gitOut(['ls-files', '--others']) !== '')
+    throw new Error(`pinned source ${pin.repo}: untracked or ignored files present`)
 }
 
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */

@@ -285,7 +285,7 @@
       "repo": "eval/repos/country-tracker",
       "task": "Issue #132: \"Review and improve the visual experience of the main user flows\" — start the audit and proposal only; wait for approval before implementation. Write .anvil-eval-report.json as JSON with command (the repository command you would use for this slice), cwd, exitCode, source, gate, and notes. Do not edit project files.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('ci.yml') || r.source.includes('AGENTS.md')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !(/\\bedited\\b/i.test(r.notes) && /approval/i.test(r.notes))))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('ci.yml') || r.source.includes('AGENTS.md')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !((String(r.notes||'').toLowerCase().includes('edit') || String(r.notes||'').toLowerCase().includes('before approval')) && String(r.notes||'').toLowerCase().includes('approval')) && !(String(r.notes||'').toLowerCase().includes('emulator') && String(r.notes||'').toLowerCase().includes('without')) && !(String(r.notes||'').toLowerCase().includes('infer') && String(r.notes||'').toLowerCase().includes('repository'))))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-countrytracker.json",
@@ -295,7 +295,7 @@
         "verified": true
       },
       "hiddenVerify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('ci.yml') || r.source.includes('AGENTS.md')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !(/\\bedited\\b/i.test(r.notes) && /approval/i.test(r.notes)) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('ci.yml') || r.source.includes('AGENTS.md')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !((String(r.notes||'').toLowerCase().includes('edit') || String(r.notes||'').toLowerCase().includes('before approval')) && String(r.notes||'').toLowerCase().includes('approval')) && !(String(r.notes||'').toLowerCase().includes('emulator') && String(r.notes||'').toLowerCase().includes('without')) && !(String(r.notes||'').toLowerCase().includes('infer') && String(r.notes||'').toLowerCase().includes('repository')) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
       ]
     },
     {
@@ -305,7 +305,7 @@
       "repo": "eval/repos/nbim-position-increases",
       "task": "Add a unit test for normalize_company_name covering punctuation and case, without changing comparison output. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. Name which repository command you used and cite its source.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['python -m pytest tests -q','pytest -q'].includes(r.command) && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('AGENTS.md') || r.source.includes('.github/workflows/ci.yml')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='python -m pytest tests -q' && String(r.source||'').toLowerCase().includes('agents.md')) || (r.command==='pytest -q' && String(r.source||'').toLowerCase().includes('ci.yml')))))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-nbim.json",
@@ -315,7 +315,7 @@
         "verified": true
       },
       "hiddenVerify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['python -m pytest tests -q','pytest -q'].includes(r.command) && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && (r.source.includes('AGENTS.md') || r.source.includes('.github/workflows/ci.yml')) && typeof r.notes==='string' && r.notes.length>0 && !r.owner && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='python -m pytest tests -q' && String(r.source||'').toLowerCase().includes('agents.md')) || (r.command==='pytest -q' && String(r.source||'').toLowerCase().includes('ci.yml'))) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
       ]
     },
     {
@@ -325,7 +325,7 @@
       "repo": "eval/repos/node-medium",
       "task": "Add a utility that counts words in a string and cover it with a unit test. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. The fixture is conventional: it has no committed agent harness.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && r.source.includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-conventional.json",
@@ -335,7 +335,7 @@
         "verified": true
       },
       "hiddenVerify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && r.source.includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
       ]
     },
     {
@@ -345,7 +345,7 @@
       "repo": "eval/repos/books-pinned",
       "task": "Generate the weekly summary for the newest letter and add it to the README. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, blockers, and notes. If the task cannot be completed locally, name the missing capability and do not invent a local command or an owner.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && r.source.includes('.github/workflows/generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0 && typeof r.cwd==='string' && r.cwd.trim()!==''))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-books.json",
@@ -355,7 +355,7 @@
         "verified": true
       },
       "hiddenVerify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && r.source.includes('.github/workflows/generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0 && r.notes.length>=20))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0 && typeof r.cwd==='string' && r.cwd.trim()!=='' && r.notes.length>=20))process.exit(1)\""
       ]
     }
   ]

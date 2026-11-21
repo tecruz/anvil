@@ -35,7 +35,7 @@ describe('pinned pilot source clones', () => {
         const clean = spawnSync('git', ['--no-optional-locks', ...args], { cwd })
         assert.equal(clean.status, 0, `working tree must match HEAD: ${args.join(' ')}`)
       }
-      assert.equal(git(cwd, 'ls-files', '--others', '--exclude-standard'), '')
+      assert.equal(git(cwd, 'ls-files', '--others'), '')
     })
   }
 })
