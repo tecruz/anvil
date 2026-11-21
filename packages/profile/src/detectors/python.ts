@@ -82,6 +82,13 @@ function tomlArray(section: string, key: string): string[] {
       } else if (ch === quote) quote = null
       continue
     }
+    // Comments are skipped in the same pass that tracks quotes. An apostrophe inside a comment
+    // (`# Don't ...`) must not start a quoted string, which would hide the rest of the array.
+    if (ch === '#') {
+      while (i < section.length && section[i] !== '\n') i++
+      if (i < section.length) body += '\n'
+      continue
+    }
     if (ch === '"' || ch === "'") {
       quote = ch
       body += ch
@@ -94,33 +101,7 @@ function tomlArray(section: string, key: string): string[] {
     }
     body += ch
   }
-  // Strip TOML comments outside quoted strings. A commented-out `# "shared-lib",` inside a
-  // dependency array is not a dependency; matching on the raw body would invent an edge.
-  let withoutComments = ''
-  let commentQuote: string | null = null
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i] as string
-    if (commentQuote !== null) {
-      withoutComments += ch
-      if (ch === '\\' && i + 1 < body.length) {
-        withoutComments += body[i + 1]
-        i++
-      } else if (ch === commentQuote) commentQuote = null
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      commentQuote = ch
-      withoutComments += ch
-      continue
-    }
-    if (ch === '#') {
-      while (i < body.length && body[i] !== '\n') i++
-      if (i < body.length) withoutComments += '\n'
-      continue
-    }
-    withoutComments += ch
-  }
-  return [...withoutComments.matchAll(/["']((?:[^"'\\]|\\.)*)["']/g)].map((item) => item[1] as string)
+  return [...body.matchAll(/["']((?:[^"'\\]|\\.)*)["']/g)].map((item) => item[1] as string)
 }
 
 /** PEP 503 normalisation: dependency names are case- and separator-insensitive. */
@@ -156,6 +137,8 @@ function uvMembers(ctx: DetectorContext, text: string): string[] {
 interface UvSource {
   workspace: boolean | string | null
   path: string | null
+  /** Sentinel for source syntax this reader cannot decide safely. */
+  unsupported?: boolean
 }
 
 /** `[tool.uv.sources]`: only `workspace = true` or a path names a local dependency. */
@@ -175,6 +158,12 @@ function uvSources(manifest: string): Map<string, UvSource> {
       path: path?.[1] ?? null,
     })
   }
+  // A list of tables or a marker changes which source applies; reading it as absent would report
+  // a confident empty graph. Mark the whole manifest's sources as undecidable instead.
+  const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some(
+    (match) => /^\s*\[/.test(match[1] ?? '') || /\bmarker\s*=/.test(match[1] ?? ''),
+  )
+  if (undecidable) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
 }
 
@@ -207,6 +196,11 @@ function uvDependencies(
   // silently read them as a plain package name; leave coverage unknown instead.
   if (raw.some((entry) => /[[{@;]/.test(entry))) return { deps: [], unsupported: true }
   const memberSources = uvSources(manifest)
+  if (
+    memberSources.get('__unsupported__')?.unsupported === true ||
+    rootSources.get('__unsupported__')?.unsupported === true
+  )
+    return { deps: [], unsupported: true }
   const out = new Set<string>()
   for (const dep of raw) {
     const name = /^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)/.exec(dep)?.[1]

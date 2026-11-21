@@ -359,15 +359,20 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
       flush()
       entry = ''
       const table = /^\[(.+)\]$/.exec(line)?.[1] ?? ''
-      const prefix = workspaceSection ? 'workspace.dependencies' : 'dependencies'
+      const prefixes = workspaceSection
+        ? ['workspace.dependencies']
+        : ['dependencies', 'dev-dependencies', 'build-dependencies']
       let rest: string | null = null
-      if (table === prefix) rest = ''
-      else if (table.startsWith(`${prefix}.`)) rest = table.slice(prefix.length + 1)
-      // Target-scoped tables such as [target.'cfg(unix)'.dependencies] also declare dependencies.
-      else if (table.endsWith(`.${prefix}`)) rest = ''
-      else {
-        const scoped = table.indexOf(`.${prefix}.`)
-        if (scoped >= 0) rest = table.slice(scoped + prefix.length + 2)
+      for (const prefix of prefixes) {
+        if (table === prefix) rest = ''
+        else if (table.startsWith(`${prefix}.`)) rest = table.slice(prefix.length + 1)
+        // Target-scoped tables such as [target.'cfg(unix)'.dependencies] also declare deps.
+        else if (table.endsWith(`.${prefix}`)) rest = ''
+        else {
+          const scoped = table.indexOf(`.${prefix}.`)
+          if (scoped >= 0) rest = table.slice(scoped + prefix.length + 2)
+        }
+        if (rest !== null) break
       }
       inSection = rest !== null
       sectionCrate = rest === '' || rest === null ? null : (rest.split('.')[0] ?? null)
