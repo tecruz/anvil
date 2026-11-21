@@ -2979,6 +2979,54 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
+  test('an external .NET project reference leaves coverage unknown', () => {
+    const profile = profileOf({
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup>',
+        '    <ProjectReference Include="C:\\External\\Other.csproj" />',
+        '    <ProjectReference Include="..\\Core\\Core.csproj" />',
+        '  </ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
+    })
+    // Dropping the external reference but keeping the internal edge would claim a complete graph
+    // while ignoring a declared dependency; the conservative contract requires unknown coverage.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'src:App:App',
+        path: 'src/App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
+  })
+
+  test('a .NET reference differing only in case resolves to the on-disk module on Windows', () => {
+    const profile = profileOf({
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="..\\core\\CORE.csproj" /></ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
+    })
+    if (process.platform === 'win32') {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, ['src:Core:Core'])
+      assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    } else {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0)
+    }
+  })
+
   test('commented and CDATA project references are not .NET edges', () => {
     const profile = profileOf({
       'App/App.csproj': [

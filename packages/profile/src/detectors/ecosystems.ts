@@ -1617,7 +1617,10 @@ function dotnetFullyLiteral(text: string): boolean {
   return true
 }
 
-function dotnetProjectReferences(text: string, projectDir: string, projects: ReadonlySet<string>): DotnetReferences {
+/** Resolve a declared path to the project file as it actually appears in the repository. */
+type ProjectResolver = (target: string) => string | null
+
+function dotnetProjectReferences(text: string, projectDir: string, resolveProject: ProjectResolver): DotnetReferences {
   const empty = (unsupported: boolean): DotnetReferences => ({ deps: [], unsupported })
   const parsed = dotnetParseXml(text)
   if (parsed.unsupported || parsed.root === null || parsed.root.name !== 'Project') return empty(true)
@@ -1672,17 +1675,28 @@ function dotnetProjectReferences(text: string, projectDir: string, projects: Rea
         continue
       }
       const normalized = item.replace(/\\/g, '/')
-      // Absolute, UNC and drive-qualified paths name projects outside this repository.
-      if (/^[A-Za-z]:/.test(normalized) || normalized.startsWith('/') || normalized.startsWith('//')) continue
-      const target = posix
-        .normalize(projectDir === '.' ? normalized : posix.join(projectDir, normalized))
-        .replace(/^\.\//, '')
-      if (target.split('/')[0] === '..' || excluded.has(normalized) || excluded.has(target)) continue
-      if (!projects.has(target)) {
+      // Absolute, UNC and drive-qualified paths name projects outside this repository. Dropping
+      // them silently would report a complete graph while ignoring a declared dependency, so the
+      // conservative contract requires unknown coverage instead.
+      if (/^[A-Za-z]:/.test(normalized) || normalized.startsWith('/') || normalized.startsWith('//')) {
         unsupported = true
         continue
       }
-      deps.add(target.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
+      const target = posix
+        .normalize(projectDir === '.' ? normalized : posix.join(projectDir, normalized))
+        .replace(/^\.\//, '')
+      // An escaped relative path is also external and cannot be resolved from this checkout.
+      if (target.split('/')[0] === '..') {
+        unsupported = true
+        continue
+      }
+      if (excluded.has(normalized) || excluded.has(target)) continue
+      const actual = resolveProject(target)
+      if (actual === null) {
+        unsupported = true
+        continue
+      }
+      deps.add(actual.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
     }
   }
   return { deps: [...deps].sort(), unsupported }
@@ -1702,7 +1716,12 @@ export const dotnetDetector: Detector = {
       evidence: [projects[0] ?? 'global.json'],
     })
 
-    const projectFiles = new Set(projects)
+    // On Windows the filesystem is case-insensitive: a ProjectReference that differs only in
+    // case still names the same file, and must resolve to the module id of the file on disk.
+    const caseInsensitive = process.platform === 'win32'
+    const projectKey = (path: string): string => (caseInsensitive ? path.toLowerCase() : path)
+    const projectByKey = new Map(projects.map((p) => [projectKey(p), p]))
+    const resolveProject = (target: string): string | null => projectByKey.get(projectKey(target)) ?? null
     const projectIds = projects.map((p) => p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
     const duplicateIds = new Set(projectIds.filter((id, index) => projectIds.indexOf(id) !== index))
     for (const p of projects) {
@@ -1738,7 +1757,7 @@ export const dotnetDetector: Detector = {
           resolved.unsupported = true
           continue
         }
-        const part = dotnetProjectReferences(sourceText, dir, projectFiles)
+        const part = dotnetProjectReferences(sourceText, dir, resolveProject)
         if (part.unsupported) resolved.unsupported = true
         resolved.deps.push(...part.deps)
       }
