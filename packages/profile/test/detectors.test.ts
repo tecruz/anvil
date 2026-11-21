@@ -1868,6 +1868,106 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
+  test('multiple Cargo path dependencies in one table are all read', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["api", "core", "util"]\n',
+      'core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'core/src/lib.rs': 'pub fn core() {}\n',
+      'util/Cargo.toml': '[package]\nname = "util"\nversion = "0.1.0"\n',
+      'util/src/lib.rs': 'pub fn util() {}\n',
+      'api/Cargo.toml':
+        '[package]\nname = "api"\nversion = "0.1.0"\n[dependencies]\ncore = { path = "../core" }\nutil = { path = "../util" }\n',
+      'api/src/lib.rs': 'pub fn api() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core', 'util'])
+  })
+
+  test('a Cargo workspace root package is a path dependency target', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[package]\nname = "rootlib"\nversion = "0.1.0"\n[workspace]\nmembers = ["api"]\n',
+      'src/lib.rs': 'pub fn root() {}\n',
+      'api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n[dependencies]\nrootlib = { path = ".." }\n',
+      'api/src/lib.rs': 'pub fn api() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['rootlib'])
+    assert.ok(profile.modules.some((m) => m.id === 'rootlib'))
+  })
+
+  test('a nested Cargo workspace resolves inherited paths from its own root', () => {
+    const profile = profileOf({
+      'engine/Cargo.toml':
+        '[workspace]\nmembers = ["api"]\n[workspace.dependencies]\ncore = { path = "crates/core" }\n',
+      'engine/crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'engine/crates/core/src/lib.rs': 'pub fn core() {}\n',
+      'engine/api/Cargo.toml':
+        '[package]\nname = "api"\nversion = "0.1.0"\n[dependencies]\ncore = { workspace = true }\n',
+      'engine/api/src/lib.rs': 'pub fn api() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+  })
+
+  test('a programmatic Gradle dependency add leaves coverage unknown', () => {
+    const profile = profileOf({
+      'settings.gradle.kts': 'include(":api", ":core")\n',
+      'build.gradle.kts': 'plugins { base }\n',
+      'api/build.gradle.kts': 'plugins { `java-library` }\ndependencies.add("implementation", project(":core"))\n',
+      'api/src/main/kotlin/A.kt': 'class A\n',
+      'core/build.gradle.kts': 'plugins { `java-library` }\n',
+      'core/src/main/kotlin/C.kt': 'class C\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === ':api'))
+  })
+
+  test('a nested Gradle include also registers its implicit parent', () => {
+    const profile = profileOf({
+      'settings.gradle.kts': 'include(":app:core")\n',
+      'build.gradle.kts': 'plugins { base }\n',
+      'app/build.gradle.kts': 'plugins { base }\n',
+      'app/src/main/kotlin/A.kt': 'class A\n',
+      'app/core/build.gradle.kts': 'plugins { base }\n',
+      'app/core/src/main/kotlin/C.kt': 'class C\n',
+    })
+    assert.ok(profile.modules.some((m) => m.id === ':app'))
+    assert.ok(profile.modules.some((m) => m.id === ':app:core'))
+  })
+
+  test('a uv workspace in a subdirectory discovers its own members', () => {
+    const profile = profileOf({
+      'backend/pyproject.toml':
+        '[project]\nname = "backend"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
+      'backend/services/api/pyproject.toml':
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["worker"]\n[tool.uv.sources]\nworker = { workspace = true }\n',
+      'backend/services/api/src/api.py': 'value = 1\n',
+      'backend/services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
+      'backend/services/worker/src/worker.py': 'value = 1\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['worker'])
+  })
+
+  test('uv extras and trailing comment markers are handled conservatively', () => {
+    const base = {
+      'pyproject.toml':
+        '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["packages/*"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'packages/core/pyproject.toml': '[project]\nname = "core"\nversion = "0.1.0"\n',
+    }
+    const extra = profileOf({
+      ...base,
+      'packages/api/pyproject.toml':
+        '[project]\nname = "api"\nversion = "0.1.0"\n[project.optional-dependencies]\nintegration = ["core"]\n',
+      'packages/api/src/api.py': 'value = 1\n',
+    })
+    const comment = profileOf({
+      ...base,
+      'packages/api/pyproject.toml':
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { workspace = true } # old marker = "x"\n',
+      'packages/api/src/api.py': 'value = 1\n',
+    })
+    assert.deepEqual(extra.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((extra.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+    assert.deepEqual(comment.modules.find((m) => m.id === 'api')?.deps, ['core'])
+  })
+
   test('Cargo build and dev dependency tables produce path edges', () => {
     const profile = profileOf({
       'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',

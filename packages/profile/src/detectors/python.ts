@@ -110,7 +110,7 @@ function pythonName(name: string): string {
 }
 
 /** The directories a uv workspace declares, after its `exclude` globs. */
-function uvMembers(ctx: DetectorContext, text: string): string[] {
+function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
   const section = tomlSection(text, /^\[tool\.uv\.workspace\]/)
   if (section === null) return []
   const declared = tomlArray(section, 'members')
@@ -118,6 +118,8 @@ function uvMembers(ctx: DetectorContext, text: string): string[] {
   const projects = [...ctx.files]
     .filter((file) => file === 'pyproject.toml' || file.endsWith('/pyproject.toml'))
     .map((file) => (file === 'pyproject.toml' ? '.' : file.slice(0, -'/pyproject.toml'.length)))
+    .filter((dir) => dir === '.' || base === '.' || dir === base || dir.startsWith(`${base}/`))
+    .map((dir) => (base === '.' || dir === '.' ? dir : dir === base ? '.' : dir.slice(base.length + 1)))
   const out = new Set<string>()
   // uv's root project is always a workspace member, even when no glob names it.
   if (tomlSection(text, /^\[project\]/) !== null) out.add('.')
@@ -160,9 +162,11 @@ function uvSources(manifest: string): Map<string, UvSource> {
   }
   // A list of tables or a marker changes which source applies; reading it as absent would report
   // a confident empty graph. Mark the whole manifest's sources as undecidable instead.
-  const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some(
-    (match) => /^\s*\[/.test(match[1] ?? '') || /\bmarker\s*=/.test(match[1] ?? ''),
-  )
+  const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some((match) => {
+    // A trailing TOML comment is inert: `# old marker = "..."` must not invalidate the source.
+    const value = (match[1] ?? '').replace(/\s+#.*$/, '')
+    return /^\s*\[/.test(value) || /\bmarker\s*=/.test(value)
+  })
   if (undecidable) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
 }
@@ -188,6 +192,10 @@ function uvDependencies(
 ): UvDependencies {
   const project = tomlSection(manifest, /^\[project\]/)
   if (project === null) return { deps: [], unsupported: false }
+  // An extra selects additional dependencies at install time; reading only the base list would
+  // claim a complete graph for a dependency set that can change. Fail closed.
+  if (/^\[project\.optional-dependencies\]/m.test(manifest) || /^\[dependency-groups\]/m.test(manifest))
+    return { deps: [], unsupported: true }
   if (tomlArray(project, 'dynamic').some((field) => pythonName(field) === 'dependencies')) {
     return { deps: [], unsupported: true }
   }
@@ -368,21 +376,29 @@ export const pythonDetector: Detector = {
 
     // uv workspaces: only directories named by `members` are modules. A pyproject.toml in
     // an unrelated example directory must not silently enter the graph.
-    if (pyproject !== null && findLine(pyproject, /\[tool\.uv\.workspace\]/) !== null) {
+    const workspaceFile = [...ctx.files].find((file) => {
+      if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
+      const text = readTomlish(ctx, file)
+      return text !== null && /^\[tool\.uv\.workspace\]/m.test(text)
+    })
+    if (workspaceFile !== undefined) {
+      const workspaceBase = workspaceFile === 'pyproject.toml' ? '.' : workspaceFile.slice(0, -'/pyproject.toml'.length)
+      const workspaceText = readTomlish(ctx, workspaceFile) ?? ''
       setMonorepo(draft, {
         tool: 'uv',
-        evidence: evidence('pyproject.toml', findLine(pyproject, /\[tool\.uv\.workspace\]/)),
+        evidence: evidence(workspaceFile, findLine(workspaceText, /^\[tool\.uv\.workspace\]/)),
         members: [],
       })
       const members: Array<{ id: string; path: string; manifest: string | null }> = []
-      for (const path of uvMembers(ctx, pyproject)) {
-        const manifest = path === '.' ? 'pyproject.toml' : `${path}/pyproject.toml`
+      for (const path of uvMembers(ctx, workspaceText, workspaceBase)) {
+        const relativePath = workspaceBase === '.' ? path : path === '.' ? workspaceBase : `${workspaceBase}/${path}`
+        const manifest = relativePath === '.' ? 'pyproject.toml' : `${relativePath}/pyproject.toml`
         if (!ctx.files.has(ctx.resolve(manifest))) continue
         const inner = readTomlish(ctx, manifest)
         const name = inner === null ? null : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? null)
-        const id = name ?? path
-        addModulePy(draft, id, path)
-        members.push({ id, path, manifest: inner })
+        const id = name ?? relativePath
+        addModulePy(draft, id, relativePath)
+        members.push({ id, path: relativePath, manifest: inner })
       }
       // A dependency is internal only when tool.uv.sources marks it local. Root sources
       // apply to every member; a member's own sources override them. An unreadable manifest
@@ -393,7 +409,7 @@ export const pythonDetector: Detector = {
         names.set(pythonName(member.id), member.id)
         idsByPath.set(member.path, member.id)
       }
-      const rootSources = uvSources(pyproject)
+      const rootSources = uvSources(workspaceText)
       for (const member of members) {
         if (member.manifest === null) continue
         const resolved = uvDependencies(member.manifest, names, idsByPath, member.id, member.path, rootSources)
