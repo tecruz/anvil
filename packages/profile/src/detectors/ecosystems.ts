@@ -1897,13 +1897,18 @@ export const dotnetDetector: Detector = {
       // Directory.Packages.props can add or redirect references through MSBuild; it is not parsed
       // here, so any project under one must stay unknown rather than be reported as complete.
       const packagesProps = [...ctx.files].some((file) => /(^|\/)Directory\.Packages\.props$/i.test(file))
+      // MSBuild imports <project>.csproj.user automatically. If one exists it can remove or add
+      // references, so its project's graph is unknown rather than confidently complete.
+      const userFile = `${p}.user`
+      const userImport = ctx.files.has(ctx.resolve(userFile))
       if (
         settings.unsupported ||
         imports.unsupported ||
         !dotnetFullyLiteral(text) ||
         imports.sources.length > 0 ||
         duplicateIds.has(id) ||
-        packagesProps
+        packagesProps ||
+        userImport
       ) {
         draft.depsUnknownReasons.set(id, 'unsupported .NET project reference; dependencies left unknown')
         continue
