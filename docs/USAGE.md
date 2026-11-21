@@ -743,10 +743,13 @@ this repository's own findings, not a team's priorities. Building a brief does n
 tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
 reads the snapshot the page already loaded, and a reload is required before the first brief.
 
-Verification is deliberately shown as *unavailable*: anvil does not persist verification
-results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`
-for a current verdict. The dashboard does not stage, apply, set up, claim, ship, or update a
-tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
+Verification has no green-by-absence state. The dashboard never runs `crew verify` or any other
+command on page load. With `anvil crew verify --record`, the CLI writes a bounded evidence file;
+the dashboard displays those records as historical facts, labelled with the commit sampled at
+startup and any incomplete or stale records. The dashboard cannot prove the records' origin and
+never presents them as a current verdict — run `anvil crew verify` for that. The dashboard does
+not stage, apply, set up, claim, ship, or update a tracker. See [ADR-0025](adr/0025-local-dashboard.md)
+for the boundary and threat model.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
 `fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those

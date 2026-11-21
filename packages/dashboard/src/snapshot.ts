@@ -43,7 +43,7 @@ export interface VerificationEvidence {
   revision: string | null
   exitCode: number | null
   timestamp: string | null
-  /** Whether this record was captured at the repository revision sampled by the CLI; null if unknown. */
+  /** Whether this record's commit equals the one sampled at dashboard startup; null if unknown. */
   matchesCurrent: boolean | null
 }
 
@@ -213,12 +213,16 @@ async function verificationSource(options: LoadSnapshotOptions): Promise<Dashboa
     if (!Array.isArray(records)) return unavailable('The verification evidence source returned no readable records.')
     const incompleteCount = records.length - records.filter(validEvidence).length
     const currentRevision = options.currentRevision ?? null
+    // A `-dirty` suffix describes a worktree, not a commit, and two different dirty states share
+    // it. Compare the commit only, which is the sole fact the startup probe establishes.
+    const commitOf = (revision: string): string => revision.replace(/-dirty$/i, '')
+    const currentCommit = currentRevision === null ? null : commitOf(currentRevision)
     const evidence: VerificationEvidence[] = records
       .filter(validEvidence)
       .slice(-20)
       .map((record) => ({
         ...record,
-        matchesCurrent: currentRevision === null ? null : record.revision === currentRevision,
+        matchesCurrent: currentCommit === null ? null : commitOf(record.revision as string) === currentCommit,
       }))
     if (evidence.length === 0) {
       const reason =
@@ -231,8 +235,8 @@ async function verificationSource(options: LoadSnapshotOptions): Promise<Dashboa
     return {
       status: 'recorded',
       reason: stale
-        ? 'Recorded by an explicit, bounded verification run; at least one record is from a different revision than this checkout.'
-        : 'Recorded by an explicit, bounded verification run; this page only displays the facts.',
+        ? 'Records found in the CLI-owned evidence file; at least one is from a different revision (commit) than the one sampled at dashboard startup. Their origin cannot be independently proven.'
+        : 'Records found in the CLI-owned evidence file. The dashboard does not execute commands and cannot independently prove their origin.',
       currentRevision,
       incompleteCount,
       evidence,

@@ -441,7 +441,7 @@ function renderBrief(parent, brief) {
       const timestamp = item.timestamp || 'unknown time';
       const revisionNote =
         item.matchesCurrent === false
-          ? ' · recorded at a different revision than this checkout'
+          ? ' · recorded at a different commit than the one sampled at dashboard startup'
           : item.matchesCurrent === null
             ? ' · revision not compared (current revision unknown)'
             : '';

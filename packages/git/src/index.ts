@@ -16,7 +16,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
@@ -196,6 +196,32 @@ export function normalizeGitPath(raw: string): string {
   }
 }
 
+/** Bounded, non-blocking read of a small git metadata file; never follows a final link. */
+function readBoundedGitFile(path: string, maxBytes = 8 * 1024): string | null {
+  let fd: number | null = null
+  try {
+    const info = lstatSync(path)
+    if (info.isSymbolicLink() || !info.isFile()) return null
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.size > maxBytes) return null
+    const size = stat.size
+    const buffer = Buffer.allocUnsafe(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) return null
+    return buffer.subarray(0, size).toString('utf8')
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        // A descriptor that cannot be closed cannot change the verdict.
+      }
+    }
+  }
+}
+
 /**
  * Read the common Git metadata directory of a repository without starting a process.
  *
@@ -213,7 +239,8 @@ export function gitDirFromMetadata(repoRoot: string): string | null {
     if (info.isSymbolicLink()) return null
     let gitDir = normalizeGitPath(dotGit)
     if (info.isFile()) {
-      const text = readFileSync(dotGit, 'utf8')
+      const text = readBoundedGitFile(dotGit)
+      if (text === null) return null
       const match = /^gitdir:\s*(.+)$/i.exec(text.trim())
       if (match === null) return null
       gitDir = normalizeGitPath(
@@ -226,8 +253,9 @@ export function gitDirFromMetadata(repoRoot: string): string | null {
     }
     const commonFile = join(gitDir, 'commondir')
     if (existsSync(commonFile)) {
-      const common = readFileSync(commonFile, 'utf8').trim()
-      if (common === '') return null
+      const commonRaw = readBoundedGitFile(commonFile)
+      if (commonRaw === null || commonRaw.trim() === '') return null
+      const common = commonRaw.trim()
       gitDir = normalizeGitPath(isAbsolute(common) ? common : join(gitDir, common))
     }
     return gitDir

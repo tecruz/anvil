@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import * as fs from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -82,9 +82,7 @@ describe('the dashboard staging view', () => {
       mkdirSync(join(root, '.anvil'), { recursive: true })
       const store = evidenceStore(root)
       assert.ok(store)
-      const mkfifo = (fs as unknown as { mkfifoSync?: (path: string) => void }).mkfifoSync
-      assert.ok(mkfifo, 'mkfifoSync is available on POSIX')
-      mkfifo(verificationEvidencePath(store))
+      execFileSync('mkfifo', [verificationEvidencePath(store)])
       assert.deepEqual(readVerificationEvidence(store), [])
     } finally {
       rmSync(root, { recursive: true, force: true })

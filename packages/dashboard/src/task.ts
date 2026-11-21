@@ -1063,7 +1063,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     )
     if (snapshot.verification.evidence.some((item) => item.matchesCurrent === false)) {
       unknowns.push(
-        'At least one verification record was captured at a different revision than the revision sampled when this dashboard started.',
+        'At least one verification record names a different commit than the one sampled when this dashboard started.',
       )
     }
     if (snapshot.verification.incompleteCount > 0) {

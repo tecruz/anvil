@@ -29,7 +29,7 @@ import {
   runProcess,
   tokenizeCommand,
 } from '@anvil/core'
-import { gitDirFromMetadata } from '@anvil/git'
+import { gitDirFromMetadata, readOnlyGitEnv } from '@anvil/git'
 import { requireCapability } from '@anvil/providers'
 import type { Ticket, TicketRef } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
@@ -288,6 +288,9 @@ function readBoundedFile(path: string): string {
       throw new Error('Verification evidence store is not a regular directory')
     }
   }
+  // On Windows O_NOFOLLOW is unavailable; this check is advisory but still rejects a known link.
+  const info = lstatSync(path)
+  if (info.isSymbolicLink()) throw new Error('Verification evidence is not a regular file')
   const fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
   try {
     const stats = fstatSync(fd)
@@ -325,6 +328,22 @@ export async function worktreeRevision(worktree: string): Promise<string | null>
   return `${head.stdout.trim()}${status.stdout.trim() === '' ? '' : '-dirty'}`
 }
 
+/**
+ * Sample only the HEAD commit for a read-only consumer such as dashboard startup.
+ *
+ * `git status` can refresh the index on disk and run configured fsmonitor or filter helpers, so a
+ * page load must not call it. The same read-only guards the setup probe uses are applied here; the
+ * result is a commit id, never a dirty-state claim.
+ */
+export async function headRevision(worktree: string): Promise<string | null> {
+  const head = await runProcess(
+    'git',
+    ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'rev-parse', '--verify', 'HEAD^{commit}'],
+    { cwd: worktree, env: readOnlyGitEnv() },
+  )
+  return head.exitCode === 0 ? head.stdout.trim() : null
+}
+
 type EvidenceRecord = { command: string; revision: string | null; exitCode: number | null; timestamp: string }
 
 function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
@@ -350,7 +369,11 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
   }
   // Keep the most recent records. Dropping from the end would crowd out the last -- and often
   // failing -- command in favour of older successes; under the byte cap, discard oldest first.
-  let records = all.slice(-20)
+  // Retain only displayable facts before applying the caps. Raw claim order is not completion
+  // order: keeping the last 20 entries could otherwise let later incomplete rows erase a real
+  // failure recorded earlier.
+  const usable = all.filter((record) => record.revision !== null && record.exitCode !== null)
+  let records = usable.slice(-20)
   let payload = `${JSON.stringify(records, null, 2)}\n`
   while (Buffer.byteLength(payload) > VERIFICATION_EVIDENCE_MAX_BYTES && records.length > 0) {
     records = records.slice(1)
