@@ -15,18 +15,21 @@ The maintainer approved the exact zero-cost run on 2026-11-21: four scenarios, t
 - Ground truth: [pilot-ground-truth-2026-11-20.md](pilot-ground-truth-2026-11-20.md)
 - 3D decision: [ADR-0027](../adr/0027-3d-comparison-postponed.md) — postponed; no prototype or participants, so insufficient evidence rather than a negative verdict.
 
-Each run is a subset (`subset: true`, `completionState: partial`) and never enters the hermetic gate. The canonical free-only config is retained beside each run record as `opencode-config.json`; it allows only the `opencode` provider and denies subagents and external-directory tools.
+Each of the four reported runs is a subset (`subset: true`, `completionState: partial`) and never enters the hermetic gate. Its canonical free-only config is retained beside the run record as `opencode-config.json`; it allows only the `opencode` provider and denies subagents and external-directory tools. The earlier superseded run described below has no retained config.
 
-An earlier attempt to launch the wrapper failed in PowerShell before any agent invocation: native stderr was treated as a terminating error by `$ErrorActionPreference = 'Stop'`. It produced no model calls and is not counted as a run. The wrapper now keeps stderr as data. Only the four retained run ids below are reported.
+An earlier attempt to launch the wrapper failed in PowerShell before any agent invocation: native stderr was treated as a terminating error by `$ErrorActionPreference = 'Stop'`. It produced no model calls and is not counted as a run. The wrapper now keeps stderr as data.
+
+An earlier *completed* CountryTracker run, `93b04e69-5a1d-41ca-b4b8-a6a895f3970d` (11:21–11:57Z), is also accounted for below. It used the same seed, model, scenario hash and source hash as the reported runs, launched from the earlier branch commit `8621598…`, and completed six invocations with every visible verifier exiting `1`. It was superseded by the `5bbb5164…` CountryTracker rerun on the final branch commit `3aec8a0…`. Its companion `opencode-config.json` was not retained at run time, so its configuration cannot be independently attested; it is reported only as a completed run under the declared setup, not as a separate result. It is distinct from the pre-invocation wrapper failure above.
 
 This pilot compares Anvil-generated CLI context with a bare checkout at the same commit. The task-centred 2D dashboard map is on the unmerged `feat/task-brief` branch, so this run did not exercise that UI. ADR-0027 records the separate 3D decision.
 
 ## Run records
 
-The retained records keep the scenario and source hashes that existed at run time. Scenario verifiers were tightened after the run; the canned fake-agent answers and the four retained real run records were not rewritten, so the hashes below describe the executed definitions rather than today's file bytes.
+The retained records keep the scenario and source hashes that existed at run time. Scenario verifiers were tightened after the runs; the canned fake-agent answers and the retained real run records were not rewritten, so the hashes below describe the executed definitions rather than today's file bytes. Source hashes recorded at run time include the local clones' `.git` metadata; hashing now excludes `.git` so it identifies the source tree, but the historical hashes are kept verbatim.
 
 | Scenario | Run id | Retained record SHA-256 |
 | --- | --- | --- |
+| `pilot-countrytracker` (superseded) | `93b04e69-5a1d-41ca-b4b8-a6a895f3970d` | `118F9181EC0B5EEED273B110DB7D1B8914FBDE4FAAD3FE5472D3087811DD7ACF` |
 | `pilot-countrytracker` | `5bbb5164-70a9-4f19-8f0a-36e378819fdd` | `5359EF5E4BDD173B4D80C1EAD171A1AAC8BF05F20A67A6FFD38ECC4AB445A3C4` |
 | `pilot-nbim` | `bf33172e-b209-43f9-b64e-f87d72969a84` | `CE36961C09DA9222F0A6CEDF7BD910F32DA1920D7A735E6D0F7B1F1374758835` |
 | `pilot-conventional-wordcount` | `7862b05c-b704-4240-a34c-4c5d2866440d` | `299DF0864E36B5B20891031396589C7311522DB378F37A8B6888278DCBE7E4D2` |
@@ -55,7 +58,7 @@ For `pilot-nbim`, successful-pair mean durations were bare `124s` and anvil `88s
 
 ## Follow-up required before an adoption decision
 
-1. Inspect one retained report/verifier failure per unsuccessful scenario and correct the task or verifier contract if it was at fault; then predeclare and approve a new run rather than retrying for a favourable result.
+1. Add report/verifier-output retention and a bounded failure reason to the harness before rerunning. The retained records do not contain the agent-written reports, so the unsuccessful scenarios cannot be classified as a task-contract fault or a product fault from this evidence alone. Then predeclare and approve a new run rather than retrying for a favourable result; the tightened verifiers and their regression tests are in place, but were not the ones executed in these runs.
 2. Add at least two more repetitions per scenario if the direction rule is to be applied.
 3. Obtain the blocked repository owner's confirmation before counting an accurate handoff as an outcome.
 4. Treat the 3D question as separately blocked under ADR-0027.

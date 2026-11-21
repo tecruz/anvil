@@ -1561,8 +1561,44 @@ function projectDirIn(workdir: string): string {
   return join(workdir, ...profile.projectDir.split('/'))
 }
 
+/**
+ * The #91 pilot sources are local clones declared in `eval/pilots/sources.json`. Before a
+ * clone is copied into a worktree, prove it is still the pinned tree: a wrong origin, a moved
+ * HEAD, a content change (staged or unstaged) or an untracked file must fail the run rather
+ * than silently become evidence. Clean checkouts have no clones and need no assertion.
+ */
+function assertPinnedSource(scenario: EvalScenario): void {
+  const manifestPath = join(repoRoot, 'eval/pilots/sources.json')
+  if (!existsSync(manifestPath)) return
+  const pins = (
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      sources: Array<{ repo: string; origin: string; sha: string }>
+    }
+  ).sources
+  const pin = pins.find((p) => p.repo === scenario.repo)
+  if (pin === undefined) return
+  const cwd = join(repoRoot, ...pin.repo.split('/'))
+  if (!existsSync(join(cwd, '.git'))) return
+  const gitOut = (args: string[]): string =>
+    execFileSync('git', ['--no-optional-locks', ...args], { cwd, encoding: 'utf8' }).trim()
+  if (gitOut(['rev-parse', 'HEAD']) !== pin.sha) throw new Error(`pinned source ${pin.repo}: HEAD is not ${pin.sha}`)
+  if (gitOut(['config', '--get', 'remote.origin.url']) !== pin.origin)
+    throw new Error(`pinned source ${pin.repo}: origin is not ${pin.origin}`)
+  // CRLF-only differences on `eol=crlf` files are not source changes; any content change is.
+  for (const args of [
+    ['diff', 'HEAD', '--ignore-cr-at-eol', '--quiet'],
+    ['diff', '--cached', 'HEAD', '--ignore-cr-at-eol', '--quiet'],
+  ]) {
+    if (spawnSync('git', ['--no-optional-locks', ...args], { cwd }).status !== 0)
+      throw new Error(`pinned source ${pin.repo}: working tree differs from HEAD`)
+  }
+  if (gitOut(['ls-files', '--others', '--exclude-standard']) !== '')
+    throw new Error(`pinned source ${pin.repo}: untracked files present`)
+}
+
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */
 function prepareRepo(scenario: EvalScenario, workdir: string): void {
+  assertPinnedSource(scenario)
   const source = join(repoRoot, ...scenario.repo.split('/'))
   if (!existsSync(source)) throw new Error(`scenario repository not found: ${scenario.repo}`)
   cpSync(source, workdir, { recursive: true })

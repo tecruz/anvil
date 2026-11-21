@@ -2,7 +2,6 @@
   "command": "python -m pytest tests -q",
   "cwd": ".",
   "exitCode": 0,
-  "timestamp": "2026-11-21T00:00:00.000Z",
   "source": "AGENTS.md",
   "notes": "Added punctuation and case coverage for normalize_company_name; comparison output unchanged."
 }

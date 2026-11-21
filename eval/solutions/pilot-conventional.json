@@ -2,7 +2,6 @@
   "command": "npm test",
   "cwd": ".",
   "exitCode": 0,
-  "timestamp": "2026-11-21T00:00:00.000Z",
   "source": "package.json",
   "notes": "Added a word-count utility and unit test in the conventional fixture."
 }
