@@ -342,7 +342,7 @@ type CargoDependencyEntry = { name: string; path: string | null; workspace: bool
 // A source that needs registry/git resolution cannot be decided from the manifest alone. When one
 // appears in a dependency section the whole module's graph is unknown, never "analysed, no edges".
 const CARGO_UNRESOLVED_KEY =
-  /["']?\b(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\b["']?\s*=/i
+  /(?:\b|\.)(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\b["']?\s*=/i
 
 /** Read dependency entries from a Cargo manifest, including `[dependencies.name]` tables. */
 function cargoDependencyEntries(manifest: string, workspaceSection: boolean): CargoDependencyEntry[] {
@@ -391,7 +391,7 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
       continue
     }
     if (!inSection || line === '') continue
-    if (/^[A-Za-z0-9_-]+\s*=/.test(line)) {
+    if (/^\s*(?:"[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=/.test(line)) {
       flush()
       entry = line
     } else entry += `${entry === '' ? '' : '\n'}${line}`
@@ -1729,6 +1729,15 @@ export const jvmDetector: Detector = {
             buildTexts.some((body) => gradleRootWideProjectDeps(body, ids) || gradleRootComputedProjectSelector(body))
           // Programmatic DependencyHandler.add(...) and a root-level project("app") selector
           // cannot be attributed safely; leave every module unknown rather than confidently empty.
+          // A programmatic add on any script can configure a different project, and a conditional
+          // dependency block can change which edges exist; neither can be attributed safely.
+          const programmaticAdd = buildTexts.some((body) =>
+            /(?:\bdependencies|\)\s*\.dependencies)\s*\.\s*add\s*\(/.test(maskGradleComments(body)),
+          )
+          const conditionalDependencies = buildTexts.some((body) => {
+            const masked = maskGradleComments(body)
+            return /\bif\s*\([\s\S]*?\bdependencies\s*\{/.test(masked)
+          })
           const rootMasked = rootChoice.file === undefined ? null : read(ctx, rootChoice.file)
           const rootUnsupported =
             rootMasked !== null &&
@@ -1744,7 +1753,13 @@ export const jvmDetector: Detector = {
           for (const [id, dir] of directories) {
             const deps = new Set<string>()
             const choice = choices.get(id) ?? { file: undefined, ambiguous: true }
-            let unsupported = rootWide || rootUnsupported || scriptAmbiguous || (dir !== null && choice.ambiguous)
+            let unsupported =
+              rootWide ||
+              rootUnsupported ||
+              programmaticAdd ||
+              conditionalDependencies ||
+              scriptAmbiguous ||
+              (dir !== null && choice.ambiguous)
             let ownReadable = false
             if (!scriptSelection.ambiguous && choice.file !== undefined) {
               const body = read(ctx, choice.file)
