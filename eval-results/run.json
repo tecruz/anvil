@@ -1,202 +1,270 @@
 {
   "schemaVersion": 3,
-  "runId": "f2bbd284-d3a0-47ae-a68d-787b1d23a758",
-  "startedAt": "2026-11-21T12:42:55.911Z",
-  "completedAt": "2026-11-21T12:53:36.623Z",
-  "completionState": "partial",
-  "commitSha": "3aec8a075194769c98f967a6133470c7250ae77b",
+  "runId": "87a46b69-0aea-4f71-b89f-9f065789a469",
+  "startedAt": "2026-11-21T11:08:55.247Z",
+  "completedAt": "2026-11-21T11:09:30.533Z",
+  "completionState": "completed",
+  "commitSha": "a4498cb83331d68b01dbc546162e2622e804d0e0",
   "implementation": "6c7b4b7c413c9e7de0dec0723ef226cd99874db047956a20f15c002caef9a1b1",
   "bundleDigest": "e0933dd464e3a542f3d52631221aa1bd3c5632931575ca1cb2980ac46e24f40d",
   "harnessDigest": "30aa1032f21ee3e346b75f7890d979a6736fe1f4fb029b36e1657fe96bfbad64",
   "models": [
     {
-      "id": "opencode/hy4-flash-free",
+      "id": "fake-agent",
       "role": "small"
     }
   ],
-  "opencodeVersion": "2.3.2",
+  "opencodeVersion": null,
   "nodeVersion": "v24.13.0",
   "publishTranscripts": false,
-  "subset": true,
-  "repetitions": 3,
-  "seed": "pilot-2026-11-21",
+  "subset": false,
+  "repetitions": 1,
+  "seed": "2b7abe16-0d9b-4253-bdc8-3adcf05fb829",
   "order": "alternate",
   "scenarioHashes": {
-    "pilot-books-blocked": {
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48"
+    "tiny-code-change": {
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0"
+    },
+    "tiny-verify-only": {
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265"
+    },
+    "medium-code-change": {
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be"
+    },
+    "medium-verify-only": {
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515"
     }
   },
   "runKeys": [
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/0",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/0",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/1",
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/1",
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/2",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/2"
+    "tiny-code-change/bare/fake-agent/0",
+    "tiny-code-change/anvil/fake-agent/0",
+    "tiny-verify-only/bare/fake-agent/0",
+    "tiny-verify-only/anvil/fake-agent/0",
+    "medium-code-change/bare/fake-agent/0",
+    "medium-code-change/anvil/fake-agent/0",
+    "medium-verify-only/bare/fake-agent/0",
+    "medium-verify-only/anvil/fake-agent/0"
   ],
   "executionOrder": [
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/0",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/0",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/1",
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/1",
-    "pilot-books-blocked/bare/opencode/hy4-flash-free/2",
-    "pilot-books-blocked/anvil/opencode/hy4-flash-free/2"
+    "tiny-code-change/bare/fake-agent/0",
+    "tiny-code-change/anvil/fake-agent/0",
+    "tiny-verify-only/bare/fake-agent/0",
+    "tiny-verify-only/anvil/fake-agent/0",
+    "medium-code-change/bare/fake-agent/0",
+    "medium-code-change/anvil/fake-agent/0",
+    "medium-verify-only/bare/fake-agent/0",
+    "medium-verify-only/anvil/fake-agent/0"
   ],
   "results": [
     {
-      "scenario": "pilot-books-blocked",
+      "scenario": "tiny-code-change",
       "variant": "bare",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
       "verifyCount": 1,
-      "hiddenVerifyCount": 0,
+      "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-21T12:42:56.973Z",
-          "completedAt": "2026-11-21T12:44:14.255Z",
+          "startedAt": "2026-11-21T11:08:55.341Z",
+          "completedAt": "2026-11-21T11:08:58.939Z",
           "state": "completed"
         }
       ],
-      "verified": false,
-      "hiddenVerified": null,
-      "verifyExitCodes": [1],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 77131,
+      "durationMs": 3580,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "pilot-books-blocked",
+      "scenario": "tiny-code-change",
       "variant": "anvil",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
       "verifyCount": 1,
-      "hiddenVerifyCount": 0,
+      "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-21T12:44:14.261Z",
-          "completedAt": "2026-11-21T12:45:59.392Z",
+          "startedAt": "2026-11-21T11:08:58.943Z",
+          "completedAt": "2026-11-21T11:09:03.392Z",
           "state": "completed"
         }
       ],
-      "verified": false,
-      "hiddenVerified": null,
-      "verifyExitCodes": [1],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 104971,
+      "durationMs": 4430,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "pilot-books-blocked",
-      "variant": "anvil",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-21T12:45:59.398Z",
-          "completedAt": "2026-11-21T12:47:51.170Z",
-          "state": "completed"
-        }
-      ],
-      "verified": false,
-      "hiddenVerified": null,
-      "verifyExitCodes": [1],
-      "repetition": 1,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 111629,
-      "transcript": "",
-      "skillInstall": "not-requested"
-    },
-    {
-      "scenario": "pilot-books-blocked",
+      "scenario": "tiny-verify-only",
       "variant": "bare",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
       "verifyCount": 1,
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-21T12:47:51.176Z",
-          "completedAt": "2026-11-21T12:49:58.066Z",
+          "startedAt": "2026-11-21T11:09:03.411Z",
+          "completedAt": "2026-11-21T11:09:06.333Z",
           "state": "completed"
         }
       ],
-      "verified": false,
+      "verified": true,
       "hiddenVerified": null,
-      "verifyExitCodes": [1],
-      "repetition": 1,
+      "verifyExitCodes": [0],
+      "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 126749,
+      "durationMs": 2899,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "pilot-books-blocked",
-      "variant": "bare",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-21T12:49:58.071Z",
-          "completedAt": "2026-11-21T12:52:06.181Z",
-          "state": "completed"
-        }
-      ],
-      "verified": false,
-      "hiddenVerified": null,
-      "verifyExitCodes": [1],
-      "repetition": 2,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 127960,
-      "transcript": "",
-      "skillInstall": "not-requested"
-    },
-    {
-      "scenario": "pilot-books-blocked",
+      "scenario": "tiny-verify-only",
       "variant": "anvil",
-      "model": "opencode/hy4-flash-free",
-      "modelRole": "small",
-      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
-      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
       "verifyCount": 1,
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-21T12:52:06.185Z",
-          "completedAt": "2026-11-21T12:53:33.596Z",
+          "startedAt": "2026-11-21T11:09:06.342Z",
+          "completedAt": "2026-11-21T11:09:10.542Z",
           "state": "completed"
         }
       ],
-      "verified": false,
+      "verified": true,
       "hiddenVerified": null,
-      "verifyExitCodes": [1],
-      "repetition": 2,
+      "verifyExitCodes": [0],
+      "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 87245,
+      "durationMs": 4182,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-code-change",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:09:10.569Z",
+          "completedAt": "2026-11-21T11:09:13.869Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3275,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-code-change",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:09:13.873Z",
+          "completedAt": "2026-11-21T11:09:20.130Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 6230,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:09:20.159Z",
+          "completedAt": "2026-11-21T11:09:23.007Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2821,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:09:23.011Z",
+          "completedAt": "2026-11-21T11:09:27.667Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 4625,
       "transcript": "",
       "skillInstall": "not-requested"
     }

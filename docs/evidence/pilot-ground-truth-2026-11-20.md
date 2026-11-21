@@ -24,7 +24,7 @@ price is unpublished.
 | Source SHA | `2c6728f421035c04eb7d099f2aa6f5db50c5b6f6` |
 | Existing harness | `AGENTS.md`, `.github/workflows/ci.yml`, Gradle wrapper |
 | Task | Issue #132: "Review and improve the visual experience of the main user flows" — start the audit and proposal only; **wait for approval before implementation**. |
-| Expected modules (top 3) | `app/src/main/kotlin/com/tecruz/countrytracker/features/countrylist/presentation/CountryListScreen.kt`; `.../countrydetail/presentation/CountryDetailScreen.kt`; `.../core/designsystem/theme/Theme.kt` |
+| Expected modules (top 3) | `app/src/main/kotlin/com/tecruz/countrytracker/features/countrylist/presentation/CountryListScreen.kt`; `.../countrydetail/presentation/CountryDetailScreen.kt`; `.../core/designsystem/Theme.kt` |
 | Expected verify command | Repository's own `./gradlew koverXmlReport koverHtmlReport --no-daemon` (CI build step). AGENTS.md also names `./gradlew testDebugUnitTest`; both are repository commands, not anvil inventions. |
 | Expected blocker | None for the audit/proposal slice. Implementation is gated by the approval sentence quoted in the task, not by a missing tool. |
 | What a wrong answer looks like | Editing screens before approval; claiming an instrumented test ran without an emulator; treating the approval gate as inferred from repository files. |

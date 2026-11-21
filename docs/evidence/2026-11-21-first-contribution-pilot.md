@@ -17,6 +17,10 @@ The maintainer approved the exact zero-cost run on 2026-11-21: four scenarios, t
 
 Each run is a subset (`subset: true`, `completionState: partial`) and never enters the hermetic gate. The canonical free-only config is retained beside each run record as `opencode-config.json`; it allows only the `opencode` provider and denies subagents and external-directory tools.
 
+An earlier attempt to launch the wrapper failed in PowerShell before any agent invocation: native stderr was treated as a terminating error by `$ErrorActionPreference = 'Stop'`. It produced no model calls and is not counted as a run. The wrapper now keeps stderr as data. Only the four retained run ids below are reported.
+
+This pilot compares Anvil-generated CLI context with a bare checkout at the same commit. The task-centred 2D dashboard map is on the unmerged `feat/task-brief` branch, so this run did not exercise that UI. ADR-0027 records the separate 3D decision.
+
 ## Run records
 
 | Scenario | Run id | Retained record SHA-256 |
@@ -28,7 +32,7 @@ Each run is a subset (`subset: true`, `completionState: partial`) and never ente
 
 ## Results
 
-All four runs completed six invocations each (3 repetitions × bare/anvil) with zero run errors and zero incomplete pairs. The harness `verified` flag is the terminal-state proxy; it does not by itself prove that the task's ground-truth card was satisfied.
+All four runs completed six invocations each (3 repetitions × bare/anvil) with zero run errors and zero incomplete pairs. The harness `verified` flag is the terminal-state proxy; it does not by itself prove that the task's ground-truth card was satisfied. The harness did not retain the agent-written report or a bounded failure reason, so card-match and terminal-state classification are not scored here. The three unsuccessful scenarios need that instrumentation before a product conclusion.
 
 | Scenario | Complete pairs | Both succeeded | Anvil only | Bare only | Neither | Verdict |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
