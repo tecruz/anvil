@@ -1870,6 +1870,53 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
+  test('Cargo build and dev dependency tables produce path edges', () => {
+    const profile = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',
+      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'crates/core/src/lib.rs': 'pub fn core() {}\n',
+      'crates/api/Cargo.toml': [
+        '[package]',
+        'name = "api"',
+        'version = "0.1.0"',
+        '',
+        '[dev-dependencies.core]',
+        'path = "../core"',
+        '',
+        '[build-dependencies.core]',
+        'path = "../core"',
+        '',
+      ].join('\n'),
+      'crates/api/src/lib.rs': 'pub fn api() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+  })
+
+  test('an apostrophe in a uv comment does not create an edge', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
+      'services/api/pyproject.toml': [
+        '[project]',
+        'name = "api"',
+        'version = "0.1.0"',
+        'dependencies = [',
+        '  "worker", # Don\'t add the optional integration here.',
+        ']',
+        'description = "shared-lib integration service"',
+        '[tool.uv.sources]',
+        'worker = { workspace = true }',
+        'shared-lib = { workspace = true }',
+        '',
+      ].join('\n'),
+      'services/api/src/api.py': 'value = 1\n',
+      'services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
+      'services/worker/src/worker.py': 'value = 1\n',
+      'services/shared-lib/pyproject.toml': '[project]\nname = "shared-lib"\nversion = "0.1.0"\n',
+      'services/shared-lib/src/shared.py': 'value = 1\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['worker'])
+  })
+
   test('a commented-out uv source is not a dependency', () => {
     const profile = profileOf({
       'pyproject.toml': [
