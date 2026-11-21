@@ -564,6 +564,8 @@ function parsePomXml(text: string): PomXml {
         const key = (match[1] as string).toLowerCase()
         if (names.has(key)) duplicate = true
         names.add(key)
+        // A raw '<' or '&' inside an attribute value is not a literal value Maven can read.
+        if (/[<&]/.test(match[0] as string)) duplicate = true
       }
       if (name === '' || duplicate || attrText.replace(attrRe, '').trim() !== '') unsupported = true
       else {
@@ -662,10 +664,10 @@ function pomLiteralVersion(text: string | null): string | null {
 function pomFullyLiteral(text: string | null): boolean {
   if (text === null) return false
   // Namespaces, character references and CDATA change what Maven reads after XML decoding.
-  // A default namespace (`xmlns="..."`) matters as much as a prefixed one (`xmlns:m="..."`): this
-  // reader does not apply namespace semantics, so either must degrade to unknown rather than
-  // risking an edge built from an element a namespace-aware Maven would read differently.
-  if (/xmlns\s*[:=]|<\/?[A-Za-z_][\w.-]*:|&#[0-9x]|&[A-Za-z]+;|<!\[CDATA\[/.test(text)) return false
+  // Processing instructions are inert text, so strip them before looking for declarations: a PI
+  // that merely mentions `xmlns` must not suppress an otherwise literal edge.
+  const structural = text.replace(/<\?[\s\S]*?\?>/g, '')
+  if (/xmlns\s*[:=]|<\/?[A-Za-z_][\w.-]*:|&#[0-9x]|&[A-Za-z]+;|<!\[CDATA\[/.test(structural)) return false
   for (const match of text.matchAll(/<module>([\s\S]*?)<\/module>/g)) {
     if (!/^[A-Za-z0-9._/-]+$/.test((match[1] as string).trim())) return false
   }
@@ -689,8 +691,17 @@ function pomFullyLiteral(text: string | null): boolean {
   if (pomChildren(parsed.root, 'dependencies').length > 1) return false
   const parent = pomChild(parsed.root, 'parent')
   if (parent !== null && (pomCoordinates(parent) === null || pomText(parent, 'relativePath') !== null)) return false
+  // Any repeated child in a coordinate-bearing section is ambiguous; taking the first would be a
+  // guess. This covers parent coordinates and dependency metadata such as a second <optional>.
+  const hasRepeatedChild = (node: ReturnType<typeof pomChild>): boolean => {
+    const counts = new Map<string, number>()
+    for (const child of node?.children ?? []) counts.set(child.name, (counts.get(child.name) ?? 0) + 1)
+    return [...counts.values()].some((count) => count > 1)
+  }
+  if (hasRepeatedChild(parent)) return false
   const identities = new Set<string>()
   for (const dependency of pomChildren(pomChild(parsed.root, 'dependencies'), 'dependency')) {
+    if (hasRepeatedChild(dependency)) return false
     for (const name of ['groupId', 'artifactId', 'version', 'type', 'classifier', 'scope']) {
       const value = pomText(dependency, name)
       if (['groupId', 'artifactId', 'version'].includes(name)) {
@@ -730,13 +741,18 @@ function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
     if (parsed.unsupported || parsed.root === null) continue
     const slash = pom.lastIndexOf('/')
     const dir = slash < 0 ? '' : pom.slice(0, slash + 1)
-    // A `<module>` in a profile is not built unless that profile is active.
-    for (const module of pomChildren(pomChild(parsed.root, 'modules'), 'module')) {
-      const name = module.text.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
-      if (name === '') continue
-      // A module may name a directory or a POM file, and a nested aggregator may use `../`.
-      const declared = name.endsWith('.xml') ? name : `${name}/pom.xml`
-      queue.push(posix.normalize(`${dir}${declared}`).replace(/^\.\//, ''))
+    // A `<module>` in a profile is not built unless that profile is active. Read every modules
+    // section so a repeated section cannot silently drop a declared module from the profile.
+    for (const modules of pomChildren(parsed.root, 'modules')) {
+      for (const module of pomChildren(modules, 'module')) {
+        const name = module.text.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+        if (name === '') continue
+        // A module may name a directory or a POM file. An `.xml` suffix is only a file when that
+        // file exists; otherwise it is a directory that happens to end in `.xml`.
+        const asFile = posix.normalize(`${dir}${name}`).replace(/^\.\//, '')
+        const declared = name.endsWith('.xml') && ctx.files.has(asFile) ? name : `${name}/pom.xml`
+        queue.push(posix.normalize(`${dir}${declared}`).replace(/^\.\//, ''))
+      }
     }
   }
   return out
@@ -1739,11 +1755,22 @@ export const jvmDetector: Detector = {
           else uncertainArtifacts.add(key.slice(key.indexOf(':') + 1))
         } else identityUncertain = true
       }
+      // Two declared paths sharing coordinates are both real reactor members. Give each a
+      // path-based identity so neither is lost when modules are registered by id; the reactor
+      // still reports unknown coverage because the coordinates are ambiguous.
+      const idCounts = new Map<string, number>()
+      for (const module of reactorModules) idCounts.set(module.id, (idCounts.get(module.id) ?? 0) + 1)
+      const duplicateCoordinates = [...idCounts.values()].some((count) => count > 1)
+      if (duplicateCoordinates) {
+        for (const module of reactorModules) {
+          if ((idCounts.get(module.id) ?? 0) > 1) module.id = `pom:${module.path}`
+        }
+      }
       for (const module of reactorModules)
         addModule(draft, { id: module.id, path: module.path, kind: 'project', deps: [] })
       const fullyLiteral =
         reactorModules.length > 0 &&
-        new Set(reactorModules.map((module) => module.id)).size === reactorModules.length &&
+        !duplicateCoordinates &&
         reactorModules.every((module) => pomFullyLiteral(module.text)) &&
         ![...ctx.files].some((file) => file.endsWith('pom.xml') && !reactorSet.has(ctx.resolve(file)))
       if (!fullyLiteral) {

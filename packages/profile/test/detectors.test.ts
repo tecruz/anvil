@@ -3110,6 +3110,86 @@ describe('module dependency completeness', () => {
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
   })
 
+  test('malformed attribute values and repeated metadata leave Maven coverage unknown', () => {
+    const root =
+      '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n'
+    const api =
+      '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n'
+    const core = '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n'
+    const base = {
+      'pom.xml': root,
+      'api/pom.xml': api,
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml': core,
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    }
+    const rawAttribute = profileOf({ ...base, 'api/pom.xml': api.replace('<project>', '<project a="foo<bar">') })
+    const repeatedParentScalar = profileOf({
+      ...base,
+      'api/pom.xml': api.replace(
+        '<artifactId>api</artifactId>',
+        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><version>2</version></parent><artifactId>api</artifactId>',
+      ),
+    })
+    const repeatedOptional = profileOf({
+      ...base,
+      'api/pom.xml': api.replace(
+        '<artifactId>core</artifactId><version>1</version>',
+        '<artifactId>core</artifactId><version>1</version><optional>true</optional><optional>false</optional>',
+      ),
+    })
+    for (const profile of [rawAttribute, repeatedParentScalar, repeatedOptional]) {
+      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    }
+  })
+
+  test('a repeated modules section keeps both modules visible', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules><modules><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.path).sort(), ['.', 'api', 'core'])
+  })
+
+  test('a module directory ending in .xml is not mistaken for a POM file', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>core.xml</module><module>api</module></modules></project>\n',
+      'core.xml/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core.xml/src/main/java/Core.java': 'class Core {}\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
+  })
+
+  test('two modules sharing coordinates are both visible with unknown coverage', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>duplicate</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'duplicate/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version></project>\n',
+      'duplicate/src/main/java/Duplicate.java': 'class Duplicate {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.map((m) => m.path).sort(), ['.', 'api', 'core', 'duplicate'])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0)
+  })
+
   test('malformed POM markup leaves Maven coverage unknown', () => {
     const base = {
       'pom.xml':
