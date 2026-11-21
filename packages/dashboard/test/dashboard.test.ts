@@ -506,6 +506,29 @@ describe('the snapshot reader', () => {
     assert.match(snapshot.verification.reason, /different revision/)
   })
 
+  test('verification compares commit ids case-insensitively', async () => {
+    const { invoke } = fakeInvoke()
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      currentRevision: 'ABCDEF1234',
+      readVerification: () => [
+        {
+          command: 'npm test',
+          revision: 'abcdef1234-dirty',
+          exitCode: 0,
+          timestamp: '2026-11-20T10:00:00.000Z',
+        },
+      ],
+    })
+    assert.deepEqual(
+      snapshot.verification.evidence.map((item) => item.matchesCurrent),
+      [true],
+    )
+    assert.doesNotMatch(snapshot.verification.reason, /different revision/)
+  })
+
   test('a store of only incomplete records says so instead of claiming no evidence', async () => {
     const { invoke } = fakeInvoke()
     const snapshot = await loadSnapshot({

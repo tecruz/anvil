@@ -215,13 +215,16 @@ async function verificationSource(options: LoadSnapshotOptions): Promise<Dashboa
     const currentRevision = options.currentRevision ?? null
     // A `-dirty` suffix describes a worktree, not a commit, and two different dirty states share
     // it. Compare the commit only, which is the sole fact the startup probe establishes.
-    const commitOf = (revision: string): string => revision.replace(/-dirty$/i, '')
+    const commitOf = (revision: string): string => revision.replace(/-dirty$/i, '').toLowerCase()
     const currentCommit = currentRevision === null ? null : commitOf(currentRevision)
     const evidence: VerificationEvidence[] = records
       .filter(validEvidence)
       .slice(-20)
       .map((record) => ({
-        ...record,
+        command: record.command,
+        revision: record.revision,
+        exitCode: record.exitCode,
+        timestamp: record.timestamp,
         matchesCurrent: currentCommit === null ? null : commitOf(record.revision as string) === currentCommit,
       }))
     if (evidence.length === 0) {

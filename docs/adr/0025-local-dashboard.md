@@ -89,9 +89,11 @@ runtime dependency.**
   network because it only talks to its own loopback server.
 - A user with no browser, or a headless workflow, loses nothing: every command behind the
   page is already directly available.
-- The first version deliberately does not show saved verification history, live agent
-  output, or tracker state. Those need a storage contract anvil does not have yet, and
-  inventing one would make the page assert facts it cannot verify.
+- The first version shows only opt-in, CLI-recorded verification history — never a live agent
+  output, a current-pass claim, or tracker state. The storage contract is owned by the CLI, and
+  the page labels rows with the commit sampled at startup and states that their origin cannot be
+  independently proven. Inventing a different source of truth would make the page assert facts it
+  cannot verify.
 
 ## Alternatives rejected
 

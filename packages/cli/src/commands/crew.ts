@@ -359,9 +359,6 @@ export type EvidenceRecord = {
  * can report them as incomplete rather than as "no evidence".
  */
 export function selectVerificationRecords(all: EvidenceRecord[]): EvidenceRecord[] {
-  const sorted = [...all].sort((left, right) =>
-    left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0,
-  )
   const displayable = (record: EvidenceRecord): boolean =>
     record.command.trim() !== '' &&
     record.command.length <= 200 &&
@@ -370,11 +367,29 @@ export function selectVerificationRecords(all: EvidenceRecord[]): EvidenceRecord
     Number.isSafeInteger(record.exitCode) &&
     (record.exitCode as number) >= 0 &&
     (record.exitCode as number) <= 0x7fffffff
-  const valid = sorted.filter(displayable)
-  const incomplete = sorted.filter((record) => !displayable(record))
-  return [...valid.slice(-20), ...incomplete.slice(-Math.max(0, 20 - Math.min(valid.length, 20)))].sort(
-    (left, right) => (left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0),
+  // A same-millisecond tie must not drop the failure: failures sort before successes at the same
+  // timestamp, so the capped tail keeps the interesting outcome.
+  const ordered = [...all].sort((left, right) => {
+    if (left.timestamp !== right.timestamp) return left.timestamp < right.timestamp ? -1 : 1
+    const leftFailed = displayable(left) && (left.exitCode as number) !== 0 ? 1 : 0
+    const rightFailed = displayable(right) && (right.exitCode as number) !== 0 ? 1 : 0
+    return rightFailed - leftFailed
+  })
+  const valid = ordered.filter(displayable)
+  const incomplete = ordered.filter((record) => !displayable(record))
+  const validKept = valid.slice(-20)
+  const quota = 20 - validKept.length
+  const incompleteKept = quota > 0 ? incomplete.slice(-quota) : []
+  let records = [...validKept, ...incompleteKept].sort((left, right) =>
+    left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0,
   )
+  // Under the byte cap, discard rejected rows first; only drop real facts as a last resort.
+  const fits = (rows: EvidenceRecord[]): boolean => Buffer.byteLength(`${JSON.stringify(rows, null, 2)}\n`) <= 64 * 1024
+  while (!fits(records) && records.length > 0) {
+    const rejectedIndex = records.findIndex((record) => !displayable(record))
+    records = rejectedIndex >= 0 ? records.filter((_, index) => index !== rejectedIndex) : records.slice(1)
+  }
+  return records
 }
 
 function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
@@ -398,12 +413,8 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
       hint: `Remove ${path} before recording again.`,
     })
   }
-  let records = selectVerificationRecords(all)
-  let payload = `${JSON.stringify(records, null, 2)}\n`
-  while (Buffer.byteLength(payload) > VERIFICATION_EVIDENCE_MAX_BYTES && records.length > 0) {
-    records = records.slice(1)
-    payload = `${JSON.stringify(records, null, 2)}\n`
-  }
+  const records = selectVerificationRecords(all)
+  const payload = `${JSON.stringify(records, null, 2)}\n`
   mkdirSync(anvilDir, { recursive: true })
   const temp = `${path}.${process.pid}.tmp`
   if (existsSync(temp)) {

@@ -547,23 +547,27 @@ export interface WorktreeStatus {
  * unpushed will happily release a worktree and lose them.
  */
 export async function worktreeStatus(cwd: string): Promise<WorktreeStatus> {
-  const statusRes = await git(['status', '--porcelain'], { cwd })
+  // The dashboard calls this on every load/refresh, so every probe must be read-only: no index
+  // refresh, no fsmonitor/filter helpers, no lazy fetch. On Git older than 2.45 the unknown
+  // --no-lazy-fetch option fails closed rather than silently fetching.
+  const options = { cwd, env: readOnlyGitEnv() }
+  const call = (args: string[]) =>
+    git(['--no-optional-locks', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', ...args], options)
+  const statusRes = await call(['status', '--porcelain'])
   const changes = statusRes.exitCode === 0 ? statusRes.stdout.split('\n').filter((l) => l.trim() !== '') : []
 
-  const upstreamRes = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { cwd })
+  const upstreamRes = await call(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
   const hasUpstream = upstreamRes.exitCode === 0
   let unpushed: number | null = null
   if (hasUpstream) {
-    const count = await git(['rev-list', '--count', '@{upstream}..HEAD'], {
-      cwd,
-    })
+    const count = await call(['rev-list', '--count', '@{upstream}..HEAD'])
     if (count.exitCode === 0) {
       const n = Number.parseInt(count.stdout.trim(), 10)
       unpushed = Number.isFinite(n) ? n : null
     }
   }
 
-  const log = await git(['log', '-1', '--format=%ct%x00%s'], { cwd })
+  const log = await call(['log', '-1', '--format=%ct%x00%s'])
   let lastCommitAgeSeconds: number | null = null
   let lastCommitSubject: string | null = null
   if (log.exitCode === 0) {

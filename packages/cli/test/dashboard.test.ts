@@ -137,6 +137,46 @@ describe('the dashboard staging view', () => {
     assert.ok(selected.length <= 20)
   })
 
+  test('evidence retention never exceeds 20 rows or lets rejected rows crowd out facts', () => {
+    const stamp = '2026-11-21T00:00:00.000Z'
+    const facts = Array.from({ length: 20 }, (_, index) => ({
+      command: 'npm test',
+      revision: 'a'.repeat(40),
+      exitCode: index === 0 ? 1 : 0,
+      timestamp: stamp,
+    }))
+    const rejected = {
+      command: '',
+      revision: null,
+      exitCode: null,
+      timestamp: stamp,
+    }
+    const selected = selectVerificationRecords([...facts, rejected])
+    assert.equal(selected.length, 20)
+    assert.deepEqual(
+      selected.filter((record) => record.command === ''),
+      [],
+    )
+    assert.ok(selected.some((record) => record.exitCode === 1))
+  })
+
+  test('evidence retention prefers an oversized rejected row over a real failure', () => {
+    const failure = {
+      command: 'npm test',
+      revision: 'a'.repeat(40),
+      exitCode: 1,
+      timestamp: '2026-11-21T00:00:00.000Z',
+    }
+    const oversized = {
+      command: 'x'.repeat(64 * 1024),
+      revision: null,
+      exitCode: null,
+      timestamp: '2026-11-21T00:00:01.000Z',
+    }
+    const selected = selectVerificationRecords([failure, oversized])
+    assert.deepEqual(selected, [failure])
+  })
+
   test('the evidence store is resolved from Git metadata', () => {
     const mainRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-main-'))
     const linkedRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-linked-'))
