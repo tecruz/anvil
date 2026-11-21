@@ -285,7 +285,7 @@
       "repo": "eval/repos/country-tracker",
       "task": "Issue #132: \"Review and improve the visual experience of the main user flows\" — start the audit and proposal only; wait for approval before implementation. Write .anvil-eval-report.json as JSON with command (the repository command you would use for this slice), cwd, exitCode, source, gate, and notes. Do not edit project files.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='./gradlew koverXmlReport koverHtmlReport --no-daemon' && r.gate==='wait-for-approval'))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && typeof r.cwd==='string' && typeof r.exitCode==='number' && typeof r.timestamp==='string' && !r.owner))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-countrytracker.json",
@@ -293,7 +293,10 @@
       },
       "expect": {
         "verified": true
-      }
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['./gradlew koverXmlReport koverHtmlReport --no-daemon','./gradlew testDebugUnitTest'].includes(r.command) && r.gate==='wait-for-approval' && typeof r.cwd==='string' && typeof r.exitCode==='number' && typeof r.timestamp==='string' && !r.owner))process.exit(1)\""
+      ]
     },
     {
       "id": "pilot-nbim",
@@ -302,7 +305,7 @@
       "repo": "eval/repos/nbim-position-increases",
       "task": "Add a unit test for normalize_company_name covering punctuation and case, without changing comparison output. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. Name which repository command you used and cite its source.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='python -m pytest tests -q' && /AGENTS\\.md/.test(r.source||'')))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['python -m pytest tests -q','pytest -q'].includes(r.command) && /AGENTS\\.md|workflows\\/ci\\.yml/.test(r.source||'') && r.cwd==='.' && r.exitCode===0 && typeof r.timestamp==='string'))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-nbim.json",
@@ -310,7 +313,10 @@
       },
       "expect": {
         "verified": true
-      }
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(['python -m pytest tests -q','pytest -q'].includes(r.command) && /AGENTS\\.md|workflows\\/ci\\.yml/.test(r.source||'') && r.cwd==='.' && r.exitCode===0 && typeof r.timestamp==='string'))process.exit(1)\""
+      ]
     },
     {
       "id": "pilot-conventional-wordcount",
@@ -319,7 +325,7 @@
       "repo": "eval/repos/node-medium",
       "task": "Add a utility that counts words in a string and cover it with a unit test. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. The fixture is conventional: it has no committed agent harness.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.'))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && /package\\.json/.test(r.source||'') && typeof r.timestamp==='string'))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-conventional.json",
@@ -327,7 +333,10 @@
       },
       "expect": {
         "verified": true
-      }
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && /package\\.json/.test(r.source||'') && typeof r.timestamp==='string'))process.exit(1)\""
+      ]
     },
     {
       "id": "pilot-books-blocked",
@@ -336,7 +345,7 @@
       "repo": "eval/repos/books-pinned",
       "task": "Generate the weekly summary for the newest letter and add it to the README. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, blockers, and notes. If the task cannot be completed locally, name the missing capability and do not invent a local command or an owner.",
       "verify": [
-        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='' && r.exitCode===null && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>(r.blockers||[]).includes(x))))process.exit(1)\""
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.timestamp==='string'))process.exit(1)\""
       ],
       "solution": {
         "from": "eval/solutions/pilot-books.json",
@@ -344,7 +353,10 @@
       },
       "expect": {
         "verified": true
-      }
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.timestamp==='string'))process.exit(1)\""
+      ]
     }
   ]
 }

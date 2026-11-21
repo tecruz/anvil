@@ -23,6 +23,8 @@ This pilot compares Anvil-generated CLI context with a bare checkout at the same
 
 ## Run records
 
+The retained records keep the scenario and source hashes that existed at run time. Scenario verifiers were tightened after the run; the canned fake-agent answers and the four retained real run records were not rewritten, so the hashes below describe the executed definitions rather than today's file bytes.
+
 | Scenario | Run id | Retained record SHA-256 |
 | --- | --- | --- |
 | `pilot-countrytracker` | `5bbb5164-70a9-4f19-8f0a-36e378819fdd` | `5359EF5E4BDD173B4D80C1EAD171A1AAC8BF05F20A67A6FFD38ECC4AB445A3C4` |

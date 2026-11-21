@@ -2,6 +2,7 @@
   "command": "",
   "cwd": ".",
   "exitCode": null,
+  "timestamp": "2026-11-21T00:00:00.000Z",
   "source": "dove-letter-main/.github/workflows/generate-summary.yml",
   "blockers": ["GEMINI_API_KEY", "SUMMARY_API_KEY", "https://doveletter.dev/api/summaries"],
   "notes": "Generation requires declared GitHub secrets and an external service; no local command or owner is inferred."

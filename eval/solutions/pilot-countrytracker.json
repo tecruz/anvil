@@ -2,6 +2,7 @@
   "command": "./gradlew koverXmlReport koverHtmlReport --no-daemon",
   "cwd": ".",
   "exitCode": 0,
+  "timestamp": "2026-11-21T00:00:00.000Z",
   "source": ".github/workflows/ci.yml",
   "gate": "wait-for-approval",
   "notes": "Audit and proposal only; implementation waits for issue #132 approval."

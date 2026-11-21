@@ -32,8 +32,9 @@ No default changes until a new ADR accepts that evidence.
 
 ## Consequences
 
-- The dashboard remains a single-file, read-only 2D view; ADR-0025's boundary is unchanged.
-- The #91 real-agent pilot measures the task workspace and baseline workflow, not 3D.
+- ADR-0025's read-only dashboard boundary is unchanged; this ADR does not ship or enable a view.
+- The task-centred 2D map exists only on the unmerged `feat/task-brief` branch at this decision.
+- The #91 real-agent pilot run compared Anvil-generated CLI context with a bare checkout; it did not exercise the 2D map or 3D.
 - The pilot report must say `insufficient evidence` for the visualization question.
 - Future 3D work is a separate, opt-in experiment with its own review and evidence.
 
