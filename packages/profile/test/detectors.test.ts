@@ -3027,6 +3027,80 @@ describe('module dependency completeness', () => {
     }
   })
 
+  test('a root-level .NET project resolves a sibling reference from the repository root', () => {
+    const profile = profileOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, ['Core'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('trailing text or nested item metadata leaves .NET coverage unknown', () => {
+    const base =
+      '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>'
+    const trailing = profileOf({
+      'App.csproj': `${base}garbage\n`,
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    const nested = profileOf({
+      'App.csproj': base.replace(
+        'Include="Core.csproj" />',
+        'Include="Core.csproj"><Metadata><ProjectReference Include="Other.csproj" /></Metadata></ProjectReference>',
+      ),
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Other.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    for (const profile of [trailing, nested]) {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
+    }
+  })
+
+  test('a custom SDK and a case-variant implicit import stay unknown on Windows', () => {
+    const customSdk = profileOf({
+      'App.csproj': '<Project Sdk="Contoso.Sdk" />\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    assert.deepEqual(customSdk.modules.find((m) => m.id === 'App')?.deps, [])
+    if (process.platform === 'win32') {
+      const shadow = profileOf({
+        'App.csproj':
+          '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+        'directory.build.targets':
+          '<Project><ItemGroup><ProjectReference Remove="Core.csproj" /></ItemGroup></Project>\n',
+        'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      })
+      assert.deepEqual(shadow.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((shadow.diagnostics.unanalysedDeps ?? []).length > 0)
+    }
+  })
+
+  test('a .NET project does not overwrite an npm module with the same id', () => {
+    const profile = profileOf({
+      'package.json': '{"name":"root","workspaces":["api","core"]}\n',
+      'api/package.json': '{"name":"api","dependencies":{"core":"*"}}\n',
+      'core/package.json': '{"name":"core"}\n',
+      'api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'dotnet:api')?.deps, [])
+  })
+
+  test('a .NET reference with an upper-case extension resolves on Windows', () => {
+    const profile = profileOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.CSPROJ" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    if (process.platform === 'win32') {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, ['Core'])
+    } else {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+    }
+  })
+
   test('commented and CDATA project references are not .NET edges', () => {
     const profile = profileOf({
       'App/App.csproj': [

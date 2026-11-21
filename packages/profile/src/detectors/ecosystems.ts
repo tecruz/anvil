@@ -1552,6 +1552,15 @@ function dotnetImportSources(
   }
   const sources: Array<{ path: string; dir: string }> = []
   let unsupported = false
+  // MSBuild's implicit imports are case-insensitive on Windows; a differently-cased file in the
+  // index still shadows the root one and can remove a declared reference.
+  const findFile = (path: string): string | null => {
+    if (ctx.files.has(path)) return path
+    if (process.platform !== 'win32') return null
+    const lowered = path.toLowerCase()
+    for (const file of ctx.files) if (file.toLowerCase() === lowered) return file
+    return null
+  }
   for (const [name, enabled, custom] of [
     ['Directory.Build.props', settings.props, settings.propsPath],
     ['Directory.Build.targets', settings.targets, settings.targetsPath],
@@ -1559,14 +1568,16 @@ function dotnetImportSources(
     if (!enabled) continue
     if (custom !== null) {
       const path = posix.normalize(projectDir === '.' ? custom : posix.join(projectDir, custom))
-      if (!ctx.files.has(path)) unsupported = true
-      else sources.push({ path, dir: projectDir })
+      const found = findFile(path)
+      if (found === null) unsupported = true
+      else sources.push({ path: found, dir: projectDir })
       continue
     }
     for (const directory of directories) {
       const path = directory === '.' ? name : `${directory}/${name}`
-      if (ctx.files.has(path)) {
-        sources.push({ path, dir: directory })
+      const found = findFile(path)
+      if (found !== null) {
+        sources.push({ path: found, dir: directory })
         break
       }
     }
@@ -1602,22 +1613,27 @@ function dotnetFullyLiteral(text: string): boolean {
     .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
     .replace(/<\?[\s\S]*?\?>/g, '')
   if (!/^\s*<Project[\s>]/.test(content)) return false
-  if (/^\s*<Project[^>]*\/>\s*$/.test(content)) return true
-  // Only the standard SDK and plain ItemGroups of ProjectReference items are accepted.
+  // Only the standard SDK is accepted, including for a self-closing project.
   const sdk = parsed.root.attrs.get('Sdk')
   if (sdk !== undefined && sdk !== 'Microsoft.NET.Sdk') return false
+  if (/^\s*<Project[^>]*\/>\s*$/.test(content)) return true
+  // Nothing may follow the root element: trailing text changes what MSBuild reads even when the
+  // element structure itself parses cleanly.
+  if (!/<\/Project>\s*$/.test(content)) return false
   for (const child of parsed.root.children) {
     if (child.name !== 'ItemGroup' || child.attrs.size > 0) return false
     for (const item of child.children) {
       if (item.name !== 'ProjectReference' || item.attrs.size !== 1) return false
+      // Metadata on an item can add or change references; it is not a literal, unconditional item.
+      if (item.children.length > 0) return false
       const include = item.attrs.get('Include')
-      if (include === undefined || !/^(?:\.\.[/\\])?[A-Za-z0-9._/\\-]+\.(?:cs|fs)proj$/.test(include)) return false
+      if (include === undefined || !/^(?:\.\.[/\\])?[A-Za-z0-9._/\\-]+\.(?:cs|fs)proj$/i.test(include)) return false
     }
   }
   return true
 }
 
-/** Resolve a declared path to the project file as it actually appears in the repository. */
+/** Resolve a declared path to the module id of the project file as it appears on disk. */
 type ProjectResolver = (target: string) => string | null
 
 function dotnetProjectReferences(text: string, projectDir: string, resolveProject: ProjectResolver): DotnetReferences {
@@ -1696,7 +1712,7 @@ function dotnetProjectReferences(text: string, projectDir: string, resolveProjec
         unsupported = true
         continue
       }
-      deps.add(actual.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
+      deps.add(actual)
     }
   }
   return { deps: [...deps].sort(), unsupported }
@@ -1706,10 +1722,9 @@ export const dotnetDetector: Detector = {
   id: 'dotnet',
   title: '.NET',
   priority: 50,
-  matches: (ctx) =>
-    filesUnder(ctx, '').some((f) => f.endsWith('.csproj') || f.endsWith('.fsproj')) || hasFile(ctx, 'global.json'),
+  matches: (ctx) => filesUnder(ctx, '').some((f) => /\.(cs|fs)proj$/i.test(f)) || hasFile(ctx, 'global.json'),
   detect(ctx, draft) {
-    const projects = filesUnder(ctx, '').filter((f) => f.endsWith('.csproj') || f.endsWith('.fsproj'))
+    const projects = filesUnder(ctx, '').filter((f) => /\.(cs|fs)proj$/i.test(f))
     addStack(draft, {
       id: 'dotnet',
       version: null,
@@ -1721,18 +1736,30 @@ export const dotnetDetector: Detector = {
     const caseInsensitive = process.platform === 'win32'
     const projectKey = (path: string): string => (caseInsensitive ? path.toLowerCase() : path)
     const projectByKey = new Map(projects.map((p) => [projectKey(p), p]))
-    const resolveProject = (target: string): string | null => projectByKey.get(projectKey(target)) ?? null
-    const projectIds = projects.map((p) => p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':'))
+    const projectDirOf = (p: string): string => {
+      const slash = p.lastIndexOf('/')
+      return slash < 0 ? '.' : p.slice(0, slash)
+    }
+    // A .NET module must never overwrite another ecosystem's module with the same id: adding a
+    // root api.csproj to an npm workspace must not erase the npm api -> core edge.
+    const idOf = (p: string): string => {
+      const base = p.replace(/\.(cs|fs)proj$/i, '').replace(/\//g, ':')
+      return draft.modules.some((module) => module.id === base) ? `dotnet:${base}` : base
+    }
+    const effectiveIds = new Map(projects.map((p) => [p, idOf(p)]))
+    const resolveProject = (target: string): string | null => {
+      const path = projectByKey.get(projectKey(target))
+      return path === undefined ? null : (effectiveIds.get(path) ?? null)
+    }
+    const projectIds = [...effectiveIds.values()]
     const duplicateIds = new Set(projectIds.filter((id, index) => projectIds.indexOf(id) !== index))
     for (const p of projects) {
-      const dir = p.slice(0, p.lastIndexOf('/')) || '.'
-      const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
-      addModule(draft, { id, path: dir, kind: 'project', deps: [] })
+      addModule(draft, { id: effectiveIds.get(p) as string, path: projectDirOf(p), kind: 'project', deps: [] })
     }
     const moduleById = new Map(draft.modules.map((module) => [module.id, module]))
     for (const p of projects) {
-      const dir = p.slice(0, p.lastIndexOf('/')) || '.'
-      const id = p.replace(/\.(cs|fs)proj$/, '').replace(/\//g, ':')
+      const dir = projectDirOf(p)
+      const id = effectiveIds.get(p) as string
       const text = read(ctx, p)
       if (text === null) continue
       // SDK-style projects implicitly import Directory.Build.props and .targets, but properties
