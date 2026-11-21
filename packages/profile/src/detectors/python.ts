@@ -165,9 +165,12 @@ function uvSources(manifest: string): Map<string, UvSource> {
   const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some((match) => {
     // A trailing TOML comment is inert: `# old marker = "..."` must not invalidate the source.
     const value = (match[1] ?? '').replace(/\s+#.*$/, '')
-    return /^\s*\[/.test(value) || /["']?\bmarker\b["']?\s*=/.test(value)
+    // workspace = "other-workspace" selects a different workspace, not the local boolean case.
+    return /^\s*\[/.test(value) || /["']?\bmarker\b["']?\s*=/.test(value) || /\bworkspace\s*=\s*["']/.test(value)
   })
-  if (undecidable) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
+  // A [tool.uv.sources.NAME] sub-table can carry a marker or a different workspace selector.
+  const subTables = /^\s*\[tool\.uv\.sources\.[^\]]+\]/m.test(manifest)
+  if (undecidable || subTables) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
 }
 
@@ -195,7 +198,10 @@ function uvDependencies(
   if (project === null) return { deps: [], unsupported: false }
   // An extra selects additional dependencies at install time; reading only the base list would
   // claim a complete graph for a dependency set that can change. Fail closed.
-  if (/^\s*\[project\.optional-dependencies\]/m.test(manifest) || /^\s*\[dependency-groups\]/m.test(manifest))
+  if (
+    /^\s*\[\s*project\.optional-dependencies\s*\]/m.test(manifest) ||
+    /^\s*\[\s*dependency-groups\s*\]/m.test(manifest)
+  )
     return { deps: [], unsupported: true }
   if (tomlArray(project, 'dynamic').some((field) => pythonName(field) === 'dependencies')) {
     return { deps: [], unsupported: true }
