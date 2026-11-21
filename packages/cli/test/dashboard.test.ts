@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import * as fs from 'node:fs'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -66,6 +67,24 @@ describe('the dashboard staging view', () => {
       writeFileSync(path, JSON.stringify([record]))
       assert.deepEqual(readVerificationEvidence(store), [record])
       writeFileSync(path, 'x'.repeat(70 * 1024))
+      assert.deepEqual(readVerificationEvidence(store), [])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a FIFO at the evidence path is rejected without blocking the reader', {
+    skip: process.platform === 'win32',
+  }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-evidence-fifo-'))
+    try {
+      mkdirSync(join(root, '.git'), { recursive: true })
+      mkdirSync(join(root, '.anvil'), { recursive: true })
+      const store = evidenceStore(root)
+      assert.ok(store)
+      const mkfifo = (fs as unknown as { mkfifoSync?: (path: string) => void }).mkfifoSync
+      assert.ok(mkfifo, 'mkfifoSync is available on POSIX')
+      mkfifo(verificationEvidencePath(store))
       assert.deepEqual(readVerificationEvidence(store), [])
     } finally {
       rmSync(root, { recursive: true, force: true })

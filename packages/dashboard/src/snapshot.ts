@@ -43,6 +43,8 @@ export interface VerificationEvidence {
   revision: string | null
   exitCode: number | null
   timestamp: string | null
+  /** Whether this record was captured at the repository revision sampled by the CLI; null if unknown. */
+  matchesCurrent: boolean | null
 }
 
 export interface DashboardSnapshot {
@@ -70,6 +72,10 @@ export interface DashboardSnapshot {
   verification: {
     status: 'unavailable' | 'recorded'
     reason: string
+    /** Revision sampled once by the CLI when the dashboard started, never on a page load. */
+    currentRevision: string | null
+    /** Records present in the store but too incomplete to display as facts. */
+    incompleteCount: number
     evidence: VerificationEvidence[]
   }
   notes: string[]
@@ -90,6 +96,8 @@ export interface LoadSnapshotOptions {
   readStaged: () => StagedView
   /** Optional, opt-in source of bounded verification facts; the dashboard never runs commands. */
   readVerification?: () => unknown[] | Promise<unknown[]>
+  /** Sampled once by the CLI at startup so a page load never launches git. */
+  currentRevision?: string | null
   now?: () => Date
 }
 
@@ -190,9 +198,11 @@ function validEvidence(value: unknown): value is VerificationEvidence {
 
 /** Bound and validate opt-in verification records; never infer a result from their absence. */
 async function verificationSource(options: LoadSnapshotOptions): Promise<DashboardSnapshot['verification']> {
-  const unavailable = (reason: string): DashboardSnapshot['verification'] => ({
+  const unavailable = (reason: string, incompleteCount = 0): DashboardSnapshot['verification'] => ({
     status: 'unavailable',
     reason,
+    currentRevision: options.currentRevision ?? null,
+    incompleteCount,
     evidence: [],
   })
   if (options.readVerification === undefined) {
@@ -201,12 +211,30 @@ async function verificationSource(options: LoadSnapshotOptions): Promise<Dashboa
   try {
     const records: unknown = await options.readVerification()
     if (!Array.isArray(records)) return unavailable('The verification evidence source returned no readable records.')
-    const evidence: VerificationEvidence[] = records.filter(validEvidence).slice(0, 20)
-    if (evidence.length === 0)
-      return unavailable('No bounded verification evidence has been recorded for this repository.')
+    const incompleteCount = records.length - records.filter(validEvidence).length
+    const currentRevision = options.currentRevision ?? null
+    const evidence: VerificationEvidence[] = records
+      .filter(validEvidence)
+      .slice(-20)
+      .map((record) => ({
+        ...record,
+        matchesCurrent: currentRevision === null ? null : record.revision === currentRevision,
+      }))
+    if (evidence.length === 0) {
+      const reason =
+        incompleteCount > 0
+          ? `${incompleteCount} verification record(s) exist but are incomplete; none can be shown as a fact.`
+          : 'No bounded verification evidence has been recorded for this repository.'
+      return unavailable(reason, incompleteCount)
+    }
+    const stale = currentRevision !== null && evidence.some((item) => item.matchesCurrent === false)
     return {
       status: 'recorded',
-      reason: 'Recorded by an explicit, bounded verification run; this page only displays the facts.',
+      reason: stale
+        ? 'Recorded by an explicit, bounded verification run; at least one record is from a different revision than this checkout.'
+        : 'Recorded by an explicit, bounded verification run; this page only displays the facts.',
+      currentRevision,
+      incompleteCount,
       evidence,
     }
   } catch {

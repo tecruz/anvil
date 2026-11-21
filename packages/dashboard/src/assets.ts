@@ -439,7 +439,13 @@ function renderBrief(parent, brief) {
       const exitCode = item.exitCode === null || item.exitCode === undefined ? 'unknown' : String(item.exitCode);
       const revision = item.revision || 'unknown revision';
       const timestamp = item.timestamp || 'unknown time';
-      row.appendChild(make('div', 'muted', 'exit ' + exitCode + ' · ' + revision + ' · ' + timestamp));
+      const revisionNote =
+        item.matchesCurrent === false
+          ? ' · recorded at a different revision than this checkout'
+          : item.matchesCurrent === null
+            ? ' · revision not compared (current revision unknown)'
+            : '';
+      row.appendChild(make('div', 'muted', 'exit ' + exitCode + ' · ' + revision + ' · ' + timestamp + revisionNote));
       card.appendChild(row);
     }
   } else {

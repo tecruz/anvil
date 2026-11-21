@@ -117,6 +117,8 @@ export interface TaskBrief {
   verification: {
     status: 'unavailable' | 'recorded'
     reason: string
+    currentRevision: string | null
+    incompleteCount: number
     evidence: VerificationEvidence[]
   }
   blockers: TaskBlocker[]
@@ -1059,6 +1061,16 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     unknowns.push(
       'Recorded verification is a snapshot of an explicitly bounded run; it is not a claim that the current worktree passes.',
     )
+    if (snapshot.verification.evidence.some((item) => item.matchesCurrent === false)) {
+      unknowns.push(
+        'At least one verification record was captured at a different revision than the revision sampled when this dashboard started.',
+      )
+    }
+    if (snapshot.verification.incompleteCount > 0) {
+      unknowns.push(
+        `${snapshot.verification.incompleteCount} verification record(s) are incomplete and are not shown as facts.`,
+      )
+    }
   }
   for (const reference of unmatched) {
     unknowns.push(`The task names ${reference}, which is not in the file index; it may be a new or renamed file.`)
@@ -1118,6 +1130,8 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     verification: {
       status: snapshot.verification.status,
       reason: snapshot.verification.reason,
+      currentRevision: snapshot.verification.currentRevision,
+      incompleteCount: snapshot.verification.incompleteCount,
       evidence: snapshot.verification.evidence,
     },
     blockers: found,

@@ -12,7 +12,7 @@ import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
 import { createDashboardServer, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
 import { createCliInvoker } from '../mcp.ts'
-import { evidenceStore, readVerificationEvidence } from './crew.ts'
+import { evidenceStore, readVerificationEvidence, worktreeRevision } from './crew.ts'
 import type { Command } from './types.ts'
 
 function parsePort(value: unknown): number {
@@ -112,13 +112,17 @@ export const dashboardCommand: Command = {
       })
     }
 
-    // Resolve the canonical store once from Git metadata; a load or refresh never launches Git.
+    // Resolve the canonical store and sample the current revision once from Git metadata; a load
+    // or refresh never launches Git. The sample lets recorded evidence be labelled stale without
+    // the read-only dashboard ever running a command of its own.
     const store = evidenceStore(repoRoot)
+    const currentRevision = await worktreeRevision(repoRoot)
     const server = await createDashboardServer({
       cwd: repoRoot,
       port,
       invoke: createCliInvoker(),
       readStaged: () => stagedView(repoRoot),
+      currentRevision,
       ...(store === null ? {} : { readVerification: () => readVerificationEvidence(store) }),
     })
 

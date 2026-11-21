@@ -16,7 +16,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
@@ -193,6 +193,46 @@ export function normalizeGitPath(raw: string): string {
     return realpathSync.native(trimmed)
   } catch {
     return resolve(trimmed)
+  }
+}
+
+/**
+ * Read the common Git metadata directory of a repository without starting a process.
+ *
+ * A linked worktree has a `.git` file naming its private gitdir, whose `commondir` points back to
+ * the main `.git`. Every resolved path goes through {@link normalizeGitPath}, so a gitdir written
+ * with a different drive-letter case or separator style still identifies the same physical
+ * directory. Consumers that must be process-free (the dashboard) use this rather than parsing the
+ * metadata themselves; callers that can afford a process should prefer `discoverRepo`.
+ */
+export function gitDirFromMetadata(repoRoot: string): string | null {
+  try {
+    const dotGit = join(repoRoot, '.git')
+    if (!existsSync(dotGit)) return null
+    const info = lstatSync(dotGit)
+    if (info.isSymbolicLink()) return null
+    let gitDir = normalizeGitPath(dotGit)
+    if (info.isFile()) {
+      const text = readFileSync(dotGit, 'utf8')
+      const match = /^gitdir:\s*(.+)$/i.exec(text.trim())
+      if (match === null) return null
+      gitDir = normalizeGitPath(
+        isAbsolute((match[1] as string).trim())
+          ? (match[1] as string).trim()
+          : join(repoRoot, (match[1] as string).trim()),
+      )
+    } else if (!info.isDirectory()) {
+      return null
+    }
+    const commonFile = join(gitDir, 'commondir')
+    if (existsSync(commonFile)) {
+      const common = readFileSync(commonFile, 'utf8').trim()
+      if (common === '') return null
+      gitDir = normalizeGitPath(isAbsolute(common) ? common : join(gitDir, common))
+    }
+    return gitDir
+  } catch {
+    return null
   }
 }
 

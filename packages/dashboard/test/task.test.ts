@@ -124,7 +124,13 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
       }),
     },
     work: { crew: source({ crew: [] }) },
-    verification: { status: 'unavailable', reason: 'not persisted', evidence: [] },
+    verification: {
+      status: 'unavailable',
+      reason: 'not persisted',
+      currentRevision: null,
+      incompleteCount: 0,
+      evidence: [],
+    },
     notes: [],
   }
 }
@@ -348,12 +354,15 @@ describe('buildTaskBrief', () => {
     snapshot.verification = {
       status: 'recorded',
       reason: 'Recorded by an explicit, bounded verification run.',
+      currentRevision: null,
+      incompleteCount: 0,
       evidence: [
         {
           command: 'npm test',
           revision: 'abcdef1234',
           exitCode: 0,
           timestamp: '2026-11-20T10:00:00.000Z',
+          matchesCurrent: false,
         },
       ],
     }

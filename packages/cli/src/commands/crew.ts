@@ -18,7 +18,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   AnvilError,
   ErrorCode,
@@ -29,6 +29,7 @@ import {
   runProcess,
   tokenizeCommand,
 } from '@anvil/core'
+import { gitDirFromMetadata } from '@anvil/git'
 import { requireCapability } from '@anvil/providers'
 import type { Ticket, TicketRef } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
@@ -244,37 +245,17 @@ export interface EvidenceStore {
 }
 
 /**
- * Resolve the evidence store from Git metadata without starting a process. A linked worktree has a
- * `.git` file pointing at its private gitdir, whose `commondir` points back to the main `.git`.
- * Unreadable metadata makes evidence unavailable rather than preventing the dashboard from starting.
+ * Resolve the evidence store from Git metadata without starting a process. The metadata parser and
+ * path normalization live in `@anvil/git`, the single source of truth for git paths; this command
+ * only derives the store location and key. Unreadable metadata makes evidence unavailable rather
+ * than preventing the dashboard from starting.
  */
 export function evidenceStore(repoRoot: string): EvidenceStore | null {
-  try {
-    const dotGit = join(repoRoot, '.git')
-    if (!existsSync(dotGit)) return null
-    const info = lstatSync(dotGit)
-    if (info.isSymbolicLink()) return null
-    let gitDir = dotGit
-    if (info.isFile()) {
-      const match = /^gitdir:\s*(.+)$/i.exec(readBoundedFile(dotGit).trim())
-      if (match === null) return null
-      gitDir = resolve(repoRoot, (match[1] as string).trim())
-    } else if (!info.isDirectory()) {
-      return null
-    }
-    const commonFile = join(gitDir, 'commondir')
-    if (existsSync(commonFile)) {
-      const common = readBoundedFile(commonFile).trim()
-      if (common === '') return null
-      gitDir = resolve(gitDir, common)
-    }
-    const absolute = resolve(gitDir)
-    return {
-      root: dirname(absolute),
-      key: createHash('sha256').update(absolute).digest('hex').slice(0, 16),
-    }
-  } catch {
-    return null
+  const gitDir = gitDirFromMetadata(repoRoot)
+  if (gitDir === null) return null
+  return {
+    root: dirname(gitDir),
+    key: createHash('sha256').update(gitDir).digest('hex').slice(0, 16),
   }
 }
 
@@ -292,7 +273,13 @@ function assertWritableDirectory(path: string): void {
   }
 }
 
-/** Read the exact opened file, never a path that can be swapped between a stat and a read. */
+/**
+ * Read the exact opened file, never a path that can be swapped between a stat and a read.
+ *
+ * `O_NOFOLLOW` rejects a final symlink and `O_NONBLOCK` stops a FIFO swapped in after an advisory
+ * check from hanging the read; the `fstat` on the *opened descriptor* is the authoritative check.
+ * The buffer is bounded by that stat before any bytes are read.
+ */
 function readBoundedFile(path: string): string {
   const parent = dirname(path)
   if (existsSync(parent)) {
@@ -301,22 +288,18 @@ function readBoundedFile(path: string): string {
       throw new Error('Verification evidence store is not a regular directory')
     }
   }
-  const info = lstatSync(path)
-  if (info.isSymbolicLink() || !info.isFile()) {
-    throw new Error('Verification evidence is not a regular file')
-  }
-  const fd = openSync(path, fsConstants.O_RDONLY)
+  const fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
   try {
     const stats = fstatSync(fd)
     if (!stats.isFile() || stats.size > VERIFICATION_EVIDENCE_MAX_BYTES) {
       throw new Error('Verification evidence is not a bounded regular file')
     }
-    const buffer = Buffer.allocUnsafe(VERIFICATION_EVIDENCE_MAX_BYTES + 1)
-    const bytes = readSync(fd, buffer, 0, buffer.length, 0)
-    if (bytes > VERIFICATION_EVIDENCE_MAX_BYTES) {
+    const size = stats.size
+    const buffer = Buffer.allocUnsafe(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) {
       throw new Error('Verification evidence is not a bounded regular file')
     }
-    return buffer.subarray(0, bytes).toString('utf8')
+    return buffer.subarray(0, size).toString('utf8')
   } finally {
     closeSync(fd)
   }
@@ -334,7 +317,7 @@ export function readVerificationEvidence(store: EvidenceStore): unknown[] {
   }
 }
 
-async function worktreeRevision(worktree: string): Promise<string | null> {
+export async function worktreeRevision(worktree: string): Promise<string | null> {
   const head = await runProcess('git', ['rev-parse', 'HEAD'], { cwd: worktree })
   if (head.exitCode !== 0) return null
   const status = await runProcess('git', ['status', '--porcelain'], { cwd: worktree })
@@ -365,10 +348,12 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
       hint: `Remove ${path} before recording again.`,
     })
   }
-  let records = all.slice(0, 20)
+  // Keep the most recent records. Dropping from the end would crowd out the last -- and often
+  // failing -- command in favour of older successes; under the byte cap, discard oldest first.
+  let records = all.slice(-20)
   let payload = `${JSON.stringify(records, null, 2)}\n`
   while (Buffer.byteLength(payload) > VERIFICATION_EVIDENCE_MAX_BYTES && records.length > 0) {
-    records = records.slice(0, -1)
+    records = records.slice(1)
     payload = `${JSON.stringify(records, null, 2)}\n`
   }
   mkdirSync(anvilDir, { recursive: true })
@@ -395,8 +380,10 @@ async function crewVerifyFlow(
   }
 
   const keys = Array.isArray(args.values.key) ? (args.values.key as string[]) : undefined
-  // Sample the revision immediately before every command and attach it to that command alone.
+  // Revision binding is only needed for evidence recording. A plain `crew verify` must not spawn
+  // two extra git processes per command: the read-only verification path stays process-free.
   const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
+    if (args.values.record !== true) return runCommand(command, cwd)
     const revision = await worktreeRevision(cwd)
     return { ...(await runCommand(command, cwd)), revision }
   }

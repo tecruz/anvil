@@ -473,10 +473,50 @@ describe('the snapshot reader', () => {
     })
     assert.equal(snapshot.verification.status, 'recorded')
     assert.deepEqual(snapshot.verification.evidence, [
-      record,
-      { ...record, revision: 'a'.repeat(40) },
-      { ...record, exitCode: 3010 },
+      { ...record, matchesCurrent: null },
+      { ...record, revision: 'a'.repeat(40), matchesCurrent: null },
+      { ...record, exitCode: 3010, matchesCurrent: null },
     ])
+    assert.equal(snapshot.verification.currentRevision, null)
+    assert.ok(snapshot.verification.incompleteCount > 0)
+  })
+
+  test('verification records are bound to the revision sampled by the CLI', async () => {
+    const { invoke } = fakeInvoke()
+    const current = {
+      command: 'npm test',
+      revision: 'abcdef1234',
+      exitCode: 0,
+      timestamp: '2026-11-20T10:00:00.000Z',
+    }
+    const stale = { ...current, revision: 'fffffffff', command: 'npm run lint' }
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      currentRevision: 'abcdef1234',
+      readVerification: () => [stale, current],
+    })
+    assert.equal(snapshot.verification.status, 'recorded')
+    assert.equal(snapshot.verification.currentRevision, 'abcdef1234')
+    assert.deepEqual(
+      snapshot.verification.evidence.map((item) => item.matchesCurrent),
+      [false, true],
+    )
+    assert.match(snapshot.verification.reason, /different revision/)
+  })
+
+  test('a store of only incomplete records says so instead of claiming no evidence', async () => {
+    const { invoke } = fakeInvoke()
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      readVerification: () => [{ command: 'npm test', revision: null, exitCode: 0, timestamp: null }],
+    })
+    assert.equal(snapshot.verification.status, 'unavailable')
+    assert.equal(snapshot.verification.incompleteCount, 1)
+    assert.match(snapshot.verification.reason, /incomplete/)
   })
 
   test('a thrown invocation becomes one error, not a rejected promise', async () => {
@@ -680,7 +720,13 @@ describe('the dashboard page', () => {
           ],
         }),
       },
-      verification: { status: 'unavailable', reason: 'not persisted', evidence: [] },
+      verification: {
+        status: 'unavailable',
+        reason: 'not persisted',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
       notes: [],
     }
 
