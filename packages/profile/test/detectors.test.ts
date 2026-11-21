@@ -3110,6 +3110,72 @@ describe('module dependency completeness', () => {
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
   })
 
+  test('malformed POM markup leaves Maven coverage unknown', () => {
+    const base = {
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    }
+    const unterminated = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace('<dependencies>', '<?broken<dependencies>'),
+    })
+    const duplicateAttr = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace('<project>', '<project a="x" a="y">'),
+    })
+    const twoBlocks = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace(
+        '</project>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies></project>',
+      ),
+    })
+    for (const profile of [unterminated, duplicateAttr, twoBlocks]) {
+      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    }
+  })
+
+  test('a padded Maven module name resolves to its directory', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module> api </module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
+  })
+
+  test('an unindexed default parent is not replaced by a same-coordinate reactor POM', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>nested/api</module><module>parent</module><module>core</module></modules></project>\n',
+      'nested/api/pom.xml':
+        '<project><parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
+      'nested/api/src/main/java/Api.java': 'class Api {}\n',
+      'parent/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'parent/src/main/java/Parent.java': 'class Parent {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    // nested/api's real parent is nested/pom.xml (not indexed); the indexed parent/ POM must not
+    // be substituted just because its coordinates match.
+    assert.deepEqual(profile.modules.find((m) => m.path === 'nested/api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'nested/api'))
+  })
+
   test('an unresolved Maven parent version leaves coverage unknown', () => {
     const profile = profileOf({
       'pom.xml':

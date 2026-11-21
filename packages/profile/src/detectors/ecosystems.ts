@@ -524,7 +524,11 @@ function parsePomXml(text: string): PomXml {
     }
     if (text.startsWith('<?', i) || text.startsWith('<!', i)) {
       const end = text.indexOf('>', i + 2)
-      i = end < 0 ? text.length : end + 1
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      i = end + 1
       continue
     }
     if (text.startsWith('</', i)) {
@@ -550,7 +554,14 @@ function parsePomXml(text: string): PomXml {
       const name = (selfClosing ? raw.slice(0, -1) : raw).trim().split(/[\s/]/, 1)[0] ?? ''
       const attrText = raw.slice(name.length)
       const attrRe = /([A-Za-z_:][\w:.-]*)\s*=\s*(["'])[^"']*\2/g
-      if (name === '' || attrText.replace(attrRe, '').trim() !== '') unsupported = true
+      const names = new Set<string>()
+      let duplicate = false
+      for (const match of attrText.matchAll(attrRe)) {
+        const key = (match[1] as string).toLowerCase()
+        if (names.has(key)) duplicate = true
+        names.add(key)
+      }
+      if (name === '' || duplicate || attrText.replace(attrRe, '').trim() !== '') unsupported = true
       else {
         const node: PomNode = { name, text: '', children: [] }
         attach(node)
@@ -659,6 +670,8 @@ function pomFullyLiteral(text: string | null): boolean {
   for (const name of ['profiles', 'dependencyManagement']) {
     if (pomChild(parsed.root, name) !== null) return false
   }
+  // Maven merges multiple dependencies sections; reading only the first would invent a graph.
+  if (pomChildren(parsed.root, 'dependencies').length > 1) return false
   const parent = pomChild(parsed.root, 'parent')
   if (parent !== null && (pomCoordinates(parent) === null || pomText(parent, 'relativePath') !== null)) return false
   const identities = new Set<string>()
@@ -704,7 +717,7 @@ function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
     const dir = slash < 0 ? '' : pom.slice(0, slash + 1)
     // A `<module>` in a profile is not built unless that profile is active.
     for (const module of pomChildren(pomChild(parsed.root, 'modules'), 'module')) {
-      const name = module.text.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+      const name = module.text.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
       if (name === '') continue
       // A module may name a directory or a POM file, and a nested aggregator may use `../`.
       const declared = name.endsWith('.xml') ? name : `${name}/pom.xml`
@@ -753,7 +766,7 @@ function mavenDependencies(text: string, modules: ReadonlySet<string>): MavenDep
   const keys: string[] = []
   const targets: string[] = []
   const versions = new Map<string, string | null>()
-  let unsupported = pomChild(parsed.root, 'profiles') !== null
+  let unsupported = pomChild(parsed.root, 'profiles') !== null || pomChildren(parsed.root, 'dependencies').length > 1
   for (const dependency of pomChildren(pomChild(parsed.root, 'dependencies'), 'dependency')) {
     const group = pomText(dependency, 'groupId')
     const artifact = pomText(dependency, 'artifactId')
@@ -1766,7 +1779,12 @@ export const jvmDetector: Detector = {
             (explicitParentPath !== null && explicitParentPath.trim() !== '' && parentByPath === undefined)
           const effective = new Map(resolved.versions)
           if (parent !== null) {
-            const parentModule = parentByPath ?? (parentId === null ? undefined : parsedById.get(parentId))
+            // Coordinate lookup is only valid when local lookup is explicitly disabled. With a
+            // default or explicit relativePath that is absent from the index, the real parent is
+            // unreadable; substituting an unrelated reactor POM with the same coordinates invents
+            // inherited dependencies.
+            const parentModule =
+              parentByPath ?? (parentLookupDisabled && parentId !== null ? parsedById.get(parentId) : undefined)
             const parentRoot = parentModule?.root ?? null
             if (
               parentModule === undefined ||
