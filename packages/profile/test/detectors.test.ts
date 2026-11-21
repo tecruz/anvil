@@ -1838,6 +1838,86 @@ describe('module dependency completeness', () => {
     ])
   })
 
+  test('a Cargo dependency table and a workspace-inherited path produce edges', () => {
+    const profile = profileOf({
+      'Cargo.toml': [
+        '[workspace]',
+        'members = ["crates/api", "crates/core"]',
+        '',
+        '[workspace.dependencies]',
+        'shared = { path = "crates/core" }',
+        '',
+      ].join('\n'),
+      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+      'crates/core/src/lib.rs': 'pub fn core() {}\n',
+      'crates/api/Cargo.toml': [
+        '[package]',
+        'name = "api"',
+        'version = "0.1.0"',
+        '',
+        '[dependencies.core]',
+        'path = "../core"',
+        '',
+        '[dependencies.shared]',
+        'workspace = true',
+        '',
+      ].join('\n'),
+      'crates/api/src/lib.rs': 'pub fn api() {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('a commented-out uv source is not a dependency', () => {
+    const profile = profileOf({
+      'pyproject.toml': [
+        '[project]',
+        'name = "root"',
+        'dependencies = []',
+        '',
+        '[tool.uv.workspace]',
+        'members = ["services/*"]',
+        '',
+        '[tool.uv.sources]',
+        'worker = { workspace = true }',
+        '',
+      ].join('\n'),
+      'services/api/pyproject.toml': [
+        '[project]',
+        'name = "api"',
+        'dependencies = [',
+        '  "worker>=0.1",',
+        '  # "shared-lib",',
+        ']',
+        '',
+        '[tool.uv.sources]',
+        'worker = { workspace = true }',
+        '# shared-lib = { workspace = true }',
+        '',
+      ].join('\n'),
+      'services/api/src/api.py': 'value = 1\n',
+      'services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
+      'services/worker/src/worker.py': 'value = 1\n',
+      'services/shared-lib/pyproject.toml': '[project]\nname = "shared-lib"\nversion = "0.1.0"\n',
+      'services/shared-lib/src/shared.py': 'value = 1\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['worker'])
+  })
+
+  test('a relative Gradle project path resolves against the declaring project', () => {
+    const profile = profileOf({
+      'settings.gradle.kts': 'rootProject.name = "root"\ninclude(":app", ":app:core", ":core")\n',
+      'build.gradle.kts': 'plugins { base }\n',
+      'app/build.gradle.kts': 'dependencies { implementation(project("core")) }\n',
+      'app/src/main/kotlin/A.kt': 'class A\n',
+      'app/core/build.gradle.kts': 'dependencies { }\n',
+      'app/core/src/main/kotlin/AC.kt': 'class AC\n',
+      'core/build.gradle.kts': 'dependencies { }\n',
+      'core/src/main/kotlin/C.kt': 'class C\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === ':app')?.deps, [':app:core'])
+  })
+
   test('Gradle project dependencies use declared modules and ignore comments or undeclared ids', () => {
     const profile = profileOf({
       'settings.gradle.kts': 'rootProject.name = "root"\ninclude(":api", ":core")\n',
