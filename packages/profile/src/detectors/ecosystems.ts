@@ -523,12 +523,13 @@ function parsePomXml(text: string): PomXml {
       continue
     }
     if (text.startsWith('<?', i) || text.startsWith('<!', i)) {
-      const end = text.indexOf('>', i + 2)
+      const pi = text.startsWith('<?', i)
+      const end = text.indexOf(pi ? '?>' : '>', i + 2)
       if (end < 0) {
         unsupported = true
         break
       }
-      i = end + 1
+      i = end + (pi ? 2 : 1)
       continue
     }
     if (text.startsWith('</', i)) {
@@ -551,9 +552,12 @@ function parsePomXml(text: string): PomXml {
       }
       const raw = text.slice(i + 1, end).trim()
       const selfClosing = raw.endsWith('/')
-      const name = (selfClosing ? raw.slice(0, -1) : raw).trim().split(/[\s/]/, 1)[0] ?? ''
-      const attrText = raw.slice(name.length)
-      const attrRe = /([A-Za-z_:][\w:.-]*)\s*=\s*(["'])[^"']*\2/g
+      const body = (selfClosing ? raw.slice(0, -1) : raw).trim()
+      const name = body.split(/[\s/]/, 1)[0] ?? ''
+      const attrText = body.slice(name.length)
+      // Each attribute must be separated from the tag name (and the previous attribute) by
+      // whitespace; `a="x"b="y"` is malformed and must not be read as two attributes.
+      const attrRe = /\s+([A-Za-z_:][\w:.-]*)\s*=\s*(["'])[^"']*\2/g
       const names = new Set<string>()
       let duplicate = false
       for (const match of attrText.matchAll(attrRe)) {
@@ -666,9 +670,20 @@ function pomFullyLiteral(text: string | null): boolean {
     if (!/^[A-Za-z0-9._/-]+$/.test((match[1] as string).trim())) return false
   }
   const parsed = parsePomXml(text)
-  if (parsed.unsupported || parsed.root === null || pomCoordinates(parsed.root) === null) return false
+  if (
+    parsed.unsupported ||
+    parsed.root === null ||
+    parsed.root.name !== 'project' ||
+    pomCoordinates(parsed.root) === null
+  )
+    return false
   for (const name of ['profiles', 'dependencyManagement']) {
     if (pomChild(parsed.root, name) !== null) return false
+  }
+  // A repeated section has no literal interpretation: Maven merges it, and reading only the first
+  // would invent a graph.
+  for (const name of ['modules', 'dependencies', 'parent', 'groupId', 'artifactId', 'version']) {
+    if (pomChildren(parsed.root, name).length > 1) return false
   }
   // Maven merges multiple dependencies sections; reading only the first would invent a graph.
   if (pomChildren(parsed.root, 'dependencies').length > 1) return false
@@ -766,8 +781,15 @@ function mavenDependencies(text: string, modules: ReadonlySet<string>): MavenDep
   const keys: string[] = []
   const targets: string[] = []
   const versions = new Map<string, string | null>()
-  let unsupported = pomChild(parsed.root, 'profiles') !== null || pomChildren(parsed.root, 'dependencies').length > 1
+  let unsupported =
+    pomChild(parsed.root, 'profiles') !== null ||
+    pomChildren(parsed.root, 'dependencies').length > 1 ||
+    pomChildren(parsed.root, 'modules').length > 1
   for (const dependency of pomChildren(pomChild(parsed.root, 'dependencies'), 'dependency')) {
+    // A repeated scalar has no single literal value.
+    for (const name of ['groupId', 'artifactId', 'version', 'type', 'classifier', 'scope']) {
+      if (pomChildren(dependency, name).length > 1) unsupported = true
+    }
     const group = pomText(dependency, 'groupId')
     const artifact = pomText(dependency, 'artifactId')
     const version = pomText(dependency, 'version')

@@ -3142,6 +3142,66 @@ describe('module dependency completeness', () => {
     }
   })
 
+  test('processing instructions and malformed start tags leave Maven coverage unknown', () => {
+    const base = {
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    }
+    const pi = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace('<dependencies>', '<?broken ><dependencies>'),
+    })
+    const badAttr = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace('<project>', '<project a="x"b="y">'),
+    })
+    const twoVersions = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml'].replace(
+        '<artifactId>core</artifactId><version>1</version>',
+        '<artifactId>core</artifactId><version>1</version><version>2</version>',
+      ),
+    })
+    const otherRoot = profileOf({
+      ...base,
+      'api/pom.xml': base['api/pom.xml']
+        .replaceAll('<project', '<notProject')
+        .replaceAll('</project>', '</notProject>'),
+    })
+    for (const [label, profile] of [
+      ['processing instruction', pi],
+      ['malformed attribute spacing', badAttr],
+      ['duplicate version', twoVersions],
+      ['non-project root', otherRoot],
+    ] as const) {
+      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [], label)
+      assert.ok(
+        (profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'),
+        label,
+      )
+    }
+  })
+
+  test('a self-closing element does not invalidate an otherwise literal POM', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><description/><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
+  })
+
   test('a padded Maven module name resolves to its directory', () => {
     const profile = profileOf({
       'pom.xml':
