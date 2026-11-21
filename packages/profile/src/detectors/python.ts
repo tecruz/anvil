@@ -165,7 +165,7 @@ function uvSources(manifest: string): Map<string, UvSource> {
   const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some((match) => {
     // A trailing TOML comment is inert: `# old marker = "..."` must not invalidate the source.
     const value = (match[1] ?? '').replace(/\s+#.*$/, '')
-    return /^\s*\[/.test(value) || /\bmarker\s*=/.test(value)
+    return /^\s*\[/.test(value) || /["']?\bmarker\b["']?\s*=/.test(value)
   })
   if (undecidable) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
@@ -189,12 +189,13 @@ function uvDependencies(
   self: string,
   memberPath: string,
   rootSources: ReadonlyMap<string, UvSource>,
+  workspaceBase = '.',
 ): UvDependencies {
   const project = tomlSection(manifest, /^\[project\]/)
   if (project === null) return { deps: [], unsupported: false }
   // An extra selects additional dependencies at install time; reading only the base list would
   // claim a complete graph for a dependency set that can change. Fail closed.
-  if (/^\[project\.optional-dependencies\]/m.test(manifest) || /^\[dependency-groups\]/m.test(manifest))
+  if (/^\s*\[project\.optional-dependencies\]/m.test(manifest) || /^\s*\[dependency-groups\]/m.test(manifest))
     return { deps: [], unsupported: true }
   if (tomlArray(project, 'dynamic').some((field) => pythonName(field) === 'dependencies')) {
     return { deps: [], unsupported: true }
@@ -222,7 +223,7 @@ function uvDependencies(
       continue
     }
     if (source.path !== null) {
-      const base = memberSources.has(key) ? memberPath : '.'
+      const base = memberSources.has(key) ? memberPath : workspaceBase
       const target = posix.normalize(posix.join(base, source.path)).replace(/\/+$/, '')
       const id = idsByPath.get(target)
       if (id !== undefined && id !== self) out.add(id)
@@ -412,7 +413,15 @@ export const pythonDetector: Detector = {
       const rootSources = uvSources(workspaceText)
       for (const member of members) {
         if (member.manifest === null) continue
-        const resolved = uvDependencies(member.manifest, names, idsByPath, member.id, member.path, rootSources)
+        const resolved = uvDependencies(
+          member.manifest,
+          names,
+          idsByPath,
+          member.id,
+          member.path,
+          rootSources,
+          workspaceBase,
+        )
         if (resolved.unsupported) {
           draft.depsUnknownReasons.set(member.id, 'unsupported dependency syntax; dependencies left unknown')
           continue

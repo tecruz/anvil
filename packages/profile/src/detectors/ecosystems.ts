@@ -341,7 +341,8 @@ type CargoDependencyEntry = { name: string; path: string | null; workspace: bool
 
 // A source that needs registry/git resolution cannot be decided from the manifest alone. When one
 // appears in a dependency section the whole module's graph is unknown, never "analysed, no edges".
-const CARGO_UNRESOLVED_KEY = /\b(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\s*=/i
+const CARGO_UNRESOLVED_KEY =
+  /["']?\b(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\b["']?\s*=/i
 
 /** Read dependency entries from a Cargo manifest, including `[dependencies.name]` tables. */
 function cargoDependencyEntries(manifest: string, workspaceSection: boolean): CargoDependencyEntry[] {
@@ -402,7 +403,7 @@ function cargoPathDependencies(
   manifest: string,
   cratePath: string,
   paths: ReadonlySet<string>,
-  workspacePaths: ReadonlyMap<string, string> = new Map(),
+  workspacePaths: ReadonlyMap<string, CargoDependencyEntry> = new Map(),
   workspaceRoot = '.',
 ): { paths: string[]; unsupported: boolean } {
   const out = new Set<string>()
@@ -419,8 +420,9 @@ function cargoPathDependencies(
     if (entry.path !== null) add(entry.path, cratePath)
     else if (entry.workspace) {
       const shared = workspacePaths.get(entry.name)
-      // A [workspace.dependencies] path is relative to the workspace root, not the member.
-      if (shared !== undefined) add(shared, workspaceRoot)
+      // A [workspace.dependencies] path is relative to the workspace root, not the member, and
+      // an unsupported inherited key makes this member unknown rather than analysed.
+      if (shared !== undefined && !shared.unsupported && shared.path !== null) add(shared.path, workspaceRoot)
       else unsupported = true
     }
   }
@@ -474,18 +476,36 @@ export const rustDetector: Detector = {
       // A manifest that cannot be read stays unknown rather than becoming an empty list.
       const paths = new Set(crates.map((crate) => crate.path))
       const idByPath = new Map(crates.map((crate) => [crate.path, crate.id]))
-      // A member can inherit a path from [workspace.dependencies] with `workspace = true`;
-      // resolve that shared declaration against the workspace root before looking for edges.
-      const workspacePaths = new Map<string, string>()
-      if (workspaceText !== null) {
-        for (const entry of cargoDependencyEntries(workspaceText, true)) {
-          if (entry.path !== null) workspacePaths.set(entry.name, entry.path)
-        }
-      }
+      // A member inherits from the nearest enclosing [workspace.dependencies], not from an
+      // unrelated workspace elsewhere in the repository. Preserve each entry's unsupported flag
+      // so an inherited `features`/`git` source makes the member unknown too.
+      const workspaces = [...ctx.files]
+        .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+        .map((file) => ({
+          file,
+          root: file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length),
+          text: read(ctx, file),
+        }))
+        .filter((workspace) => workspace.text !== null && /^\[workspace\]/m.test(workspace.text))
+        .map((workspace) => {
+          const shared = new Map<string, CargoDependencyEntry>()
+          for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
+          return { ...workspace, shared }
+        })
       for (const crate of crates) {
         if (crate.manifest === null) continue
-        const resolved = cargoPathDependencies(crate.manifest, crate.path, paths, workspacePaths, workspaceRoot)
-        if (resolved.unsupported) {
+        const enclosing = workspaces
+          .filter((w) => w.root === '.' || crate.path === w.root || crate.path.startsWith(`${w.root}/`))
+          .sort((a, b) => b.root.length - a.root.length)[0]
+        const inheritedUnsupported = enclosing === undefined
+        const resolved = cargoPathDependencies(
+          crate.manifest,
+          crate.path,
+          paths,
+          enclosing?.shared ?? new Map(),
+          enclosing?.root ?? workspaceRoot,
+        )
+        if (resolved.unsupported || inheritedUnsupported) {
           draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo dependency syntax; dependencies left unknown')
           continue
         }
@@ -1337,10 +1357,13 @@ export const jvmDetector: Detector = {
             buildTexts.some((body) => gradleRootWideProjectDeps(body, ids) || gradleRootComputedProjectSelector(body))
           // Programmatic DependencyHandler.add(...) and a root-level project("app") selector
           // cannot be attributed safely; leave every module unknown rather than confidently empty.
-          const rootBody = rootChoice.file === undefined ? null : read(ctx, rootChoice.file)
+          const rootMasked = rootChoice.file === undefined ? null : read(ctx, rootChoice.file)
           const rootUnsupported =
-            rootBody !== null &&
-            (/\bdependencies\s*\.\s*add\s*\(/.test(rootBody) || /\bproject\s*\(\s*(['"])[^:'"]+\1\s*\)/.test(rootBody))
+            rootMasked !== null &&
+            (/\bdependencies\s*\.\s*add\s*\(/.test(maskGradleComments(rootMasked)) ||
+              // A root project("app") or project("app:core") selector is relative; only an
+              // absolute project(":app") can be attributed safely.
+              /\bproject\s*\(\s*(['"])[^:'"][^'"]*\1\s*\)/.test(maskGradleComments(rootMasked)))
           // An unresolved script for any project can configure any other project, so every
           // member's dependency list becomes untrustworthy.
           const scriptAmbiguous =
@@ -1355,7 +1378,7 @@ export const jvmDetector: Detector = {
               const body = read(ctx, choice.file)
               if (body !== null) {
                 ownReadable = true
-                if (/\bdependencies\s*\.\s*add\s*\(/.test(body)) unsupported = true
+                if (/\bdependencies\s*\.\s*add\s*\(/.test(maskGradleComments(body))) unsupported = true
                 const resolved = gradleProjectDependencies(body, ids, id)
                 for (const dep of resolved.deps) deps.add(dep)
                 unsupported ||= resolved.unsupported
