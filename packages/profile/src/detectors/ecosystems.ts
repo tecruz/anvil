@@ -647,7 +647,10 @@ function pomLiteralVersion(text: string | null): string | null {
 function pomFullyLiteral(text: string | null): boolean {
   if (text === null) return false
   // Namespaces, character references and CDATA change what Maven reads after XML decoding.
-  if (/xmlns:|<\/?[A-Za-z_][\w.-]*:|&#[0-9x]|&[A-Za-z]+;|<!\[CDATA\[/.test(text)) return false
+  // A default namespace (`xmlns="..."`) matters as much as a prefixed one (`xmlns:m="..."`): this
+  // reader does not apply namespace semantics, so either must degrade to unknown rather than
+  // risking an edge built from an element a namespace-aware Maven would read differently.
+  if (/xmlns\s*[:=]|<\/?[A-Za-z_][\w.-]*:|&#[0-9x]|&[A-Za-z]+;|<!\[CDATA\[/.test(text)) return false
   for (const match of text.matchAll(/<module>([\s\S]*?)<\/module>/g)) {
     if (!/^[A-Za-z0-9._/-]+$/.test((match[1] as string).trim())) return false
   }

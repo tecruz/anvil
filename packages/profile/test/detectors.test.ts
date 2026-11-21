@@ -3072,6 +3072,44 @@ describe('module dependency completeness', () => {
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
   })
 
+  test('malformed Maven POM XML never yields a dependency edge', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version>\n',
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    // The malformed POM leaves the whole reactor's coverage unknown rather than producing a
+    // partial graph from the bytes that happened to parse before the unterminated tag.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:core:1')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
+  test('a namespaced Maven POM leaves coverage unknown instead of guessing identities', () => {
+    const profile = profileOf({
+      'pom.xml':
+        '<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'api/pom.xml': [
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">',
+        '<groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
+        '</project>',
+        '',
+      ].join('\n'),
+      'api/src/main/java/Api.java': 'class Api {}\n',
+      'core/pom.xml':
+        '<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+  })
+
   test('an unresolved Maven parent version leaves coverage unknown', () => {
     const profile = profileOf({
       'pom.xml':
