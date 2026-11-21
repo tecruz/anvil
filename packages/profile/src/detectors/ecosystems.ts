@@ -353,7 +353,8 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
   let entry = ''
   const flush = (): void => {
     if (!inSection) return
-    const name = sectionCrate ?? /^\s*([A-Za-z0-9_-]+)\s*=/.exec(entry)?.[1] ?? null
+    const key = /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*=/.exec(entry)
+    const name = sectionCrate ?? key?.[1] ?? key?.[2] ?? key?.[3] ?? null
     if (name === null) return
     const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1] ?? null
     const workspace = /\bworkspace\s*=\s*true\b/.test(entry)
