@@ -834,7 +834,10 @@ function mavenDependencies(text: string, modules: ReadonlySet<string>): MavenDep
       versions.set(key, null)
       continue
     }
-    if (version === null || version.includes('${') || /[[\]()]/.test(version)) {
+    // Maven resolves RELEASE/LATEST from repository metadata, so a declared literal of either is
+    // not a determinate coordinate; treating it as one would report a false analysed state.
+    const metadataVersion = version === 'RELEASE' || version === 'LATEST'
+    if (version === null || version.includes('${') || /[[\]()]/.test(version) || metadataVersion) {
       unsupported = true
       versions.set(key, null)
       continue

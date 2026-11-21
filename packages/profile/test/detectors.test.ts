@@ -3358,6 +3358,30 @@ describe('module dependency completeness', () => {
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
   })
 
+  test('a Maven RELEASE or LATEST version leaves coverage unknown', () => {
+    const base = {
+      'pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
+      'core/pom.xml':
+        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1.0</version></project>\n',
+      'core/src/main/java/Core.java': 'class Core {}\n',
+    }
+    for (const keyword of ['RELEASE', 'LATEST']) {
+      const profile = profileOf({
+        ...base,
+        'api/pom.xml': [
+          '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
+          `<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>${keyword}</version></dependency></dependencies>`,
+          '</project>',
+          '',
+        ].join('\n'),
+        'api/src/main/java/Api.java': 'class Api {}\n',
+      })
+      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    }
+  })
+
   test('a Maven version-range dependency leaves coverage unknown', () => {
     const profile = profileOf({
       'pom.xml':
