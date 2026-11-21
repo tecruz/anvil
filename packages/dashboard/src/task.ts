@@ -11,7 +11,7 @@
  * that the command was not run.
  */
 
-import type { DashboardSnapshot } from './snapshot.ts'
+import type { DashboardSnapshot, VerificationEvidence } from './snapshot.ts'
 
 export const MAX_TASK_TEXT = 4000
 const MAX_START_ITEMS = 5
@@ -113,6 +113,12 @@ export interface TaskBrief {
   /** The same task, as a reproducible 2D subgraph. */
   map: TaskMap
   howToCheck: TaskCheck[]
+  /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
+  verification: {
+    status: 'unavailable' | 'recorded'
+    reason: string
+    evidence: VerificationEvidence[]
+  }
   blockers: TaskBlocker[]
   /** Copyable handoff, or an explicit reason why none can be produced. */
   handoff: TaskHandoff
@@ -1047,7 +1053,13 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   }
   unknowns.push(...approval.notes)
   unknowns.push('This page is read-only: the verification commands were not run and the repository was not changed.')
-  unknowns.push('Verification history is unavailable; run a command in a worktree to produce evidence.')
+  if (snapshot.verification.status !== 'recorded') {
+    unknowns.push(`Verification history is unavailable: ${snapshot.verification.reason}`)
+  } else {
+    unknowns.push(
+      'Recorded verification is a snapshot of an explicitly bounded run; it is not a claim that the current worktree passes.',
+    )
+  }
   for (const reference of unmatched) {
     unknowns.push(`The task names ${reference}, which is not in the file index; it may be a new or renamed file.`)
   }
@@ -1103,6 +1115,11 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     startHere,
     map,
     howToCheck: checks,
+    verification: {
+      status: snapshot.verification.status,
+      reason: snapshot.verification.reason,
+      evidence: snapshot.verification.evidence,
+    },
     blockers: found,
     handoff,
     gates,

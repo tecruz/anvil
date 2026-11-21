@@ -351,7 +351,7 @@ function renderWork(root, snap) {
   }
   const card = make('div', 'card');
   card.appendChild(make('h2', '', 'Verification'));
-  card.appendChild(badge('unavailable'));
+  card.appendChild(badge(snap.verification?.status === 'recorded' ? 'recorded' : 'unavailable'));
   card.appendChild(make('div', '', snap.verification.reason));
   parent.appendChild(card);
 }
@@ -429,6 +429,22 @@ function renderBrief(parent, brief) {
     }
   }
   card.appendChild(make('div', 'muted', 'Not run: this page cannot execute commands. Run one in a worktree to produce evidence.'));
+
+  const verification = brief.verification || { status: 'unavailable', reason: '', evidence: [] };
+  card.appendChild(make('h3', '', 'Recorded verification'));
+  if (verification.status === 'recorded' && Array.isArray(verification.evidence) && verification.evidence.length > 0) {
+    for (const item of verification.evidence) {
+      const row = make('div', 'check');
+      row.appendChild(make('code', 'path', item.command));
+      const exitCode = item.exitCode === null || item.exitCode === undefined ? 'unknown' : String(item.exitCode);
+      const revision = item.revision || 'unknown revision';
+      const timestamp = item.timestamp || 'unknown time';
+      row.appendChild(make('div', 'muted', 'exit ' + exitCode + ' · ' + revision + ' · ' + timestamp));
+      card.appendChild(row);
+    }
+  } else {
+    card.appendChild(make('div', 'muted', verification.reason || 'No bounded verification evidence has been recorded.'));
+  }
 
   card.appendChild(make('h3', '', 'Blocked or missing'));
   const blockers = Array.isArray(brief.blockers) ? brief.blockers : [];

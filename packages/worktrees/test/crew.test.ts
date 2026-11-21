@@ -703,6 +703,12 @@ describe('crew verify', () => {
       cwds.every((cwd) => cwd.replace(/\\/g, '/').endsWith('/app')),
       `every command ran from the project directory: ${cwds.join(', ')}`,
     )
+    assert.ok(
+      result.results.every((worktree) =>
+        worktree.commands.every((command) => cwds.includes(command.cwd) && command.exitObserved),
+      ),
+      'each recorded command keeps the directory it actually ran in',
+    )
   })
 
   test('one failing worktree fails the whole crew', async () => {
@@ -722,6 +728,22 @@ describe('crew verify', () => {
     assert.equal(result.ok, false)
     assert.equal(result.results.filter((r) => r.ok).length, 2)
     assert.equal(result.results.find((r) => !r.ok)?.key, 'local-2')
+    const failed = result.results.find((r) => !r.ok)
+    assert.equal(failed?.commands[0]?.exitObserved, true)
+  })
+
+  test('an unobserved launch failure is not a real exit code', async () => {
+    const dir = makeRepo({ go: true })
+    const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v-unobserved-'))
+    temps.push(wtRoot)
+    await crew(dir, 1, wtRoot)
+
+    const result = await crewVerify({
+      repoRoot: dir,
+      run: async () => ({ ok: false, code: 1, stdout: '', stderr: 'spawn ENOENT', exitObserved: false }),
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.results[0]?.commands[0]?.exitObserved, false)
   })
 
   test('stops at the first failing command in a worktree', async () => {

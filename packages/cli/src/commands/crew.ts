@@ -5,6 +5,20 @@
  * runs every worktree's verification under a concurrency policy the tool will explain.
  */
 
+import { createHash } from 'node:crypto'
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import {
   AnvilError,
   ErrorCode,
@@ -54,6 +68,7 @@ export const crewCommand: Command = {
     '--provider <p>    ticket provider for the whole crew: local (default), github or jira',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
     '--force-parallel  ignore the cache policy and use --jobs literally',
+    '--record          with `verify`, write bounded revision-bound evidence for the dashboard',
     '--cost            with `status`, show what each agent session cost',
     '',
     'Cost is read from ccusage, which prices the usage logs the agents already wrote on',
@@ -70,6 +85,7 @@ export const crewCommand: Command = {
     base: { type: 'string' },
     jobs: { type: 'string' },
     'force-parallel': { type: 'boolean' },
+    record: { type: 'boolean' },
     cost: { type: 'boolean' },
     key: { type: 'string', multiple: true },
   },
@@ -216,6 +232,156 @@ async function crewUpFlow(
 // crew verify
 // ---------------------------------------------------------------------------
 
+/** Bounded, revision-bound verification facts produced only by an explicit `crew verify --record`. */
+const VERIFICATION_EVIDENCE_PREFIX = '.anvil/verification-evidence-'
+const VERIFICATION_EVIDENCE_MAX_BYTES = 64 * 1024
+
+export interface EvidenceStore {
+  /** The worktree root that owns the `.anvil` directory. */
+  root: string
+  /** A stable key derived from the Git metadata directory, so separate repositories cannot collide. */
+  key: string
+}
+
+/**
+ * Resolve the evidence store from Git metadata without starting a process. A linked worktree has a
+ * `.git` file pointing at its private gitdir, whose `commondir` points back to the main `.git`.
+ * Unreadable metadata makes evidence unavailable rather than preventing the dashboard from starting.
+ */
+export function evidenceStore(repoRoot: string): EvidenceStore | null {
+  try {
+    const dotGit = join(repoRoot, '.git')
+    if (!existsSync(dotGit)) return null
+    const info = lstatSync(dotGit)
+    if (info.isSymbolicLink()) return null
+    let gitDir = dotGit
+    if (info.isFile()) {
+      const match = /^gitdir:\s*(.+)$/i.exec(readBoundedFile(dotGit).trim())
+      if (match === null) return null
+      gitDir = resolve(repoRoot, (match[1] as string).trim())
+    } else if (!info.isDirectory()) {
+      return null
+    }
+    const commonFile = join(gitDir, 'commondir')
+    if (existsSync(commonFile)) {
+      const common = readBoundedFile(commonFile).trim()
+      if (common === '') return null
+      gitDir = resolve(gitDir, common)
+    }
+    const absolute = resolve(gitDir)
+    return {
+      root: dirname(absolute),
+      key: createHash('sha256').update(absolute).digest('hex').slice(0, 16),
+    }
+  } catch {
+    return null
+  }
+}
+
+export function verificationEvidencePath(store: EvidenceStore): string {
+  return join(store.root, `${VERIFICATION_EVIDENCE_PREFIX}${store.key}.json`)
+}
+
+function assertWritableDirectory(path: string): void {
+  if (!existsSync(path)) return
+  const info = lstatSync(path)
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to write verification evidence through a link', {
+      hint: `Remove or replace the entry at ${path}.`,
+    })
+  }
+}
+
+/** Read the exact opened file, never a path that can be swapped between a stat and a read. */
+function readBoundedFile(path: string): string {
+  const parent = dirname(path)
+  if (existsSync(parent)) {
+    const parentInfo = lstatSync(parent)
+    if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
+      throw new Error('Verification evidence store is not a regular directory')
+    }
+  }
+  const info = lstatSync(path)
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new Error('Verification evidence is not a regular file')
+  }
+  const fd = openSync(path, fsConstants.O_RDONLY)
+  try {
+    const stats = fstatSync(fd)
+    if (!stats.isFile() || stats.size > VERIFICATION_EVIDENCE_MAX_BYTES) {
+      throw new Error('Verification evidence is not a bounded regular file')
+    }
+    const buffer = Buffer.allocUnsafe(VERIFICATION_EVIDENCE_MAX_BYTES + 1)
+    const bytes = readSync(fd, buffer, 0, buffer.length, 0)
+    if (bytes > VERIFICATION_EVIDENCE_MAX_BYTES) {
+      throw new Error('Verification evidence is not a bounded regular file')
+    }
+    return buffer.subarray(0, bytes).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** The caller passes the resolved evidence store; this reader never launches Git. */
+export function readVerificationEvidence(store: EvidenceStore): unknown[] {
+  const path = verificationEvidencePath(store)
+  if (!existsSync(path)) return []
+  try {
+    const parsed: unknown = JSON.parse(readBoundedFile(path))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+async function worktreeRevision(worktree: string): Promise<string | null> {
+  const head = await runProcess('git', ['rev-parse', 'HEAD'], { cwd: worktree })
+  if (head.exitCode !== 0) return null
+  const status = await runProcess('git', ['status', '--porcelain'], { cwd: worktree })
+  if (status.exitCode !== 0) return null
+  return `${head.stdout.trim()}${status.stdout.trim() === '' ? '' : '-dirty'}`
+}
+
+type EvidenceRecord = { command: string; revision: string | null; exitCode: number | null; timestamp: string }
+
+function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
+  const timestamp = new Date().toISOString()
+  const all: EvidenceRecord[] = []
+  for (const worktree of result.results) {
+    for (const command of worktree.commands) {
+      all.push({
+        command: command.command,
+        revision: command.revision,
+        exitCode: command.exitObserved ? command.code : null,
+        timestamp,
+      })
+    }
+  }
+  const anvilDir = join(store.root, '.anvil')
+  assertWritableDirectory(anvilDir)
+  const path = verificationEvidencePath(store)
+  if (existsSync(path) && !lstatSync(path).isFile()) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to replace non-regular verification evidence', {
+      hint: `Remove ${path} before recording again.`,
+    })
+  }
+  let records = all.slice(0, 20)
+  let payload = `${JSON.stringify(records, null, 2)}\n`
+  while (Buffer.byteLength(payload) > VERIFICATION_EVIDENCE_MAX_BYTES && records.length > 0) {
+    records = records.slice(0, -1)
+    payload = `${JSON.stringify(records, null, 2)}\n`
+  }
+  mkdirSync(anvilDir, { recursive: true })
+  const temp = `${path}.${process.pid}.tmp`
+  if (existsSync(temp)) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to reuse an existing verification evidence temp file', {
+      hint: `Remove ${temp} before recording again.`,
+    })
+  }
+  writeFileSync(temp, payload, { flag: 'wx' })
+  renameSync(temp, path)
+}
+
 async function crewVerifyFlow(
   ctx: CommandContext,
   repoRoot: string,
@@ -229,13 +395,18 @@ async function crewVerifyFlow(
   }
 
   const keys = Array.isArray(args.values.key) ? (args.values.key as string[]) : undefined
+  // Sample the revision immediately before every command and attach it to that command alone.
+  const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
+    const revision = await worktreeRevision(cwd)
+    return { ...(await runCommand(command, cwd)), revision }
+  }
 
   const result: CrewVerifyResult = await crewVerify({
     repoRoot,
     ...(keys === undefined ? {} : { keys }),
     jobs,
     forceParallel: args.values['force-parallel'] === true,
-    run: runCommand,
+    run: runWithRevision,
   })
 
   const data = {
@@ -244,6 +415,10 @@ async function crewVerifyFlow(
     concurrency: result.concurrency,
     results: result.results,
     skipped: result.skipped,
+  }
+  if (args.values.record === true) {
+    const store = evidenceStore(repoRoot)
+    if (store !== null) recordVerificationEvidence(result, store)
   }
 
   // A green aggregate must never hide a red member, so the exit code is the verdict and
@@ -447,10 +622,12 @@ function age(seconds: number | null): string {
 async function runCommand(
   command: string,
   cwd: string,
-): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; exitObserved: boolean }> {
   const parts = tokenizeCommand(command)
   const [bin, ...args] = parts as [string, ...string[]]
-  if (bin === undefined) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
+  if (bin === undefined) {
+    return { ok: false, code: 1, stdout: '', stderr: 'empty command', exitObserved: false }
+  }
   try {
     const result = await runProcess(bin, args, { cwd, timeoutMs: 10 * 60_000 })
     return {
@@ -458,6 +635,7 @@ async function runCommand(
       code: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
+      exitObserved: true,
     }
   } catch (err) {
     return {
@@ -465,6 +643,7 @@ async function runCommand(
       code: 1,
       stdout: '',
       stderr: err instanceof Error ? err.message : String(err),
+      exitObserved: false,
     }
   }
 }

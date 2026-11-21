@@ -37,6 +37,14 @@ export interface DashboardSource<T> {
   command: string
 }
 
+/** A verification fact recorded elsewhere, never inferred by the dashboard. */
+export interface VerificationEvidence {
+  command: string
+  revision: string | null
+  exitCode: number | null
+  timestamp: string | null
+}
+
 export interface DashboardSnapshot {
   schemaVersion: 1
   fetchedAt: string
@@ -54,10 +62,15 @@ export interface DashboardSnapshot {
   work: {
     crew: DashboardSource<unknown>
   }
-  /** An explicit absence, never a green result inferred from "no output". */
+  /**
+   * An explicit absence, never a green result inferred from "no output". When a bounded baseline
+   * verification was explicitly run, its recorded facts appear in `evidence`; this page still does
+   * not execute anything.
+   */
   verification: {
-    status: 'unavailable'
+    status: 'unavailable' | 'recorded'
     reason: string
+    evidence: VerificationEvidence[]
   }
   notes: string[]
 }
@@ -75,6 +88,8 @@ export interface LoadSnapshotOptions {
   invoke: DashboardInvoke
   cwd: string
   readStaged: () => StagedView
+  /** Optional, opt-in source of bounded verification facts; the dashboard never runs commands. */
+  readVerification?: () => unknown[] | Promise<unknown[]>
   now?: () => Date
 }
 
@@ -147,6 +162,58 @@ function stagedSource(options: LoadSnapshotOptions, fetchedAt: string): Dashboar
   }
 }
 
+function validTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
+
+function validEvidence(value: unknown): value is VerificationEvidence {
+  if (value === null || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.command === 'string' &&
+    record.command.trim() !== '' &&
+    record.command.length <= 200 &&
+    typeof record.revision === 'string' &&
+    /^[0-9a-f]{7,64}(?:-dirty)?$/i.test(record.revision) &&
+    typeof record.exitCode === 'number' &&
+    Number.isSafeInteger(record.exitCode) &&
+    record.exitCode >= 0 &&
+    record.exitCode <= 0x7fffffff &&
+    validTimestamp(record.timestamp)
+  )
+}
+
+/** Bound and validate opt-in verification records; never infer a result from their absence. */
+async function verificationSource(options: LoadSnapshotOptions): Promise<DashboardSnapshot['verification']> {
+  const unavailable = (reason: string): DashboardSnapshot['verification'] => ({
+    status: 'unavailable',
+    reason,
+    evidence: [],
+  })
+  if (options.readVerification === undefined) {
+    return unavailable('anvil does not persist verification results. Run `anvil crew verify` for a current verdict.')
+  }
+  try {
+    const records: unknown = await options.readVerification()
+    if (!Array.isArray(records)) return unavailable('The verification evidence source returned no readable records.')
+    const evidence: VerificationEvidence[] = records.filter(validEvidence).slice(0, 20)
+    if (evidence.length === 0)
+      return unavailable('No bounded verification evidence has been recorded for this repository.')
+    return {
+      status: 'recorded',
+      reason: 'Recorded by an explicit, bounded verification run; this page only displays the facts.',
+      evidence,
+    }
+  } catch {
+    return unavailable('The verification evidence source could not be read.')
+  }
+}
+
 /**
  * Read all sources once. `--offline` is deliberate: a page load must not spend a network
  * request or refresh the discovery cache. An explicit refresh button calls this again.
@@ -169,10 +236,7 @@ export async function loadSnapshot(options: LoadSnapshotOptions): Promise<Dashbo
     repository: { doctor, ready, plan, profile },
     context: { brief, staged: stagedSource(options, fetchedAt) },
     work: { crew },
-    verification: {
-      status: 'unavailable',
-      reason: 'anvil does not persist verification results. Run `anvil crew verify` for a current verdict.',
-    },
+    verification: await verificationSource(options),
     notes: [
       'Read-only: refresh re-reads the CLI JSON contracts; it never runs setup, tests, or ship.',
       'Values are a snapshot, not a live view of an agent or a tracker.',

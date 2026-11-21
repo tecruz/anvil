@@ -447,6 +447,38 @@ describe('the snapshot reader', () => {
     assert.match(file?.error ?? '', /could not be read/)
   })
 
+  test('opt-in verification evidence is bounded and recorded beside the sources', async () => {
+    const { invoke } = fakeInvoke()
+    const record = {
+      command: 'npm test',
+      revision: 'abcdef1234',
+      exitCode: 0,
+      timestamp: '2026-11-20T10:00:00.000Z',
+    }
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      readVerification: () => [
+        record,
+        { command: '' },
+        { note: 'not a command' },
+        'ignored',
+        { command: ' ', revision: 'bogus', exitCode: 0.5, timestamp: 'not a date' },
+        { ...record, revision: 'a'.repeat(40) },
+        { ...record, timestamp: '2026-02-31T00:00:00.000Z' },
+        { ...record, exitCode: 3010 },
+        ...Array.from({ length: 20 }, () => ({ command: '' })),
+      ],
+    })
+    assert.equal(snapshot.verification.status, 'recorded')
+    assert.deepEqual(snapshot.verification.evidence, [
+      record,
+      { ...record, revision: 'a'.repeat(40) },
+      { ...record, exitCode: 3010 },
+    ])
+  })
+
   test('a thrown invocation becomes one error, not a rejected promise', async () => {
     const { invoke } = fakeInvoke()
     const snapshot = await loadSnapshot({
@@ -648,7 +680,7 @@ describe('the dashboard page', () => {
           ],
         }),
       },
-      verification: { status: 'unavailable', reason: 'not persisted' },
+      verification: { status: 'unavailable', reason: 'not persisted', evidence: [] },
       notes: [],
     }
 

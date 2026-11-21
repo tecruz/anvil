@@ -493,8 +493,14 @@ export interface VerifyResult {
   /** Per-command outcomes. */
   commands: Array<{
     command: string
+    /** The directory the command actually ran in, not just the claim worktree. */
+    cwd: string
     ok: boolean
     code: number
+    /** False when no process exit was observed, such as a spawn failure or timeout. */
+    exitObserved: boolean
+    /** Revision sampled immediately before this command, when supplied by the runner. */
+    revision: string | null
     detail: string
   }>
   error?: string
@@ -509,7 +515,19 @@ export interface CrewVerifyOptions {
   /** Skip the cache policy and use --jobs literally. */
   forceParallel?: boolean
   /** Injected so tests never execute a build. */
-  run: (command: string, cwd: string) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>
+  run: (
+    command: string,
+    cwd: string,
+  ) => Promise<{
+    ok: boolean
+    code: number
+    stdout: string
+    stderr: string
+    /** False when no process exit was observed, such as a spawn failure or timeout. */
+    exitObserved?: boolean
+    /** Revision sampled immediately before this command, when available. */
+    revision?: string | null
+  }>
   read?: (rel: string) => string | null
 }
 
@@ -583,8 +601,11 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
       const outcome = await options.run(command, verifyCwd)
       perCommand.push({
         command,
+        cwd: verifyCwd,
         ok: outcome.ok,
         code: outcome.code,
+        exitObserved: outcome.exitObserved ?? true,
+        revision: outcome.revision ?? null,
         detail: outcome.ok ? '' : (outcome.stderr || outcome.stdout).slice(0, 300),
       })
       // Stop at the first failure: running lint after tests failed is wasted time, and the

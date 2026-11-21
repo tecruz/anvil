@@ -124,7 +124,7 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
       }),
     },
     work: { crew: source({ crew: [] }) },
-    verification: { status: 'unavailable', reason: 'not persisted' },
+    verification: { status: 'unavailable', reason: 'not persisted', evidence: [] },
     notes: [],
   }
 }
@@ -341,6 +341,26 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /No verification command/)
     assert.match(unknowns, /README\.md/)
     assert.equal(brief.readiness.checked, false)
+  })
+
+  test('recorded verification is shown as a bounded snapshot, not a current pass', () => {
+    const snapshot = makeSnapshot({ checked: true })
+    snapshot.verification = {
+      status: 'recorded',
+      reason: 'Recorded by an explicit, bounded verification run.',
+      evidence: [
+        {
+          command: 'npm test',
+          revision: 'abcdef1234',
+          exitCode: 0,
+          timestamp: '2026-11-20T10:00:00.000Z',
+        },
+      ],
+    }
+    const brief = buildTaskBrief(snapshot, { text: 'Update README.md' })
+
+    assert.deepEqual(brief.verification, snapshot.verification)
+    assert.match(brief.unknowns.join('\n'), /not a claim that the current worktree passes/)
   })
 
   test('an unprobed environment is reported once, in the blockers section', () => {
