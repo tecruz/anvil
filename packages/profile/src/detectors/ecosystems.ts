@@ -1613,15 +1613,18 @@ function dotnetFullyLiteral(text: string): boolean {
     .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '')
     .replace(/<\?[\s\S]*?\?>/g, '')
   if (!/^\s*<Project[\s>]/.test(content)) return false
-  // Only the standard SDK is accepted, including for a self-closing project.
+  // Only the standard SDK attribute is accepted; a foreign namespace or other root attribute
+  // changes what MSBuild reads. Non-whitespace text in an element is also not a literal item.
   const sdk = parsed.root.attrs.get('Sdk')
   if (sdk !== undefined && sdk !== 'Microsoft.NET.Sdk') return false
+  for (const key of parsed.root.attrs.keys()) if (key !== 'Sdk') return false
+  if (parsed.root.text.trim() !== '') return false
   if (/^\s*<Project[^>]*\/>\s*$/.test(content)) return true
   // Nothing may follow the root element: trailing text changes what MSBuild reads even when the
   // element structure itself parses cleanly.
   if (!/<\/Project>\s*$/.test(content)) return false
   for (const child of parsed.root.children) {
-    if (child.name !== 'ItemGroup' || child.attrs.size > 0) return false
+    if (child.name !== 'ItemGroup' || child.attrs.size > 0 || child.text.trim() !== '') return false
     for (const item of child.children) {
       if (item.name !== 'ProjectReference' || item.attrs.size !== 1) return false
       // Metadata on an item can add or change references; it is not a literal, unconditional item.
@@ -1742,9 +1745,13 @@ export const dotnetDetector: Detector = {
     }
     // A .NET module must never overwrite another ecosystem's module with the same id: adding a
     // root api.csproj to an npm workspace must not erase the npm api -> core edge.
+    const usedIds = new Set(draft.modules.map((module) => module.id))
     const idOf = (p: string): string => {
       const base = p.replace(/\.(cs|fs)proj$/i, '').replace(/\//g, ':')
-      return draft.modules.some((module) => module.id === base) ? `dotnet:${base}` : base
+      const candidates = [base, `dotnet:${base}`, `dotnet:${p.replace(/\.(cs|fs)proj$/i, '').replace(/[/\\]/g, ':')}`]
+      const chosen = candidates.find((id) => !usedIds.has(id)) ?? `dotnet:${p}`
+      usedIds.add(chosen)
+      return chosen
     }
     const effectiveIds = new Map(projects.map((p) => [p, idOf(p)]))
     const resolveProject = (target: string): string | null => {
@@ -1766,12 +1773,16 @@ export const dotnetDetector: Detector = {
       // can disable or redirect them. Only files MSBuild actually imports contribute references.
       const settings = dotnetImportSettings(text)
       const imports = dotnetImportSources(dir, ctx, settings)
+      // Directory.Packages.props can add or redirect references through MSBuild; it is not parsed
+      // here, so any project under one must stay unknown rather than be reported as complete.
+      const packagesProps = [...ctx.files].some((file) => /(^|\/)Directory\.Packages\.props$/i.test(file))
       if (
         settings.unsupported ||
         imports.unsupported ||
         !dotnetFullyLiteral(text) ||
         imports.sources.length > 0 ||
-        duplicateIds.has(id)
+        duplicateIds.has(id) ||
+        packagesProps
       ) {
         draft.depsUnknownReasons.set(id, 'unsupported .NET project reference; dependencies left unknown')
         continue

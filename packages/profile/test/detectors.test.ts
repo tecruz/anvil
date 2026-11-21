@@ -3077,6 +3077,52 @@ describe('module dependency completeness', () => {
     }
   })
 
+  test('distinct .NET projects keep distinct ids even when names collide', () => {
+    const profile = profileOf({
+      'package.json': '{"name":"root","workspaces":["api","core"]}\n',
+      'api/package.json': '{"name":"api","dependencies":{"core":"*"}}\n',
+      'core/package.json': '{"name":"core"}\n',
+      'api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'dotnet/api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core.fsproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    const ids = profile.modules.map((module) => module.id)
+    assert.equal(new Set(ids).size, ids.length)
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+  })
+
+  test('a foreign root attribute or ItemGroup text leaves .NET coverage unknown', () => {
+    const base = {
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    }
+    const foreignNamespace = profileOf({
+      ...base,
+      'App.csproj': base['App.csproj'].replace('<Project ', '<Project xmlns="urn:foreign" '),
+    })
+    const itemGroupText = profileOf({
+      ...base,
+      'App.csproj': base['App.csproj'].replace('<ItemGroup>', '<ItemGroup>note'),
+    })
+    for (const profile of [foreignNamespace, itemGroupText]) {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
+    }
+  })
+
+  test('a Directory.Packages.props in the repository leaves .NET coverage unknown', () => {
+    const profile = profileOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Directory.Packages.props': '<Project><ItemGroup /></Project>\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
+  })
+
   test('a .NET project does not overwrite an npm module with the same id', () => {
     const profile = profileOf({
       'package.json': '{"name":"root","workspaces":["api","core"]}\n',
