@@ -337,7 +337,11 @@ export const goDetector: Detector = {
  * not workspace nodes and are deliberately ignored. The name of the crate is not trusted as
  * an edge; the resolved directory is.
  */
-type CargoDependencyEntry = { name: string; path: string | null; workspace: boolean }
+type CargoDependencyEntry = { name: string; path: string | null; workspace: boolean; unsupported: boolean }
+
+// A source that needs registry/git resolution cannot be decided from the manifest alone. When one
+// appears in a dependency section the whole module's graph is unknown, never "analysed, no edges".
+const CARGO_UNRESOLVED_KEY = /\b(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\s*=/i
 
 /** Read dependency entries from a Cargo manifest, including `[dependencies.name]` tables. */
 function cargoDependencyEntries(manifest: string, workspaceSection: boolean): CargoDependencyEntry[] {
@@ -351,7 +355,13 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
     if (name === null) return
     const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1] ?? null
     const workspace = /\bworkspace\s*=\s*true\b/.test(entry)
-    if (path !== null || workspace) out.push({ name, path, workspace })
+    const unsupported = CARGO_UNRESOLVED_KEY.test(entry)
+    // More than one literal assignment in a single entry hides edges: fail closed rather than
+    // reading only the first path and claiming the rest do not exist.
+    const declarations = [...entry.matchAll(/^\s*[A-Za-z0-9_-]+\s*=/gm)].length
+    const ambiguous = declarations > 1 && sectionCrate === null
+    if (path !== null || workspace || unsupported || ambiguous)
+      out.push({ name, path, workspace, unsupported: unsupported || ambiguous })
   }
   for (const raw of manifest.split('\n')) {
     const line = raw.replace(/#.*$/, '').trim()
@@ -379,8 +389,10 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
       continue
     }
     if (!inSection || line === '') continue
-    if (/^[A-Za-z0-9_-]+\s*=/.test(line)) flush()
-    entry += `${entry === '' ? '' : '\n'}${line}`
+    if (/^[A-Za-z0-9_-]+\s*=/.test(line)) {
+      flush()
+      entry = line
+    } else entry += `${entry === '' ? '' : '\n'}${line}`
   }
   flush()
   return out
@@ -391,21 +403,29 @@ function cargoPathDependencies(
   cratePath: string,
   paths: ReadonlySet<string>,
   workspacePaths: ReadonlyMap<string, string> = new Map(),
-): string[] {
+  workspaceRoot = '.',
+): { paths: string[]; unsupported: boolean } {
   const out = new Set<string>()
+  let unsupported = false
   const add = (path: string, base: string): void => {
     const normalized = posix.normalize(posix.join(base, path)).replace(/\/+$/, '')
     if (normalized !== '' && paths.has(normalized)) out.add(normalized)
   }
   for (const entry of cargoDependencyEntries(manifest, false)) {
+    if (entry.unsupported) {
+      unsupported = true
+      continue
+    }
     if (entry.path !== null) add(entry.path, cratePath)
     else if (entry.workspace) {
       const shared = workspacePaths.get(entry.name)
       // A [workspace.dependencies] path is relative to the workspace root, not the member.
-      if (shared !== undefined) add(shared, '.')
+      if (shared !== undefined) add(shared, workspaceRoot)
+      else unsupported = true
     }
   }
-  return [...out].sort()
+  for (const entry of cargoDependencyEntries(manifest, true)) if (entry.unsupported) unsupported = true
+  return { paths: [...out].sort(), unsupported }
 }
 
 export const rustDetector: Detector = {
@@ -421,17 +441,31 @@ export const rustDetector: Detector = {
       evidence: [evidence('Cargo.toml', cargo === null ? null : findLine(cargo, /^\[package\]/))],
     })
 
-    if (cargo !== null && /\[workspace\]/.test(cargo)) {
+    // The workspace manifest may live in a subdirectory. Find the one that declares [workspace]
+    // so inherited paths resolve against it rather than against the repository root.
+    const workspaceManifest = [...ctx.files].find((file) => {
+      if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
+      const text = read(ctx, file)
+      return text !== null && /^\[workspace\]/m.test(text)
+    })
+    if (workspaceManifest !== undefined) {
+      const workspaceRoot = workspaceManifest === 'Cargo.toml' ? '.' : workspaceManifest.slice(0, -'/Cargo.toml'.length)
+      const workspaceText = read(ctx, workspaceManifest)
       setMonorepo(draft, {
         tool: 'cargo-workspace',
-        evidence: evidence('Cargo.toml', findLine(cargo, /\[workspace\]/)),
+        evidence: evidence(
+          workspaceManifest,
+          workspaceText === null ? null : findLine(workspaceText, /^\[workspace\]/),
+        ),
         members: [],
       })
       const crates: Array<{ id: string; path: string; manifest: string | null }> = []
       for (const f of ctx.files) {
-        if (!f.endsWith('/Cargo.toml')) continue
+        // A root manifest with [package] is itself a crate and can be a path dependency target.
+        if (f !== 'Cargo.toml' && !f.endsWith('/Cargo.toml')) continue
         const path = f === 'Cargo.toml' ? '.' : f.slice(0, -'/Cargo.toml'.length)
         const inner = read(ctx, f)
+        if (f === 'Cargo.toml' && inner !== null && !/^\s*\[package\]/m.test(inner)) continue
         const name = inner === null ? path : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'crate', deps: [] })
         crates.push({ id: name, path, manifest: inner })
@@ -443,15 +477,21 @@ export const rustDetector: Detector = {
       // A member can inherit a path from [workspace.dependencies] with `workspace = true`;
       // resolve that shared declaration against the workspace root before looking for edges.
       const workspacePaths = new Map<string, string>()
-      if (cargo !== null) {
-        for (const entry of cargoDependencyEntries(cargo, true)) {
+      if (workspaceText !== null) {
+        for (const entry of cargoDependencyEntries(workspaceText, true)) {
           if (entry.path !== null) workspacePaths.set(entry.name, entry.path)
         }
       }
       for (const crate of crates) {
         if (crate.manifest === null) continue
-        const pathsFound = cargoPathDependencies(crate.manifest, crate.path, paths, workspacePaths)
-        const deps = [...new Set(pathsFound.map((path) => idByPath.get(path) ?? path))].filter((id) => id !== crate.id)
+        const resolved = cargoPathDependencies(crate.manifest, crate.path, paths, workspacePaths, workspaceRoot)
+        if (resolved.unsupported) {
+          draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo dependency syntax; dependencies left unknown')
+          continue
+        }
+        const deps = [...new Set(resolved.paths.map((path) => idByPath.get(path) ?? path))].filter(
+          (id) => id !== crate.id,
+        )
         const existing = draft.modules.find((module) => module.id === crate.id)
         if (existing !== undefined) existing.deps = deps.sort()
         markDepsAnalysed(draft, crate.id)
@@ -1232,7 +1272,14 @@ export const jvmDetector: Detector = {
           const remaps = gradleProjectDirs(text, settingsDir)
           // Membership, module ids and build-file paths all use the same canonical `:a:b` form.
           // Without this, `include("api")` reports `api` in the workspace but `:api` in the graph.
-          const members = gradleIncludes(text).map(gradlePath)
+          const declaredMembers = gradleIncludes(text).map(gradlePath)
+          // Declaring :app:core implicitly creates :app. Without it, a parent's build script is
+          // never read and its edges disappear.
+          const members = new Set<string>(declaredMembers)
+          for (const id of declaredMembers) {
+            const parts = id.split(':').filter((part) => part !== '')
+            for (let i = 1; i < parts.length; i++) members.add(`:${parts.slice(0, i).join(':')}`)
+          }
           const ids = new Set(members)
           // A project's directory defaults to the path implied by its Gradle id, relative to the
           // settings file. A computed projectDir is unknown: do not fall back to the default path,
@@ -1288,6 +1335,12 @@ export const jvmDetector: Detector = {
           const rootWide =
             scriptSelection.ambiguous ||
             buildTexts.some((body) => gradleRootWideProjectDeps(body, ids) || gradleRootComputedProjectSelector(body))
+          // Programmatic DependencyHandler.add(...) and a root-level project("app") selector
+          // cannot be attributed safely; leave every module unknown rather than confidently empty.
+          const rootBody = rootChoice.file === undefined ? null : read(ctx, rootChoice.file)
+          const rootUnsupported =
+            rootBody !== null &&
+            (/\bdependencies\s*\.\s*add\s*\(/.test(rootBody) || /\bproject\s*\(\s*(['"])[^:'"]+\1\s*\)/.test(rootBody))
           // An unresolved script for any project can configure any other project, so every
           // member's dependency list becomes untrustworthy.
           const scriptAmbiguous =
@@ -1296,12 +1349,13 @@ export const jvmDetector: Detector = {
           for (const [id, dir] of directories) {
             const deps = new Set<string>()
             const choice = choices.get(id) ?? { file: undefined, ambiguous: true }
-            let unsupported = rootWide || scriptAmbiguous || (dir !== null && choice.ambiguous)
+            let unsupported = rootWide || rootUnsupported || scriptAmbiguous || (dir !== null && choice.ambiguous)
             let ownReadable = false
             if (!scriptSelection.ambiguous && choice.file !== undefined) {
               const body = read(ctx, choice.file)
               if (body !== null) {
                 ownReadable = true
+                if (/\bdependencies\s*\.\s*add\s*\(/.test(body)) unsupported = true
                 const resolved = gradleProjectDependencies(body, ids, id)
                 for (const dep of resolved.deps) deps.add(dep)
                 unsupported ||= resolved.unsupported
@@ -1320,8 +1374,8 @@ export const jvmDetector: Detector = {
             if (existing !== undefined) existing.deps = [...deps].sort()
             if (ownReadable) markDepsAnalysed(draft, id)
           }
-          if (draft.monorepo !== null) draft.monorepo.members = members
-          gradleMembers = members
+          if (draft.monorepo !== null) draft.monorepo.members = [...members]
+          gradleMembers = [...members]
           for (const [id, dir] of directories) gradleRemaps.set(id, dir)
         }
       }
