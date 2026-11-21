@@ -169,7 +169,9 @@ function uvSources(manifest: string): Map<string, UvSource> {
     return /^\s*\[/.test(value) || /["']?\bmarker\b["']?\s*=/.test(value) || /\bworkspace\s*=\s*["']/.test(value)
   })
   // A [tool.uv.sources.NAME] sub-table can carry a marker or a different workspace selector.
-  const subTables = /^\s*\[tool\.uv\.sources\.[^\]]+\]/m.test(manifest)
+  const subTables =
+    /^\s*\[tool\.uv\.["']?sources["']?\.[^\]]+\]/m.test(manifest) ||
+    /^\s*sources\.[\w.-]+\s*=\s*\{[^}]*\bmarker\b/m.test(manifest)
   if (undecidable || subTables) out.set('__unsupported__', { workspace: null, path: null, unsupported: true })
   return out
 }
@@ -200,7 +202,8 @@ function uvDependencies(
   // claim a complete graph for a dependency set that can change. Fail closed.
   if (
     /^\s*\[\s*project\.optional-dependencies\s*\]/m.test(manifest) ||
-    /^\s*\[\s*dependency-groups\s*\]/m.test(manifest)
+    /^\s*\[\s*dependency-groups\s*\]/m.test(manifest) ||
+    /^\s*optional-dependencies\s*=\s*\{/m.test(project)
   )
     return { deps: [], unsupported: true }
   if (tomlArray(project, 'dynamic').some((field) => pythonName(field) === 'dependencies')) {
