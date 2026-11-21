@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { describe, test } from 'node:test'
-import { evidenceStore, readVerificationEvidence, verificationEvidencePath } from '../src/commands/crew.ts'
+import {
+  type EvidenceRecord,
+  evidenceStore,
+  readVerificationEvidence,
+  selectVerificationRecords,
+  verificationEvidencePath,
+} from '../src/commands/crew.ts'
 import { stagedView } from '../src/commands/dashboard.ts'
 
 /** A staged manifest whose staged file has disappeared must not look like a deletion. */
@@ -89,20 +95,62 @@ describe('the dashboard staging view', () => {
     }
   })
 
+  test('evidence retention keeps the newest result by completion time', () => {
+    const at = (seconds: number, exitCode: number | null, command = 'npm test'): EvidenceRecord => ({
+      command,
+      revision: exitCode === null ? null : 'abcdef1234',
+      exitCode,
+      timestamp: `2026-11-21T00:00:${String(seconds).padStart(2, '0')}.000Z`,
+    })
+    const failures = Array.from({ length: 20 }, (_, index) => at(index, 0))
+    const lastFailure = { ...at(30, 1), command: 'npm run lint' }
+    const selected = selectVerificationRecords([lastFailure, ...failures])
+    assert.ok(selected.some((record) => record.command === 'npm run lint' && record.exitCode === 1))
+    assert.equal(selected.length, 20)
+  })
+
+  test('evidence retention keeps incomplete rows so they are distinguishable from no run', () => {
+    const row: EvidenceRecord = {
+      command: 'npm test',
+      revision: null,
+      exitCode: null,
+      timestamp: '2026-11-21T00:00:00.000Z',
+    }
+    assert.deepEqual(selectVerificationRecords([row]), [row])
+  })
+
+  test('evidence retention does not let rejected rows evict a real failure', () => {
+    const rejected = Array.from({ length: 25 }, (_, index) => ({
+      command: '',
+      revision: null,
+      exitCode: null,
+      timestamp: `2026-11-21T00:01:${String(index).padStart(2, '0')}.000Z`,
+    }))
+    const failure: EvidenceRecord = {
+      command: 'npm test',
+      revision: 'abcdef1234',
+      exitCode: 1,
+      timestamp: '2026-11-21T00:00:00.000Z',
+    }
+    const selected = selectVerificationRecords([...rejected, failure])
+    assert.ok(selected.some((record) => record.exitCode === 1))
+    assert.ok(selected.length <= 20)
+  })
+
   test('the evidence store is resolved from Git metadata', () => {
     const mainRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-main-'))
     const linkedRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-linked-'))
     try {
       mkdirSync(join(mainRoot, '.git'), { recursive: true })
       const main = evidenceStore(mainRoot)
-      assert.equal(main?.root, mainRoot)
+      assert.equal(main?.root, realpathSync.native(mainRoot))
 
       const gitDir = join(linkedRoot, 'admin', 'worktrees', 'claim')
       mkdirSync(gitDir, { recursive: true })
       writeFileSync(join(gitDir, 'commondir'), `${relative(gitDir, join(mainRoot, '.git'))}\n`, 'utf8')
       writeFileSync(join(linkedRoot, '.git'), `gitdir: ${relative(linkedRoot, gitDir)}\n`, 'utf8')
       const linked = evidenceStore(linkedRoot)
-      assert.equal(linked?.root, mainRoot)
+      assert.equal(linked?.root, realpathSync.native(mainRoot))
       assert.equal(linked?.key, main?.key)
     } finally {
       rmSync(mainRoot, { recursive: true, force: true })

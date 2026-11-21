@@ -1059,7 +1059,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     unknowns.push(`Verification history is unavailable: ${snapshot.verification.reason}`)
   } else {
     unknowns.push(
-      'Recorded verification is a snapshot of an explicitly bounded run; it is not a claim that the current worktree passes.',
+      'Verification rows were found in the CLI-owned evidence file. The dashboard cannot independently prove their origin, and they are not a claim that the current worktree passes.',
     )
     if (snapshot.verification.evidence.some((item) => item.matchesCurrent === false)) {
       unknowns.push(

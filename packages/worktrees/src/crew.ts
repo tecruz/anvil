@@ -501,6 +501,8 @@ export interface VerifyResult {
     exitObserved: boolean
     /** Revision sampled immediately before this command, when supplied by the runner. */
     revision: string | null
+    /** When the runner observed the command finish, for completion-order evidence retention. */
+    completedAt: string | null
     detail: string
   }>
   error?: string
@@ -527,6 +529,8 @@ export interface CrewVerifyOptions {
     exitObserved?: boolean
     /** Revision sampled immediately before this command, when available. */
     revision?: string | null
+    /** When the runner observed the command finish, for completion-order evidence retention. */
+    completedAt?: string | null
   }>
   read?: (rel: string) => string | null
 }
@@ -606,6 +610,7 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
         code: outcome.code,
         exitObserved: outcome.exitObserved ?? true,
         revision: outcome.revision ?? null,
+        completedAt: outcome.completedAt ?? null,
         detail: outcome.ok ? '' : (outcome.stderr || outcome.stdout).slice(0, 300),
       })
       // Stop at the first failure: running lint after tests failed is wasted time, and the

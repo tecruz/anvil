@@ -64,8 +64,10 @@ runtime dependency.**
 - The context view reads `.anvil/staging/` through the same functions `init` uses. It shows
   the diff and whether staged bytes were edited after staging. It never stages, applies, or
   refreshes anything.
-- Verification is reported as `unavailable`, never as green by absence. anvil does not
-  persist verification results, and the dashboard does not run `crew verify` on page load.
+- Verification is never green by absence. When `anvil crew verify --record` has run, the CLI
+  persists a bounded evidence file that the dashboard displays as historical rows, labelled with
+  the commit sampled at startup; their origin cannot be independently proven. The dashboard does
+  not run `crew verify` or any write action on page load or refresh.
 - The page is a snapshot with an explicit timestamp and a manual refresh. It does not claim
   to be a live view of an agent, a tracker, or a CI run.
 - No write actions are wired. The brief route is a derivation with no side effect beyond its

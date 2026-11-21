@@ -743,8 +743,9 @@ this repository's own findings, not a team's priorities. Building a brief does n
 tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
 reads the snapshot the page already loaded, and a reload is required before the first brief.
 
-Verification has no green-by-absence state. The dashboard never runs `crew verify` or any other
-command on page load. With `anvil crew verify --record`, the CLI writes a bounded evidence file;
+Verification has no green-by-absence state. The dashboard never runs a verify command or a write
+action; a refresh re-reads the CLI's existing read-only JSON contracts (`doctor`, `ready`, `plan`,
+`brief`, `crew status`). With `anvil crew verify --record`, the CLI writes a bounded evidence file;
 the dashboard displays those records as historical facts, labelled with the commit sampled at
 startup and any incomplete or stale records. The dashboard cannot prove the records' origin and
 never presents them as a current verdict — run `anvil crew verify` for that. The dashboard does

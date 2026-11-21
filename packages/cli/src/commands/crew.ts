@@ -338,16 +338,47 @@ export async function worktreeRevision(worktree: string): Promise<string | null>
 export async function headRevision(worktree: string): Promise<string | null> {
   const head = await runProcess(
     'git',
-    ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'rev-parse', '--verify', 'HEAD^{commit}'],
+    // --no-lazy-fetch keeps a promisor repository from fetching a missing commit; on older Git
+    // the unknown option makes the probe fail closed and the revision is reported as unknown.
+    ['--no-optional-locks', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', 'rev-parse', '--verify', 'HEAD^{commit}'],
     { cwd: worktree, env: readOnlyGitEnv() },
   )
   return head.exitCode === 0 ? head.stdout.trim() : null
 }
 
-type EvidenceRecord = { command: string; revision: string | null; exitCode: number | null; timestamp: string }
+export type EvidenceRecord = {
+  command: string
+  revision: string | null
+  exitCode: number | null
+  timestamp: string
+}
+
+/**
+ * Keep the bounded set of evidence rows to write. Completion order (timestamp) wins over claim
+ * order; displayable facts win over rejected rows; incomplete rows are retained so the dashboard
+ * can report them as incomplete rather than as "no evidence".
+ */
+export function selectVerificationRecords(all: EvidenceRecord[]): EvidenceRecord[] {
+  const sorted = [...all].sort((left, right) =>
+    left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0,
+  )
+  const displayable = (record: EvidenceRecord): boolean =>
+    record.command.trim() !== '' &&
+    record.command.length <= 200 &&
+    typeof record.revision === 'string' &&
+    /^[0-9a-f]{7,64}(?:-dirty)?$/i.test(record.revision) &&
+    Number.isSafeInteger(record.exitCode) &&
+    (record.exitCode as number) >= 0 &&
+    (record.exitCode as number) <= 0x7fffffff
+  const valid = sorted.filter(displayable)
+  const incomplete = sorted.filter((record) => !displayable(record))
+  return [...valid.slice(-20), ...incomplete.slice(-Math.max(0, 20 - Math.min(valid.length, 20)))].sort(
+    (left, right) => (left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0),
+  )
+}
 
 function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
-  const timestamp = new Date().toISOString()
+  const fallbackTimestamp = new Date().toISOString()
   const all: EvidenceRecord[] = []
   for (const worktree of result.results) {
     for (const command of worktree.commands) {
@@ -355,7 +386,7 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
         command: command.command,
         revision: command.revision,
         exitCode: command.exitObserved ? command.code : null,
-        timestamp,
+        timestamp: command.completedAt ?? fallbackTimestamp,
       })
     }
   }
@@ -367,13 +398,7 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
       hint: `Remove ${path} before recording again.`,
     })
   }
-  // Keep the most recent records. Dropping from the end would crowd out the last -- and often
-  // failing -- command in favour of older successes; under the byte cap, discard oldest first.
-  // Retain only displayable facts before applying the caps. Raw claim order is not completion
-  // order: keeping the last 20 entries could otherwise let later incomplete rows erase a real
-  // failure recorded earlier.
-  const usable = all.filter((record) => record.revision !== null && record.exitCode !== null)
-  let records = usable.slice(-20)
+  let records = selectVerificationRecords(all)
   let payload = `${JSON.stringify(records, null, 2)}\n`
   while (Buffer.byteLength(payload) > VERIFICATION_EVIDENCE_MAX_BYTES && records.length > 0) {
     records = records.slice(1)
@@ -408,7 +433,8 @@ async function crewVerifyFlow(
   const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
     if (args.values.record !== true) return runCommand(command, cwd)
     const revision = await worktreeRevision(cwd)
-    return { ...(await runCommand(command, cwd)), revision }
+    const outcome = await runCommand(command, cwd)
+    return { ...outcome, revision, completedAt: new Date().toISOString() }
   }
 
   const result: CrewVerifyResult = await crewVerify({
