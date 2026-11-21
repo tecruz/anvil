@@ -94,7 +94,33 @@ function tomlArray(section: string, key: string): string[] {
     }
     body += ch
   }
-  return [...body.matchAll(/["']((?:[^"'\\]|\\.)*)["']/g)].map((item) => item[1] as string)
+  // Strip TOML comments outside quoted strings. A commented-out `# "shared-lib",` inside a
+  // dependency array is not a dependency; matching on the raw body would invent an edge.
+  let withoutComments = ''
+  let commentQuote: string | null = null
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i] as string
+    if (commentQuote !== null) {
+      withoutComments += ch
+      if (ch === '\\' && i + 1 < body.length) {
+        withoutComments += body[i + 1]
+        i++
+      } else if (ch === commentQuote) commentQuote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      commentQuote = ch
+      withoutComments += ch
+      continue
+    }
+    if (ch === '#') {
+      while (i < body.length && body[i] !== '\n') i++
+      if (i < body.length) withoutComments += '\n'
+      continue
+    }
+    withoutComments += ch
+  }
+  return [...withoutComments.matchAll(/["']((?:[^"'\\]|\\.)*)["']/g)].map((item) => item[1] as string)
 }
 
 /** PEP 503 normalisation: dependency names are case- and separator-insensitive. */

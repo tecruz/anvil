@@ -337,31 +337,69 @@ export const goDetector: Detector = {
  * not workspace nodes and are deliberately ignored. The name of the crate is not trusted as
  * an edge; the resolved directory is.
  */
-function cargoPathDependencies(manifest: string, cratePath: string, paths: ReadonlySet<string>): string[] {
-  const out = new Set<string>()
-  const lines = manifest.split('\n')
-  let section: string | null = null
+type CargoDependencyEntry = { name: string; path: string | null; workspace: boolean }
+
+/** Read dependency entries from a Cargo manifest, including `[dependencies.name]` tables. */
+function cargoDependencyEntries(manifest: string, workspaceSection: boolean): CargoDependencyEntry[] {
+  const out: CargoDependencyEntry[] = []
+  let inSection = false
+  let sectionCrate: string | null = null
   let entry = ''
   const flush = (): void => {
-    const match = /^\s*([A-Za-z0-9_-]+)\s*=/.exec(entry)
-    const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1]
-    if (match === null || path === undefined) return
-    const normalized = posix.normalize(posix.join(cratePath, path)).replace(/\/+$/, '')
-    if (normalized !== '' && paths.has(normalized)) out.add(normalized)
+    if (!inSection) return
+    const name = sectionCrate ?? /^\s*([A-Za-z0-9_-]+)\s*=/.exec(entry)?.[1] ?? null
+    if (name === null) return
+    const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1] ?? null
+    const workspace = /\bworkspace\s*=\s*true\b/.test(entry)
+    if (path !== null || workspace) out.push({ name, path, workspace })
   }
-  for (const raw of lines) {
+  for (const raw of manifest.split('\n')) {
     const line = raw.replace(/#.*$/, '').trim()
     if (line.startsWith('[')) {
       flush()
       entry = ''
-      section = /dependencies\]/.test(line) ? line : null
+      const table = /^\[(.+)\]$/.exec(line)?.[1] ?? ''
+      const prefix = workspaceSection ? 'workspace.dependencies' : 'dependencies'
+      let rest: string | null = null
+      if (table === prefix) rest = ''
+      else if (table.startsWith(`${prefix}.`)) rest = table.slice(prefix.length + 1)
+      // Target-scoped tables such as [target.'cfg(unix)'.dependencies] also declare dependencies.
+      else if (table.endsWith(`.${prefix}`)) rest = ''
+      else {
+        const scoped = table.indexOf(`.${prefix}.`)
+        if (scoped >= 0) rest = table.slice(scoped + prefix.length + 2)
+      }
+      inSection = rest !== null
+      sectionCrate = rest === '' || rest === null ? null : (rest.split('.')[0] ?? null)
       continue
     }
-    if (section === null || line === '') continue
+    if (!inSection || line === '') continue
     if (/^[A-Za-z0-9_-]+\s*=/.test(line)) flush()
     entry += `${entry === '' ? '' : '\n'}${line}`
   }
   flush()
+  return out
+}
+
+function cargoPathDependencies(
+  manifest: string,
+  cratePath: string,
+  paths: ReadonlySet<string>,
+  workspacePaths: ReadonlyMap<string, string> = new Map(),
+): string[] {
+  const out = new Set<string>()
+  const add = (path: string, base: string): void => {
+    const normalized = posix.normalize(posix.join(base, path)).replace(/\/+$/, '')
+    if (normalized !== '' && paths.has(normalized)) out.add(normalized)
+  }
+  for (const entry of cargoDependencyEntries(manifest, false)) {
+    if (entry.path !== null) add(entry.path, cratePath)
+    else if (entry.workspace) {
+      const shared = workspacePaths.get(entry.name)
+      // A [workspace.dependencies] path is relative to the workspace root, not the member.
+      if (shared !== undefined) add(shared, '.')
+    }
+  }
   return [...out].sort()
 }
 
@@ -397,9 +435,17 @@ export const rustDetector: Detector = {
       // A manifest that cannot be read stays unknown rather than becoming an empty list.
       const paths = new Set(crates.map((crate) => crate.path))
       const idByPath = new Map(crates.map((crate) => [crate.path, crate.id]))
+      // A member can inherit a path from [workspace.dependencies] with `workspace = true`;
+      // resolve that shared declaration against the workspace root before looking for edges.
+      const workspacePaths = new Map<string, string>()
+      if (cargo !== null) {
+        for (const entry of cargoDependencyEntries(cargo, true)) {
+          if (entry.path !== null) workspacePaths.set(entry.name, entry.path)
+        }
+      }
       for (const crate of crates) {
         if (crate.manifest === null) continue
-        const pathsFound = cargoPathDependencies(crate.manifest, crate.path, paths)
+        const pathsFound = cargoPathDependencies(crate.manifest, crate.path, paths, workspacePaths)
         const deps = [...new Set(pathsFound.map((path) => idByPath.get(path) ?? path))].filter((id) => id !== crate.id)
         const existing = draft.modules.find((module) => module.id === crate.id)
         if (existing !== undefined) existing.deps = deps.sort()
@@ -805,7 +851,10 @@ function gradleDependenciesBody(
       unsupported = true
       return
     }
-    const id = gradlePath(raw)
+    // Gradle resolves a project path without a leading ':' relative to the declaring project:
+    // `project("core")` in `:app` means `:app:core`, never `:core`. Only an absolute `:core`
+    // selects the root-level module. Do not fall back to a different member with the same tail.
+    const id = raw.startsWith(':') ? gradlePath(raw) : target === ':' ? `:${raw}` : `${target}:${raw}`
     if (id === target || !members.has(id)) return
     out.add(id)
   }
