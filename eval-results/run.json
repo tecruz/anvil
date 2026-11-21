@@ -1,10 +1,10 @@
 {
   "schemaVersion": 3,
-  "runId": "8bd71107-67be-4902-821e-7959e64f16af",
-  "startedAt": "2026-11-20T15:55:41.645Z",
-  "completedAt": "2026-11-20T15:56:09.062Z",
-  "completionState": "completed",
-  "commitSha": "cfdd3b911e7476ec4ee833d3354ceb35189c5b9a",
+  "runId": "146cd3b3-887b-48d0-a9ea-608ac938d9c0",
+  "startedAt": "2026-11-21T11:10:55.610Z",
+  "completedAt": "2026-11-21T11:12:50.856Z",
+  "completionState": "partial",
+  "commitSha": "a4498cb83331d68b01dbc546162e2622e804d0e0",
   "implementation": "6c7b4b7c413c9e7de0dec0723ef226cd99874db047956a20f15c002caef9a1b1",
   "bundleDigest": "e0933dd464e3a542f3d52631221aa1bd3c5632931575ca1cb2980ac46e24f40d",
   "harnessDigest": "30aa1032f21ee3e346b75f7890d979a6736fe1f4fb029b36e1657fe96bfbad64",
@@ -17,62 +17,126 @@
   "opencodeVersion": null,
   "nodeVersion": "v24.13.0",
   "publishTranscripts": false,
-  "subset": false,
+  "subset": true,
   "repetitions": 1,
-  "seed": "9442fe1b-0a28-4e6d-a6e2-7f73412c9930",
+  "seed": "489f2048-71ea-42db-820c-40c8c7b3db43",
   "order": "alternate",
   "scenarioHashes": {
-    "tiny-code-change": {
-      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
-      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0"
+    "nested-project": {
+      "scenarioHash": "e7c96f388656ff751e0b4c3b30be379fa38ec3483a3a1302853bbc556716a56e",
+      "sourceHash": "82f50b10cc894b892e85636654b8fdb823cebdebed87c84c81595e5ae430035a"
     },
-    "tiny-verify-only": {
-      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
-      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265"
+    "workspace-dependency": {
+      "scenarioHash": "7d7598aa441e66c62570ff9c3b6c25a1ab7411f9783ba7d937f901b2f1fe9f6b",
+      "sourceHash": "15125cbab85ba4291319a5c86a6d739437fc92d45f920f36a96052e437a4d17e"
     },
-    "medium-code-change": {
-      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
-      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be"
+    "cross-file-regression": {
+      "scenarioHash": "3af033479216d4ac56da48d265057cdc770f7f434808b2e06bd5559749f89e21",
+      "sourceHash": "1cbe39289973123c30b8eb8432551d2ec1b8417d16567b02969537c7f2e2eeaf"
     },
-    "medium-verify-only": {
-      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
-      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515"
+    "misleading-docs": {
+      "scenarioHash": "36c8e3d5f81aa84e26149abb1fe00f0fb17d26ff3d69172c0df3ebf7b92cf5db",
+      "sourceHash": "12159412c5a1454dfe5144dbc88fbcdab3dc22737d5b99c9490b4a728ef4c8f7"
+    },
+    "failing-verification": {
+      "scenarioHash": "53cc29ce1ca2e17d407a53c820e119cc9bc996c8dd7c58eaffbaab3e0d9a6358",
+      "sourceHash": "8245a9339dae8d45381597e60a9f411c6d44ecdc7b4eacb6a8639ff16efab3cf"
+    },
+    "risk-sensitive-change": {
+      "scenarioHash": "18a7350000ef37ca245ed16e486df1fef332493d222cad7a7f513557fdcd2dfb",
+      "sourceHash": "747c17fa603ee392d207276c4ed87da741359ec5754ffecb9e39f830bbc3cbad"
+    },
+    "nested-stale-verification": {
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d"
+    },
+    "skill-guidance": {
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab"
+    },
+    "pilot-countrytracker": {
+      "scenarioHash": "c9c259aa88326ce04ef2700a61d7c5c2589344b7a8150c744b719da92cb878a7",
+      "sourceHash": "09e87850a1c5d04d52fd2844ac68e94078952e48c0a5b906349ed526b1ebec6a"
+    },
+    "pilot-nbim": {
+      "scenarioHash": "e38ee555fd46769d2622c3db8c6aa48a646bede5725d159bb7b374c0bf9ccae8",
+      "sourceHash": "611dca4ba37febf4e37ebc18af0cd93e7470f1cae6a4ac59dce1a2c4a4b73c26"
+    },
+    "pilot-conventional-wordcount": {
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288"
+    },
+    "pilot-books-blocked": {
+      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
+      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48"
     }
   },
   "runKeys": [
-    "tiny-code-change/bare/fake-agent/0",
-    "tiny-code-change/anvil/fake-agent/0",
-    "tiny-verify-only/bare/fake-agent/0",
-    "tiny-verify-only/anvil/fake-agent/0",
-    "medium-code-change/bare/fake-agent/0",
-    "medium-code-change/anvil/fake-agent/0",
-    "medium-verify-only/bare/fake-agent/0",
-    "medium-verify-only/anvil/fake-agent/0"
+    "nested-project/bare/fake-agent/0",
+    "nested-project/anvil/fake-agent/0",
+    "workspace-dependency/bare/fake-agent/0",
+    "workspace-dependency/anvil/fake-agent/0",
+    "cross-file-regression/bare/fake-agent/0",
+    "cross-file-regression/anvil/fake-agent/0",
+    "misleading-docs/bare/fake-agent/0",
+    "misleading-docs/anvil/fake-agent/0",
+    "failing-verification/bare/fake-agent/0",
+    "failing-verification/anvil/fake-agent/0",
+    "risk-sensitive-change/bare/fake-agent/0",
+    "risk-sensitive-change/anvil/fake-agent/0",
+    "nested-stale-verification/bare/fake-agent/0",
+    "nested-stale-verification/anvil/fake-agent/0",
+    "skill-guidance/bare/fake-agent/0",
+    "skill-guidance/anvil/fake-agent/0",
+    "pilot-countrytracker/bare/fake-agent/0",
+    "pilot-countrytracker/anvil/fake-agent/0",
+    "pilot-nbim/bare/fake-agent/0",
+    "pilot-nbim/anvil/fake-agent/0",
+    "pilot-conventional-wordcount/bare/fake-agent/0",
+    "pilot-conventional-wordcount/anvil/fake-agent/0",
+    "pilot-books-blocked/bare/fake-agent/0",
+    "pilot-books-blocked/anvil/fake-agent/0"
   ],
   "executionOrder": [
-    "tiny-code-change/bare/fake-agent/0",
-    "tiny-code-change/anvil/fake-agent/0",
-    "tiny-verify-only/bare/fake-agent/0",
-    "tiny-verify-only/anvil/fake-agent/0",
-    "medium-code-change/bare/fake-agent/0",
-    "medium-code-change/anvil/fake-agent/0",
-    "medium-verify-only/bare/fake-agent/0",
-    "medium-verify-only/anvil/fake-agent/0"
+    "nested-project/bare/fake-agent/0",
+    "nested-project/anvil/fake-agent/0",
+    "workspace-dependency/bare/fake-agent/0",
+    "workspace-dependency/anvil/fake-agent/0",
+    "cross-file-regression/bare/fake-agent/0",
+    "cross-file-regression/anvil/fake-agent/0",
+    "misleading-docs/bare/fake-agent/0",
+    "misleading-docs/anvil/fake-agent/0",
+    "failing-verification/bare/fake-agent/0",
+    "failing-verification/anvil/fake-agent/0",
+    "risk-sensitive-change/bare/fake-agent/0",
+    "risk-sensitive-change/anvil/fake-agent/0",
+    "nested-stale-verification/bare/fake-agent/0",
+    "nested-stale-verification/anvil/fake-agent/0",
+    "skill-guidance/bare/fake-agent/0",
+    "skill-guidance/anvil/fake-agent/0",
+    "pilot-countrytracker/bare/fake-agent/0",
+    "pilot-countrytracker/anvil/fake-agent/0",
+    "pilot-nbim/bare/fake-agent/0",
+    "pilot-nbim/anvil/fake-agent/0",
+    "pilot-conventional-wordcount/bare/fake-agent/0",
+    "pilot-conventional-wordcount/anvil/fake-agent/0",
+    "pilot-books-blocked/bare/fake-agent/0",
+    "pilot-books-blocked/anvil/fake-agent/0"
   ],
   "results": [
     {
-      "scenario": "tiny-code-change",
+      "scenario": "nested-project",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
-      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
+      "scenarioHash": "e7c96f388656ff751e0b4c3b30be379fa38ec3483a3a1302853bbc556716a56e",
+      "sourceHash": "82f50b10cc894b892e85636654b8fdb823cebdebed87c84c81595e5ae430035a",
       "verifyCount": 1,
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:55:41.760Z",
-          "completedAt": "2026-11-20T15:55:43.897Z",
+          "startedAt": "2026-11-21T11:10:55.730Z",
+          "completedAt": "2026-11-21T11:11:06.350Z",
           "state": "completed"
         }
       ],
@@ -82,23 +146,23 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2122,
+      "durationMs": 10599,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "tiny-code-change",
+      "scenario": "nested-project",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
-      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
+      "scenarioHash": "e7c96f388656ff751e0b4c3b30be379fa38ec3483a3a1302853bbc556716a56e",
+      "sourceHash": "82f50b10cc894b892e85636654b8fdb823cebdebed87c84c81595e5ae430035a",
       "verifyCount": 1,
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:55:43.903Z",
-          "completedAt": "2026-11-20T15:55:47.541Z",
+          "startedAt": "2026-11-21T11:11:06.356Z",
+          "completedAt": "2026-11-21T11:11:15.514Z",
           "state": "completed"
         }
       ],
@@ -108,75 +172,23 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3621,
+      "durationMs": 9139,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "tiny-verify-only",
+      "scenario": "workspace-dependency",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
-      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-20T15:55:47.553Z",
-          "completedAt": "2026-11-20T15:55:49.357Z",
-          "state": "completed"
-        }
-      ],
-      "verified": true,
-      "hiddenVerified": null,
-      "verifyExitCodes": [0],
-      "repetition": 0,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 1782,
-      "transcript": "",
-      "skillInstall": "not-requested"
-    },
-    {
-      "scenario": "tiny-verify-only",
-      "variant": "anvil",
-      "model": "fake-agent",
-      "modelRole": null,
-      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
-      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
-      "verifyCount": 1,
-      "hiddenVerifyCount": 0,
-      "attempts": [
-        {
-          "startedAt": "2026-11-20T15:55:49.361Z",
-          "completedAt": "2026-11-20T15:55:53.451Z",
-          "state": "completed"
-        }
-      ],
-      "verified": true,
-      "hiddenVerified": null,
-      "verifyExitCodes": [0],
-      "repetition": 0,
-      "costUsd": null,
-      "tokens": null,
-      "durationMs": 4073,
-      "transcript": "",
-      "skillInstall": "not-requested"
-    },
-    {
-      "scenario": "medium-code-change",
-      "variant": "bare",
-      "model": "fake-agent",
-      "modelRole": null,
-      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
-      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "scenarioHash": "7d7598aa441e66c62570ff9c3b6c25a1ab7411f9783ba7d937f901b2f1fe9f6b",
+      "sourceHash": "15125cbab85ba4291319a5c86a6d739437fc92d45f920f36a96052e437a4d17e",
       "verifyCount": 1,
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:55:53.472Z",
-          "completedAt": "2026-11-20T15:55:56.724Z",
+          "startedAt": "2026-11-21T11:11:15.543Z",
+          "completedAt": "2026-11-21T11:11:19.641Z",
           "state": "completed"
         }
       ],
@@ -186,23 +198,23 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3228,
+      "durationMs": 4053,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "medium-code-change",
+      "scenario": "workspace-dependency",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
-      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "scenarioHash": "7d7598aa441e66c62570ff9c3b6c25a1ab7411f9783ba7d937f901b2f1fe9f6b",
+      "sourceHash": "15125cbab85ba4291319a5c86a6d739437fc92d45f920f36a96052e437a4d17e",
       "verifyCount": 1,
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:55:56.729Z",
-          "completedAt": "2026-11-20T15:56:01.934Z",
+          "startedAt": "2026-11-21T11:11:19.650Z",
+          "completedAt": "2026-11-21T11:11:24.715Z",
           "state": "completed"
         }
       ],
@@ -212,49 +224,339 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 5177,
+      "durationMs": 5043,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "medium-verify-only",
+      "scenario": "cross-file-regression",
       "variant": "bare",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
-      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "scenarioHash": "3af033479216d4ac56da48d265057cdc770f7f434808b2e06bd5559749f89e21",
+      "sourceHash": "1cbe39289973123c30b8eb8432551d2ec1b8417d16567b02969537c7f2e2eeaf",
       "verifyCount": 1,
-      "hiddenVerifyCount": 0,
+      "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:56:01.963Z",
-          "completedAt": "2026-11-20T15:56:04.700Z",
+          "startedAt": "2026-11-21T11:11:24.736Z",
+          "completedAt": "2026-11-21T11:11:27.620Z",
           "state": "completed"
         }
       ],
       "verified": true,
-      "hiddenVerified": null,
-      "verifyExitCodes": [0],
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2711,
+      "durationMs": 2868,
       "transcript": "",
       "skillInstall": "not-requested"
     },
     {
-      "scenario": "medium-verify-only",
+      "scenario": "cross-file-regression",
       "variant": "anvil",
       "model": "fake-agent",
       "modelRole": null,
-      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
-      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "scenarioHash": "3af033479216d4ac56da48d265057cdc770f7f434808b2e06bd5559749f89e21",
+      "sourceHash": "1cbe39289973123c30b8eb8432551d2ec1b8417d16567b02969537c7f2e2eeaf",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:27.625Z",
+          "completedAt": "2026-11-21T11:11:35.685Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 8042,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "misleading-docs",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "36c8e3d5f81aa84e26149abb1fe00f0fb17d26ff3d69172c0df3ebf7b92cf5db",
+      "sourceHash": "12159412c5a1454dfe5144dbc88fbcdab3dc22737d5b99c9490b4a728ef4c8f7",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:35.698Z",
+          "completedAt": "2026-11-21T11:11:37.303Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 1593,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "misleading-docs",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "36c8e3d5f81aa84e26149abb1fe00f0fb17d26ff3d69172c0df3ebf7b92cf5db",
+      "sourceHash": "12159412c5a1454dfe5144dbc88fbcdab3dc22737d5b99c9490b4a728ef4c8f7",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:37.310Z",
+          "completedAt": "2026-11-21T11:11:41.337Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 4013,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "failing-verification",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "53cc29ce1ca2e17d407a53c820e119cc9bc996c8dd7c58eaffbaab3e0d9a6358",
+      "sourceHash": "8245a9339dae8d45381597e60a9f411c6d44ecdc7b4eacb6a8639ff16efab3cf",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:41.347Z",
+          "completedAt": "2026-11-21T11:11:42.866Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 1466,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "failing-verification",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "53cc29ce1ca2e17d407a53c820e119cc9bc996c8dd7c58eaffbaab3e0d9a6358",
+      "sourceHash": "8245a9339dae8d45381597e60a9f411c6d44ecdc7b4eacb6a8639ff16efab3cf",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:42.871Z",
+          "completedAt": "2026-11-21T11:11:46.225Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3337,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "risk-sensitive-change",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "18a7350000ef37ca245ed16e486df1fef332493d222cad7a7f513557fdcd2dfb",
+      "sourceHash": "747c17fa603ee392d207276c4ed87da741359ec5754ffecb9e39f830bbc3cbad",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:46.240Z",
+          "completedAt": "2026-11-21T11:11:49.027Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2769,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "risk-sensitive-change",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "18a7350000ef37ca245ed16e486df1fef332493d222cad7a7f513557fdcd2dfb",
+      "sourceHash": "747c17fa603ee392d207276c4ed87da741359ec5754ffecb9e39f830bbc3cbad",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:49.031Z",
+          "completedAt": "2026-11-21T11:11:53.594Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 4544,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:53.608Z",
+          "completedAt": "2026-11-21T11:11:55.006Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 1380,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:55.011Z",
+          "completedAt": "2026-11-21T11:11:58.397Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3369,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:11:58.412Z",
+          "completedAt": "2026-11-21T11:12:04.915Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 6482,
+      "transcript": "",
+      "skillInstall": "not-installed",
+      "skillAccess": "not-installed",
+      "skillAccessReason": "not-installed"
+    },
+    {
+      "scenario": "skill-guidance",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "7fa2e696fc4fbfa12e6dd58b09ba871b185380237a887bffcdd2fa0f2a721eea",
+      "sourceHash": "f04b727e37cb5054fdf7aeb1ac7f400b7cf0228341b8f5b025ed11b762ae6dab",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:04.920Z",
+          "completedAt": "2026-11-21T11:12:26.585Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 21638,
+      "transcript": "",
+      "skillInstall": "verified",
+      "skillAccess": "unknown",
+      "skillAccessReason": "no-tool-events"
+    },
+    {
+      "scenario": "pilot-countrytracker",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "c9c259aa88326ce04ef2700a61d7c5c2589344b7a8150c744b719da92cb878a7",
+      "sourceHash": "09e87850a1c5d04d52fd2844ac68e94078952e48c0a5b906349ed526b1ebec6a",
       "verifyCount": 1,
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-20T15:56:04.706Z",
-          "completedAt": "2026-11-20T15:56:08.791Z",
+          "startedAt": "2026-11-21T11:12:27.140Z",
+          "completedAt": "2026-11-21T11:12:28.324Z",
           "state": "completed"
         }
       ],
@@ -264,7 +566,189 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 4056,
+      "durationMs": 1098,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-countrytracker",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "c9c259aa88326ce04ef2700a61d7c5c2589344b7a8150c744b719da92cb878a7",
+      "sourceHash": "09e87850a1c5d04d52fd2844ac68e94078952e48c0a5b906349ed526b1ebec6a",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:28.329Z",
+          "completedAt": "2026-11-21T11:12:31.515Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3100,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-nbim",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "e38ee555fd46769d2622c3db8c6aa48a646bede5725d159bb7b374c0bf9ccae8",
+      "sourceHash": "611dca4ba37febf4e37ebc18af0cd93e7470f1cae6a4ac59dce1a2c4a4b73c26",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:31.575Z",
+          "completedAt": "2026-11-21T11:12:32.082Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 491,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-nbim",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "e38ee555fd46769d2622c3db8c6aa48a646bede5725d159bb7b374c0bf9ccae8",
+      "sourceHash": "611dca4ba37febf4e37ebc18af0cd93e7470f1cae6a4ac59dce1a2c4a4b73c26",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:32.087Z",
+          "completedAt": "2026-11-21T11:12:34.751Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2649,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:34.778Z",
+          "completedAt": "2026-11-21T11:12:35.707Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 906,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:35.713Z",
+          "completedAt": "2026-11-21T11:12:38.574Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2834,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-books-blocked",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
+      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:39.880Z",
+          "completedAt": "2026-11-21T11:12:42.772Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2722,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-books-blocked",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "fbf4c5ec3a760eb2afc7fdf91c29921331038e94fcd1ab8381d1454dab2b1e48",
+      "sourceHash": "fc1fc6057ce201319f59ce1186699e49162f86caeb8576980e4ad0cec709be48",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T11:12:42.779Z",
+          "completedAt": "2026-11-21T11:12:48.046Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 5122,
       "transcript": "",
       "skillInstall": "not-requested"
     }
