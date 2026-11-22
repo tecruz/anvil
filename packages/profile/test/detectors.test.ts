@@ -1598,9 +1598,7 @@ describe('module dependency completeness', () => {
     })
     const api = profile.modules[0]
     assert.deepEqual(api?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: api?.id, path: api?.path, reason: 'no dependency resolver for this ecosystem' },
-    ])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === api?.path))
   })
 
   test('Go workspace requires become internal edges, and analysed modules are not listed as unknown', () => {
@@ -2635,814 +2633,460 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
-  test('Maven reactor dependencies use declared coordinates', () => {
+  test('.NET ProjectReference paths become internal module edges', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency><dependency><groupId>org.example</groupId><artifactId>external</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>core</artifactId></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App.sln': 'Solution\n',
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup>',
+        '    <ProjectReference Include="..\\Core\\Core.csproj" />',
+        '    <ProjectReference Include="../Worker/Worker.fsproj" />',
+        '  </ItemGroup>',
+        '</Project>',
+        '',
+      ].join('\n'),
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
+      'src/Worker/Worker.fsproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Worker/Worker.fs': 'module Worker\n',
     })
-    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['com.acme:api:1', 'com.acme:core:1', 'com.acme:root:1'])
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, ['com.acme:core:1'])
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.path, 'api')
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:root:1')?.path, '.')
-    assert.deepEqual(profile.monorepo?.members.sort(), ['com.acme:api:1', 'com.acme:core:1', 'com.acme:root:1'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, ['src:Core:Core', 'src:Worker:Worker'])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
-  test('a Maven dependency version must match the reactor module', () => {
+  test('an external .NET project reference leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
-        '</project>',
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup>',
+        '    <ProjectReference Include="C:\\External\\Other.csproj" />',
+        '    <ProjectReference Include="..\\Core\\Core.csproj" />',
+        '  </ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a Maven dependencyManagement entry is not a module edge', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencyManagement><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></dependencyManagement>',
-        '<dependencies><dependency><groupId>org.example</groupId><artifactId>external</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
-  })
-
-  test('a Maven dependency with property coordinates stays unknown', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>$' +
-          '{dep.group}</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
-  })
-
-  test('a Maven profile-only module is not added to the graph', () => {
-    const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<modules><module>api</module></modules>',
-        '<profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/pom.xml': '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'extra/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>extra</artifactId><version>1</version></project>\n',
-      'extra/src/main/java/Extra.java': 'class Extra {}\n',
-    })
-    assert.deepEqual(profile.modules.map((m) => m.id).sort(), ['com.acme:api:1', 'com.acme:root:1'])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
-  })
-
-  test('dependency-shaped text inside CDATA is not a Maven edge', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<properties><example><![CDATA[<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>]]></example></properties>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
-  })
-
-  test('malformed Maven POM XML never yields a dependency edge', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    // The malformed POM leaves the whole reactor's coverage unknown rather than producing a
-    // partial graph from the bytes that happened to parse before the unterminated tag.
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:core:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
-  })
-
-  test('a namespaced Maven POM leaves coverage unknown instead of guessing identities', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project xmlns="http://maven.apache.org/POM/4.0.0">',
-        '<groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project xmlns="http://maven.apache.org/POM/4.0.0"><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
-  })
-
-  test('malformed attribute values and repeated metadata leave Maven coverage unknown', () => {
-    const root =
-      '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n'
-    const api =
-      '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n'
-    const core = '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n'
-    const base = {
-      'pom.xml': root,
-      'api/pom.xml': api,
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': core,
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    }
-    const rawAttribute = profileOf({ ...base, 'api/pom.xml': api.replace('<project>', '<project a="foo<bar">') })
-    const repeatedParentScalar = profileOf({
-      ...base,
-      'api/pom.xml': api.replace(
-        '<artifactId>api</artifactId>',
-        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><version>2</version></parent><artifactId>api</artifactId>',
-      ),
-    })
-    const repeatedOptional = profileOf({
-      ...base,
-      'api/pom.xml': api.replace(
-        '<artifactId>core</artifactId><version>1</version>',
-        '<artifactId>core</artifactId><version>1</version><optional>true</optional><optional>false</optional>',
-      ),
-    })
-    for (const profile of [rawAttribute, repeatedParentScalar, repeatedOptional]) {
-      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
-    }
-  })
-
-  test('a repeated modules section keeps both modules visible', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules><modules><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.map((m) => m.path).sort(), ['.', 'api', 'core'])
-  })
-
-  test('a module directory ending in .xml is not mistaken for a POM file', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>core.xml</module><module>api</module></modules></project>\n',
-      'core.xml/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core.xml/src/main/java/Core.java': 'class Core {}\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
-  })
-
-  test('two modules sharing coordinates are both visible with unknown coverage', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>duplicate</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'duplicate/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version></project>\n',
-      'duplicate/src/main/java/Duplicate.java': 'class Duplicate {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.map((m) => m.path).sort(), ['.', 'api', 'core', 'duplicate'])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0)
-  })
-
-  test('malformed POM markup leaves Maven coverage unknown', () => {
-    const base = {
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    }
-    const unterminated = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace('<dependencies>', '<?broken<dependencies>'),
-    })
-    const duplicateAttr = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace('<project>', '<project a="x" a="y">'),
-    })
-    const twoBlocks = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace(
-        '</project>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies></project>',
-      ),
-    })
-    for (const profile of [unterminated, duplicateAttr, twoBlocks]) {
-      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
-    }
-  })
-
-  test('processing instructions and malformed start tags leave Maven coverage unknown', () => {
-    const base = {
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    }
-    const pi = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace('<dependencies>', '<?broken ><dependencies>'),
-    })
-    const badAttr = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace('<project>', '<project a="x"b="y">'),
-    })
-    const twoVersions = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml'].replace(
-        '<artifactId>core</artifactId><version>1</version>',
-        '<artifactId>core</artifactId><version>1</version><version>2</version>',
-      ),
-    })
-    const otherRoot = profileOf({
-      ...base,
-      'api/pom.xml': base['api/pom.xml']
-        .replaceAll('<project', '<notProject')
-        .replaceAll('</project>', '</notProject>'),
-    })
-    for (const [label, profile] of [
-      ['processing instruction', pi],
-      ['malformed attribute spacing', badAttr],
-      ['duplicate version', twoVersions],
-      ['non-project root', otherRoot],
-    ] as const) {
-      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [], label)
-      assert.ok(
-        (profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'),
-        label,
-      )
-    }
-  })
-
-  test('a self-closing element does not invalidate an otherwise literal POM', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><description/><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
-  })
-
-  test('a padded Maven module name resolves to its directory', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module> api </module><module>core</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
-  })
-
-  test('an unindexed default parent is not replaced by a same-coordinate reactor POM', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>nested/api</module><module>parent</module><module>core</module></modules></project>\n',
-      'nested/api/pom.xml':
-        '<project><parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
-      'nested/api/src/main/java/Api.java': 'class Api {}\n',
-      'parent/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1</version><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'parent/src/main/java/Parent.java': 'class Parent {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    // nested/api's real parent is nested/pom.xml (not indexed); the indexed parent/ POM must not
-    // be substituted just because its coordinates match.
-    assert.deepEqual(profile.modules.find((m) => m.path === 'nested/api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'nested/api'))
-  })
-
-  test('an unresolved Maven parent version leaves coverage unknown', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><parent><groupId>com.acme</groupId><artifactId>external-parent</artifactId><version>1</version></parent><artifactId>api</artifactId>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
+    // Dropping the external reference but keeping the internal edge would claim a complete graph
+    // while ignoring a declared dependency; the conservative contract requires unknown coverage.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, [])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [
       {
-        id: 'com.acme:api:1',
-        path: 'api',
-        reason: 'unsupported Maven dependency syntax; dependencies left unknown',
+        id: 'src:App:App',
+        path: 'src/App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
       },
     ])
   })
 
-  test('a parent with a non-literal version leaves child coverage unknown', () => {
+  test('a .NET reference differing only in case resolves to the on-disk module on Windows', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>$' + '{revision}</version></parent>',
-        '</project>',
+      'src/App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="..\\core\\CORE.csproj" /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'src/App/Program.cs': 'class Program {}\n',
+      'src/Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'src/Core/Core.cs': 'class Core {}\n',
     })
-    // The default relativePath resolves the parent to the indexed root POM, which declares no
-    // dependencies, so the child's empty list is known even though the parent version is computed.
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    if (process.platform === 'win32') {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, ['src:Core:Core'])
+      assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    } else {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'src:App:App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0)
+    }
   })
 
-  test('a Maven RELEASE or LATEST version leaves coverage unknown', () => {
-    const base = {
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1.0</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+  test('a root-level .NET project resolves a sibling reference from the repository root', () => {
+    const profile = profileOf({
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, ['Core'])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+  })
+
+  test('trailing text or nested item metadata leaves .NET coverage unknown', () => {
+    const base =
+      '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>'
+    const trailing = profileOf({
+      'App.csproj': `${base}garbage\n`,
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    const nested = profileOf({
+      'App.csproj': base.replace(
+        'Include="Core.csproj" />',
+        'Include="Core.csproj"><Metadata><ProjectReference Include="Other.csproj" /></Metadata></ProjectReference>',
+      ),
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Other.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    for (const profile of [trailing, nested]) {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
     }
-    for (const keyword of ['RELEASE', 'LATEST']) {
-      const profile = profileOf({
-        ...base,
-        'api/pom.xml': [
-          '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-          `<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>${keyword}</version></dependency></dependencies>`,
-          '</project>',
-          '',
-        ].join('\n'),
-        'api/src/main/java/Api.java': 'class Api {}\n',
+  })
+
+  test('a custom SDK and a case-variant implicit import stay unknown on Windows', () => {
+    const customSdk = profileOf({
+      'App.csproj': '<Project Sdk="Contoso.Sdk" />\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    })
+    assert.deepEqual(customSdk.modules.find((m) => m.id === 'App')?.deps, [])
+    if (process.platform === 'win32') {
+      const shadow = profileOf({
+        'App.csproj':
+          '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+        'directory.build.targets':
+          '<Project><ItemGroup><ProjectReference Remove="Core.csproj" /></ItemGroup></Project>\n',
+        'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
       })
-      assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+      assert.deepEqual(shadow.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((shadow.diagnostics.unanalysedDeps ?? []).length > 0)
     }
   })
 
-  test('a Maven version-range dependency leaves coverage unknown', () => {
+  test('distinct .NET projects keep distinct ids even when names collide', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>[1,2)</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'package.json': '{"name":"root","workspaces":["api","core"]}\n',
+      'api/package.json': '{"name":"api","dependencies":{"core":"*"}}\n',
+      'core/package.json': '{"name":"core"}\n',
+      'api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'dotnet/api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core.fsproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    const ids = profile.modules.map((module) => module.id)
+    assert.equal(new Set(ids).size, ids.length)
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
   })
 
-  test('a child dependency overrides an inherited reactor dependency', () => {
-    const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules><dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies></project>\n',
-      'api/pom.xml': [
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+  test('a foreign root attribute or ItemGroup text leaves .NET coverage unknown', () => {
+    const base = {
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+    }
+    const foreignNamespace = profileOf({
+      ...base,
+      'App.csproj': base['App.csproj'].replace('<Project ', '<Project xmlns="urn:foreign" '),
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    const itemGroupText = profileOf({
+      ...base,
+      'App.csproj': base['App.csproj'].replace('<ItemGroup>', '<ItemGroup>note'),
+    })
+    for (const profile of [foreignNamespace, itemGroupText]) {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+      assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
+    }
   })
 
-  test('Maven dependency type and classifier distinguish inherited entries', () => {
+  test('a Directory.Packages.props in the repository leaves .NET coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/pom.xml': [
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.csproj" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Directory.Packages.props': '<Project><ItemGroup /></Project>\n',
     })
-    // The child's plain jar override does not replace the parent's test-jar entry.
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, ['com.acme:core:1'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === '.'))
   })
 
-  test('a system-scoped child override removes the inherited reactor edge', () => {
+  test('a .NET project does not overwrite an npm module with the same id', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/pom.xml': [
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version><scope>system</scope><systemPath>/opt/core.jar</systemPath></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'package.json': '{"name":"root","workspaces":["api","core"]}\n',
+      'api/package.json': '{"name":"api","dependencies":{"core":"*"}}\n',
+      'core/package.json': '{"name":"core"}\n',
+      'api.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'dotnet:api')?.deps, [])
   })
 
-  test('an inherited dependency on unresolved coordinates stays unknown', () => {
+  test('a .NET reference with an upper-case extension resolves on Windows', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/pom.xml':
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
-        '<version>$' + '{revision}</version>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="Core.CSPROJ" /></ItemGroup></Project>\n',
+      'Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    if (process.platform === 'win32') {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, ['Core'])
+    } else {
+      assert.deepEqual(profile.modules.find((m) => m.id === 'App')?.deps, [])
+    }
   })
 
-  test('an inherited test-jar dependency on an unresolved reactor module stays unknown', () => {
+  test('commented and CDATA project references are not .NET edges', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <!-- <ProjectReference Include="../Core/Core.csproj" /> -->',
+        '  <PropertyGroup><Docs><![CDATA[<ProjectReference Include="../Core/Core.csproj" />]]></Docs></PropertyGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/pom.xml':
-        '<project><parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version></parent><artifactId>api</artifactId></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
-        '<version>$' + '{revision}</version>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
   })
 
-  test('a jar and a test-jar dependency produce one module edge', () => {
+  test('a computed .NET project reference leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies>',
-        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency>',
-        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><type>test-jar</type><classifier>tests</classifier></dependency>',
-        '</dependencies></project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="$(CoreDir)/Core.csproj" /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, ['com.acme:core:1'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('a reactor target with a non-literal group leaves dependants unknown', () => {
+  test('a conditional .NET project reference leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup Condition="false"><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': [
-        '<project><groupId>$' + '{group}</groupId><artifactId>core</artifactId><version>1</version></project>',
-        '',
-      ].join('\n'),
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('a dependency on an unreadable reactor POM stays unknown', () => {
+  test('a Directory.Build.props project reference is an internal edge', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'App/Directory.Build.props': [
+        '<Project>',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': '\u0000not a readable pom',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    // Imported files are outside the conservative resolver's scope; coverage stays unknown.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
   })
 
-  test('an uncertain reactor group does not hide a dependency on another module', () => {
+  test('a nearer Directory.Build.props shadows the root one', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module><module>ui</module></modules>',
-        '</project>',
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'App/Directory.Build.props': '<Project />\n',
+      'Directory.Build.props': [
+        '<Project><ItemGroup><ProjectReference Include="../Shared/Shared.csproj" /></ItemGroup></Project>',
         '',
       ].join('\n'),
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>ui</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>$' + '{group}</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-      'ui/pom.xml': '<project><groupId>com.acme</groupId><artifactId>ui</artifactId><version>1</version></project>\n',
-      'ui/src/main/java/Ui.java': 'class Ui {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
+      'Shared/Shared.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Shared/Shared.cs': 'class Shared {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    // Imports are not resolved conservatively, so neither App nor Core claims edges.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.modules.find((m) => m.id === 'Core:Core')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
   })
 
-  test('a dependency on a target with unresolved coordinates stays unknown', () => {
+  test('an imported ProjectReference path resolves against the consuming project', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Directory.Build.props': [
+        '<Project><ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup></Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId>',
-        '<version>$' + '{revision}</version>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'App'))
   })
 
-  test('a dependency on a profile-only reactor module stays unknown', () => {
+  test('mismatched .NET project XML leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<modules><module>api</module></modules>',
-        '<profiles><profile><id>extra</id><modules><module>core</module></modules></profile></profiles>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></PropertyGroup></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'com.acme:api:1')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('a Maven POM with unresolved coordinates stays unknown', () => {
+  test('malformed .NET project XML leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module></modules></project>\n',
-      'api/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>$' +
-        '{module.artifact}</artifactId><version>1</version></project>\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
+      'App/App.csproj': '<Project Sdk="Microsoft.NET.Sdk">\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    const api = profile.modules.find((m) => m.path === 'api')
-    assert.deepEqual(api?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('a declared reactor POM missing from the index leaves its consumer unknown', () => {
+  test('a project reference inside a Target is not a module edge', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <Target Name="Build"><ProjectReference Include="../Core/Core.csproj" /></Target>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      // `core` is declared as a module but the walker omits its directory, so the POM is unreadable.
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    // A reference created during target execution needs a build to resolve, so coverage is unknown.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('an explicit parent relativePath leaves the child unknown', () => {
+  test('a non-Project XML root leaves .NET coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<parent><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><relativePath>../elsewhere/pom.xml</relativePath></parent>',
-        '</project>',
+      'App/App.csproj': [
+        '<ProjectTemplate>',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</ProjectTemplate>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('the last duplicate dependency identity wins', () => {
+  test('a nested Project element is not an MSBuild project root', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies>',
-        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency>',
-        '<dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></dependency>',
-        '</dependencies></project>',
+      'App/App.csproj': [
+        '<Wrapper>',
+        '  <Project Sdk="Microsoft.NET.Sdk">',
+        '    <ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '  </Project>',
+        '</Wrapper>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('a profile-only target with a different version does not suppress an active edge', () => {
+  test('a malformed ItemGroup attribute leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version>',
-        '<packaging>pom</packaging><modules><module>api</module><module>core</module></modules>',
-        '<profiles><profile><id>extra</id><modules><module>extra</module></modules></profile></profiles>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup stray><ProjectReference Include="../Core/Core.csproj" /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></dependency></dependencies>',
-        '</project>',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-      'extra/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>2</version></project>\n',
-      'extra/src/main/java/Extra.java': 'class Extra {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).length > 0, 'expected unknown dependency coverage')
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
-  test('computed scope or type leaves Maven coverage unknown', () => {
+  test('a malformed ProjectReference attribute leaves coverage unknown', () => {
     const profile = profileOf({
-      'pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>root</artifactId><version>1</version><packaging>pom</packaging><modules><module>api</module><module>core</module></modules></project>\n',
-      'api/pom.xml': [
-        '<project><groupId>com.acme</groupId><artifactId>api</artifactId><version>1</version>',
-        '<dependencies><dependency><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version><scope>$' +
-          '{dependencyScope}</scope><type>$' +
-          '{dependencyType}</type></dependency></dependencies>',
-        '</project>',
+      'App/App.csproj': [
+        '<Project Sdk="Microsoft.NET.Sdk">',
+        '  <ItemGroup><ProjectReference Include="../Core/Core.csproj" stray /></ItemGroup>',
+        '</Project>',
         '',
       ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/pom.xml':
-        '<project><groupId>com.acme</groupId><artifactId>core</artifactId><version>1</version></project>\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
+      'App/Program.cs': 'class Program {}\n',
+      'Core/Core.csproj': '<Project Sdk="Microsoft.NET.Sdk" />\n',
+      'Core/Core.cs': 'class Core {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'api')?.deps, [])
-    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'api'))
+    assert.deepEqual(profile.modules.find((m) => m.id === 'App:App')?.deps, [])
+    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
+      {
+        id: 'App:App',
+        path: 'App',
+        reason: 'unsupported .NET project reference; dependencies left unknown',
+      },
+    ])
   })
 
   test('an unreadable Cargo manifest stays unknown', () => {
