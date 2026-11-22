@@ -509,8 +509,16 @@ export const pythonDetector: Detector = {
         names.set(pythonName(member.id), member.id)
         idsByPath.set(member.path, member.id)
       }
+      const declared = tomlArray(workspaceText, 'members')
+      const hiddenMember = declared.some((declaredPath) => {
+        if (/[*?]/.test(declaredPath)) return false
+        const memberDir = declaredPath.replace(/^\.\//, '').replace(/\/+$/, '')
+        const dir = workspaceBase === '.' ? memberDir : `${workspaceBase}/${memberDir}`
+        return ![...ctx.files].some((file) => file === `${dir}/pyproject.toml` || file.startsWith(`${dir}/`))
+      })
       const uvSafe =
         !oddUvHeader &&
+        !hiddenMember &&
         linesWithin(workspaceText, UV_SAFE) &&
         members.every((member) => (member.manifest === null ? false : linesWithin(member.manifest, UV_SAFE)))
       const rootSources = uvSources(workspaceText)

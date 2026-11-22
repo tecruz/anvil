@@ -593,8 +593,22 @@ export const rustDetector: Detector = {
           for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
           return { ...workspace, shared }
         })
+      // A literal member the walk never saw may still hold an unsupported table. Fail closed
+      // instead of treating its absence as an analysed, dependency-free crate.
+      const declaredMembers =
+        /^\s*(?:workspace\s*\.\s*)?members\s*=\s*\[([\s\S]*?)\]/m
+          .exec(workspaceText ?? '')
+          ?.slice(1)
+          .flatMap((body) => [...body.matchAll(/["']([^"']+)["']/g)].map((m) => m[1] ?? '')) ?? []
+      const hiddenMember = declaredMembers.some((declared) => {
+        if (/[*?]/.test(declared)) return false
+        const memberDir = declared.replace(/^\.\//, '').replace(/\/+$/, '')
+        const dir = workspaceRoot === '.' ? memberDir : `${workspaceRoot}/${memberDir}`
+        return ![...ctx.files].some((file) => file === `${dir}/Cargo.toml` || file.startsWith(`${dir}/`))
+      })
       const cargoSafe =
         !oddWorkspaceHeader &&
+        !hiddenMember &&
         [...ctx.files]
           .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
           .every((file) => {
@@ -1506,12 +1520,11 @@ export const jvmDetector: Detector = {
           // member's dependency list becomes untrustworthy.
           // A remapped project whose script is not visible to the walk cannot be checked; a
           // dependency add there could configure any module, so no module's edges are trusted.
-          const remappedScriptMissing = [...remaps].some(
-            ([id, dir]) => dir !== null && choices.get(id)?.file === undefined,
-          )
+          const declaredIds = new Set(declaredMembers)
+          const scriptMissing = [...declaredIds, ...remaps.keys()].some((id) => choices.get(id)?.file === undefined)
           const scriptAmbiguous =
             rootChoice.ambiguous ||
-            remappedScriptMissing ||
+            scriptMissing ||
             [...directories].filter(([, dir]) => dir !== null).some(([id]) => choices.get(id)?.ambiguous === true)
           for (const [id, dir] of directories) {
             const deps = new Set<string>()

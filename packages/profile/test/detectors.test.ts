@@ -3354,4 +3354,40 @@ describe('module dependency completeness', () => {
     })
     assert.deepEqual((uv.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'root'])
   })
+
+  test('a declared member hidden from the walk leaves its ecosystem unknown', () => {
+    const cargo = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["api", "vendor/core"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n',
+      'vendor/core/Cargo.toml': '[package]\nname = "core"\n[target.\'cfg(unix)\'.dependencies]\nlibc = "0.2"\n',
+    })
+    assert.deepEqual(cargo.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((cargo.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+
+    const gradle = profileOf({
+      'settings.gradle': 'include(":api", ":core", ":vendor")\n',
+      'api/build.gradle': "plugins { id 'java-library' }\n",
+      'core/build.gradle': "plugins { id 'java-library' }\n",
+      'vendor/build.gradle': "project(':api').dependencies.add 'implementation', project(':core')\n",
+    })
+    assert.deepEqual((gradle.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [':api', ':core', ':vendor'])
+
+    const uv = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "vendor/core"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'vendor/core/pyproject.toml': '[project]\nname = "core"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.deepEqual(uv.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((uv.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+  })
+
+  test('a glob wildcard in a uv member pattern is treated as a wildcard', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "packages/worker?"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'packages/worker1/pyproject.toml':
+        '[project]\nname = "worker1"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'worker1'])
+  })
 })
