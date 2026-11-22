@@ -274,6 +274,70 @@ describe('INSTRUCTION_CONFLICT compares verify commands across instruction files
       }
     }
   })
+
+  // Regression: a trailing shell comment is documentation, not part of the invocation.
+  test('a shell comment outside quotes does not create a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```sh\nnpm test # run the full suite\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: a console fence is a transcript. An output line that happens to name a
+  // runner must not be read as an invoked command.
+  test('console output naming a runner is not an invoked command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md':
+        '# Claude\n\n```console\nnpm warn exec The following package was not found and will be installed: vitest@3.2.4\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('a $ prompt in a console fence still marks a command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```console\n$ npm test\nnpm warn exec vitest@3.2.4\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: the `cd ... &&` prefix is a working directory, not shell noise. Two
+  // files running the same script in different packages verify different things.
+  test('the same command in different working directories is a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\ncd packages/api && npm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```sh\ncd packages/web && npm test\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /packages\/api/, f.detail)
+    assert.match(f.detail, /packages\/web/, f.detail)
+  })
+
+  // Regression: `bun run test` runs the package script, while `bun test` is Bun's
+  // built-in runner. Normalising `run` for bun collapsed two different commands.
+  test('bun run test and bun test are different commands', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest' } }),
+      'AGENTS.md': '# App\n\nRun `bun run test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `bun test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /bun run test/, f.detail)
+    assert.match(f.detail, /bun test/, f.detail)
+  })
 })
 
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {

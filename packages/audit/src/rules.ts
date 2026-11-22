@@ -301,31 +301,119 @@ const SHELL_FENCES = new Set([
  * A command must *open* with a runner, allowing only a `$` prompt and a `cd ... &&`
  * prefix. `In the old setup, pnpm test was used` contains a runner but is not an
  * invocation. The runner list is the profile's own, so the two cannot drift apart.
+ *
+ * The `cd` prefix is a working directory, not shell noise: `cd packages/api && npm test`
+ * and `cd packages/web && npm test` verify different packages. It is kept in the
+ * comparison key and stripped only when deciding what kind of command this is.
  */
-const COMMAND_START = new RegExp(
-  `^(?:\\$\\s*)?(?:cd\\s+\\S+\\s*&&\\s*)?(?:\\S*/)?(?:${runnerAlternation()})(?=\\s|;|&|$)`,
-)
+const CD_PREFIX = '(?:cd\\s+(?:"[^"]*"|\'[^\']*\'|\\S+)\\s*&&\\s*)'
+const COMMAND_START = new RegExp(`^(?:\\$\\s*)?(?:${CD_PREFIX})?(?:\\S*/)?(?:${runnerAlternation()})(?=\\s|;|&|$)`)
+const CD_PREFIXES = new RegExp(`^((?:${CD_PREFIX})+)`)
+
+/**
+ * Console and session fences are transcripts, where output sits beside commands.
+ * Only a `$` prompt makes a line in one of them an invocation.
+ */
+const TRANSCRIPT_FENCES = new Set(['console', 'shellsession', 'shell-session'])
+
+/** Runners whose `run <script>` spelling is shorthand for the bare script form. */
+const SCRIPT_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'npx'])
+
+/**
+ * Drop a trailing shell comment, respecting quotes and backslash escapes.
+ *
+ * `npm test # run the full suite` invokes exactly the command `npm test` does.
+ * Comparing the comment as part of the command invented a conflict between two files
+ * that agree. A `#` inside a quoted word is data, not a comment, so it stays.
+ */
+function stripShellComment(line: string): string {
+  let quote: "'" | '"' | null = null
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (ch === '\\') {
+      i++ // escaped character: a literal `#`, or a quote that does not open a string
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    // A comment starts a new word: after whitespace or a shell separator, but not
+    // inside a token such as `test#unit`.
+    if (ch === '#' && (i === 0 || /[\s;&|()]/.test(line[i - 1] as string))) return line.slice(0, i)
+  }
+  return line
+}
+
+/** Split off the `$` prompt and any leading `cd ... &&` prefixes. */
+function commandParts(raw: string): { prefix: string; body: string } {
+  const text = raw.trim().replace(/^\$\s*/, '')
+  const prefix = CD_PREFIXES.exec(text)?.[1] ?? ''
+  return { prefix, body: text.slice(prefix.length) }
+}
+
+/**
+ * The runner and its subcommand: the part of a command that says what is being run.
+ *
+ * Later words are arguments -- or, in a console transcript, output. Classifying on
+ * them made `npm warn exec ... vitest@3.2.4` look like a test command just because the
+ * word `vitest` appeared in the message.
+ */
+function invocationHead(body: string): string {
+  const tokens = body.split(/\s+/).filter((token) => token !== '')
+  const runner = tokens[0]
+  if (runner === undefined) return ''
+  let at = 1
+  if (SCRIPT_RUNNERS.has(runner)) {
+    // Skip flags such as `npm --silent test`, but stop at a word: that is the
+    // subcommand (`test`, `warn`, `exec`, ...).
+    while (tokens[at]?.startsWith('-') === true) at++
+  }
+  const second = tokens[at]
+  if (SCRIPT_RUNNERS.has(runner) && (second === 'run' || second === 'run-script')) {
+    const third = tokens[at + 1]
+    return third === undefined ? `${runner} ${second}` : `${runner} ${second} ${third}`
+  }
+  return second === undefined ? runner : `${runner} ${second}`
+}
+
+interface VerifyCommand {
+  /** Full comparison key: the `cd` prefix stays, because the directory is part of the command. */
+  key: string
+  /** Normalized invocation without the prefix, for deciding the command kind. */
+  body: string
+}
 
 /**
  * Stable comparison key for a documented verify command.
  *
  * The whole invocation is kept: `npm run test:unit` and `npm run test:integration`
  * are different scripts, and comparing only the regex match (`npm run test`) made
- * them look identical. The only normalisation is the genuinely equivalent `run`
- * spelling (`npm run test` == `npm test`), plus shell noise that carries no meaning.
+ * them look identical. The `cd ... &&` prefix is kept too: it names the working
+ * directory, and two directories are two different verifications.
+ *
+ * The only normalisation is the genuinely equivalent `run` spelling for the npm
+ * family (`npm run test` == `npm test`). `bun run test` is deliberately *not*
+ * normalised: it runs the package script, while `bun test` is Bun's built-in runner.
  */
-function verifyCommandKey(raw: string): string {
-  let cmd = raw
-    .trim()
-    .replace(/^\$\s*/, '')
-    .replace(/^(?:cd\s+\S+\s*&&\s*)+/, '')
+function parseVerifyCommand(raw: string): VerifyCommand {
+  const { prefix, body: rawBody } = commandParts(raw)
   // Flags after the script are meaningful; the rest of a shell chain is a different
   // command and is compared on its own line, not glued onto this one.
-  cmd = (cmd.split(/\s*&&\s*|\s*;\s*/)[0] ?? cmd).trim()
-  return cmd
+  const first = (rawBody.split(/\s*&&\s*|\s*;\s*/)[0] ?? rawBody).trim()
+  const body = first
     .replace(/\s+/g, ' ')
     .toLowerCase()
-    .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
+    .replace(/\b(npm|pnpm|yarn)\s+run\s+/g, '$1 ')
+  return { key: `${prefix.replace(/\s+/g, ' ').toLowerCase()}${body}`, body }
 }
 
 const INSTRUCTION_CONFLICT: Rule = {
@@ -410,7 +498,11 @@ const INSTRUCTION_CONFLICT: Rule = {
         if (fenced) {
           if (!SHELL_FENCES.has(fenceLang)) continue
           const shell = raw.trim()
-          if (shell !== '' && !shell.startsWith('#')) candidates.push(shell.replace(/^\$\s*/, ''))
+          if (shell === '' || shell.startsWith('#')) continue
+          // In a transcript, an output line is not an invocation until a `$` prompt
+          // marks it as one.
+          if (TRANSCRIPT_FENCES.has(fenceLang) && !/^\$\s*/.test(shell)) continue
+          candidates.push(shell)
         } else {
           for (const span of raw.matchAll(/`([^`]+)`/g)) {
             if (span[1] !== undefined) candidates.push(span[1])
@@ -418,15 +510,17 @@ const INSTRUCTION_CONFLICT: Rule = {
           const prompt = /^\s*\$\s+(.+)$/.exec(raw)
           if (prompt?.[1] !== undefined) candidates.push(prompt[1])
         }
-        for (const candidate of candidates) {
+        for (const rawCandidate of candidates) {
+          const candidate = stripShellComment(rawCandidate).trim()
           if (!COMMAND_START.test(candidate)) continue
-          const cmd = verifyCommandKey(candidate)
-          if (cmd === '') continue
+          const { key, body } = parseVerifyCommand(candidate)
+          if (key === '') continue
+          const head = invocationHead(body)
           for (const pattern of patterns) {
-            if (!pattern.re.test(cmd)) continue
+            if (!pattern.re.test(head)) continue
             const list = found.get(pattern.kind) ?? []
-            if (!list.some((entry) => entry.cmd === cmd && entry.evidence.startsWith(instruction))) {
-              list.push({ cmd, evidence: `${instruction}:${index + 1}` })
+            if (!list.some((entry) => entry.cmd === key && entry.evidence.startsWith(instruction))) {
+              list.push({ cmd: key, evidence: `${instruction}:${index + 1}` })
             }
             found.set(pattern.kind, list)
             break
