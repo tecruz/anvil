@@ -1010,10 +1010,10 @@ const STYLE_GUIDE: Rule = {
  * the command fails. That is the same class of bug as a stale `AGENTS.md` command, and it
  * belongs in the same report rather than in a quarterly cleanup.
  *
- * The scan reads `.opencode` directly because the profile walker deliberately skips hidden
- * config directories. It only reports references that can be resolved: a missing
- * `package.json` under a `cd` target proves nothing about the script, so that case is left
- * alone rather than turned into a guess.
+ * The scan reads `.opencode` and the other instruction sources directly because the profile
+ * walker deliberately skips hidden config directories and can be truncated. It only reports
+ * references that can be resolved: a missing `package.json` under a `cd` target proves
+ * nothing about the script, so that case is left alone rather than turned into a guess.
  */
 const AGENT_CONFIG: Rule = {
   id: 'AGENT_CONFIG',
@@ -1032,10 +1032,18 @@ const AGENT_CONFIG: Rule = {
         ...filesUnder(root, '.opencode/skills'),
       ]),
     ].filter((f) => f.endsWith('/SKILL.md'))
+    // Other instruction sources an agent actually loads. Read from disk, not from the
+    // profile walk: a truncated walk would otherwise make a stale CLAUDE.md invisible.
+    const instructionFiles = [
+      ...['CLAUDE.md', '.github/copilot-instructions.md', '.cursorrules'].filter((rel) =>
+        existsSync(join(root, ...rel.split('/'))),
+      ),
+      ...filesUnder(root, '.cursor/rules'),
+    ]
     const config = readInstructionsConfig(root)
 
-    if (commands.length === 0 && skills.length === 0 && config.patterns.length === 0) {
-      return na('No agent commands, skills or instruction globs to check')
+    if (commands.length === 0 && skills.length === 0 && instructionFiles.length === 0 && config.patterns.length === 0) {
+      return na('No agent commands, skills, instruction files or instruction globs to check')
     }
 
     const issues: string[] = []
@@ -1046,7 +1054,7 @@ const AGENT_CONFIG: Rule = {
       evidence.push(at)
     }
 
-    for (const file of [...commands, ...skills]) {
+    for (const file of [...commands, ...skills, ...instructionFiles]) {
       const text = readRepoText(root, file)
       // A file that was listed and then disappeared between walk and read is not evidence
       // of a stale reference; it is evidence that the tree moved while we looked at it.
@@ -1150,8 +1158,8 @@ const AGENT_CONFIG: Rule = {
       )
     }
 
-    const scanned = commands.length + skills.length + (config.path === '' ? 0 : 1)
-    const sources = [...commands, ...skills, ...(config.path === '' ? [] : [config.path])]
+    const scanned = commands.length + skills.length + instructionFiles.length + (config.path === '' ? 0 : 1)
+    const sources = [...commands, ...skills, ...instructionFiles, ...(config.path === '' ? [] : [config.path])]
     return pass(`${scanned} agent-config source(s) resolve`, sources.slice(0, 6))
   },
 }
