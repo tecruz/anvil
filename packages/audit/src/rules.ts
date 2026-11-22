@@ -319,6 +319,87 @@ function evidenceLine(text: string): number {
   return 1
 }
 
+/** At most this many evidence entries go in a finding. */
+const EVIDENCE_CAP = 6
+
+/**
+ * Flags that turn a full-suite invocation into a narrower one.
+ *
+ * A `npm test -- --changed` or `npm test --watch` is a real command an agent can run, but it
+ * is documentation of a *subset* command, not coverage for the full suite anvil detected.
+ * Counting it as coverage is the false pass the review found: the agent follows the narrow
+ * command and leaves most of the suite unrun. The list mirrors the changed-files patterns
+ * used by the profile detectors, plus the watch forms a full-suite check can never use.
+ */
+const NARROWING_ARG =
+  /(?:^|\s)(?:--\s*)?(?:--?changed\b|--changedSince\b|--watch(?:All)?(?:=[^\s]*)?|-w\b|-k(?:\s|=)|--onlyChanged\b|--tests?\b|--testNamePattern\b|-t(?:\s|=)|--grep\b|-g(?:\s|=)|--filter\b|--include\b|--path\b|--file\b|--shard\b|nextest\b)/i
+
+/**
+ * The part of the text after an invocation that still belongs to that invocation. Prose
+ * punctuation (a backtick, a newline, a sentence-ending period) ends it; the rest is flags.
+ */
+function invocationArgs(rest: string): string {
+  const cut = /[`\n;]|\.(?=\s|$)/.exec(rest)
+  return cut === null ? rest : rest.slice(0, cut.index)
+}
+
+/**
+ * Whether the text right after a command ends an invocation rather than extending its name.
+ *
+ * `:` and `.` followed by a name character continue a script (`test:fast`, `test.unit`), so
+ * they cannot terminate it. A lone trailing `.` is prose punctuation and does terminate it.
+ */
+function endsInvocation(rest: string): boolean {
+  if (rest === '') return true
+  const first = rest[0] as string
+  if (first === ':') return false
+  if (first === '.') {
+    const second = rest[1]
+    return second === undefined || !/[a-z0-9:._-]/i.test(second)
+  }
+  return !/[a-z0-9_-]/i.test(first)
+}
+
+/**
+ * The 1-based line where `normalized` is written as a complete invocation, or null.
+ *
+ * Each line is checked on its own: a command split across two instruction files is not a
+ * command anyone can copy. A match needs a leading token boundary (so `npm test` is not found
+ * inside `pnpm test`), a terminator that is not script-name punctuation, and no narrowing
+ * flags in its arguments.
+ */
+function documentsOnLine(lines: readonly string[], normalized: string): number | null {
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?<![a-z0-9:._-])${escaped}`, 'gi')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    for (const match of line.matchAll(pattern)) {
+      const rest = line.slice((match.index ?? 0) + (match[0]?.length ?? 0))
+      if (!endsInvocation(rest)) continue
+      if (NARROWING_ARG.test(invocationArgs(rest))) continue
+      return i + 1
+    }
+  }
+  return null
+}
+
+/**
+ * Bound a finding's evidence without losing the sources it inspected.
+ *
+ * A flat `.slice(0, 6)` used to drop the last instruction file once four detected commands
+ * had contributed four `package.json` lines -- so a finding about three files cited two.
+ * Every inspected source keeps at least one entry; only the remaining citations are capped.
+ */
+function capEvidence(entries: readonly string[], sources: readonly string[]): string[] {
+  const unique = [...new Set(entries.filter((e) => e !== ''))]
+  if (unique.length <= EVIDENCE_CAP) return unique
+  const required = sources
+    .map((path) => unique.find((e) => e.startsWith(`${path}:`)) ?? path)
+    .filter((e, i, all) => all.indexOf(e) === i)
+  const rest = unique.filter((e) => !required.includes(e))
+  return [...required, ...rest].slice(0, Math.max(EVIDENCE_CAP, required.length))
+}
+
 /**
  * A repository can name one generic command in its instructions and still leave the
  * commands anvil actually detected undocumented.
@@ -364,7 +445,8 @@ const VERIFY_DOC_COVERAGE: Rule = {
     // the engine's read of a directory entry throws EISDIR and contributes nothing.
     const instructions = verifyInstructionSources(ctx)
     const text = instructions.text
-    const instructionEvidence = (): string[] => instructions.sources.map((s) => `${s.path}:${s.line}`).slice(0, 6)
+    const sourcePaths = instructions.sources.map((s) => s.path)
+    const fallbackEvidence = (): string[] => instructions.sources.map((s) => `${s.path}:${s.line}`)
     const target =
       ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
       instructions.sources[0]?.path ??
@@ -382,7 +464,7 @@ const VERIFY_DOC_COVERAGE: Rule = {
       const names = detected.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
       return warn(
         `Instructions are blank, but the repository has detected verify commands: ${names}. An agent that cannot see the real command will invent or omit the verify step.`,
-        [...new Set([...commandEvidence(), ...instructionEvidence()])].slice(0, 6),
+        capEvidence([...commandEvidence(), ...fallbackEvidence()], sourcePaths),
         {
           ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
         },
@@ -390,7 +472,7 @@ const VERIFY_DOC_COVERAGE: Rule = {
     }
 
     const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
-    const documented: string[] = []
+    const documented: Array<{ kind: string; path: string; line: number }> = []
     // `npm run test` and `npm test` are the same command: npm has a built-in `test`
     // shorthand. `npm lint`, `npm build` and `npm typecheck` are NOT valid npm commands --
     // npm answers "Unknown command" and exits 1 -- so `run` is kept for every other
@@ -402,26 +484,42 @@ const VERIFY_DOC_COVERAGE: Rule = {
         .replace(/\s+/g, ' ')
         .replace(/\bnpm\s+run\s+test\b/g, 'npm test')
         .trim()
-    const instructionText = canonical(text)
-    // A script name may contain `:`, `.`, `_` and `-`, so the end of the matched command
-    // must be a full token boundary: otherwise `npm test` matches `npm test:fast`. The
-    // leading boundary still stops `npm test` matching inside `pnpm test`.
-    const token = 'a-z0-9:._-'
+    // Canonicalize one line at a time: collapsing the whole file's whitespace would erase
+    // the line numbers the evidence has to cite. Each source is searched separately too, so
+    // a command split across two files cannot pass as documented.
+    const prepared = instructions.sources.map((source) => ({
+      ...source,
+      lines: source.text.split('\n').map((line) => canonical(line)),
+    }))
     for (const entry of detected) {
       const normalized = canonical(entry.cmd)
-      const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const pattern = new RegExp(`(^|[^${token}])${escaped}([^${token}]|$)`, 'i')
-      if (pattern.test(instructionText)) {
-        documented.push(entry.kind)
-        continue
+      let found: { path: string; line: number } | null = null
+      for (const source of prepared) {
+        const line = documentsOnLine(source.lines, normalized)
+        if (line !== null) {
+          found = { path: source.path, line }
+          break
+        }
       }
-      missing.push(entry)
+      if (found !== null) {
+        documented.push({ kind: entry.kind, path: found.path, line: found.line })
+      } else {
+        missing.push(entry)
+      }
     }
+
+    const documentedEvidence = documented.map((d) => `${d.path}:${d.line}`)
+    // A source that actually documents a command is already represented by that line; only
+    // sources with no match need the first-command fallback to stay in the provenance.
+    const documentedPaths = new Set(documented.map((d) => d.path))
+    const otherEvidence = instructions.sources
+      .filter((s) => !documentedPaths.has(s.path))
+      .map((s) => `${s.path}:${s.line}`)
 
     if (missing.length === 0) {
       return pass(
         `${documented.length} detected verify command kind(s) appear in the instructions`,
-        instructionEvidence(),
+        capEvidence([...documentedEvidence, ...otherEvidence], sourcePaths),
       )
     }
 
@@ -432,12 +530,14 @@ const VERIFY_DOC_COVERAGE: Rule = {
         : `Detected verify commands are not documented: ${names}.`
     return warn(
       `${prefix} An agent that cannot see the real command will invent or omit the verify step.`,
-      [
-        ...new Set([
+      capEvidence(
+        [
           ...missing.map((d) => d.evidence).filter((e): e is string => e !== null && e !== ''),
-          ...instructionEvidence(),
-        ]),
-      ].slice(0, 6),
+          ...documentedEvidence,
+          ...otherEvidence,
+        ],
+        sourcePaths,
+      ),
       {
         ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
       },

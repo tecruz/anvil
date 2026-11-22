@@ -236,6 +236,133 @@ describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions'
     const profile = profileOf({ 'README.md': '# Docs\n' })
     assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')
   })
+
+  // PR94 second review, blocker 1, repro A: a full stop ends a sentence, not a script name.
+  test('a prose mention ending in a period documents the detected command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'AGENTS.md': '# App\n\nRun npm test.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  // PR94 second review, blocker 1, repro B: `npm test -- --changed` is a subset, not the
+  // full suite anvil detected, so naming it does not document the detected command.
+  test('a changed-only invocation does not document the full-suite command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'AGENTS.md': '# App\n\nRun `npm test -- --changed`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test\b/)
+  })
+
+  test('watch and changed flags in other spellings are not full-suite coverage', () => {
+    for (const documented of ['npm test --changed', 'npm test --watch', 'npm test -w', 'npm test -- --watch']) {
+      const profile = profileOf({
+        'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+        'AGENTS.md': `# App\n\nRun \`${documented}\`.\n`,
+        'src/index.ts': 'export const app = 1\n',
+      })
+      const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+      assert.equal(f.status, 'warn', `${documented}: ${f.detail}`)
+    }
+  })
+
+  // PR94 second review, blocker 2, repro A: a title that happens to say "(npm)" is not where
+  // the commands are. Each covered command must carry the line it is actually written on.
+  test('each covered command cites the line where it is actually documented', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: {
+          test: 'node --test',
+          build: 'tsc -p tsconfig.json',
+          lint: 'biome check',
+          typecheck: 'tsc --noEmit',
+        },
+      }),
+      'AGENTS.md': [
+        '# Monorepo (npm)', // 1 — mentions npm, documents nothing
+        '', // 2
+        '## Commands', // 3
+        '', // 4
+        '- Test: `npm run test`', // 5
+        '- Build: `npm run build`', // 6
+        '- Lint: `npm run lint`', // 7
+        '- Typecheck: `npm run typecheck`', // 8
+        '', // 9
+      ].join('\n'),
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+    for (const line of [5, 6, 7, 8]) {
+      assert.ok(f.evidence.includes(`AGENTS.md:${line}`), `expected AGENTS.md:${line}, got ${f.evidence.join(', ')}`)
+    }
+    assert.ok(
+      !f.evidence.includes('AGENTS.md:1'),
+      `a title that merely says "npm" is not evidence, got ${f.evidence.join(', ')}`,
+    )
+  })
+
+  // PR94 second review, blocker 2, repro B: four missing scripts carry four package.json
+  // lines, and a flat six-entry cap used to drop GEMINI.md from the cited sources entirely.
+  test('every inspected instruction file stays in the evidence under the cap', () => {
+    const manifest = [
+      '{',
+      '  "scripts": {',
+      '    "test": "node --test",',
+      '    "build": "tsc -p tsconfig.json",',
+      '    "lint": "biome check",',
+      '    "typecheck": "tsc --noEmit"',
+      '  }',
+      '}',
+    ].join('\n')
+    const profile = profileOf({
+      'package.json': manifest,
+      'AGENTS.md': '# App\n\nSee the docs.\n',
+      'CLAUDE.md': '# Claude\n\nNotes.\n',
+      'GEMINI.md': '# Gemini\n\nNotes.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    for (const path of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']) {
+      assert.ok(
+        f.evidence.some((e) => e.startsWith(`${path}:`)),
+        `expected ${path} in evidence, got ${f.evidence.join(', ')}`,
+      )
+    }
+  })
+
+  // PR94 second review, blocker 2, repro C: the Flutter detector already knows the line that
+  // declares the SDK; the finding used to drop it and cite a bare pubspec.yaml.
+  test('the detector declaring line reaches the finding', () => {
+    const pubspec = [
+      'name: app',
+      'environment:',
+      '  sdk: ">=3.0.0 <4.0.0"',
+      'dependencies:',
+      '  flutter:',
+      '    sdk: flutter',
+      '',
+    ].join('\n')
+    const profile = profileOf({
+      'pubspec.yaml': pubspec,
+      'AGENTS.md': '# App\n\nSee the docs.\n',
+      'lib/main.dart': 'void main() {}\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e === 'pubspec.yaml:5'),
+      `expected the declaring line pubspec.yaml:5, got ${f.evidence.join(', ')}`,
+    )
+  })
 })
 
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
