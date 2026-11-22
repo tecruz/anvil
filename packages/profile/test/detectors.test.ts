@@ -2822,4 +2822,82 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
   })
+
+  test('a declared member skipped by the walk leaves its ecosystem unknown', () => {
+    const cargo = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["api", "build/core"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n[dependencies]\ncore = { path = "../build/core" }\n',
+      'build/core/Cargo.toml': '[package]\nname = "core"\n[target.\'cfg(unix)\'.dependencies]\nlibc = "0.2"\n',
+    })
+    assert.deepEqual(cargo.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((cargo.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+
+    const gradle = profileOf({
+      'settings.gradle': 'include(":api", ":core")\nproject(":core").projectDir = file("build/core")\n',
+      'api/build.gradle': "plugins { id 'java-library' }\n",
+      'build/core/build.gradle':
+        "plugins { id 'java-library' }\nproject(':api').dependencies.add 'implementation', project(':core')\n",
+    })
+    assert.deepEqual(gradle.modules.find((m) => m.id === ':api')?.deps, [])
+    assert.deepEqual((gradle.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [':api', ':core'])
+
+    const uv = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "build/core"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'build/core/pyproject.toml': '[project]\nname = "core"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.deepEqual(uv.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((uv.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+  })
+
+  test('literal paths with special characters and dot-prefixed members still resolve', () => {
+    const cargo = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["api", "crates/*"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n[dependencies]\ncore = { path = "../crates/core#stable" }\n',
+      'crates/core#stable/Cargo.toml': '[package]\nname = "core"\n',
+    })
+    assert.deepEqual(cargo.modules.find((m) => m.id === 'api')?.deps, ['core'])
+
+    const uv = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "packages/*"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { path = "../packages/core}stable" }\n',
+      'packages/core}stable/pyproject.toml': '[project]\nname = "core"\n',
+    })
+    assert.deepEqual(uv.modules.find((m) => m.id === 'api')?.deps, ['core'])
+
+    const dotPrefixed = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "./core"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'core/pyproject.toml': '[project]\nname = "core"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.deepEqual(dotPrefixed.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.deepEqual((dotPrefixed.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'core'])
+  })
+
+  test('an escaped Gradle remap and quoted root headers fail closed', () => {
+    const gradle = profileOf({
+      'settings.gradle.kts': 'include(":api", ":core")\nproject(":api").projectDir = file("modules/' + '\\u0061pi")\n',
+      'modules/api/build.gradle.kts': 'plugins { base }\ndependencies { implementation(project(":core")) }\n',
+      'modules/u0061pi/build.gradle.kts': 'plugins { base }\n',
+      'core/build.gradle.kts': 'plugins { base }\n',
+    })
+    assert.deepEqual(gradle.modules.find((m) => m.id === ':api')?.deps, [])
+    assert.deepEqual((gradle.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [':api', ':core'])
+
+    const cargo = profileOf({
+      'Cargo.toml': '["package"]\nname = "root"\n[workspace]\nmembers = ["api"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n[dependencies]\nroot = { path = ".." }\n',
+    })
+    assert.deepEqual((cargo.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'root'])
+
+    const uv = profileOf({
+      'pyproject.toml': '["project"]\nname = "root"\n[tool.uv.workspace]\nmembers = ["api"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["root"]\n[tool.uv.sources]\nroot = { workspace = true }\n',
+    })
+    assert.deepEqual((uv.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'root'])
+  })
 })
