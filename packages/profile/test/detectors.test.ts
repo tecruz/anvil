@@ -3746,4 +3746,60 @@ describe('module dependency completeness', () => {
     })
     assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'worker1'])
   })
+
+  test('hidden glob members and alternate workspace declarations fail closed', () => {
+    const cargo = profileOf({
+      'Cargo.toml': '[workspace]\nmembers = ["api", "crates/*"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n',
+      'crates/vendor/Cargo.toml': '[package]\nname = "vendor"\n[target.\'cfg(unix)\'.dependencies]\nlibc = "0.2"\n',
+    })
+    assert.ok((cargo.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+
+    const uv = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "packages/*"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'packages/vendor/pyproject.toml': '[project]\nname = "vendor"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.ok((uv.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+
+    const inlineCargo = profileOf({
+      'Cargo.toml': 'workspace = { members = ["api", "core"] }\n',
+      'api/Cargo.toml': '[package]\nname = "api"\n',
+      'core/Cargo.toml': '[package]\nname = "core"\n',
+    })
+    assert.deepEqual((inlineCargo.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'core'])
+
+    const dottedUv = profileOf({
+      'pyproject.toml': '[tool.uv]\nworkspace.members = ["api", "core"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'core/pyproject.toml': '[project]\nname = "core"\n',
+    })
+    assert.deepEqual((dottedUv.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'core'])
+  })
+
+  test('trailing slashes in member paths still resolve and gate', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "core/"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'core/pyproject.toml': '[project]\nname = "core"\noptional-dependencies = { tests = ["pytest"] }\n',
+    })
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'core'])
+  })
+
+  test('an implicit Gradle parent with a checked script fails closed', () => {
+    const profile = profileOf({
+      'settings.gradle':
+        'include(":vendor:core", ":api", ":core")\nproject(":vendor:core").projectDir = file("inner")\n',
+      'api/build.gradle': "plugins { id 'java-library' }\n",
+      'core/build.gradle': "plugins { id 'java-library' }\n",
+      'inner/build.gradle': "plugins { id 'java-library' }\n",
+      'vendor/build.gradle': "project(':api').dependencies.add 'implementation', project(':core')\n",
+    })
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [
+      ':api',
+      ':core',
+      ':vendor',
+      ':vendor:core',
+    ])
+  })
 })

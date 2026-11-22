@@ -530,7 +530,7 @@ export const rustDetector: Detector = {
     const workspaceManifest = [...ctx.files].find((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
       const text = read(ctx, file)
-      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*\.)/m.test(text)
+      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*[.=])/m.test(text)
     })
     const oddWorkspaceHeader = [...ctx.files].some((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
@@ -600,9 +600,14 @@ export const rustDetector: Detector = {
           ?.slice(1)
           .flatMap((body) => [...body.matchAll(/["']([^"']+)["']/g)].map((m) => m[1] ?? '')) ?? []
       const hiddenMember = declaredMembers.some((declared) => {
-        if (/[*?]/.test(declared)) return false
         const memberDir = declared.replace(/^\.\//, '').replace(/\/+$/, '')
         const dir = workspaceRoot === '.' ? memberDir : `${workspaceRoot}/${memberDir}`
+        // A glob that matches no file visible to the walk may be hiding a skipped manifest.
+        const pattern = /[*?]/.test(memberDir) ? dir : null
+        if (pattern !== null) {
+          const base = pattern.slice(0, Math.max(0, pattern.search(/[*?]/))).replace(/\/+$/, '')
+          return ![...ctx.files].some((file) => file === base || file.startsWith(`${base}/`))
+        }
         return ![...ctx.files].some((file) => file === `${dir}/Cargo.toml` || file.startsWith(`${dir}/`))
       })
       const cargoSafe =
@@ -1890,8 +1895,7 @@ export const jvmDetector: Detector = {
           // member's dependency list becomes untrustworthy.
           // A remapped project whose script is not visible to the walk cannot be checked; a
           // dependency add there could configure any module, so no module's edges are trusted.
-          const declaredIds = new Set(declaredMembers)
-          const scriptMissing = [...declaredIds, ...remaps.keys()].some((id) => choices.get(id)?.file === undefined)
+          const scriptMissing = [...members, ...remaps.keys()].some((id) => choices.get(id)?.file === undefined)
           const scriptAmbiguous =
             rootChoice.ambiguous ||
             scriptMissing ||
