@@ -137,6 +137,14 @@ export interface ProfileDiagnostics {
   fileLimit: number
   /** Detectors that threw, with the reason. */
   failedDetectors: Array<{ id: string; error: string }>
+  /**
+   * Modules whose internal dependencies were not resolved by any detector.
+   *
+   * Additive in schema version 1: an older profile without this field is treated as "unknown
+   * which modules were analysed", never as "all dependencies resolved". A module in this list
+   * has `deps: []` because no resolver ran for its ecosystem, not because it has no edges.
+   */
+  unanalysedDeps?: Array<{ id: string; path: string; reason: string }>
 }
 
 export interface ProjectProfile {

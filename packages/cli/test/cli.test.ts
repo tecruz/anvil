@@ -12,10 +12,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
+import { emptyProfile } from '@anvil/profile'
+import { renderStackLocations, stackLocations } from '../src/commands/doctor.ts'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
 
@@ -1257,5 +1259,91 @@ describe('per-command help', () => {
     assert.match(res.stdout, /USAGE/)
     assert.match(res.stdout, /anvil config <show\|path\|init>/)
     assert.match(res.stdout, /--json/)
+  })
+})
+
+describe('doctor per-module stack summaries', () => {
+  test('groups the existing stacks by the directory that produced their evidence', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [
+        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
+        { id: 'typescript', version: null, evidence: ['apps/web/tsconfig.json'] },
+        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
+        { id: 'node', version: null, evidence: ['package.json'] },
+      ],
+    }
+    assert.deepEqual(stackLocations(profile), [
+      { dir: '.', stacks: ['node'], evidence: 'package.json' },
+      { dir: 'apps/web', stacks: ['nextjs', 'typescript'], evidence: 'apps/web/package.json' },
+      { dir: 'services/api', stacks: ['fastapi'], evidence: 'services/api/pyproject.toml' },
+    ])
+    // The machine-readable array is not replaced by the presentation summary.
+    assert.equal(profile.stacks.length, 4)
+  })
+
+  test('a stack shared by two directories appears in both locations', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'node', version: null, evidence: ['apps/web/package.json', 'apps/worker/package.json'] }],
+    }
+    assert.deepEqual(stackLocations(profile), [
+      { dir: 'apps/web', stacks: ['node'], evidence: 'apps/web/package.json' },
+      { dir: 'apps/worker', stacks: ['node'], evidence: 'apps/worker/package.json' },
+    ])
+  })
+
+  test("doctor's human report renders the grouped stacks", () => {
+    // Use the renderer rather than a fixture: today's detectors put stack evidence at the
+    // repository root, and this is a presentation of whatever `ProjectProfile.stacks` holds.
+    const ctx = { style: { bold: (v: string) => v, dim: (v: string) => v } } as never
+    const located = stackLocations({
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [
+        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
+        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
+      ],
+    })
+    const text = renderStackLocations(ctx, located)
+    assert.match(text, /Stack by location/)
+    assert.match(text, /apps\/web\s+nextjs/)
+    assert.match(text, /services\/api\s+fastapi/)
+    assert.equal(renderStackLocations(ctx, located.slice(0, 1)), '')
+  })
+
+  test('a repo with one stack location has no second table to read', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'node', version: null, evidence: ['package.json'] }],
+    }
+    assert.equal(stackLocations(profile).length, 1)
+  })
+
+  test('a stack with no evidence is shown as unknown, not silently dropped', () => {
+    const profile = {
+      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
+      stacks: [{ id: 'unknown', version: null, evidence: [] }],
+    }
+    assert.deepEqual(stackLocations(profile), [{ dir: '.', stacks: ['unknown'], evidence: 'unknown' }])
+  })
+})
+
+describe('doctor module dependency diagnostics', () => {
+  test('an unanalysed module is printed as unknown, not as an empty dependency list', () => {
+    const dir = tempDir('anvil-profile-unanalysed-')
+    for (const [rel, content] of Object.entries({
+      'services/api.csproj':
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+    })) {
+      const target = join(dir, ...rel.split('/'))
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, content, 'utf8')
+    }
+    const res = runAnvil(['profile', '--profile', dir])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /unknown \(not analysed\)/)
+    const doctor = runAnvil(['doctor', '--profile', dir, '--json'])
+    const report = jsonOf(doctor).data as { degraded: Array<{ reason: string }> }
+    assert.ok(report.degraded.some((d) => /dependency graph incomplete/.test(d.reason)))
   })
 })
