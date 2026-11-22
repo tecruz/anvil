@@ -43,10 +43,32 @@ function hasBlockComment(raw: string): boolean {
   return false
 }
 
+/** Strip a TOML `#` comment only when it is outside a quoted string. */
+function stripHashComment(raw: string): string {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === '\\') {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '#') return raw.slice(0, i)
+  }
+  return raw
+}
+
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
     if (hasBlockComment(raw)) return false
-    const line = raw.replace(/#.*$/, '').trimEnd()
+    const line = stripHashComment(raw).trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
   }
@@ -145,14 +167,19 @@ function pythonName(name: string): string {
   return name.toLowerCase().replace(/[-_.]+/g, '-')
 }
 
+/** Regex source for a dotted `tool.uv.workspace.<leaf>` key, tolerant of quotes and spacing. */
+function dottedWorkspaceKey(leaf: string): string {
+  return `["']?tool["']?\\s*\\.\\s*["']?uv["']?\\s*\\.\\s*["']?workspace["']?\\s*\\.\\s*${leaf}`
+}
+
 /** The directories a uv workspace declares, after its `exclude` globs. */
 function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
   const section = tomlSection(
     text,
     /^\s*(?:\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]|["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\.)/m,
   )
-  const declared = section !== null ? tomlArray(section, 'members') : tomlArray(text, 'tool\\.uv\\.workspace\\.members')
-  const excluded = section !== null ? tomlArray(section, 'exclude') : tomlArray(text, 'tool\\.uv\\.workspace\\.exclude')
+  const declared = section !== null ? tomlArray(section, 'members') : tomlArray(text, dottedWorkspaceKey('members'))
+  const excluded = section !== null ? tomlArray(section, 'exclude') : tomlArray(text, dottedWorkspaceKey('exclude'))
   const projects = [...ctx.files]
     .filter((file) => file === 'pyproject.toml' || file.endsWith('/pyproject.toml'))
     .map((file) => (file === 'pyproject.toml' ? '.' : file.slice(0, -'/pyproject.toml'.length)))
@@ -484,7 +511,14 @@ export const pythonDetector: Detector = {
         members.every((member) => (member.manifest === null ? false : linesWithin(member.manifest, UV_SAFE)))
       const rootSources = uvSources(workspaceText)
       for (const member of members) {
-        if (member.manifest === null) continue
+        if (member.manifest === null) {
+          // An unreadable manifest cannot prove its dependencies; the module stays unknown
+          // and keeps no edges, even if another detector claimed the same module id.
+          draft.depsUnknownReasons.set(member.id, 'unsupported dependency syntax; dependencies left unknown')
+          const module = draft.modules.find((candidate) => candidate.id === member.id)
+          if (module !== undefined) module.deps = []
+          continue
+        }
         const resolved = uvDependencies(
           member.manifest,
           names,
