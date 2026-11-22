@@ -25,6 +25,23 @@ import { matchesGlob } from '../general.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 
+function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/#.*$/, '').trim()
+    if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
+    return false
+  }
+  return true
+}
+const UV_SAFE = [
+  /\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]/,
+  /^(?:name|version)\s*=\s*["'][^"']+["']$/,
+  /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@]+["']\s*,?\s*)*\]$/,
+  /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]]+["']\s*,?\s*)*\]$/,
+  /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
+  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
+]
+
 /** Line-based readers for the flat formats Python uses. */
 function readTomlish(ctx: DetectorContext, relPath: string): string | null {
   const { text } = readText(join(ctx.root, ctx.resolve(relPath)))
@@ -419,6 +436,9 @@ export const pythonDetector: Detector = {
         names.set(pythonName(member.id), member.id)
         idsByPath.set(member.path, member.id)
       }
+      const uvSafe =
+        linesWithin(workspaceText, UV_SAFE) &&
+        members.every((member) => (member.manifest === null ? false : linesWithin(member.manifest, UV_SAFE)))
       const rootSources = uvSources(workspaceText)
       for (const member of members) {
         if (member.manifest === null) continue
@@ -431,7 +451,7 @@ export const pythonDetector: Detector = {
           rootSources,
           workspaceBase,
         )
-        if (resolved.unsupported) {
+        if (!uvSafe || resolved.unsupported) {
           draft.depsUnknownReasons.set(member.id, 'unsupported dependency syntax; dependencies left unknown')
           continue
         }
