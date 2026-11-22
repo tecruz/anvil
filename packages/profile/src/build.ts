@@ -198,7 +198,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
       fileLimit,
       failedDetectors: failedDetectors.map((d) => ({ ...d })),
       unanalysedDeps: draft.modules
-        .filter((m) => !draft.depsAnalysed.has(m.id))
+        .filter((m) => !draft.depsAnalysed.has(m.id) || draft.depsUnknownReasons.has(m.id))
         .map((m) => ({
           id: m.id,
           path: m.path,
