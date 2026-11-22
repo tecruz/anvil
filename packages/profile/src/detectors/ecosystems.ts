@@ -348,10 +348,32 @@ function hasBlockComment(raw: string): boolean {
   return false
 }
 
+/** Strip a TOML/Groovy `#` comment only when it is outside a quoted string. */
+function stripHashComment(raw: string): string {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === '\\') {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '#') return raw.slice(0, i)
+  }
+  return raw
+}
+
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
     if (hasBlockComment(raw)) return false
-    const line = raw.replace(/#.*$/, '').trimEnd()
+    const line = stripHashComment(raw).trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
   }
@@ -372,7 +394,7 @@ const GRADLE_SAFE = [
   /^plugins\s*\{[^}]*\}$/,
   /^rootProject\.name\s*=\s*["'][^"'$]+["']$/,
   /^include\(["'][\w:.-]+["'](?:,\s*["'][\w:.-]+["'])*\)$/,
-  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"']+["']\)$/,
+  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"'$]+["']\)$/,
   /^dependencies\s*\{\s*(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)\s*\}$/,
   /^dependencies\s*\{$/,
   /^\}$/,
@@ -506,7 +528,7 @@ export const rustDetector: Detector = {
     const workspaceManifest = [...ctx.files].find((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
       const text = read(ctx, file)
-      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|workspace\s*\.)/m.test(text)
+      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*\.)/m.test(text)
     })
     const oddWorkspaceHeader = [...ctx.files].some((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
@@ -560,7 +582,8 @@ export const rustDetector: Detector = {
         }))
         .filter(
           (workspace) =>
-            workspace.text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|workspace\s*\.)/m.test(workspace.text),
+            workspace.text !== null &&
+            /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*\.)/m.test(workspace.text),
         )
         .map((workspace) => {
           const shared = new Map<string, CargoDependencyEntry>()
