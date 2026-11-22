@@ -106,9 +106,11 @@ Two consequences worth knowing:
   tool said.
 - **The dashboard is a view, not a second implementation.** `anvil dashboard` binds to
   loopback, requires a one-time session token, and presents `doctor`, `ready`, `plan`,
-  `brief` and `crew status` JSON beside a read-only view of the staging bundle. A failed
-  source is reported beside the others, and verification is `unavailable` rather than
-  green by absence ([ADR-0025](adr/0025-local-dashboard.md)).
+  `profile`, `brief` and `crew status` JSON beside a read-only view of the staging bundle.
+  A task brief combines those sources for one entry point — a pasted ticket or a plan
+  suggestion — without running a command or writing to the repository. A failed source is
+  reported beside the others, and verification is `unavailable` rather than green by
+  absence ([ADR-0025](adr/0025-local-dashboard.md)).
 
 ## Tickets and providers
 

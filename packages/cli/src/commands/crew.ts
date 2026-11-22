@@ -5,6 +5,20 @@
  * runs every worktree's verification under a concurrency policy the tool will explain.
  */
 
+import { createHash } from 'node:crypto'
+import {
+  closeSync,
+  existsSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   AnvilError,
   ErrorCode,
@@ -15,6 +29,7 @@ import {
   runProcess,
   tokenizeCommand,
 } from '@anvil/core'
+import { gitDirFromMetadata, readOnlyGitEnv } from '@anvil/git'
 import { requireCapability } from '@anvil/providers'
 import type { Ticket, TicketRef } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
@@ -54,6 +69,7 @@ export const crewCommand: Command = {
     '--provider <p>    ticket provider for the whole crew: local (default), github or jira',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
     '--force-parallel  ignore the cache policy and use --jobs literally',
+    '--record          with `verify`, write bounded revision-bound evidence for the dashboard',
     '--cost            with `status`, show what each agent session cost',
     '',
     'Cost is read from ccusage, which prices the usage logs the agents already wrote on',
@@ -70,6 +86,7 @@ export const crewCommand: Command = {
     base: { type: 'string' },
     jobs: { type: 'string' },
     'force-parallel': { type: 'boolean' },
+    record: { type: 'boolean' },
     cost: { type: 'boolean' },
     key: { type: 'string', multiple: true },
   },
@@ -216,6 +233,199 @@ async function crewUpFlow(
 // crew verify
 // ---------------------------------------------------------------------------
 
+/** Bounded, revision-bound verification facts produced only by an explicit `crew verify --record`. */
+const VERIFICATION_EVIDENCE_PREFIX = '.anvil/verification-evidence-'
+const VERIFICATION_EVIDENCE_MAX_BYTES = 64 * 1024
+
+export interface EvidenceStore {
+  /** The worktree root that owns the `.anvil` directory. */
+  root: string
+  /** A stable key derived from the Git metadata directory, so separate repositories cannot collide. */
+  key: string
+}
+
+/**
+ * Resolve the evidence store from Git metadata without starting a process. The metadata parser and
+ * path normalization live in `@anvil/git`, the single source of truth for git paths; this command
+ * only derives the store location and key. Unreadable metadata makes evidence unavailable rather
+ * than preventing the dashboard from starting.
+ */
+export function evidenceStore(repoRoot: string): EvidenceStore | null {
+  const gitDir = gitDirFromMetadata(repoRoot)
+  if (gitDir === null) return null
+  return {
+    root: dirname(gitDir),
+    key: createHash('sha256').update(gitDir).digest('hex').slice(0, 16),
+  }
+}
+
+export function verificationEvidencePath(store: EvidenceStore): string {
+  return join(store.root, `${VERIFICATION_EVIDENCE_PREFIX}${store.key}.json`)
+}
+
+function assertWritableDirectory(path: string): void {
+  if (!existsSync(path)) return
+  const info = lstatSync(path)
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to write verification evidence through a link', {
+      hint: `Remove or replace the entry at ${path}.`,
+    })
+  }
+}
+
+/**
+ * Read the exact opened file, never a path that can be swapped between a stat and a read.
+ *
+ * `O_NOFOLLOW` rejects a final symlink and `O_NONBLOCK` stops a FIFO swapped in after an advisory
+ * check from hanging the read; the `fstat` on the *opened descriptor* is the authoritative check.
+ * The buffer is bounded by that stat before any bytes are read.
+ */
+function readBoundedFile(path: string): string {
+  const parent = dirname(path)
+  if (existsSync(parent)) {
+    const parentInfo = lstatSync(parent)
+    if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
+      throw new Error('Verification evidence store is not a regular directory')
+    }
+  }
+  // On Windows O_NOFOLLOW is unavailable; this check is advisory but still rejects a known link.
+  const info = lstatSync(path)
+  if (info.isSymbolicLink()) throw new Error('Verification evidence is not a regular file')
+  const fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
+  try {
+    const stats = fstatSync(fd)
+    if (!stats.isFile() || stats.size > VERIFICATION_EVIDENCE_MAX_BYTES) {
+      throw new Error('Verification evidence is not a bounded regular file')
+    }
+    const size = stats.size
+    const buffer = Buffer.allocUnsafe(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) {
+      throw new Error('Verification evidence is not a bounded regular file')
+    }
+    return buffer.subarray(0, size).toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** The caller passes the resolved evidence store; this reader never launches Git. */
+export function readVerificationEvidence(store: EvidenceStore): unknown[] {
+  const path = verificationEvidencePath(store)
+  if (!existsSync(path)) return []
+  try {
+    const parsed: unknown = JSON.parse(readBoundedFile(path))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+export async function worktreeRevision(worktree: string): Promise<string | null> {
+  const head = await runProcess('git', ['rev-parse', 'HEAD'], { cwd: worktree })
+  if (head.exitCode !== 0) return null
+  const status = await runProcess('git', ['status', '--porcelain'], { cwd: worktree })
+  if (status.exitCode !== 0) return null
+  return `${head.stdout.trim()}${status.stdout.trim() === '' ? '' : '-dirty'}`
+}
+
+/**
+ * Sample only the HEAD commit for a read-only consumer such as dashboard startup.
+ *
+ * `git status` can refresh the index on disk and run configured fsmonitor or filter helpers, so a
+ * page load must not call it. The same read-only guards the setup probe uses are applied here; the
+ * result is a commit id, never a dirty-state claim.
+ */
+export async function headRevision(worktree: string): Promise<string | null> {
+  const head = await runProcess(
+    'git',
+    // --no-lazy-fetch keeps a promisor repository from fetching a missing commit; on older Git
+    // the unknown option makes the probe fail closed and the revision is reported as unknown.
+    ['--no-optional-locks', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', 'rev-parse', '--verify', 'HEAD^{commit}'],
+    { cwd: worktree, env: readOnlyGitEnv() },
+  )
+  return head.exitCode === 0 ? head.stdout.trim() : null
+}
+
+export type EvidenceRecord = {
+  command: string
+  revision: string | null
+  exitCode: number | null
+  timestamp: string
+}
+
+/**
+ * Keep the bounded set of evidence rows to write. Completion order (timestamp) wins over claim
+ * order; displayable facts win over rejected rows; incomplete rows are retained so the dashboard
+ * can report them as incomplete rather than as "no evidence".
+ */
+export function selectVerificationRecords(all: EvidenceRecord[]): EvidenceRecord[] {
+  const displayable = (record: EvidenceRecord): boolean =>
+    record.command.trim() !== '' &&
+    record.command.length <= 200 &&
+    typeof record.revision === 'string' &&
+    /^[0-9a-f]{7,64}(?:-dirty)?$/i.test(record.revision) &&
+    Number.isSafeInteger(record.exitCode) &&
+    (record.exitCode as number) >= 0 &&
+    (record.exitCode as number) <= 0x7fffffff
+  // A same-millisecond tie must not drop the failure: failures sort before successes at the same
+  // timestamp, so the capped tail keeps the interesting outcome.
+  const ordered = [...all].sort((left, right) => {
+    if (left.timestamp !== right.timestamp) return left.timestamp < right.timestamp ? -1 : 1
+    const leftFailed = displayable(left) && (left.exitCode as number) !== 0 ? 1 : 0
+    const rightFailed = displayable(right) && (right.exitCode as number) !== 0 ? 1 : 0
+    return rightFailed - leftFailed
+  })
+  const valid = ordered.filter(displayable)
+  const incomplete = ordered.filter((record) => !displayable(record))
+  const validKept = valid.slice(-20)
+  const quota = 20 - validKept.length
+  const incompleteKept = quota > 0 ? incomplete.slice(-quota) : []
+  let records = [...validKept, ...incompleteKept].sort((left, right) =>
+    left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0,
+  )
+  // Under the byte cap, discard rejected rows first; only drop real facts as a last resort.
+  const fits = (rows: EvidenceRecord[]): boolean => Buffer.byteLength(`${JSON.stringify(rows, null, 2)}\n`) <= 64 * 1024
+  while (!fits(records) && records.length > 0) {
+    const rejectedIndex = records.findIndex((record) => !displayable(record))
+    records = rejectedIndex >= 0 ? records.filter((_, index) => index !== rejectedIndex) : records.slice(1)
+  }
+  return records
+}
+
+function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
+  const fallbackTimestamp = new Date().toISOString()
+  const all: EvidenceRecord[] = []
+  for (const worktree of result.results) {
+    for (const command of worktree.commands) {
+      all.push({
+        command: command.command,
+        revision: command.revision,
+        exitCode: command.exitObserved ? command.code : null,
+        timestamp: command.completedAt ?? fallbackTimestamp,
+      })
+    }
+  }
+  const anvilDir = join(store.root, '.anvil')
+  assertWritableDirectory(anvilDir)
+  const path = verificationEvidencePath(store)
+  if (existsSync(path) && !lstatSync(path).isFile()) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to replace non-regular verification evidence', {
+      hint: `Remove ${path} before recording again.`,
+    })
+  }
+  const records = selectVerificationRecords(all)
+  const payload = `${JSON.stringify(records, null, 2)}\n`
+  mkdirSync(anvilDir, { recursive: true })
+  const temp = `${path}.${process.pid}.tmp`
+  if (existsSync(temp)) {
+    throw new AnvilError(ErrorCode.Usage, 'Refusing to reuse an existing verification evidence temp file', {
+      hint: `Remove ${temp} before recording again.`,
+    })
+  }
+  writeFileSync(temp, payload, { flag: 'wx' })
+  renameSync(temp, path)
+}
+
 async function crewVerifyFlow(
   ctx: CommandContext,
   repoRoot: string,
@@ -229,13 +439,21 @@ async function crewVerifyFlow(
   }
 
   const keys = Array.isArray(args.values.key) ? (args.values.key as string[]) : undefined
+  // Revision binding is only needed for evidence recording. A plain `crew verify` must not spawn
+  // two extra git processes per command: the read-only verification path stays process-free.
+  const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
+    if (args.values.record !== true) return runCommand(command, cwd)
+    const revision = await worktreeRevision(cwd)
+    const outcome = await runCommand(command, cwd)
+    return { ...outcome, revision, completedAt: new Date().toISOString() }
+  }
 
   const result: CrewVerifyResult = await crewVerify({
     repoRoot,
     ...(keys === undefined ? {} : { keys }),
     jobs,
     forceParallel: args.values['force-parallel'] === true,
-    run: runCommand,
+    run: runWithRevision,
   })
 
   const data = {
@@ -244,6 +462,10 @@ async function crewVerifyFlow(
     concurrency: result.concurrency,
     results: result.results,
     skipped: result.skipped,
+  }
+  if (args.values.record === true) {
+    const store = evidenceStore(repoRoot)
+    if (store !== null) recordVerificationEvidence(result, store)
   }
 
   // A green aggregate must never hide a red member, so the exit code is the verdict and
@@ -447,10 +669,12 @@ function age(seconds: number | null): string {
 async function runCommand(
   command: string,
   cwd: string,
-): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+): Promise<{ ok: boolean; code: number; stdout: string; stderr: string; exitObserved: boolean }> {
   const parts = tokenizeCommand(command)
   const [bin, ...args] = parts as [string, ...string[]]
-  if (bin === undefined) return { ok: false, code: 1, stdout: '', stderr: 'empty command' }
+  if (bin === undefined) {
+    return { ok: false, code: 1, stdout: '', stderr: 'empty command', exitObserved: false }
+  }
   try {
     const result = await runProcess(bin, args, { cwd, timeoutMs: 10 * 60_000 })
     return {
@@ -458,6 +682,7 @@ async function runCommand(
       code: result.exitCode,
       stdout: result.stdout,
       stderr: result.stderr,
+      exitObserved: true,
     }
   } catch (err) {
     return {
@@ -465,6 +690,7 @@ async function runCommand(
       code: 1,
       stdout: '',
       stderr: err instanceof Error ? err.message : String(err),
+      exitObserved: false,
     }
   }
 }
