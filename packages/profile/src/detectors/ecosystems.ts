@@ -369,9 +369,10 @@ const CARGO_SAFE = [
 
 const GRADLE_SAFE = [
   /^plugins\s*\{[^}]*\}$/,
-  /^rootProject\.name\s*=\s*["'][^"']+["']$/,
+  /^rootProject\.name\s*=\s*["'][^"'$]+["']$/,
   /^include\(["'][\w:.-]+["'](?:,\s*["'][\w:.-]+["'])*\)$/,
   /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"']+["']\)$/,
+  /^dependencies\s*\{\s*(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)\s*\}$/,
   /^dependencies\s*\{$/,
   /^\}$/,
   /^\s+implementation\(project\(["'][\w:.-]+["']\)\)$/,
@@ -504,7 +505,7 @@ export const rustDetector: Detector = {
     const workspaceManifest = [...ctx.files].find((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
       const text = read(ctx, file)
-      return text !== null && /^\s*\[\s*["']?workspace["']?\s*\]/m.test(text)
+      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|workspace\s*\.)/m.test(text)
     })
     const oddWorkspaceHeader = [...ctx.files].some((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
@@ -556,7 +557,10 @@ export const rustDetector: Detector = {
           root: file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length),
           text: read(ctx, file),
         }))
-        .filter((workspace) => workspace.text !== null && /^\s*\[\s*["']?workspace["']?\s*\]/m.test(workspace.text))
+        .filter(
+          (workspace) =>
+            workspace.text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|workspace\s*\.)/m.test(workspace.text),
+        )
         .map((workspace) => {
           const shared = new Map<string, CargoDependencyEntry>()
           for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
