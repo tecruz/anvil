@@ -703,6 +703,268 @@ export const rustDetector: Detector = {
  * repository as plain Maven/JVM. The module paths are relative to the POM that declares them,
  * and nested reactors are followed the same way.
  */
+interface PomNode {
+  name: string
+  text: string
+  children: PomNode[]
+}
+
+interface PomXml {
+  root: PomNode | null
+  unsupported: boolean
+}
+
+/** The index of the `>` that closes the tag at `start`, respecting quoted attribute values. */
+function pomTagEnd(text: string, start: number): number {
+  let quote: string | null = null
+  for (let i = start + 1; i < text.length; i++) {
+    const ch = text[i]
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") quote = ch
+    else if (ch === '>') return i
+  }
+  return -1
+}
+
+/**
+ * A small, non-executing POM reader.
+ *
+ * It keeps CDATA and comments as text rather than markup, so dependency-shaped text in a
+ * description cannot become an edge. Mismatched tags make the result unsupported rather than a
+ * partial graph.
+ */
+function parsePomXml(text: string): PomXml {
+  const rootNodes: PomNode[] = []
+  const stack: PomNode[] = []
+  let unsupported = false
+  let i = 0
+  const current = (): PomNode | undefined => stack[stack.length - 1]
+  const attach = (node: PomNode): void => {
+    const parent = current()
+    if (parent === undefined) rootNodes.push(node)
+    else parent.children.push(node)
+  }
+  while (i < text.length) {
+    if (text.startsWith('<!--', i)) {
+      const end = text.indexOf('-->', i + 4)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      i = end + 3
+      continue
+    }
+    if (text.startsWith('<![CDATA[', i)) {
+      const end = text.indexOf(']]>', i + 9)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      const node = current()
+      if (node !== undefined) node.text += text.slice(i + 9, end)
+      i = end + 3
+      continue
+    }
+    if (text.startsWith('<?', i) || text.startsWith('<!', i)) {
+      const pi = text.startsWith('<?', i)
+      const end = text.indexOf(pi ? '?>' : '>', i + 2)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      i = end + (pi ? 2 : 1)
+      continue
+    }
+    if (text.startsWith('</', i)) {
+      const end = pomTagEnd(text, i + 1)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      const name = text.slice(i + 2, end).trim()
+      if (current()?.name !== name) unsupported = true
+      stack.pop()
+      i = end + 1
+      continue
+    }
+    if (text[i] === '<') {
+      const end = pomTagEnd(text, i)
+      if (end < 0) {
+        unsupported = true
+        break
+      }
+      const raw = text.slice(i + 1, end).trim()
+      const selfClosing = raw.endsWith('/')
+      const body = (selfClosing ? raw.slice(0, -1) : raw).trim()
+      const name = body.split(/[\s/]/, 1)[0] ?? ''
+      const attrText = body.slice(name.length)
+      // Each attribute must be separated from the tag name (and the previous attribute) by
+      // whitespace; `a="x"b="y"` is malformed and must not be read as two attributes.
+      const attrRe = /\s+([A-Za-z_:][\w:.-]*)\s*=\s*(["'])[^"']*\2/g
+      const names = new Set<string>()
+      let duplicate = false
+      for (const match of attrText.matchAll(attrRe)) {
+        const key = (match[1] as string).toLowerCase()
+        if (names.has(key)) duplicate = true
+        names.add(key)
+        // A raw '<' or '&' inside an attribute value is not a literal value Maven can read.
+        if (/[<&]/.test(match[0] as string)) duplicate = true
+      }
+      if (name === '' || duplicate || attrText.replace(attrRe, '').trim() !== '') unsupported = true
+      else {
+        const node: PomNode = { name, text: '', children: [] }
+        attach(node)
+        if (!selfClosing) stack.push(node)
+      }
+      i = end + 1
+      continue
+    }
+    const end = text.indexOf('<', i)
+    const stop = end < 0 ? text.length : end
+    const fragment = text.slice(i, stop)
+    const node = current()
+    if (node !== undefined) node.text += fragment
+    else if (fragment.trim() !== '') unsupported = true
+    i = stop
+  }
+  if (stack.length > 0 || rootNodes.length !== 1) unsupported = true
+  return { root: rootNodes[0] ?? null, unsupported }
+}
+
+function pomChildren(node: PomNode | null | undefined, name: string): PomNode[] {
+  return (node?.children ?? []).filter((child) => child.name === name)
+}
+
+function pomChild(node: PomNode | null | undefined, name: string): PomNode | null {
+  return pomChildren(node, name)[0] ?? null
+}
+
+/** Decode XML character references so a computed expression cannot hide behind `&#36;`. */
+function pomDecode(text: string): string {
+  return text.replace(/&#(x[0-9a-fA-F]+|[0-9]+);/g, (match, code: string) => {
+    const value = code.startsWith('x') ? Number.parseInt(code.slice(1), 16) : Number.parseInt(code, 10)
+    return Number.isFinite(value) && value > 0 && value <= 0x10ffff ? String.fromCodePoint(value) : match
+  })
+}
+
+function pomText(node: PomNode | null | undefined, name: string): string | null {
+  const value = pomChild(node, name)?.text.trim()
+  if (value === undefined || value === '') return null
+  return pomDecode(value)
+}
+
+function pomCoordinates(node: PomNode | null): string | null {
+  if (node === null) return null
+  const parent = pomChild(node, 'parent')
+  const group = pomText(node, 'groupId') ?? pomText(parent, 'groupId')
+  const artifact = pomText(node, 'artifactId')
+  const version = pomText(node, 'version') ?? pomText(parent, 'version')
+  if (group === null || artifact === null || version === null) return null
+  if ([group, artifact, version].some((value) => value.includes('${'))) return null
+  return `${group}:${artifact}:${version}`
+}
+
+/** group:artifact even when a POM's version is not a literal, for target-resolution checks. */
+function pomGroupArtifact(text: string | null): string | null {
+  if (text === null) return null
+  const parsed = parsePomXml(text)
+  if (parsed.unsupported) return null
+  const root = parsed.root
+  const parent = pomChild(root, 'parent')
+  const group = pomText(root, 'groupId') ?? pomText(parent, 'groupId')
+  const artifact = pomText(root, 'artifactId')
+  if (group === null || artifact === null || group.includes('${') || artifact.includes('${')) return null
+  return mavenGroupArtifact(group, artifact)
+}
+
+/** The artifact id when it is literal, even if the group or version is not. */
+function pomLiteralArtifact(text: string | null): string | null {
+  if (text === null) return null
+  const parsed = parsePomXml(text)
+  if (parsed.unsupported) return null
+  const artifact = pomText(parsed.root, 'artifactId')
+  if (artifact === null || artifact.includes('${')) return null
+  return artifact
+}
+
+/** A literal version when the POM parses and does not compute it, for version-aware matching. */
+function pomLiteralVersion(text: string | null): string | null {
+  if (text === null) return null
+  const parsed = parsePomXml(text)
+  if (parsed.unsupported) return null
+  const root = parsed.root
+  const parent = pomChild(root, 'parent')
+  const version = pomText(root, 'version') ?? pomText(parent, 'version')
+  if (version === null || version.includes('${')) return null
+  return version
+}
+
+/**
+ * Conservative gate: only a reactor made of fully literal, indexed POMs with no inheritance,
+ * profiles, dependency management or computed values is resolved into edges. Everything else
+ * keeps its modules but reports coverage as unknown rather than guessing.
+ */
+function pomFullyLiteral(text: string | null): boolean {
+  if (text === null) return false
+  // Namespaces, character references and CDATA change what Maven reads after XML decoding.
+  // Processing instructions are inert text, so strip them before looking for declarations: a PI
+  // that merely mentions `xmlns` must not suppress an otherwise literal edge.
+  const structural = text.replace(/<\?[\s\S]*?\?>/g, '')
+  if (/xmlns\s*[:=]|<\/?[A-Za-z_][\w.-]*:|&#[0-9x]|&[A-Za-z]+;|<!\[CDATA\[/.test(structural)) return false
+  for (const match of text.matchAll(/<module>([\s\S]*?)<\/module>/g)) {
+    if (!/^[A-Za-z0-9._/-]+$/.test((match[1] as string).trim())) return false
+  }
+  const parsed = parsePomXml(text)
+  if (
+    parsed.unsupported ||
+    parsed.root === null ||
+    parsed.root.name !== 'project' ||
+    pomCoordinates(parsed.root) === null
+  )
+    return false
+  for (const name of ['profiles', 'dependencyManagement']) {
+    if (pomChild(parsed.root, name) !== null) return false
+  }
+  // A repeated section has no literal interpretation: Maven merges it, and reading only the first
+  // would invent a graph.
+  for (const name of ['modules', 'dependencies', 'parent', 'groupId', 'artifactId', 'version']) {
+    if (pomChildren(parsed.root, name).length > 1) return false
+  }
+  // Maven merges multiple dependencies sections; reading only the first would invent a graph.
+  if (pomChildren(parsed.root, 'dependencies').length > 1) return false
+  const parent = pomChild(parsed.root, 'parent')
+  if (parent !== null && (pomCoordinates(parent) === null || pomText(parent, 'relativePath') !== null)) return false
+  // Any repeated child in a coordinate-bearing section is ambiguous; taking the first would be a
+  // guess. This covers parent coordinates and dependency metadata such as a second <optional>.
+  const hasRepeatedChild = (node: ReturnType<typeof pomChild>): boolean => {
+    const counts = new Map<string, number>()
+    for (const child of node?.children ?? []) counts.set(child.name, (counts.get(child.name) ?? 0) + 1)
+    return [...counts.values()].some((count) => count > 1)
+  }
+  if (hasRepeatedChild(parent)) return false
+  const identities = new Set<string>()
+  for (const dependency of pomChildren(pomChild(parsed.root, 'dependencies'), 'dependency')) {
+    if (hasRepeatedChild(dependency)) return false
+    for (const name of ['groupId', 'artifactId', 'version', 'type', 'classifier', 'scope']) {
+      const value = pomText(dependency, name)
+      if (['groupId', 'artifactId', 'version'].includes(name)) {
+        if (value === null || value.includes('${') || /[[\]()]/.test(value)) return false
+      } else if (value?.includes('${')) {
+        return false
+      }
+    }
+    const identity = ['groupId', 'artifactId', 'type', 'classifier']
+      .map((name) => pomText(dependency, name) ?? (name === 'type' ? 'jar' : ''))
+      .join(':')
+    if (identities.has(identity)) return false
+    identities.add(identity)
+  }
+  return true
+}
+
 function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
   const out: string[] = []
   const seen = new Set<string>()
@@ -711,18 +973,127 @@ function mavenReactorPoms(ctx: DetectorContext, rootPom: string): string[] {
     const pom = queue.shift() as string
     if (seen.has(pom)) continue
     seen.add(pom)
-    if (!ctx.files.has(pom)) continue
+    // A declared module whose POM is not in the index is still a reactor member whose identity
+    // is unknown. Keep it in the list so consumers cannot report a confident empty graph.
+    if (!ctx.files.has(pom)) {
+      out.push(pom)
+      continue
+    }
     out.push(pom)
 
     const text = read(ctx, pom)
     if (text === null) continue
-    const dir = pom.slice(0, pom.lastIndexOf('/') + 1)
-    for (const match of maskXmlComments(text).matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
-      const module = (match[1] as string).trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
-      if (module !== '') queue.push(`${dir}${module}/pom.xml`)
+    const parsed = parsePomXml(text)
+    if (parsed.unsupported || parsed.root === null) continue
+    const slash = pom.lastIndexOf('/')
+    const dir = slash < 0 ? '' : pom.slice(0, slash + 1)
+    // A `<module>` in a profile is not built unless that profile is active. Read every modules
+    // section so a repeated section cannot silently drop a declared module from the profile.
+    for (const modules of pomChildren(parsed.root, 'modules')) {
+      for (const module of pomChildren(modules, 'module')) {
+        const name = module.text.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+        if (name === '') continue
+        // A module may name a directory or a POM file. An `.xml` suffix is only a file when that
+        // file exists; otherwise it is a directory that happens to end in `.xml`.
+        const asFile = posix.normalize(`${dir}${name}`).replace(/^\.\//, '')
+        const declared = name.endsWith('.xml') && ctx.files.has(asFile) ? name : `${name}/pom.xml`
+        queue.push(posix.normalize(`${dir}${declared}`).replace(/^\.\//, ''))
+      }
     }
   }
   return out
+}
+
+type MavenDeps = {
+  id: string | null
+  root: PomNode | null
+  /** Internal edges keyed by the full Maven dependency identity, excluding version. */
+  deps: Map<string, string>
+  /** Every declared dependency identity, including unresolved and system-scoped ones. */
+  keys: string[]
+  /**
+   * group:artifact of every declared dependency. A reactor module's version is independent of
+   * the dependency's type or classifier, so target uncertainty is tracked separately from the
+   * override key: a test-jar dependency still targets an unresolved module.
+   */
+  targets: string[]
+  /** Effective version target for each dependency identity; the last declaration wins. */
+  versions: Map<string, string | null>
+  unsupported: boolean
+}
+
+/** Maven identity excluding version; type and classifier make test jars distinct from jars. */
+function mavenDependencyKey(group: string, artifact: string, type: string, classifier: string): string {
+  return `${group}:${artifact}:${type}:${classifier}`
+}
+
+/** The module a dependency targets, independent of type or classifier. */
+function mavenGroupArtifact(group: string, artifact: string): string {
+  return `${group}:${artifact}`
+}
+
+/** Internal edges from a POM's own dependencies, with unresolved effective dependencies flagged. */
+function mavenDependencies(text: string, modules: ReadonlySet<string>): MavenDeps {
+  const parsed = parsePomXml(text)
+  const id = pomCoordinates(parsed.root)
+  if (parsed.unsupported || parsed.root === null || id === null) {
+    return { id, root: parsed.root, deps: new Map(), keys: [], targets: [], versions: new Map(), unsupported: true }
+  }
+  const deps = new Map<string, string>()
+  const keys: string[] = []
+  const targets: string[] = []
+  const versions = new Map<string, string | null>()
+  let unsupported =
+    pomChild(parsed.root, 'profiles') !== null ||
+    pomChildren(parsed.root, 'dependencies').length > 1 ||
+    pomChildren(parsed.root, 'modules').length > 1
+  for (const dependency of pomChildren(pomChild(parsed.root, 'dependencies'), 'dependency')) {
+    // A repeated scalar has no single literal value.
+    for (const name of ['groupId', 'artifactId', 'version', 'type', 'classifier', 'scope']) {
+      if (pomChildren(dependency, name).length > 1) unsupported = true
+    }
+    const group = pomText(dependency, 'groupId')
+    const artifact = pomText(dependency, 'artifactId')
+    const version = pomText(dependency, 'version')
+    const scope = pomText(dependency, 'scope')
+    const type = pomText(dependency, 'type') ?? 'jar'
+    const classifier = pomText(dependency, 'classifier') ?? ''
+    if (
+      group === null ||
+      artifact === null ||
+      group.includes('${') ||
+      artifact.includes('${') ||
+      scope?.includes('${') ||
+      type.includes('${') ||
+      classifier.includes('${')
+    ) {
+      unsupported = true
+      continue
+    }
+    const moduleKey = mavenGroupArtifact(group, artifact)
+    const key = mavenDependencyKey(group, artifact, type, classifier)
+    // A system-scoped declaration still overrides an inherited dependency, even though it is not
+    // a reactor edge itself. Every declaration names a target module whose version may be unknown.
+    keys.push(key)
+    targets.push(moduleKey)
+    if (scope === 'system') {
+      versions.set(key, null)
+      continue
+    }
+    // Maven resolves RELEASE/LATEST from repository metadata, so a declared literal of either is
+    // not a determinate coordinate; treating it as one would report a false analysed state.
+    const metadataVersion = version === 'RELEASE' || version === 'LATEST'
+    if (version === null || version.includes('${') || /[[\]()]/.test(version) || metadataVersion) {
+      unsupported = true
+      versions.set(key, null)
+      continue
+    }
+    versions.set(key, `${moduleKey}:${version}`)
+  }
+  // Maven keeps the last declaration of the same group:artifact:type:classifier, so an earlier
+  // reactor version must not survive as an edge when a later declaration overrides it.
+  for (const [key, target] of versions) if (target !== null && modules.has(target)) deps.set(key, target)
+  return { id, root: parsed.root, deps, keys, targets, versions, unsupported }
 }
 
 /** Blank Groovy/Kotlin comments, keeping strings and newlines so offsets and evidence survive. */
@@ -1373,7 +1744,7 @@ export const jvmDetector: Detector = {
       hasFile(ctx, f),
     )
     const maven = hasFile(ctx, 'pom.xml')
-    const pomText = maven ? read(ctx, 'pom.xml') : null
+    const rootPomText = maven ? read(ctx, 'pom.xml') : null
     let gradleMembers: string[] = []
     const gradleRemaps = new Map<string, string | null>()
 
@@ -1623,7 +1994,8 @@ export const jvmDetector: Detector = {
       // about -- and `it.test` is failsafe's property, not surefire's, so it is the wrong
       // flag for `mvn test` besides. Only a plugin that genuinely selects by changed file
       // counts as evidence, because that is the thing the command would be invoking.
-      const mavenSubset = /buildmate|git-diff|changed-files|changedfiles/i.test(pomText ?? '') && hasFile(ctx, 'mvnw')
+      const mavenSubset =
+        /buildmate|git-diff|changed-files|changedfiles/i.test(rootPomText ?? '') && hasFile(ctx, 'mvnw')
       if (mavenSubset) {
         addCommand(draft, 'testFast', {
           cmd: `${mvn} test -Dtest='*Changed*'`,
@@ -1631,6 +2003,175 @@ export const jvmDetector: Detector = {
         })
       }
       setMonorepo(draft, { tool: 'maven', evidence: 'pom.xml', members: [] })
+      // A reactor is a real module graph. Each POM contributes its coordinates as the module id,
+      // and only a declared dependency on another reactor coordinate becomes an internal edge.
+      const reactor = mavenReactorPoms(ctx, ctx.resolve('pom.xml'))
+      // A declared module absent from the file index must stay unknown even if a copy exists on
+      // disk: the profile deliberately does not expose it to this analysis.
+      const indexedPoms = new Set([...ctx.files].map((file) => ctx.resolve(file)))
+      const reactorModules = reactor.map((pom) => {
+        const slash = pom.lastIndexOf('/')
+        const path = slash < 0 ? '.' : pom.slice(0, slash)
+        const text = indexedPoms.has(pom) ? read(ctx, pom) : null
+        const parsed = text === null ? null : mavenDependencies(text, new Set<string>())
+        return { path, pomPath: pom, text, id: parsed?.id ?? `pom:${path}`, root: parsed?.root ?? null }
+      })
+      const reactorIds = new Set(reactorModules.map((module) => module.id))
+      const parsedById = new Map(reactorModules.map((module) => [module.id, module]))
+      const unresolvedTargets = new Set<string>()
+      // When a reactor POM cannot be read, its identity is entirely unknown. When only its group
+      // is computed, its literal artifact is still enough to make dependencies on that artifact
+      // uncertain without invalidating edges to unrelated modules.
+      const uncertainArtifacts = new Set<string>()
+      let identityUncertain = false
+      for (const module of reactorModules) {
+        if (module.text === null) {
+          identityUncertain = true
+          continue
+        }
+        const key = pomGroupArtifact(module.text)
+        if (key !== null) {
+          if (module.id.startsWith('pom:')) {
+            const version = pomLiteralVersion(module.text)
+            if (version !== null) unresolvedTargets.add(`${key}:${version}`)
+            else uncertainArtifacts.add(key.slice(key.indexOf(':') + 1))
+          }
+        } else {
+          const artifact = pomLiteralArtifact(module.text)
+          if (artifact !== null) uncertainArtifacts.add(artifact)
+          else identityUncertain = true
+        }
+      }
+      // A POM outside the reactor may be an inactive profile's module. A dependency on it cannot
+      // be resolved from the POM alone, so it must not look like an analysed negative.
+      const reactorSet = new Set(reactor)
+      for (const file of ctx.files) {
+        if (file !== 'pom.xml' && !file.endsWith('/pom.xml')) continue
+        const resolvedFile = ctx.resolve(file)
+        if (reactorSet.has(resolvedFile)) continue
+        const text = read(ctx, resolvedFile)
+        const key = pomGroupArtifact(text)
+        if (key !== null) {
+          const version = pomLiteralVersion(text)
+          if (version !== null) unresolvedTargets.add(`${key}:${version}`)
+          else uncertainArtifacts.add(key.slice(key.indexOf(':') + 1))
+        } else identityUncertain = true
+      }
+      // Two declared paths sharing coordinates are both real reactor members. Give each a
+      // path-based identity so neither is lost when modules are registered by id; the reactor
+      // still reports unknown coverage because the coordinates are ambiguous.
+      const idCounts = new Map<string, number>()
+      for (const module of reactorModules) idCounts.set(module.id, (idCounts.get(module.id) ?? 0) + 1)
+      const duplicateCoordinates = [...idCounts.values()].some((count) => count > 1)
+      if (duplicateCoordinates) {
+        for (const module of reactorModules) {
+          if ((idCounts.get(module.id) ?? 0) > 1) module.id = `pom:${module.path}`
+        }
+      }
+      for (const module of reactorModules)
+        addModule(draft, { id: module.id, path: module.path, kind: 'project', deps: [] })
+      const fullyLiteral =
+        reactorModules.length > 0 &&
+        !duplicateCoordinates &&
+        reactorModules.every((module) => pomFullyLiteral(module.text)) &&
+        ![...ctx.files].some((file) => file.endsWith('pom.xml') && !reactorSet.has(ctx.resolve(file)))
+      if (!fullyLiteral) {
+        for (const module of reactorModules) {
+          draft.depsUnknownReasons.set(
+            module.id,
+            'Maven dependency graph is not fully literal; dependencies left unknown',
+          )
+        }
+      } else
+        for (const module of reactorModules) {
+          if (module.text === null || module.root === null) {
+            draft.depsUnknownReasons.set(module.id, 'unresolved Maven coordinates; dependencies left unknown')
+            continue
+          }
+          const resolved = mavenDependencies(module.text, reactorIds)
+          if (resolved.id === null) {
+            draft.depsUnknownReasons.set(module.id, 'unresolved Maven coordinates; dependencies left unknown')
+            continue
+          }
+          const parent = pomChild(module.root, 'parent')
+          const parentId = parent === null ? null : pomCoordinates(parent)
+          // An explicit relativePath can select a POM outside the reactor even when the coordinates
+          // match a reactor module, so the inherited dependencies cannot be resolved from the graph.
+          const explicitParentPath = parent === null ? null : pomText(parent, 'relativePath')
+          const parentPathElement = parent === null ? null : pomChild(parent, 'relativePath')
+          const parentLookupDisabled =
+            parentPathElement !== null && (explicitParentPath === null || explicitParentPath.trim() === '')
+          // Maven resolves the parent through relativePath (default `../pom.xml`) before coordinates.
+          // An explicit empty element disables local lookup entirely.
+          const parentRef = explicitParentPath === null || parentLookupDisabled ? '../pom.xml' : explicitParentPath
+          const parentPomPath = posix.normalize(
+            `${module.path === '.' ? '' : module.path}/${parentRef.replace(/\\/g, '/')}`,
+          )
+          const parentByPath = parentLookupDisabled
+            ? undefined
+            : reactorModules.find((candidate) => candidate.pomPath === parentPomPath)
+          // Maven only accepts the POM at relativePath when its group and artifact match the declared
+          // parent; otherwise it resolves the parent elsewhere and its dependencies are unknown.
+          const parentGroup = parent === null ? null : pomText(parent, 'groupId')
+          const parentArtifact = parent === null ? null : pomText(parent, 'artifactId')
+          const parentCoordinatesMatch =
+            parentByPath === undefined ||
+            parentGroup === null ||
+            parentArtifact === null ||
+            (parentId !== null && parentByPath.id === parentId) ||
+            parentByPath.id === `pom:${parentByPath.path}`
+          // A declared parent whose coordinates are not literal can contribute dependencies that
+          // this POM does not declare, so its effective dependency list cannot be known.
+          let unsupported =
+            resolved.unsupported ||
+            !parentCoordinatesMatch ||
+            parentLookupDisabled ||
+            (parent !== null && parentId === null && parentByPath === undefined) ||
+            (explicitParentPath !== null && explicitParentPath.trim() !== '' && parentByPath === undefined)
+          const effective = new Map(resolved.versions)
+          if (parent !== null) {
+            // Coordinate lookup is only valid when local lookup is explicitly disabled. With a
+            // default or explicit relativePath that is absent from the index, the real parent is
+            // unreadable; substituting an unrelated reactor POM with the same coordinates invents
+            // inherited dependencies.
+            const parentModule =
+              parentByPath ?? (parentLookupDisabled && parentId !== null ? parsedById.get(parentId) : undefined)
+            const parentRoot = parentModule?.root ?? null
+            if (
+              parentModule === undefined ||
+              parentRoot === null ||
+              parentModule.text === null ||
+              pomChild(parentRoot, 'parent') !== null
+            ) {
+              unsupported = true
+            } else {
+              const inherited = mavenDependencies(parentModule.text, reactorIds)
+              if (inherited.unsupported) unsupported = true
+              // Child declarations override inherited ones by identity, before any edge is taken.
+              for (const [key, target] of inherited.versions) if (!effective.has(key)) effective.set(key, target)
+            }
+          }
+          const allTargets = [...effective.values()].filter((target): target is string => target !== null)
+          if (
+            [...allTargets].some(
+              (target) => unresolvedTargets.has(target) || uncertainArtifacts.has(target.split(':')[1] as string),
+            )
+          )
+            unsupported = true
+          if (identityUncertain && allTargets.length > 0) unsupported = true
+          if (unsupported) {
+            draft.depsUnknownReasons.set(module.id, 'unsupported Maven dependency syntax; dependencies left unknown')
+            continue
+          }
+          const existing = draft.modules.find((candidate) => candidate.id === module.id)
+          // Different dependency identities can target the same reactor module (a jar and a test
+          // jar); the module graph records one edge per target module.
+          if (existing !== undefined) {
+            existing.deps = [...new Set(allTargets.filter((target) => reactorIds.has(target)))].sort()
+          }
+          markDepsAnalysed(draft, module.id)
+        }
+      if (draft.monorepo !== null) draft.monorepo.members = [...reactorIds]
     }
 
     // Spring Boot is a framework on top of the build, and the marker is the starter it pulls in.
@@ -1642,7 +2183,10 @@ export const jvmDetector: Detector = {
     // Following the reactor is what makes `api/pom.xml` evidence, with its real path.
     const springFiles = new Set<string>()
     if (maven) {
-      for (const file of mavenReactorPoms(ctx, ctx.resolve('pom.xml'))) springFiles.add(file)
+      const indexed = new Set([...ctx.files].map((file) => ctx.resolve(file)))
+      for (const file of mavenReactorPoms(ctx, ctx.resolve('pom.xml')).filter((pom) => indexed.has(pom))) {
+        springFiles.add(file)
+      }
     }
     // Only the detected Gradle build and the subprojects it declares. Scanning every
     // `build.gradle` in the tree lets an unreferenced `examples/` build add Spring guidance to a
