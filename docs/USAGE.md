@@ -100,11 +100,13 @@ anvil init --with-mirrors
 ```
 
 This stages three thin files in addition to the default three: `CLAUDE.md`,
-`.cursor/rules/anvil.mdc`, and `.github/copilot-instructions.md`. They repeat only the
-same derived verify commands, name `AGENTS.md` as the source of truth, and go through the
-same diff, validation and stale-bundle checks as `AGENTS.md`; nothing is written until
-`anvil init --apply`. The default stays the three-file bundle, and the option is never
-applied by `--only`.
+`.cursor/rules/anvil.mdc`, and `.github/copilot-instructions.md`. They **point to**
+`AGENTS.md` as the source of truth instead of repeating command strings: each mirror names
+which verification kinds exist and sends the reader to `AGENTS.md` for the exact command,
+its working directory and its evidence, so there is no second copy to drift. They go
+through the same diff, validation and stale-bundle checks as `AGENTS.md`; nothing is
+written until `anvil init --apply`. The default stays the three-file bundle, and the
+option is never applied by `--only`.
 
 Then rank what is missing:
 

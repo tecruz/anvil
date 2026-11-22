@@ -44,6 +44,7 @@ export {
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
+  MIRROR_PATHS,
   MIRROR_TARGETS,
   type MirrorTarget,
 } from './generate.ts'
@@ -246,6 +247,7 @@ export {
   applyStaging,
   checkApplyPreconditions,
   clearStaging,
+  findConflictingTargets,
   GITIGNORE_SNIPPET,
   hashInputs,
   inspectStaging,

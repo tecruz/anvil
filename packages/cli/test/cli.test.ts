@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -1365,5 +1366,67 @@ describe('anvil init --with-mirrors', () => {
     assert.equal(res.code, 0, res.stderr)
     const paths = pathsOf(res)
     assert.deepEqual(paths, ['AGENTS.md'])
+  })
+
+  test('a mirror linked to AGENTS.md is refused before the canonical file is overwritten', () => {
+    const dir = initRepo()
+    const before = '# Canonical\n\nRun `npm test` to verify.\n'
+    writeFileSync(join(dir, 'AGENTS.md'), before)
+    try {
+      symlinkSync('AGENTS.md', join(dir, 'CLAUDE.md'))
+    } catch {
+      // A hard link aliases the same inode on systems where file symlinks need elevation.
+      linkSync(join(dir, 'AGENTS.md'), join(dir, 'CLAUDE.md'))
+    }
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), before, 'the canonical file must survive')
+  })
+
+  test('a command documented only in CLAUDE.md is not cited after the mirror replaces it', () => {
+    const dir = initRepo()
+    // Line 3 is where the replacement mirror puts its generated-file notice.
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Notes\n\nRun `npm run test:unit` here.\n')
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8')
+    assert.match(agents, /npm run test:unit/, 'the command must survive')
+    assert.doesNotMatch(agents, /CLAUDE\.md:\d+/, 'a generated mirror must never be named as evidence')
+  })
+
+  test('a mirror reduced to frontmatter alone fails the apply gate', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files.find((f) => f.path === '.cursor/rules/anvil.mdc')
+    assert.ok(entry !== undefined)
+    writeFileSync(
+      join(dir, '.anvil', 'staging', ...entry.stagedPath.split('/')),
+      '---\ndescription: AGENTS.md is the source of truth.\nglobs: ["**/*"]\nalwaysApply: true\n---\n',
+    )
+    // --allow-warnings must not bypass an error.
+    const refused = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(refused.code, 0)
+    assert.equal(existsSync(join(dir, '.cursor', 'rules', 'anvil.mdc')), false)
+  })
+
+  test('a changed-files-only project is not told the mirrors have no verify commands', () => {
+    const dir = initRepo()
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'mirror-fixture', scripts: { 'test:changed': 'node --test changed' } }),
+    )
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8')
+    assert.doesNotMatch(claude, /No verify commands were detected/)
   })
 })

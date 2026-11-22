@@ -31,6 +31,7 @@ import {
   generationInputs,
   hashInputs,
   inspectStaging,
+  MIRROR_PATHS,
   MIRROR_TARGETS,
   readManifest,
   readRepoFile,
@@ -383,14 +384,21 @@ function buildArtifacts(
   withMirrors: boolean,
 ): GeneratedArtifact[] {
   const options = declared === undefined ? { profile, matches } : { profile, matches, declared }
+  // A command documented only in a file this bundle replaces must not cite the generated
+  // stub as its evidence. Only opt-in mirror runs overwrite those paths; the default
+  // three-file bundle keeps every original citation.
+  const generationOptions =
+    withMirrors && only === null
+      ? { ...options, replacedEvidencePaths: MIRROR_TARGETS.map((target) => MIRROR_PATHS[target]) }
+      : options
   const out: GeneratedArtifact[] = []
-  if (only === null || only === 'agents-file') out.push(generateAgentsFile(options))
+  if (only === null || only === 'agents-file') out.push(generateAgentsFile(generationOptions))
   if (only === null || only === 'verify-skill') {
-    const skill = generateVerifySkill(options)
+    const skill = generateVerifySkill(generationOptions)
     if (skill !== null) out.push(skill)
   }
   if (only === null || only === 'review-command') {
-    const cmd = generateReviewCommand(options)
+    const cmd = generateReviewCommand(generationOptions)
     if (cmd !== null) out.push(cmd)
   }
   // Mirrors are opt-in and never produced by --only: they are a separate bundle choice,

@@ -283,6 +283,54 @@ export function repoFileIdentity(repoRoot: string, relPath: string): string | nu
   }
 }
 
+/**
+ * The first pair of manifest paths that would write to the same file, or `null`.
+ *
+ * A manifest can name two paths that are really one document: a `CLAUDE.md -> AGENTS.md`
+ * link, a hard link, or the same name with different case on a case-insensitive volume.
+ * Resolving each path for containment is not enough -- that check judges each write on its
+ * own, so both pass and the later write silently replaces the earlier one. The opt-in
+ * mirrors make this reachable in an ordinary repository, so every target is identified
+ * before any write happens.
+ */
+export function findConflictingTargets(
+  repoRoot: string,
+  files: ReadonlyArray<Pick<StagedFile, 'path'>>,
+): [string, string] | null {
+  const seen = new Map<string, string>()
+  for (const file of files) {
+    const target = resolve(repoRoot, file.path)
+    // Inode first: it catches links and aliases of an existing file. For a name that does
+    // not exist yet, resolve the parent (the containment check already did) and fall back
+    // to the path itself, lower-cased where the filesystem is case-insensitive.
+    const identity = repoFileIdentity(repoRoot, file.path) ?? realPathIdentity(target) ?? pathIdentity(target)
+    const earlier = seen.get(identity)
+    if (earlier !== undefined && earlier !== file.path) return [earlier, file.path]
+    seen.set(identity, file.path)
+  }
+  return null
+}
+
+function realPathIdentity(target: string): string | null {
+  try {
+    return `real:${realpathSync.native(target)}`
+  } catch {
+    return null
+  }
+}
+
+function pathIdentity(target: string): string {
+  return `path:${process.platform === 'win32' ? target.toLowerCase() : target}`
+}
+
+/** The error text shared by the apply gate and the writer, naming both conflicting paths. */
+function conflictReason(conflict: [string, string]): string {
+  return `Refusing conflicting writes: ${conflict[0]} and ${conflict[1]} resolve to the same file`
+}
+
+const CONFLICT_HINT =
+  'Remove the link (or re-run `anvil init` without --with-mirrors) so each staged file has its own target.'
+
 export interface StagingState {
   exists: boolean
   manifest: StagingManifest | null
@@ -373,6 +421,9 @@ export function checkApplyPreconditions(
       hint: 'Inspect the diff above. Re-run `anvil init` to rebuild the bundle against the current state.',
     }
   }
+
+  const conflict = findConflictingTargets(repoRoot, manifest.files)
+  if (conflict !== null) return { ok: false, reason: conflictReason(conflict), hint: CONFLICT_HINT }
 
   return { ok: true }
 }
@@ -470,6 +521,13 @@ export function applyStaging(
 ): string[] {
   const contents = readAllStaged(repoRoot, manifest)
   const targets = resolveAllTargets(repoRoot, manifest)
+
+  // Two names for one file must be refused before the first write, not after: the later
+  // write would silently replace the earlier one (a mirror overwriting AGENTS.md).
+  const conflict = findConflictingTargets(repoRoot, manifest.files)
+  if (conflict !== null) {
+    throw new AnvilError(ErrorCode.PreflightFailed, conflictReason(conflict), { hint: CONFLICT_HINT })
+  }
 
   // Original repo-side content for every file, captured before any write so a failed
   // batch can be rolled back. `null` means the file did not exist before this apply.

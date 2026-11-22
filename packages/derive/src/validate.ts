@@ -191,13 +191,25 @@ function validateAgentsFile(path: string, content: string): ArtifactValidation {
   return result(path, 'agents-file', errors, warnings)
 }
 
-/** A mirror must say where the source of truth is and must not be empty. */
+/**
+ * A mirror must carry an instructions body and must point at the source of truth.
+ *
+ * The Cursor mirror has frontmatter, and its `description` mentions `AGENTS.md`. Reading
+ * the whole file let a mirror reduced to frontmatter alone pass: the description supplied
+ * both the "nonempty" verdict and the pointer, while the tool loaded no instructions at
+ * all. Frontmatter and body are therefore checked separately.
+ */
 function validateMirror(path: string, content: string): ArtifactValidation {
   const errors: string[] = []
   const warnings: string[] = []
-  if (content.trim() === '') errors.push(`${path} is empty; an empty instructions mirror is worse than none`)
-  if (!/AGENTS\.md/.test(content))
-    warnings.push('Mirror does not point at AGENTS.md, so it can drift from the baseline')
+  const { body } = parseFrontmatter(content)
+
+  if (body.trim() === '') {
+    errors.push(`${path} has no instructions body; frontmatter alone is not a mirror`)
+  }
+  if (!/AGENTS\.md/.test(body)) {
+    warnings.push('Mirror body does not point at AGENTS.md, so it can drift from the baseline')
+  }
   return result(path, 'mirror', errors, warnings)
 }
 
