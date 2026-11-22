@@ -687,7 +687,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
-| `anvil dashboard` | Loopback-only read-only overview of readiness, context and work. `--repo <dir>`, `--port <n>`. |
+| `anvil dashboard` | Loopback-only overview of a task brief, readiness, context and work. `--repo <dir>`, `--port <n>`. |
 | `anvil version` | The anvil version and the JSON schema version. |
 
 ### The local dashboard
@@ -696,17 +696,61 @@ accepts. This table is the summary; the help text is the contract.
 one-time URL it prints; the session token is then held in an HttpOnly cookie. The server
 binds to `127.0.0.1`, never to a network interface, and is stopped with Ctrl+C.
 
-The page has three views: **Repository** (readiness findings, blockers and ranked next
-steps), **Context** (verified brief gaps and a read-only view of the staged diff), and
-**Work** (claims, worktrees, uncommitted and unpushed changes, and agent liveness). Each
-value names the CLI command behind it, and every refresh re-reads those commands in offline
-mode. A failed command appears as an error beside the other views; it never renders as an
-empty result.
+The page has four views. **Task brief** is the entry point: paste a ticket or task
+description, or choose one of the repository suggestions from `anvil plan`. Either way it
+shows the likely files to start from, the verification commands with the source and working
+directory that established them, the required needs `anvil ready` reports as blocked, and
+what the page cannot know. The same brief includes a **task map**: a 2D subgraph of the
+matched files, the modules containing them, their declared one-hop dependencies and the
+verify commands. It opens filtered to the task, supports a text filter and a list view, and
+shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
+a dashed *unknown* node, not as "no dependency". No edge is inferred from import statements,
+and the map adds no fact that the brief could not cite.
 
-Verification is deliberately shown as *unavailable*: anvil does not persist verification
-results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`
-for a current verdict. The dashboard does not stage, apply, set up, claim, ship, or update a
-tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
+When `anvil ready` reports a blocked capability, the brief also offers a **copyable blocker
+handoff**. It lists only measured blockers with their status and reason, carries a contact
+only when `anvil ready` explicitly declared one, says the owner is unknown rather than guessing
+one, and cites a CODEOWNERS path as review routing to open when the profile declares one. A failed or unprobed readiness source produces an explicit
+"not available yet" handoff, not a clean one. The commands are printed, never run.
+**Repository** covers
+readiness findings, blockers and ranked next steps, **Context** covers verified brief gaps
+and a read-only view of the staged diff, and **Work** covers claims, worktrees, uncommitted
+and unpushed changes, and agent liveness. Each value names the CLI command behind it, and
+every refresh re-reads those commands in offline mode. A failed command appears as an error
+beside the other views; it never renders as an empty result.
+
+When the pasted text states an approval gate — "the audit and proposal are approved before
+implementation" — the brief quotes that sentence and separates *start now* from *wait for
+approval*. It never infers a gate from repository files (an issue body or PR template can say
+one). If the ticket states no gate, the brief says so instead of guessing, and a
+repository suggestion says that it carries no gate or owner at all.
+
+The reader is three-valued and conservative. An explicit waiver such as "no approval
+required" or "should not wait for approval" is quoted as *approval is not required*, never
+applied as a gate. Wording that merely mentions approval without requiring it is quoted as
+*mentioned but not stated as a requirement*. That distinction matters: a false gate would
+tell someone to wait for permission the ticket says they do not need.
+
+The brief is honest about what it could not measure: a failed `anvil ready` is shown as
+*blockers unknown*, not as a clean report, and an unprobed environment is shown as *not
+checked* rather than *nothing missing*. An exact path in the task outranks a file that only
+shares its ending, and both are labelled for what they are. Paths follow the order the ticket
+names them.
+
+Pasted task text stays on the loopback page: it is limited to 4,000 characters, sent to the
+local server only, and not stored. The suggestions are engineering improvements derived from
+this repository's own findings, not a team's priorities. Building a brief does not create a
+tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
+reads the snapshot the page already loaded, and a reload is required before the first brief.
+
+Verification has no green-by-absence state. The dashboard never runs a verify command or a write
+action; a refresh re-reads the CLI's existing read-only JSON contracts (`doctor`, `ready`, `plan`,
+`brief`, `crew status`). With `anvil crew verify --record`, the CLI writes a bounded evidence file;
+the dashboard displays those records as historical facts, labelled with the commit sampled at
+startup and any incomplete or stale records. The dashboard cannot prove the records' origin and
+never presents them as a current verdict — run `anvil crew verify` for that. The dashboard does
+not stage, apply, set up, claim, ship, or update a tracker. See [ADR-0025](adr/0025-local-dashboard.md)
+for the boundary and threat model.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
 `fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
