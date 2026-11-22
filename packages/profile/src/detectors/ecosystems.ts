@@ -330,8 +330,27 @@ export const goDetector: Detector = {
 // Fail-closed manifest gates
 // ---------------------------------------------------------------------------
 
+function hasBlockComment(raw: string): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '/' && raw[i + 1] === '*') return true
+    if (ch === '*' && raw[i + 1] === '/') return true
+  }
+  return false
+}
+
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
+    if (hasBlockComment(raw)) return false
     const line = raw.replace(/#.*$/, '').trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
@@ -343,7 +362,7 @@ const CARGO_SAFE = [
   /^\[(?:workspace|package|dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|features)\]$/,
   /^(?:name|version|edition|resolver)\s*=\s*["'][^"']+["']$/,
   /^(?:members|version)\s*=\s*\[\s*(?:["'][^"']+["']\s*,?\s*)*\]$/,
-  /^[\w-]+\s*=\s*["'][^"']+["']$/,
+  /^(?!workspace\s*=)[\w-]+\s*=\s*["'][^"']+["']$/,
   /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"'\\$]+["']\s*\}$/,
   /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
   /^[\w-]+\s*=\s*\[\]$/,
@@ -486,13 +505,22 @@ export const rustDetector: Detector = {
     const workspaceManifest = [...ctx.files].find((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
       const text = read(ctx, file)
-      return text !== null && /^\[workspace\]/m.test(text)
+      return text !== null && /^\s*\[\s*["']?workspace["']?\s*\]/m.test(text)
     })
     const oddWorkspaceHeader = [...ctx.files].some((file) => {
       if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
       const text = read(ctx, file)
       return text !== null && /\[\s*["']workspace["']\s*\]/.test(text)
     })
+    if (oddWorkspaceHeader) {
+      for (const file of ctx.files) {
+        if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) continue
+        const text = read(ctx, file)
+        if (text === null || !/\[\s*["']workspace["']\s*\]/.test(text)) continue
+        const path = file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length)
+        draft.depsUnknownReasons.set(path, 'unsupported Cargo manifest syntax; dependencies left unknown')
+      }
+    }
     if (workspaceManifest !== undefined) {
       const workspaceRoot = workspaceManifest === 'Cargo.toml' ? '.' : workspaceManifest.slice(0, -'/Cargo.toml'.length)
       const workspaceText = read(ctx, workspaceManifest)
@@ -529,7 +557,7 @@ export const rustDetector: Detector = {
           root: file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length),
           text: read(ctx, file),
         }))
-        .filter((workspace) => workspace.text !== null && /^\[workspace\]/m.test(workspace.text))
+        .filter((workspace) => workspace.text !== null && /^\s*\[\s*["']?workspace["']?\s*\]/m.test(workspace.text))
         .map((workspace) => {
           const shared = new Map<string, CargoDependencyEntry>()
           for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)

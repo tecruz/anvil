@@ -25,8 +25,27 @@ import { matchesGlob } from '../general.ts'
 import { evidence, findLine, looseVersion } from '../manifest.ts'
 import { readText } from '../walk.ts'
 
+function hasBlockComment(raw: string): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '/' && raw[i + 1] === '*') return true
+    if (ch === '*' && raw[i + 1] === '/') return true
+  }
+  return false
+}
+
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
+    if (hasBlockComment(raw)) return false
     const line = raw.replace(/#.*$/, '').trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
@@ -37,7 +56,7 @@ const UV_SAFE = [
   /^\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]$/,
   /^(?:name|version)\s*=\s*["'][^"']+["']$/,
   /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@;\\]+["']\s*,?\s*)*\]$/,
-  /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]]+["']\s*,?\s*)*\]$/,
+  /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]\\]+["']\s*,?\s*)*\]$/,
   /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
   /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
 ]
@@ -128,7 +147,7 @@ function pythonName(name: string): string {
 
 /** The directories a uv workspace declares, after its `exclude` globs. */
 function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
-  const section = tomlSection(text, /^\[tool\.uv\.workspace\]/)
+  const section = tomlSection(text, /^\s*\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]/m)
   if (section === null) return []
   const declared = tomlArray(section, 'members')
   const excluded = tomlArray(section, 'exclude')
@@ -406,8 +425,24 @@ export const pythonDetector: Detector = {
     const workspaceFile = [...ctx.files].find((file) => {
       if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
       const text = readTomlish(ctx, file)
-      return text !== null && /^\[tool\.uv\.workspace\]/m.test(text)
+      return text !== null && /^\s*\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]/m.test(text)
     })
+    const oddUvHeader = [...ctx.files].some((file) => {
+      if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
+      const text = readTomlish(ctx, file)
+      return text !== null && /\[\s*tool\s*\.\s*uv\s*\.\s*["']workspace["']\s*\]/.test(text)
+    })
+    if (oddUvHeader) {
+      for (const file of ctx.files) {
+        if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return
+        const text = readTomlish(ctx, file)
+        if (text === null || !/\[\s*tool\s*\.\s*uv\s*\.\s*["']workspace["']\s*\]/.test(text)) continue
+        draft.depsUnknownReasons.set(
+          file === 'pyproject.toml' ? '.' : file.slice(0, -'/pyproject.toml'.length),
+          'unsupported dependency syntax; dependencies left unknown',
+        )
+      }
+    }
     if (workspaceFile !== undefined) {
       const workspaceBase = workspaceFile === 'pyproject.toml' ? '.' : workspaceFile.slice(0, -'/pyproject.toml'.length)
       const workspaceText = readTomlish(ctx, workspaceFile) ?? ''
@@ -436,11 +471,6 @@ export const pythonDetector: Detector = {
         names.set(pythonName(member.id), member.id)
         idsByPath.set(member.path, member.id)
       }
-      const oddUvHeader = [...ctx.files].some((file) => {
-        if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
-        const text = readTomlish(ctx, file)
-        return text !== null && /\[\s*tool\s*\.\s*uv\s*\.\s*["']workspace["']\s*\]/.test(text)
-      })
       const uvSafe =
         !oddUvHeader &&
         linesWithin(workspaceText, UV_SAFE) &&
