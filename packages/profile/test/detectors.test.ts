@@ -3456,4 +3456,65 @@ describe('module dependency completeness', () => {
       { id: 'crates/api', path: 'crates/api', reason: 'unsupported Cargo manifest syntax; dependencies left unknown' },
     ])
   })
+
+  test('a Gradle block comment cannot hide a cross-project add', () => {
+    const cross = "project(':api').dependencies.add 'implementation', project(':core')"
+    const profile = profileOf({
+      'settings.gradle': "include(':api', ':core')\n",
+      'build.gradle': `plugins { id 'base' /* } # */ }; ${cross}\n`,
+      'api/build.gradle': "plugins { id 'java-library' }\n",
+      'core/build.gradle': "plugins { id 'java-library' }\n",
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [':api', ':core'])
+  })
+
+  test('quoted workspace headers mark their members unknown instead of disappearing', () => {
+    const cargo = profileOf({
+      'Cargo.toml': '["workspace"]\nmembers = ["api"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n',
+    })
+    assert.deepEqual(cargo.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.deepEqual(
+      (cargo.diagnostics.unanalysedDeps ?? []).map((d) => d.id),
+      ['api'],
+    )
+
+    const uv = profileOf({
+      'pyproject.toml': '["tool".uv.workspace]\nmembers = ["api"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\nversion = "0.1.0"\n',
+    })
+    assert.deepEqual(uv.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.deepEqual(
+      (uv.diagnostics.unanalysedDeps ?? []).map((d) => d.id),
+      ['api'],
+    )
+  })
+
+  test('an escaped uv member name fails the whole workspace gate', () => {
+    const profile = profileOf({
+      'pyproject.toml':
+        '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["api", "cor\\u0065"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'core/pyproject.toml':
+        '[project]\nname = "core"\nversion = "0.1.0"\ndependencies = ["idna; sys_platform == \'linux\'"]\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+  })
+
+  test('an unknown module never keeps edges a later detector adds', () => {
+    const profile = profileOf({
+      'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["api", "core"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\nversion = "0.1.0"\ndependencies = ["core; sys_platform == \'linux\'"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'core/pyproject.toml': '[project]\nname = "core"\nversion = "0.1.0"\n',
+      'Cargo.toml': '[workspace]\nmembers = ["api", "core"]\n',
+      'api/Cargo.toml': '[package]\nname = "api"\nversion = "0.1.0"\n[dependencies]\ncore = { path = "../core" }\n',
+      'core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
+  })
 })

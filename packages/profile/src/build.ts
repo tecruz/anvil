@@ -180,6 +180,11 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     })
   }
 
+  // Fail closed: an unknown module must not retain edges from any detector.
+  for (const module of draft.modules) {
+    if (draft.depsUnknownReasons.has(module.id)) module.deps = []
+  }
+
   const profile: ProjectProfile = {
     ...emptyProfile(root, vcs),
     monorepo: draft.monorepo,
