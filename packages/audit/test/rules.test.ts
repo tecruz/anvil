@@ -141,6 +141,37 @@ describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
     assert.match(config.detail, /test/)
   })
 
+  test('a stale reference in each other instruction source is reported with file:line', () => {
+    for (const path of ['CLAUDE.md', '.cursorrules', '.cursor/rules/review.mdc', '.github/copilot-instructions.md']) {
+      const profile = profileOf({
+        'package.json': scripts,
+        [path]: 'Run `npm run gone` and see [the docs](docs/moved.md).\n',
+      })
+      const config = finding(audit(profile), 'AGENT_CONFIG')
+      assert.equal(config.status, 'warn', path)
+      assert.match(config.detail, /gone/, path)
+      assert.match(config.detail, /moved\.md/, path)
+      assert.ok(
+        config.evidence.some((e) => e.startsWith(`${path}:1`)),
+        `${path} should give a file:line, got ${config.evidence.join(', ')}`,
+      )
+    }
+  })
+
+  test('resolving references in the other instruction sources passes', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'docs/README.md': '# Docs\n',
+      'CLAUDE.md': 'Run `npm test`.\n',
+      '.cursorrules': 'See [the docs](docs/README.md).\n',
+      '.cursor/rules/review.mdc': 'Run `npm run lint`.\n',
+      '.github/copilot-instructions.md': 'See [the docs](../docs/README.md).\n',
+    })
+    const config = finding(audit(profile), 'AGENT_CONFIG')
+    assert.equal(config.status, 'pass', config.detail)
+    assert.match(config.detail, /4 agent-config source\(s\) resolve/)
+  })
+
   test('nothing to check is na, not a warning', () => {
     const profile = profileOf({
       'package.json': scripts,
