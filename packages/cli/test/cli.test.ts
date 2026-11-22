@@ -1333,7 +1333,7 @@ describe('doctor module dependency diagnostics', () => {
     const dir = tempDir('anvil-profile-unanalysed-')
     for (const [rel, content] of Object.entries({
       'services/api.csproj':
-        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>\n',
+        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include="$(CoreDir)/Core.csproj" /></ItemGroup></Project>\n',
     })) {
       const target = join(dir, ...rel.split('/'))
       mkdirSync(dirname(target), { recursive: true })
