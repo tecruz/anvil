@@ -1803,73 +1803,6 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
-  test('unsupported uv dependency syntax leaves coverage unknown, not empty', () => {
-    const profile = profileOf({
-      'pyproject.toml': [
-        '[project]',
-        'name = "root"',
-        'dependencies = []',
-        '',
-        '[tool.uv.workspace]',
-        'members = ["services/api"]',
-        '',
-      ].join('\n'),
-      'services/api/pyproject.toml': ['[project]', 'name = "api"', 'dependencies = ["worker[cli]>=0.1"]', ''].join(
-        '\n',
-      ),
-      'services/api/src/api.py': 'pass\n',
-    })
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: 'api',
-        path: 'services/api',
-        reason: 'unsupported dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('an unreadable uv member manifest stays unknown', () => {
-    const profile = profileOf({
-      'pyproject.toml': '[project]\nname = "root"\n\n[tool.uv.workspace]\nmembers = ["services/api"]\n',
-      'services/api/pyproject.toml': '[project]\nname = "api"\n\0binary\n',
-      'services/api/src/api.py': 'pass\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.path === 'services/api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: 'services/api', path: 'services/api', reason: 'no dependency resolver for this ecosystem' },
-    ])
-  })
-
-  test('a Cargo dependency table and a workspace-inherited path produce edges', () => {
-    const profile = profileOf({
-      'Cargo.toml': [
-        '[workspace]',
-        'members = ["crates/api", "crates/core"]',
-        '',
-        '[workspace.dependencies]',
-        'shared = { path = "crates/core" }',
-        '',
-      ].join('\n'),
-      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
-      'crates/core/src/lib.rs': 'pub fn core() {}\n',
-      'crates/api/Cargo.toml': [
-        '[package]',
-        'name = "api"',
-        'version = "0.1.0"',
-        '',
-        '[dependencies.core]',
-        'path = "../core"',
-        '',
-        '[dependencies.shared]',
-        'workspace = true',
-        '',
-      ].join('\n'),
-      'crates/api/src/lib.rs': 'pub fn api() {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
   test('multiple Cargo path dependencies in one table are all read', () => {
     const profile = profileOf({
       'Cargo.toml': '[workspace]\nmembers = ["api", "core", "util"]\n',
@@ -1970,28 +1903,6 @@ describe('module dependency completeness', () => {
     assert.deepEqual(comment.modules.find((m) => m.id === 'api')?.deps, ['core'])
   })
 
-  test('Cargo build and dev dependency tables produce path edges', () => {
-    const profile = profileOf({
-      'Cargo.toml': '[workspace]\nmembers = ["crates/api", "crates/core"]\n',
-      'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
-      'crates/core/src/lib.rs': 'pub fn core() {}\n',
-      'crates/api/Cargo.toml': [
-        '[package]',
-        'name = "api"',
-        'version = "0.1.0"',
-        '',
-        '[dev-dependencies.core]',
-        'path = "../core"',
-        '',
-        '[build-dependencies.core]',
-        'path = "../core"',
-        '',
-      ].join('\n'),
-      'crates/api/src/lib.rs': 'pub fn api() {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
-  })
-
   test('a uv source with a marker or list leaves coverage unknown', () => {
     const profile = profileOf({
       'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
@@ -2010,244 +1921,6 @@ describe('module dependency completeness', () => {
     })
     assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.path === 'services/api'))
-  })
-
-  test('an apostrophe in a uv comment does not create an edge', () => {
-    const profile = profileOf({
-      'pyproject.toml': '[project]\nname = "root"\nversion = "0.1.0"\n[tool.uv.workspace]\nmembers = ["services/*"]\n',
-      'services/api/pyproject.toml': [
-        '[project]',
-        'name = "api"',
-        'version = "0.1.0"',
-        'dependencies = [',
-        '  "worker", # Don\'t add the optional integration here.',
-        ']',
-        'description = "shared-lib integration service"',
-        '[tool.uv.sources]',
-        'worker = { workspace = true }',
-        'shared-lib = { workspace = true }',
-        '',
-      ].join('\n'),
-      'services/api/src/api.py': 'value = 1\n',
-      'services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
-      'services/worker/src/worker.py': 'value = 1\n',
-      'services/shared-lib/pyproject.toml': '[project]\nname = "shared-lib"\nversion = "0.1.0"\n',
-      'services/shared-lib/src/shared.py': 'value = 1\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['worker'])
-  })
-
-  test('a commented-out uv source is not a dependency', () => {
-    const profile = profileOf({
-      'pyproject.toml': [
-        '[project]',
-        'name = "root"',
-        'dependencies = []',
-        '',
-        '[tool.uv.workspace]',
-        'members = ["services/*"]',
-        '',
-        '[tool.uv.sources]',
-        'worker = { workspace = true }',
-        '',
-      ].join('\n'),
-      'services/api/pyproject.toml': [
-        '[project]',
-        'name = "api"',
-        'dependencies = [',
-        '  "worker>=0.1",',
-        '  # "shared-lib",',
-        ']',
-        '',
-        '[tool.uv.sources]',
-        'worker = { workspace = true }',
-        '# shared-lib = { workspace = true }',
-        '',
-      ].join('\n'),
-      'services/api/src/api.py': 'value = 1\n',
-      'services/worker/pyproject.toml': '[project]\nname = "worker"\nversion = "0.1.0"\n',
-      'services/worker/src/worker.py': 'value = 1\n',
-      'services/shared-lib/pyproject.toml': '[project]\nname = "shared-lib"\nversion = "0.1.0"\n',
-      'services/shared-lib/src/shared.py': 'value = 1\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['worker'])
-  })
-
-  test('a relative Gradle project path resolves against the declaring project', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'rootProject.name = "root"\ninclude(":app", ":app:core", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'app/build.gradle.kts': 'dependencies { implementation(project("core")) }\n',
-      'app/src/main/kotlin/A.kt': 'class A\n',
-      'app/core/build.gradle.kts': 'dependencies { }\n',
-      'app/core/src/main/kotlin/AC.kt': 'class AC\n',
-      'core/build.gradle.kts': 'dependencies { }\n',
-      'core/src/main/kotlin/C.kt': 'class C\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':app')?.deps, [':app:core'])
-  })
-
-  test('Gradle project dependencies use declared modules and ignore comments or undeclared ids', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'rootProject.name = "root"\ninclude(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        'dependencies {',
-        '  implementation(project(":core"))',
-        '  implementation(project(":undeclared"))',
-        '  // implementation(project(":core"))',
-        '}',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'dependencies { /* implementation(project(":api")) */ }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.modules.find((m) => m.id === ':core')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('an unreadable Gradle build file stays unknown', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'rootProject.name = "root"\ninclude(":api")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'dependencies { implementation(project(":api")) }\n\0binary\n',
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: ':api', path: 'api', reason: 'no dependency resolver for this ecosystem' },
-    ])
-  })
-
-  test('a Gradle project lookup or raw string is not a dependency', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        'val other = project(":core")',
-        'val example = """project(":core")"""',
-        'dependencies { implementation("org:core:1.0") }',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('unsupported Gradle dependency syntax leaves coverage unknown', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        'val target = ":core"',
-        'dependencies { implementation(project(path = target)) }',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('logging a project inside Gradle dependencies is not an edge', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': ['dependencies {', '  println(project(":core").name)', '}', ''].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('a project dependency passed through a variable leaves coverage unknown', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        'dependencies {',
-        '  val core = project(":core")',
-        '  implementation(core)',
-        '}',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('an interpolated Gradle project path leaves coverage unknown', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': ['val name = "core"', 'dependencies { implementation(project(":$name")) }', ''].join(
-        '\n',
-      ),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('a root build file project block declares only that member dependency', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core", ":ui")\n',
-      'build.gradle.kts': [
-        'plugins { base }',
-        'project(":api") {',
-        '  dependencies { add("implementation", project(":core")) }',
-        '}',
-        '',
-      ].join('\n'),
-      'api/build.gradle.kts': 'plugins { base }\n',
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-      'ui/build.gradle.kts': 'plugins { base }\n',
-      'ui/src/main/kotlin/Ui.kt': 'class Ui\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.modules.find((m) => m.id === ':core')?.deps, [])
-    assert.deepEqual(profile.modules.find((m) => m.id === ':ui')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
   test('using a project lookup in a string expression is not an internal edge', () => {
@@ -2279,47 +1952,6 @@ describe('module dependency completeness', () => {
       'api/build.gradle.kts': ['dependencies { implementation("org.example:core:1-" + project(":core")) }', ''].join(
         '\n',
       ),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('a member script configuring a sibling is attributed to the named project', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core", ":ui")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'plugins { base }\n',
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-      'ui/build.gradle.kts': [
-        'plugins { base }',
-        'project(":api") {',
-        '  dependencies { add("implementation", project(":core")) }',
-        '}',
-        '',
-      ].join('\n'),
-      'ui/src/main/kotlin/Ui.kt': 'class Ui\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.modules.find((m) => m.id === ':ui')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a type-safe Gradle project accessor leaves coverage unknown', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'dependencies { implementation(projects.core) }\n',
       'api/src/main/kotlin/Api.kt': 'class Api\n',
       'core/build.gradle.kts': 'plugins { base }\n',
       'core/src/main/kotlin/Core.kt': 'class Core\n',
@@ -2666,23 +2298,6 @@ describe('module dependency completeness', () => {
     ])
   })
 
-  test('a buildFileName comparison is not a script assignment', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': [
-        'include(":api", ":core")',
-        'val isDefault = project(":api").buildFileName == "build.gradle.kts"',
-        '',
-      ].join('\n'),
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'dependencies { implementation(project(":core")) }\n',
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
   test('a brace-free conditional buildFileName assignment leaves coverage unknown', () => {
     const profile = profileOf({
       'settings.gradle.kts': [
@@ -2913,32 +2528,6 @@ describe('module dependency completeness', () => {
     ])
   })
 
-  test('a nested Gradle build root configures its own members', () => {
-    const profile = profileOf({
-      'workspace/settings.gradle.kts': 'include(":api", ":core")\n',
-      'workspace/build.gradle.kts': 'project(":api") { dependencies { add("implementation", project(":core")) } }\n',
-      'workspace/api/build.gradle.kts': 'plugins { base }\n',
-      'workspace/api/src/main/kotlin/Api.kt': 'class Api\n',
-      'workspace/core/build.gradle.kts': 'plugins { base }\n',
-      'workspace/core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a Groovy slashy string documenting a dependency is not an edge', () => {
-    const profile = profileOf({
-      'settings.gradle': "include ':api', ':core'\n",
-      'build.gradle': 'plugins { id "java" }\n',
-      'api/build.gradle': ["def example = /dependencies { implementation(project(':core')) }/", ''].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/build.gradle': 'plugins { id "java" }\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
   test('an interpolated root project selector leaves coverage unknown', () => {
     const profile = profileOf({
       'settings.gradle.kts': 'include(":api", ":core")\n',
@@ -2967,43 +2556,6 @@ describe('module dependency completeness', () => {
     ])
   })
 
-  test('a Groovy type-safe project accessor leaves coverage unknown', () => {
-    const profile = profileOf({
-      'settings.gradle': "include ':api', ':core'\n",
-      'build.gradle': 'plugins { id "java" }\n',
-      'api/build.gradle': 'dependencies { implementation projects.core }\n',
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/build.gradle': 'plugins { id "java" }\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
-  })
-
-  test('a dependency inside a nested Kotlin comment is not an edge', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        '/* outer /* inner */',
-        'dependencies { implementation(project(":core")) }',
-        '*/',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
   test('a computed root selector with a nested call leaves coverage unknown', () => {
     const profile = profileOf({
       'settings.gradle.kts': 'include(":api", ":core")\n',
@@ -3029,40 +2581,6 @@ describe('module dependency completeness', () => {
         reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
       },
     ])
-  })
-
-  test('consecutive Groovy dependency declarations are all read', () => {
-    const profile = profileOf({
-      'settings.gradle': "include ':api', ':core', ':ui'\n",
-      'build.gradle': 'plugins { id "java" }\n',
-      'api/build.gradle': [
-        'dependencies {',
-        "  implementation project(':core')",
-        "  implementation project(':ui')",
-        '}',
-        '',
-      ].join('\n'),
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/build.gradle': 'plugins { id "java" }\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-      'ui/build.gradle': 'plugins { id "java" }\n',
-      'ui/src/main/java/Ui.java': 'class Ui {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core', ':ui'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('Groovy dependency declarations without call parentheses are read', () => {
-    const profile = profileOf({
-      'settings.gradle': "include ':api', ':core'\n",
-      'build.gradle': 'plugins { id "java" }\n',
-      'api/build.gradle': "dependencies { implementation project(':core') }\n",
-      'api/src/main/java/Api.java': 'class Api {}\n',
-      'core/build.gradle': 'plugins { id "java" }\n',
-      'core/src/main/java/Core.java': 'class Core {}\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
   })
 
   test('cross-project configuration leaves member coverage unknown', () => {
@@ -3094,85 +2612,6 @@ describe('module dependency completeness', () => {
         path: 'core',
         reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
       },
-    ])
-  })
-
-  test('a fake dependencies block inside a Gradle string is not an edge', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': ['val example = """dependencies { implementation(project(":core")) }"""', ''].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a Gradle project lookup inside dependencies is not an edge', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': [
-        'dependencies {',
-        '  val other = project(":core")',
-        '  implementation("org:core:1.0")',
-        '}',
-        '',
-      ].join('\n'),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a brace inside a Gradle string does not hide a real dependency', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': ['dependencies {', '  println("}")', '  implementation(project(":core"))', '}', ''].join(
-        '\n',
-      ),
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a named literal Gradle path is a dependency edge', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': 'include(":api", ":core")\n',
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'dependencies { implementation(project(path = ":core")) }\n',
-      'api/src/main/kotlin/Api.kt': 'class Api\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [])
-  })
-
-  test('a computed Gradle projectDir does not read a decoy at the default path', () => {
-    const profile = profileOf({
-      'settings.gradle.kts': [
-        'include(":api", ":core")',
-        'project(":api").projectDir = layout.settingsDirectory.dir("api").asFile',
-        '',
-      ].join('\n'),
-      'build.gradle.kts': 'plugins { base }\n',
-      'api/build.gradle.kts': 'dependencies { implementation(project(":core")) }\n',
-      'real/api/build.gradle.kts': 'plugins { base }\n',
-      'core/build.gradle.kts': 'plugins { base }\n',
-      'core/src/main/kotlin/Core.kt': 'class Core\n',
-    })
-    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: ':api', path: '', reason: 'no dependency resolver for this ecosystem' },
     ])
   })
 

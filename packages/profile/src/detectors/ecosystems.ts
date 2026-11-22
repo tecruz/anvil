@@ -326,6 +326,41 @@ export const goDetector: Detector = {
 }
 
 // ---------------------------------------------------------------------------
+// Fail-closed manifest gates
+// ---------------------------------------------------------------------------
+
+function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/#.*$/, '').trim()
+    if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
+    return false
+  }
+  return true
+}
+
+const CARGO_SAFE = [
+  /\[(?:workspace|package|dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|features|target\..*dependencies)\]/,
+  /^(?:name|version|edition|resolver)\s*=\s*["'][^"']+["']$/,
+  /^(?:members|version)\s*=\s*\[\s*(?:["'][^"']+["']\s*,?\s*)*\]$/,
+  /^[\w-]+\s*=\s*["'][^"']+["']$/,
+  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
+  /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
+  /^[\w-]+\s*=\s*\[\]$/,
+]
+
+const GRADLE_SAFE = [
+  /^plugins\s*\{[^}]*\}$/,
+  /^rootProject\.name\s*=\s*["'][^"']+["']$/,
+  /^include\(["'][\w:.-]+["'](?:,\s*["'][\w:.-]+["'])*\)$/,
+  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"']+["']\)$/,
+  /^dependencies\s*\{$/,
+  /^\}$/,
+  /^(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)$/,
+  /^(?:implementation|api|testImplementation|runtimeOnly)\s+project\(["'][\w:.-]+["']\)$/,
+  /^dependencies\s*\{.*project\(["'][\w:.-]+["']\).*\}$/,
+]
+
+// ---------------------------------------------------------------------------
 // Rust
 // ---------------------------------------------------------------------------
 
@@ -493,7 +528,17 @@ export const rustDetector: Detector = {
           for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
           return { ...workspace, shared }
         })
-      for (const crate of crates) {
+      const cargoSafe = [...ctx.files]
+        .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+        .every((file) => {
+          const text = read(ctx, file)
+          return text === null || linesWithin(text, CARGO_SAFE)
+        })
+      if (!cargoSafe) {
+        for (const crate of crates)
+          draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo manifest syntax; dependencies left unknown')
+      }
+      for (const crate of cargoSafe ? crates : []) {
         if (crate.manifest === null) continue
         const enclosing = workspaces
           .filter((w) => w.root === '.' || crate.path === w.root || crate.path.startsWith(`${w.root}/`))
@@ -1287,6 +1332,15 @@ export const jvmDetector: Detector = {
       const settings = gradleFiles.find((f) => f.startsWith('settings.gradle'))
       if (settings !== undefined) {
         const text = read(ctx, settings)
+        const gradleSafe =
+          text !== null &&
+          linesWithin(text, GRADLE_SAFE) &&
+          [...ctx.files]
+            .filter((file) => /(?:^|\/)build\.gradle(?:\.kts)?$/.test(file))
+            .every((file) => {
+              const body = read(ctx, file)
+              return body !== null && linesWithin(body, GRADLE_SAFE)
+            })
         if (text !== null) {
           const settingsPath = ctx.resolve(settings)
           const settingsDir = settingsPath.includes('/') ? settingsPath.slice(0, settingsPath.lastIndexOf('/')) : ''
@@ -1383,6 +1437,7 @@ export const jvmDetector: Detector = {
             const deps = new Set<string>()
             const choice = choices.get(id) ?? { file: undefined, ambiguous: true }
             let unsupported =
+              !gradleSafe ||
               rootWide ||
               rootUnsupported ||
               programmaticAdd ||
