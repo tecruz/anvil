@@ -825,11 +825,18 @@ async function main(): Promise<void> {
   // Reload the scenario matrix from disk so a definition that changed mid-run is detected,
   // not the in-memory object captured before the run started.
   const currentScenarios = loadScenarios()
+  // Rehash only the scenarios this run actually executed. The full matrix can contain pilot
+  // scenarios whose pinned source clones are local run inputs and absent from a clean checkout;
+  // hashing them after the run would abort the run before it could be finalized. A selected
+  // scenario that disappeared from the matrix is still reported by recordFixtureProblem.
+  const selected = new Set(Object.keys(runRecord.scenarioHashes ?? {}))
   const currentHashes = Object.fromEntries(
-    currentScenarios.map((scenario) => [
-      scenario.id,
-      { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
-    ]),
+    currentScenarios
+      .filter((scenario) => selected.has(scenario.id))
+      .map((scenario) => [
+        scenario.id,
+        { scenarioHash: hashScenario(scenario), sourceHash: hashScenarioSource(repoRoot, scenario) },
+      ]),
   )
   const fixtureProblem = recordFixtureProblem(runRecord, currentHashes)
   const complete = allDeclaredCompleted(runRecord)
@@ -1561,8 +1568,50 @@ function projectDirIn(workdir: string): string {
   return join(workdir, ...profile.projectDir.split('/'))
 }
 
+/**
+ * The #91 pilot sources are local clones declared in `eval/pilots/sources.json`. Before a
+ * clone is copied into a worktree, prove it is still the pinned tree: a wrong origin, a moved
+ * HEAD, a content change (staged or unstaged) or an untracked file must fail the run rather
+ * than silently become evidence. Clean checkouts have no clones and need no assertion.
+ */
+function assertPinnedSource(scenario: EvalScenario): void {
+  const manifestPath = join(repoRoot, 'eval/pilots/sources.json')
+  if (!existsSync(manifestPath)) return
+  const pins = (
+    JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      sources: Array<{ repo: string; origin: string; sha: string }>
+    }
+  ).sources
+  const pin = pins.find((p) => p.repo === scenario.repo)
+  if (pin === undefined) return
+  const cwd = join(repoRoot, ...pin.repo.split('/'))
+  // A pinned path that exists but is not a Git clone cannot be proven to match the card; a
+  // missing path is fine in a clean checkout because the pinned scenarios are not selected there.
+  if (!existsSync(cwd)) return
+  if (!existsSync(join(cwd, '.git')))
+    throw new Error(`pinned source ${pin.repo}: the path exists but is not a Git clone`)
+  const gitOut = (args: string[]): string =>
+    execFileSync('git', ['--no-optional-locks', ...args], { cwd, encoding: 'utf8' }).trim()
+  if (gitOut(['rev-parse', 'HEAD']) !== pin.sha) throw new Error(`pinned source ${pin.repo}: HEAD is not ${pin.sha}`)
+  if (gitOut(['config', '--get', 'remote.origin.url']) !== pin.origin)
+    throw new Error(`pinned source ${pin.repo}: origin is not ${pin.origin}`)
+  // CRLF-only differences on `eol=crlf` files are not source changes; any content change is.
+  for (const args of [
+    ['diff', 'HEAD', '--ignore-cr-at-eol', '--quiet'],
+    ['diff', '--cached', 'HEAD', '--ignore-cr-at-eol', '--quiet'],
+  ]) {
+    if (spawnSync('git', ['--no-optional-locks', ...args], { cwd }).status !== 0)
+      throw new Error(`pinned source ${pin.repo}: working tree differs from HEAD`)
+  }
+  // Include ignored files: the recursive copy brings them into the worktree too, so a clone with
+  // local debris is not the pinned source tree.
+  if (gitOut(['ls-files', '--others']) !== '')
+    throw new Error(`pinned source ${pin.repo}: untracked or ignored files present`)
+}
+
 /** Copy the scenario's repository into a fresh git repository the agent can work in. */
 function prepareRepo(scenario: EvalScenario, workdir: string): void {
+  assertPinnedSource(scenario)
   const source = join(repoRoot, ...scenario.repo.split('/'))
   if (!existsSync(source)) throw new Error(`scenario repository not found: ${scenario.repo}`)
   cpSync(source, workdir, { recursive: true })

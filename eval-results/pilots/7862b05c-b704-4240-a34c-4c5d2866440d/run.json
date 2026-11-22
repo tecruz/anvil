@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 3,
+  "runId": "7862b05c-b704-4240-a34c-4c5d2866440d",
+  "startedAt": "2026-11-21T12:34:27.119Z",
+  "completedAt": "2026-11-21T12:42:48.549Z",
+  "completionState": "partial",
+  "commitSha": "3aec8a075194769c98f967a6133470c7250ae77b",
+  "implementation": "6c7b4b7c413c9e7de0dec0723ef226cd99874db047956a20f15c002caef9a1b1",
+  "bundleDigest": "e0933dd464e3a542f3d52631221aa1bd3c5632931575ca1cb2980ac46e24f40d",
+  "harnessDigest": "30aa1032f21ee3e346b75f7890d979a6736fe1f4fb029b36e1657fe96bfbad64",
+  "models": [
+    {
+      "id": "opencode/hy4-flash-free",
+      "role": "small"
+    }
+  ],
+  "opencodeVersion": "2.3.2",
+  "nodeVersion": "v24.13.0",
+  "publishTranscripts": false,
+  "subset": true,
+  "repetitions": 3,
+  "seed": "pilot-2026-11-21",
+  "order": "alternate",
+  "scenarioHashes": {
+    "pilot-conventional-wordcount": {
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288"
+    }
+  },
+  "runKeys": [
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/0",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/0",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/1",
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/1",
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/2",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/2"
+  ],
+  "executionOrder": [
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/0",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/0",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/1",
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/1",
+    "pilot-conventional-wordcount/bare/opencode/hy4-flash-free/2",
+    "pilot-conventional-wordcount/anvil/opencode/hy4-flash-free/2"
+  ],
+  "results": [
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:34:27.260Z",
+          "completedAt": "2026-11-21T12:36:00.396Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 93112,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:36:00.400Z",
+          "completedAt": "2026-11-21T12:37:24.561Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 84125,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:37:24.568Z",
+          "completedAt": "2026-11-21T12:39:19.219Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 114624,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:39:19.223Z",
+          "completedAt": "2026-11-21T12:40:29.055Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 69806,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:40:29.060Z",
+          "completedAt": "2026-11-21T12:41:54.764Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 85682,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "pilot-conventional-wordcount",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "4067035ff61007b54547389ecfe70c70f2dd82921f0bceb805ddc1a80ce9beb8",
+      "sourceHash": "a56c42bf3ae540a605aa1d40bea295baf2382effb5aaa6b7a1108322b8325288",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-21T12:41:54.768Z",
+          "completedAt": "2026-11-21T12:42:46.505Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": null,
+      "verifyExitCodes": [1],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 51713,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    }
+  ]
+}

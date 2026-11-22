@@ -34,6 +34,7 @@ that supersedes it. The status line at the top is the source of truth.
 | [0023](0023-npm-package-name-is-anvil-workflows.md) | The registry package name is `@anvil-workflows/cli` | accepted |
 | [0024](0024-jira-cloud-rest-v3.md) | The Jira provider speaks Jira Cloud REST API v3 only | accepted |
 | [0025](0025-local-dashboard.md) | The local dashboard is a read-only view over CLI JSON | accepted |
+| [0027](0027-3d-comparison-postponed.md) | The 3D comparison is postponed until a prototype and participants exist | accepted |
 
 The [architecture document](../ARCHITECTURE.md) describes the system as it is today; these
 describe the decisions that shaped it.
