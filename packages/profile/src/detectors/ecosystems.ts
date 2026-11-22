@@ -393,7 +393,7 @@ const GRADLE_SAFE = [
   /^plugins\s*\{[^}]*\}$/,
   /^rootProject\.name\s*=\s*["'][^"'$]+["']$/,
   /^include\(["'][\w:.-]+["'](?:,\s*["'][\w:.-]+["'])*\)$/,
-  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"'$]+["']\)$/,
+  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"'\\$]+["']\)$/,
   /^dependencies\s*\{\s*(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)\s*\}$/,
   /^dependencies\s*\{$/,
   /^\}$/,
@@ -444,7 +444,7 @@ function cargoDependencyEntries(manifest: string, workspaceSection: boolean): Ca
       out.push({ name, path, workspace, unsupported: unsupported || ambiguous })
   }
   for (const raw of manifest.split('\n')) {
-    const line = raw.replace(/#.*$/, '').trim()
+    const line = stripHashComment(raw).trim()
     if (line.startsWith('[')) {
       flush()
       entry = ''
@@ -489,7 +489,10 @@ function cargoPathDependencies(
   let unsupported = false
   const add = (path: string, base: string): void => {
     const normalized = posix.normalize(posix.join(base, path)).replace(/\/+$/, '')
+    // A path that does not resolve to a crate we can see cannot be proved safe: leave coverage
+    // unknown rather than silently dropping the edge (e.g. a member skipped by the walk).
     if (normalized !== '' && paths.has(normalized)) out.add(normalized)
+    else unsupported = true
   }
   for (const entry of cargoDependencyEntries(manifest, false)) {
     if (entry.unsupported) {
@@ -560,7 +563,7 @@ export const rustDetector: Detector = {
         if (f !== 'Cargo.toml' && !f.endsWith('/Cargo.toml')) continue
         const path = f === 'Cargo.toml' ? '.' : f.slice(0, -'/Cargo.toml'.length)
         const inner = read(ctx, f)
-        if (f === 'Cargo.toml' && inner !== null && !/^\s*\[package\]/m.test(inner)) continue
+        if (f === 'Cargo.toml' && inner !== null && !/^\s*\[\s*["']?package["']?\s*\]/m.test(inner)) continue
         const name = inner === null ? path : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'crate', deps: [] })
         crates.push({ id: name, path, manifest: inner })
@@ -1871,8 +1874,14 @@ export const jvmDetector: Detector = {
               /\bproject\s*\(\s*(['"])[^:'"][^'"]*\1\s*\)/.test(maskGradleComments(rootMasked)))
           // An unresolved script for any project can configure any other project, so every
           // member's dependency list becomes untrustworthy.
+          // A remapped project whose script is not visible to the walk cannot be checked; a
+          // dependency add there could configure any module, so no module's edges are trusted.
+          const remappedScriptMissing = [...remaps].some(
+            ([id, dir]) => dir !== null && choices.get(id)?.file === undefined,
+          )
           const scriptAmbiguous =
             rootChoice.ambiguous ||
+            remappedScriptMissing ||
             [...directories].filter(([, dir]) => dir !== null).some(([id]) => choices.get(id)?.ambiguous === true)
           for (const [id, dir] of directories) {
             const deps = new Set<string>()
