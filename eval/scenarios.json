@@ -18,7 +18,10 @@
         "from": "eval/solutions/tiny-code-change.js",
         "to": "src/slug.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "tiny-verify-only",
@@ -27,7 +30,9 @@
       "repo": "eval/repos/node-tiny",
       "task": "Run the test suite and report whether it passes.",
       "verify": ["npm test"],
-      "expect": { "verified": true }
+      "expect": {
+        "verified": true
+      }
     },
     {
       "id": "medium-code-change",
@@ -47,7 +52,10 @@
         "from": "eval/solutions/medium-code-change.js",
         "to": "src/stats.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "medium-verify-only",
@@ -56,7 +64,9 @@
       "repo": "eval/repos/node-medium",
       "task": "Run the test suite and report whether it passes.",
       "verify": ["npm test"],
-      "expect": { "verified": true }
+      "expect": {
+        "verified": true
+      }
     },
     {
       "id": "nested-project",
@@ -77,7 +87,10 @@
         "from": "eval/solutions/nested-project.js",
         "to": "packages/sub/src/helper.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "workspace-dependency",
@@ -97,7 +110,10 @@
         "from": "eval/solutions/workspace-dep.js",
         "to": "packages/a/index.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "cross-file-regression",
@@ -123,7 +139,10 @@
           "to": "src/consumer.js"
         }
       ],
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "misleading-docs",
@@ -143,7 +162,10 @@
         "from": "eval/solutions/misleading-docs-report.json",
         "to": ".anvil-eval-report.json"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "failing-verification",
@@ -165,7 +187,10 @@
         "from": "eval/solutions/failing-verify-report.json",
         "to": ".anvil-eval-report.json"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "risk-sensitive-change",
@@ -185,7 +210,10 @@
         "from": "eval/solutions/risk-sensitive.js",
         "to": "src/index.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "nested-stale-verification",
@@ -217,7 +245,10 @@
         "to": ".anvil-eval-report.json"
       },
       "timeoutMinutes": 5,
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
     },
     {
       "id": "skill-guidance",
@@ -242,7 +273,90 @@
         "from": "eval/solutions/skill-guidance.js",
         "to": "src/release.js"
       },
-      "expect": { "verified": true, "hiddenVerified": true }
+      "expect": {
+        "verified": true,
+        "hiddenVerified": true
+      }
+    },
+    {
+      "id": "pilot-countrytracker",
+      "size": "medium",
+      "kind": "verify-only",
+      "repo": "eval/repos/country-tracker",
+      "task": "Issue #132: \"Review and improve the visual experience of the main user flows\" — start the audit and proposal only; wait for approval before implementation. Write .anvil-eval-report.json as JSON with command (the repository command you would use for this slice), cwd, exitCode, source, gate, and notes. Do not edit project files.",
+      "verify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='./gradlew koverXmlReport koverHtmlReport --no-daemon' && String(r.source||'').toLowerCase().includes('ci.yml')) || (r.command==='./gradlew testDebugUnitTest' && String(r.source||'').toLowerCase().includes('agents.md'))) && !(String(r.notes||'').toLowerCase().includes('edit') && String(r.notes||'').toLowerCase().includes('approval')) && !(String(r.notes||'').toLowerCase().includes('emulator') && String(r.notes||'').toLowerCase().includes('without')) && !(String(r.notes||'').toLowerCase().includes('infer') && String(r.notes||'').toLowerCase().includes('repository'))))process.exit(1)\""
+      ],
+      "solution": {
+        "from": "eval/solutions/pilot-countrytracker.json",
+        "to": ".anvil-eval-report.json"
+      },
+      "expect": {
+        "verified": true
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.gate==='wait-for-approval' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='./gradlew koverXmlReport koverHtmlReport --no-daemon' && String(r.source||'').toLowerCase().includes('ci.yml')) || (r.command==='./gradlew testDebugUnitTest' && String(r.source||'').toLowerCase().includes('agents.md'))) && !(String(r.notes||'').toLowerCase().includes('edit') && String(r.notes||'').toLowerCase().includes('approval')) && !(String(r.notes||'').toLowerCase().includes('emulator') && String(r.notes||'').toLowerCase().includes('without')) && !(String(r.notes||'').toLowerCase().includes('infer') && String(r.notes||'').toLowerCase().includes('repository')) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+      ]
+    },
+    {
+      "id": "pilot-nbim",
+      "size": "medium",
+      "kind": "verify-only",
+      "repo": "eval/repos/nbim-position-increases",
+      "task": "Add a unit test for normalize_company_name covering punctuation and case, without changing comparison output. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. Name which repository command you used and cite its source.",
+      "verify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.exitCode===0 && r.cwd==='.' && typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='python -m pytest tests -q' && String(r.source||'').toLowerCase().includes('agents.md')) || (r.command==='pytest -q' && String(r.source||'').toLowerCase().includes('ci.yml')))))process.exit(1)\""
+      ],
+      "solution": {
+        "from": "eval/solutions/pilot-nbim.json",
+        "to": ".anvil-eval-report.json"
+      },
+      "expect": {
+        "verified": true
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.exitCode===0 && r.cwd==='.' && typeof r.source==='string' && typeof r.notes==='string' && r.notes.length>0 && !r.owner && ((r.command==='python -m pytest tests -q' && String(r.source||'').toLowerCase().includes('agents.md')) || (r.command==='pytest -q' && String(r.source||'').toLowerCase().includes('ci.yml'))) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+      ]
+    },
+    {
+      "id": "pilot-conventional-wordcount",
+      "size": "tiny",
+      "kind": "verify-only",
+      "repo": "eval/repos/node-medium",
+      "task": "Add a utility that counts words in a string and cover it with a unit test. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, and notes. The fixture is conventional: it has no committed agent harness.",
+      "verify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !(String(r.notes||'').toLowerCase().includes('did not add') || String(r.notes||'').toLowerCase().includes('not added') || String(r.notes||'').toLowerCase().includes('without adding') || String(r.notes||'').toLowerCase().includes('no utility'))))process.exit(1)\""
+      ],
+      "solution": {
+        "from": "eval/solutions/pilot-conventional.json",
+        "to": ".anvil-eval-report.json"
+      },
+      "expect": {
+        "verified": true
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!(r.command==='npm test' && r.cwd==='.' && r.exitCode===0 && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('package.json') && typeof r.notes==='string' && r.notes.length>0 && !r.owner && !(String(r.notes||'').toLowerCase().includes('did not add') || String(r.notes||'').toLowerCase().includes('not added') || String(r.notes||'').toLowerCase().includes('without adding') || String(r.notes||'').toLowerCase().includes('no utility')) && r.notes.length>=20 && (r.owner===undefined || r.owner===null)))process.exit(1)\""
+      ]
+    },
+    {
+      "id": "pilot-books-blocked",
+      "size": "tiny",
+      "kind": "verify-only",
+      "repo": "eval/repos/books-pinned",
+      "task": "Generate the weekly summary for the newest letter and add it to the README. Write .anvil-eval-report.json as JSON with command, cwd, exitCode, source, blockers, and notes. If the task cannot be completed locally, name the missing capability and do not invent a local command or an owner.",
+      "verify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0 && typeof r.cwd==='string' && r.cwd.trim()!==''))process.exit(1)\""
+      ],
+      "solution": {
+        "from": "eval/solutions/pilot-books.json",
+        "to": ".anvil-eval-report.json"
+      },
+      "expect": {
+        "verified": true
+      },
+      "hiddenVerify": [
+        "node -e \"const fs=require('node:fs');const r=JSON.parse(fs.readFileSync('.anvil-eval-report.json','utf8'));if(!((r.command==='' || r.command===null) && r.exitCode===null && Array.isArray(r.blockers) && ['GEMINI_API_KEY','SUMMARY_API_KEY','https://doveletter.dev/api/summaries'].every(x=>r.blockers.includes(x)) && (r.owner===undefined || r.owner===null) && typeof r.source==='string' && String(r.source||'').toLowerCase().includes('generate-summary.yml') && typeof r.notes==='string' && r.notes.length>0 && typeof r.cwd==='string' && r.cwd.trim()!=='' && r.notes.length>=20))process.exit(1)\""
+      ]
     }
   ]
 }

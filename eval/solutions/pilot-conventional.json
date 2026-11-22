@@ -1,0 +1,7 @@
+{
+  "command": "npm test",
+  "cwd": ".",
+  "exitCode": 0,
+  "source": "package.json",
+  "notes": "Added a word-count utility and unit test in the conventional fixture."
+}
