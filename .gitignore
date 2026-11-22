@@ -9,6 +9,11 @@ node_modules/
 # Never commit: staging is regenerated and ticket context is company-internal.
 .anvil/
 
+# pinned external pilot repositories are local run inputs, not source
+eval/repos/country-tracker/
+eval/repos/nbim-position-increases/
+eval/repos/books-pinned/
+
 # local scratch
 *.log
 .DS_Store
