@@ -1,0 +1,19 @@
+{
+  "sources": [
+    {
+      "repo": "eval/repos/country-tracker",
+      "origin": "https://github.com/tecruz/CountryTracker.git",
+      "sha": "2c6728f421035c04eb7d099f2aa6f5db50c5b6f6"
+    },
+    {
+      "repo": "eval/repos/nbim-position-increases",
+      "origin": "https://github.com/tecruz/nbim-position-increases.git",
+      "sha": "2ba28cc5d6993f7d5599932e05c5ce4355c2e21c"
+    },
+    {
+      "repo": "eval/repos/books-pinned",
+      "origin": "https://github.com/tecruz/Books.git",
+      "sha": "939566ef34f5dc456a05d8d4ca4a92fde04ecdc6"
+    }
+  ]
+}

@@ -417,11 +417,19 @@ function hashFile(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-/** Every file under `dir`, sorted so the hash is stable across platforms. */
+/**
+ * Every file under `dir`, sorted so the hash is stable across platforms.
+ *
+ * `.git` is excluded: a source hash must identify the source tree, not the state of a local
+ * clone (config, reflogs and packed objects change with unrelated git housekeeping). Tests
+ * that build their own expected hashes already skip `.git`; doing it here keeps the two in
+ * agreement for the pinned pilot clones as well.
+ */
 function filesUnder(root: string): string[] {
   const out: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else if (entry.isFile()) out.push(path)
