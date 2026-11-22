@@ -37,6 +37,15 @@ export interface ProfileDraft {
   commands: Partial<Record<CommandKind, CommandEntry[]>>
   /** Repo-relative POSIX paths the walk found, for detectors to look things up against. */
   files: ReadonlySet<string>
+  /** Module ids whose dependency lists were actually resolved from a manifest. */
+  depsAnalysed: Set<string>
+  /** Why a module's dependencies could not be decided, when it is not simply unimplemented. */
+  depsUnknownReasons: Map<string, string>
+}
+
+/** Record that a module's `deps` came from a real manifest, so `[]` means "none found". */
+export function markDepsAnalysed(draft: ProfileDraft, id: string): void {
+  draft.depsAnalysed.add(id)
 }
 
 export interface DetectorContext {

@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 3,
+  "runId": "cf4ef05e-c3ef-49cd-849c-452c0566aa0b",
+  "startedAt": "2026-11-22T01:09:39.515Z",
+  "completedAt": "2026-11-22T01:10:02.055Z",
+  "completionState": "completed",
+  "commitSha": "21ecf65e220fe608fde1c35b32b80dd4f489d8ae",
+  "implementation": "2f389d777f6fdf2d9f3bbd97543c60dd42872a3d0756f15d839411031b25ad14",
+  "bundleDigest": "11eca52a1ad04e68892d52f44f6a9f5d65d52334f50671e4f17da8865b19311c",
+  "harnessDigest": "30aa1032f21ee3e346b75f7890d979a6736fe1f4fb029b36e1657fe96bfbad64",
+  "models": [
+    {
+      "id": "fake-agent",
+      "role": "small"
+    }
+  ],
+  "opencodeVersion": null,
+  "nodeVersion": "v24.13.0",
+  "publishTranscripts": false,
+  "subset": false,
+  "repetitions": 1,
+  "seed": "a12388c2-4e2d-4aa0-bc02-096e84f61929",
+  "order": "alternate",
+  "scenarioHashes": {
+    "tiny-code-change": {
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0"
+    },
+    "tiny-verify-only": {
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265"
+    },
+    "medium-code-change": {
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be"
+    },
+    "medium-verify-only": {
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515"
+    }
+  },
+  "runKeys": [
+    "tiny-code-change/bare/fake-agent/0",
+    "tiny-code-change/anvil/fake-agent/0",
+    "tiny-verify-only/bare/fake-agent/0",
+    "tiny-verify-only/anvil/fake-agent/0",
+    "medium-code-change/bare/fake-agent/0",
+    "medium-code-change/anvil/fake-agent/0",
+    "medium-verify-only/bare/fake-agent/0",
+    "medium-verify-only/anvil/fake-agent/0"
+  ],
+  "executionOrder": [
+    "tiny-code-change/bare/fake-agent/0",
+    "tiny-code-change/anvil/fake-agent/0",
+    "tiny-verify-only/bare/fake-agent/0",
+    "tiny-verify-only/anvil/fake-agent/0",
+    "medium-code-change/bare/fake-agent/0",
+    "medium-code-change/anvil/fake-agent/0",
+    "medium-verify-only/bare/fake-agent/0",
+    "medium-verify-only/anvil/fake-agent/0"
+  ],
+  "results": [
+    {
+      "scenario": "tiny-code-change",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:39.620Z",
+          "completedAt": "2026-11-22T01:09:41.371Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 1735,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "tiny-code-change",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
+      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:41.375Z",
+          "completedAt": "2026-11-22T01:09:44.441Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3049,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "tiny-verify-only",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:44.455Z",
+          "completedAt": "2026-11-22T01:09:45.903Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 1436,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "tiny-verify-only",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
+      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:45.908Z",
+          "completedAt": "2026-11-22T01:09:48.841Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2918,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-code-change",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:48.850Z",
+          "completedAt": "2026-11-22T01:09:51.286Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2416,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-code-change",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "471545311d6ff9ab111108c5d0abb46c5255a7d6a02383acf0ce13b10a2fc8ca",
+      "sourceHash": "896524d1b8e176dbc5d5e6d78ccdaf6f60691d01e64a7f85bf4289fcc4e8e5be",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:51.290Z",
+          "completedAt": "2026-11-22T01:09:55.532Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 4214,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "bare",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:55.542Z",
+          "completedAt": "2026-11-22T01:09:58.009Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 2445,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "medium-verify-only",
+      "variant": "anvil",
+      "model": "fake-agent",
+      "modelRole": null,
+      "scenarioHash": "26f14ec00c46b94b5a72795b3820e381831aeb333791fb88b0eb64bb60d0bc5a",
+      "sourceHash": "28998b6453ef1bf6893c94fb78668816b766c0721de83423b7a7cc51c18e5515",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 0,
+      "attempts": [
+        {
+          "startedAt": "2026-11-22T01:09:58.014Z",
+          "completedAt": "2026-11-22T01:10:01.859Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": null,
+      "verifyExitCodes": [0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 3813,
+      "transcript": "",
+      "skillInstall": "not-requested"
+    }
+  ]
+}

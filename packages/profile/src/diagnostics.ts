@@ -19,5 +19,16 @@ export function profileWarnings(profile: { diagnostics?: ProjectProfile['diagnos
   for (const f of diagnostics.failedDetectors) {
     out.push(`detector ${f.id} failed: ${f.error}`)
   }
+  const unknown = diagnostics.unanalysedDeps ?? []
+  if (unknown.length > 0) {
+    const names = unknown
+      .slice(0, 4)
+      .map((m) => m.id)
+      .join(', ')
+    const more = unknown.length > 4 ? ` and ${unknown.length - 4} more` : ''
+    out.push(
+      `module dependency graph incomplete: ${unknown.length} module(s) have no dependency resolver (${names}${more}); their deps: [] means unknown, not none`,
+    )
+  }
   return out
 }
