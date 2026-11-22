@@ -54,11 +54,11 @@ function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
 }
 const UV_SAFE = [
   /^\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]$/,
-  /^(?:name|version)\s*=\s*["'][^"']+["']$/,
+  /^(?:name|version)\s*=\s*["'][^"'\\]+["']$/,
   /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@;\\]+["']\s*,?\s*)*\]$/,
   /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]\\]+["']\s*,?\s*)*\]$/,
   /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
-  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
+  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"'\\]+["']\s*\}$/,
 ]
 
 /** Line-based readers for the flat formats Python uses. */
@@ -147,10 +147,12 @@ function pythonName(name: string): string {
 
 /** The directories a uv workspace declares, after its `exclude` globs. */
 function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
-  const section = tomlSection(text, /^\s*\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]/m)
-  if (section === null) return []
-  const declared = tomlArray(section, 'members')
-  const excluded = tomlArray(section, 'exclude')
+  const section = tomlSection(
+    text,
+    /^\s*(?:\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]|["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\.)/m,
+  )
+  const declared = section !== null ? tomlArray(section, 'members') : tomlArray(text, 'tool\\.uv\\.workspace\\.members')
+  const excluded = section !== null ? tomlArray(section, 'exclude') : tomlArray(text, 'tool\\.uv\\.workspace\\.exclude')
   const projects = [...ctx.files]
     .filter((file) => file === 'pyproject.toml' || file.endsWith('/pyproject.toml'))
     .map((file) => (file === 'pyproject.toml' ? '.' : file.slice(0, -'/pyproject.toml'.length)))
@@ -425,7 +427,12 @@ export const pythonDetector: Detector = {
     const workspaceFile = [...ctx.files].find((file) => {
       if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
       const text = readTomlish(ctx, file)
-      return text !== null && /^\s*\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]/m.test(text)
+      return (
+        text !== null &&
+        /^\s*(?:\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]|["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\.)/m.test(
+          text,
+        )
+      )
     })
     const oddUvHeader = [...ctx.files].some((file) => {
       if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
@@ -434,7 +441,7 @@ export const pythonDetector: Detector = {
     })
     if (oddUvHeader) {
       for (const file of ctx.files) {
-        if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return
+        if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) continue
         const text = readTomlish(ctx, file)
         if (text === null || !/\[\s*tool\s*\.\s*uv\s*\.\s*["']workspace["']\s*\]/.test(text)) continue
         draft.depsUnknownReasons.set(
