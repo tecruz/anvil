@@ -3517,4 +3517,56 @@ describe('module dependency completeness', () => {
     assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
     assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
   })
+
+  test('a one-line literal Gradle dependency still produces an edge', () => {
+    const profile = profileOf({
+      'settings.gradle.kts': 'include(":api", ":core")\n',
+      'api/build.gradle.kts': 'plugins { base }\ndependencies { implementation(project(":core")) }\n',
+      'core/build.gradle.kts': 'plugins { base }\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [':core'])
+  })
+
+  test('a computed rootProject name cannot redirect the Gradle build script', () => {
+    const profile = profileOf({
+      'settings.gradle.kts':
+        'include(":api")\nrootProject.name = "$' +
+        '{rootProject.children.single().apply { buildFileName = name + buildFileName.drop(5) }.name}"\ninclude(":core")\n',
+      'api/build.gradle': "plugins { id 'java' }\n",
+      'core/build.gradle': "plugins { id 'java' }\n",
+      'api/api.gradle': "plugins { id 'java' }\ndependencies.add 'implementation', project(':core')\n",
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), [':api', ':core'])
+  })
+
+  test('TOML escapes in uv names and source paths fail the workspace gate', () => {
+    const escapedName = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "core"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { workspace = true }\n',
+      'core/pyproject.toml': '[project]\nname = "cor\\u0065"\n',
+    })
+    assert.deepEqual(escapedName.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((escapedName.diagnostics.unanalysedDeps ?? []).length > 0)
+
+    const escapedPath = profileOf({
+      'pyproject.toml': '[tool.uv.workspace]\nmembers = ["api", "core"]\n',
+      'api/pyproject.toml':
+        '[project]\nname = "api"\ndependencies = ["core"]\n[tool.uv.sources]\ncore = { path = "../cor\\u0065" }\n',
+      'core/pyproject.toml': '[project]\nname = "core"\n',
+    })
+    assert.deepEqual(escapedPath.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((escapedPath.diagnostics.unanalysedDeps ?? []).length > 0)
+  })
+
+  test('a dotted uv workspace declaration still marks its members unknown', () => {
+    const profile = profileOf({
+      'pyproject.toml': 'tool.uv.workspace.members = ["api", "core"]\n',
+      'api/pyproject.toml': '[project]\nname = "api"\n',
+      'core/pyproject.toml': '[project]\nname = "core"\n',
+    })
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.deepEqual((profile.diagnostics.unanalysedDeps ?? []).map((d) => d.id).sort(), ['api', 'core'])
+  })
 })
