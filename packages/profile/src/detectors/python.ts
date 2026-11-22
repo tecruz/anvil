@@ -27,14 +27,14 @@ import { readText } from '../walk.ts'
 
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/#.*$/, '').trim()
+    const line = raw.replace(/#.*$/, '').trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
   }
   return true
 }
 const UV_SAFE = [
-  /\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]/,
+  /^\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]$/,
   /^(?:name|version)\s*=\s*["'][^"']+["']$/,
   /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@]+["']\s*,?\s*)*\]$/,
   /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]]+["']\s*,?\s*)*\]$/,

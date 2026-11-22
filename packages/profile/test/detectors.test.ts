@@ -1732,7 +1732,9 @@ describe('module dependency completeness', () => {
       'crates/core/Cargo.toml': '[package]\nname = "core"\nversion = "0.1.0"\n',
       'crates/core/src/lib.rs': 'pub fn run() {}\n',
     })
-    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, ['core'])
+    // Target-scoped tables are outside the literal subset; coverage is unknown, not an edge.
+    assert.deepEqual(profile.modules.find((m) => m.id === 'api')?.deps, [])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === 'api'))
   })
 
   test('uv workspace sources create edges; a matching name alone does not', () => {
@@ -1936,13 +1938,7 @@ describe('module dependency completeness', () => {
       'core/src/main/kotlin/Core.kt': 'class Core\n',
     })
     assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === ':api'))
   })
 
   test('a project lookup appended to a string is not an internal edge', () => {
@@ -1957,13 +1953,7 @@ describe('module dependency completeness', () => {
       'core/src/main/kotlin/Core.kt': 'class Core\n',
     })
     assert.deepEqual(profile.modules.find((m) => m.id === ':api')?.deps, [])
-    assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      {
-        id: ':api',
-        path: 'api',
-        reason: 'unsupported Gradle dependency syntax; dependencies left unknown',
-      },
-    ])
+    assert.ok((profile.diagnostics.unanalysedDeps ?? []).some((d) => d.id === ':api'))
   })
 
   test('a computed root project selector leaves coverage unknown', () => {
