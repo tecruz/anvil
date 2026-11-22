@@ -96,6 +96,250 @@ describe('a probed MCP file is visible to the rule', () => {
   })
 })
 
+describe('INSTRUCTION_CONFLICT compares verify commands across instruction files', () => {
+  test('different test commands in two files warn with evidence from both', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('AGENTS.md:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('CLAUDE.md:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('matching commands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  test('a single instruction file is na, not a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'na')
+  })
+
+  test('prose that is not a command is left alone', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nWe use npm for packages and npm test is mentioned in prose.\n',
+      'CLAUDE.md': '# Claude\n\nTests are important. Use pnpm for speed.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').status,
+      'pass',
+      finding(audit(profile), 'INSTRUCTION_CONFLICT').detail,
+    )
+  })
+
+  test('equivalent npm shorthands across files pass', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm run test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('two Cursor rule files under .cursor/rules are compared', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      '.cursor/rules/a.mdc': '---\ndescription: a\n---\n\nRun `npm test`.\n',
+      '.cursor/rules/b.mdc': '---\ndescription: b\n---\n\nRun `pnpm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/a.mdc:')),
+      f.evidence.join(', '),
+    )
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/b.mdc:')),
+      f.evidence.join(', '),
+    )
+  })
+
+  test('a command inside a fenced shell block counts', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```bash\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```bash\npnpm test\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'warn')
+  })
+
+  // Regression: the old pattern match kept only `npm run test`, dropping the script
+  // suffix, so `test:unit` and `test:integration` looked like the same command.
+  test('different script suffixes are different commands', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: {
+          'test:unit': 'node --test',
+          'test:integration': 'node --test',
+          'build:dev': 'tsc',
+          'build:prod': 'tsc',
+        },
+      }),
+      'AGENTS.md': '# App\n\nRun `npm run test:unit` then `npm run build:dev`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm run test:integration` then `npm run build:prod`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test:unit/, f.detail)
+    assert.match(f.detail, /test:integration/, f.detail)
+    assert.match(f.detail, /build:dev/, f.detail)
+    assert.match(f.detail, /build:prod/, f.detail)
+  })
+
+  // Regression: keeping only the first command per file made two files that list the
+  // same alternatives in a different order look like a conflict.
+  test('reordered lists of alternative commands agree', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test` or `pnpm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `pnpm test` or `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: a fenced `text` block containing a runner in prose was treated as a
+  // command line, producing a conflict against a real command in the other file.
+  test('runner prose in a non-shell fence is not a command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\n```text\nIn the old setup, pnpm test was used for smoke tests.\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('a shell fence still requires a real command invocation', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\n```bash\nThe npm test command runs the suite.\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: detail named three conflicts while evidence carried at most six
+  // entries, so the third conflict's file:line locations never reached the report.
+  test('every reported conflict keeps the line evidence for each file', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: { test: 'node --test', build: 'tsc', lint: 'biome check' },
+      }),
+      'AGENTS.md': 'Run `npm test`.\nRun `npm run build`.\nRun `npm run lint`.\n',
+      'CLAUDE.md': 'Run `pnpm test`.\nRun `pnpm build`.\nRun `pnpm lint`.\n',
+      '.cursorrules': 'Run `yarn test`.\nRun `yarn build`.\nRun `yarn lint`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    for (const kind of ['test', 'build', 'lint']) {
+      assert.match(f.detail, new RegExp(kind), f.detail)
+    }
+    for (const file of ['AGENTS.md', 'CLAUDE.md', '.cursorrules']) {
+      for (const line of [1, 2, 3]) {
+        assert.ok(
+          f.evidence.includes(`${file}:${line}`),
+          `missing ${file}:${line} in evidence: ${f.evidence.join(', ')}`,
+        )
+      }
+    }
+  })
+
+  // Regression: a trailing shell comment is documentation, not part of the invocation.
+  test('a shell comment outside quotes does not create a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```sh\nnpm test # run the full suite\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: a console fence is a transcript. An output line that happens to name a
+  // runner must not be read as an invoked command.
+  test('console output naming a runner is not an invoked command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md':
+        '# Claude\n\n```console\nnpm warn exec The following package was not found and will be installed: vitest@3.2.4\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('a $ prompt in a console fence still marks a command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```console\n$ npm test\nnpm warn exec vitest@3.2.4\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: the `cd ... &&` prefix is a working directory, not shell noise. Two
+  // files running the same script in different packages verify different things.
+  test('the same command in different working directories is a conflict', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\n```sh\ncd packages/api && npm test\n```\n',
+      'CLAUDE.md': '# Claude\n\n```sh\ncd packages/web && npm test\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /packages\/api/, f.detail)
+    assert.match(f.detail, /packages\/web/, f.detail)
+  })
+
+  // Regression: `bun run test` runs the package script, while `bun test` is Bun's
+  // built-in runner. Normalising `run` for bun collapsed two different commands.
+  test('bun run test and bun test are different commands', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest' } }),
+      'AGENTS.md': '# App\n\nRun `bun run test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `bun test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /bun run test/, f.detail)
+    assert.match(f.detail, /bun test/, f.detail)
+  })
+})
+
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {
   const scripts = JSON.stringify({ scripts: { test: 'node --test', lint: 'biome check' } })
 
