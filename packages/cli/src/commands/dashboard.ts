@@ -12,6 +12,7 @@ import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
 import { createDashboardServer, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
 import { createCliInvoker } from '../mcp.ts'
+import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
 import type { Command } from './types.ts'
 
 function parsePort(value: unknown): number {
@@ -111,11 +112,18 @@ export const dashboardCommand: Command = {
       })
     }
 
+    // Resolve the canonical store and sample the HEAD commit once with read-only Git flags; a load
+    // or refresh never launches Git. No `git status` here: it could refresh the index or execute a
+    // configured fsmonitor/filter helper.
+    const store = evidenceStore(repoRoot)
+    const currentRevision = await headRevision(repoRoot)
     const server = await createDashboardServer({
       cwd: repoRoot,
       port,
       invoke: createCliInvoker(),
       readStaged: () => stagedView(repoRoot),
+      currentRevision,
+      ...(store === null ? {} : { readVerification: () => readVerificationEvidence(store) }),
     })
 
     ctx.out(
