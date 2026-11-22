@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Date: 2026-11-17
+- Amended: 2026-11-19 (task brief)
+- Amended: 2026-11-20 (task-centred 2D map)
 - Milestone: Phase 4 follow-on (#67)
 
 ## Context
@@ -28,35 +30,70 @@ runtime dependency.**
 - `anvil dashboard [--repo <dir>] [--port <n>]` binds to `127.0.0.1`, prints a one-time URL
   with a random session token, and keeps that token in an HttpOnly `SameSite=Strict` cookie.
 - The server rejects unknown `Host` headers, serves a strict content security policy, has no
-  inline script or style, and exposes exactly three GET routes: the page, two static assets,
-  and `/api/snapshot`. There is no route that takes a command or a path from a request.
+  inline script or style, and exposes the page, two static assets, `GET /api/snapshot` and
+  `POST /api/brief`. A request can name bounded task text or a plan suggestion id; it can
+  never name a command, a path or a repository.
 - Each refresh spawns the same CLI commands a human would run with `--json`, all in offline
   mode for guidance. A failing command is recorded beside the others as a source error; it
   never makes the rest of the overview look empty.
+- The task brief has two entry points: a pasted ticket and a derived `plan` suggestion. It
+  maps the text to files through the `profile` file index, prints the verification commands
+  with the source and working directory that established them, lists required needs that
+  `ready` reports blocked, and states what it cannot know. It runs nothing and writes
+  nothing: `POST /api/brief` takes no command, path or repository, is capped at 4,000
+  characters, and stores no request or response.
+- A blocked task also returns a **copyable handoff** built from measured `ready` blockers. It
+  names what is missing, quotes the reported reason, carries a contact only when `ready`
+  declared one, and says the owner is unknown rather than inferring one. A CODEOWNERS path from
+  the profile is cited as routing to open, never as an
+  owner. A failed or unprobed readiness source yields an explicit unavailable handoff.
+- The brief also returns a task-centred **2D map** built from the same cached profile and
+  brief. Its nodes are the matched files, the modules containing them, their declared one-hop
+  dependencies and the verify commands; every node and edge names the CLI value behind it.
+  The page filters it to the task, offers a list view for keyboard use, and shows an
+  unanalysed dependency as `unknown` rather than as an absent edge. It adds no second source
+  of truth and no new route. A 3D projection remains a separate experiment behind a flag.
+- An approval gate is quoted from the pasted text, never inferred. The brief separates what
+  the sentence allows to start from what it blocks, and says so when the text states no gate.
+  An explicit waiver is quoted as approval-not-required; an uncertain mention is quoted but
+  never applied. The reader fails toward *no gate*, because applying a waiver as a gate would
+  tell someone to wait for permission the ticket says they do not need.
+- The brief reads only the cached snapshot. It never starts a CLI load, and a POST before
+  the first page load is refused with `409` rather than warming the cache. A failed `ready`
+  source is reported as blockers-unknown, not as an empty blocker list.
 - The context view reads `.anvil/staging/` through the same functions `init` uses. It shows
   the diff and whether staged bytes were edited after staging. It never stages, applies, or
   refreshes anything.
-- Verification is reported as `unavailable`, never as green by absence. anvil does not
-  persist verification results, and the dashboard does not run `crew verify` on page load.
+- Verification is never green by absence. When `anvil crew verify --record` has run, the CLI
+  persists a bounded evidence file that the dashboard displays as historical rows, labelled with
+  the commit sampled at startup; their origin cannot be independently proven. The dashboard does
+  not run `crew verify` or any write action on page load or refresh.
 - The page is a snapshot with an explicit timestamp and a manual refresh. It does not claim
   to be a live view of an agent, a tracker, or a CI run.
-- No write actions are wired. Adding one later is a separate decision that must go through
-  the same approval boundary the CLI command would use.
+- No write actions are wired. The brief route is a derivation with no side effect beyond its
+  response. Adding a write action later is a separate decision that must go through the same
+  approval boundary the CLI command would use.
+- The brief is built when a person asks for it, from the cached snapshot. A refresh
+  invalidates it, so a brief is never presented as newer than the facts behind it. The
+  textarea keeps its draft across a refresh: the snapshot is the tool's state, the draft is
+  the reader's.
 
 ## Consequences
 
 - The CLI remains the product and every value on the page can be reproduced with one
   command from the source line the page prints. The dashboard cannot disagree with the CLI
   because it does not implement the rules.
-- One refresh costs five CLI processes, as MCP tool calls already do. That is acceptable for
+- One refresh costs six CLI processes, as MCP tool calls already do. That is acceptable for
   an on-demand human view and keeps the single-file bundle free of a web framework.
 - The browser page needs no build step, no CDN and no telemetry. It works in a locked-down
   network because it only talks to its own loopback server.
 - A user with no browser, or a headless workflow, loses nothing: every command behind the
   page is already directly available.
-- The first version deliberately does not show saved verification history, live agent
-  output, or tracker state. Those need a storage contract anvil does not have yet, and
-  inventing one would make the page assert facts it cannot verify.
+- The first version shows only opt-in, CLI-recorded verification history — never a live agent
+  output, a current-pass claim, or tracker state. The storage contract is owned by the CLI, and
+  the page labels rows with the commit sampled at startup and states that their origin cannot be
+  independently proven. Inventing a different source of truth would make the page assert facts it
+  cannot verify.
 
 ## Alternatives rejected
 
