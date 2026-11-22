@@ -332,7 +332,7 @@ export const goDetector: Detector = {
 
 function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
   for (const raw of text.split('\n')) {
-    const line = raw.replace(/#.*$/, '').trim()
+    const line = raw.replace(/#.*$/, '').trimEnd()
     if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
     return false
   }
@@ -340,7 +340,7 @@ function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
 }
 
 const CARGO_SAFE = [
-  /\[(?:workspace|package|dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|features|target\..*dependencies)\]/,
+  /^\[(?:workspace|package|dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|features)\]$/,
   /^(?:name|version|edition|resolver)\s*=\s*["'][^"']+["']$/,
   /^(?:members|version)\s*=\s*\[\s*(?:["'][^"']+["']\s*,?\s*)*\]$/,
   /^[\w-]+\s*=\s*["'][^"']+["']$/,
@@ -358,7 +358,6 @@ const GRADLE_SAFE = [
   /^\}$/,
   /^(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)$/,
   /^(?:implementation|api|testImplementation|runtimeOnly)\s+project\(["'][\w:.-]+["']\)$/,
-  /^dependencies\s*\{.*project\(["'][\w:.-]+["']\).*\}$/,
 ]
 
 // ---------------------------------------------------------------------------
