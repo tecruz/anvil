@@ -37,6 +37,16 @@ export interface DashboardSource<T> {
   command: string
 }
 
+/** A verification fact recorded elsewhere, never inferred by the dashboard. */
+export interface VerificationEvidence {
+  command: string
+  revision: string | null
+  exitCode: number | null
+  timestamp: string | null
+  /** Whether this record's commit equals the one sampled at dashboard startup; null if unknown. */
+  matchesCurrent: boolean | null
+}
+
 export interface DashboardSnapshot {
   schemaVersion: 1
   fetchedAt: string
@@ -44,6 +54,8 @@ export interface DashboardSnapshot {
     doctor: DashboardSource<unknown>
     ready: DashboardSource<unknown>
     plan: DashboardSource<unknown>
+    /** The detected file index and commands behind a task brief. */
+    profile: DashboardSource<unknown>
   }
   context: {
     brief: DashboardSource<unknown>
@@ -52,10 +64,19 @@ export interface DashboardSnapshot {
   work: {
     crew: DashboardSource<unknown>
   }
-  /** An explicit absence, never a green result inferred from "no output". */
+  /**
+   * An explicit absence, never a green result inferred from "no output". When a bounded baseline
+   * verification was explicitly run, its recorded facts appear in `evidence`; this page still does
+   * not execute anything.
+   */
   verification: {
-    status: 'unavailable'
+    status: 'unavailable' | 'recorded'
     reason: string
+    /** Revision sampled once by the CLI when the dashboard started, never on a page load. */
+    currentRevision: string | null
+    /** Records present in the store but too incomplete to display as facts. */
+    incompleteCount: number
+    evidence: VerificationEvidence[]
   }
   notes: string[]
 }
@@ -73,6 +94,10 @@ export interface LoadSnapshotOptions {
   invoke: DashboardInvoke
   cwd: string
   readStaged: () => StagedView
+  /** Optional, opt-in source of bounded verification facts; the dashboard never runs commands. */
+  readVerification?: () => unknown[] | Promise<unknown[]>
+  /** Sampled once by the CLI at startup so a page load never launches git. */
+  currentRevision?: string | null
   now?: () => Date
 }
 
@@ -145,6 +170,85 @@ function stagedSource(options: LoadSnapshotOptions, fetchedAt: string): Dashboar
   }
 }
 
+function validTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false
+  try {
+    return new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
+
+function validEvidence(value: unknown): value is VerificationEvidence {
+  if (value === null || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.command === 'string' &&
+    record.command.trim() !== '' &&
+    record.command.length <= 200 &&
+    typeof record.revision === 'string' &&
+    /^[0-9a-f]{7,64}(?:-dirty)?$/i.test(record.revision) &&
+    typeof record.exitCode === 'number' &&
+    Number.isSafeInteger(record.exitCode) &&
+    record.exitCode >= 0 &&
+    record.exitCode <= 0x7fffffff &&
+    validTimestamp(record.timestamp)
+  )
+}
+
+/** Bound and validate opt-in verification records; never infer a result from their absence. */
+async function verificationSource(options: LoadSnapshotOptions): Promise<DashboardSnapshot['verification']> {
+  const unavailable = (reason: string, incompleteCount = 0): DashboardSnapshot['verification'] => ({
+    status: 'unavailable',
+    reason,
+    currentRevision: options.currentRevision ?? null,
+    incompleteCount,
+    evidence: [],
+  })
+  if (options.readVerification === undefined) {
+    return unavailable('anvil does not persist verification results. Run `anvil crew verify` for a current verdict.')
+  }
+  try {
+    const records: unknown = await options.readVerification()
+    if (!Array.isArray(records)) return unavailable('The verification evidence source returned no readable records.')
+    const incompleteCount = records.length - records.filter(validEvidence).length
+    const currentRevision = options.currentRevision ?? null
+    // A `-dirty` suffix describes a worktree, not a commit, and two different dirty states share
+    // it. Compare the commit only, which is the sole fact the startup probe establishes.
+    const commitOf = (revision: string): string => revision.replace(/-dirty$/i, '').toLowerCase()
+    const currentCommit = currentRevision === null ? null : commitOf(currentRevision)
+    const evidence: VerificationEvidence[] = records
+      .filter(validEvidence)
+      .slice(-20)
+      .map((record) => ({
+        command: record.command,
+        revision: record.revision,
+        exitCode: record.exitCode,
+        timestamp: record.timestamp,
+        matchesCurrent: currentCommit === null ? null : commitOf(record.revision as string) === currentCommit,
+      }))
+    if (evidence.length === 0) {
+      const reason =
+        incompleteCount > 0
+          ? `${incompleteCount} verification record(s) exist but are incomplete; none can be shown as a fact.`
+          : 'No bounded verification evidence has been recorded for this repository.'
+      return unavailable(reason, incompleteCount)
+    }
+    const stale = currentRevision !== null && evidence.some((item) => item.matchesCurrent === false)
+    return {
+      status: 'recorded',
+      reason: stale
+        ? 'Records found in the CLI-owned evidence file; at least one is from a different revision (commit) than the one sampled at dashboard startup. Their origin cannot be independently proven.'
+        : 'Records found in the CLI-owned evidence file. The dashboard does not execute commands and cannot independently prove their origin.',
+      currentRevision,
+      incompleteCount,
+      evidence,
+    }
+  } catch {
+    return unavailable('The verification evidence source could not be read.')
+  }
+}
+
 /**
  * Read all sources once. `--offline` is deliberate: a page load must not spend a network
  * request or refresh the discovery cache. An explicit refresh button calls this again.
@@ -152,10 +256,11 @@ function stagedSource(options: LoadSnapshotOptions, fetchedAt: string): Dashboar
 export async function loadSnapshot(options: LoadSnapshotOptions): Promise<DashboardSnapshot> {
   const now = options.now ?? (() => new Date())
   const fetchedAt = now().toISOString()
-  const [doctor, ready, plan, brief, crew] = await Promise.all([
+  const [doctor, ready, plan, profile, brief, crew] = await Promise.all([
     callSource(['doctor', '--json'], options, fetchedAt),
     callSource(['ready', '--json'], options, fetchedAt),
     callSource(['plan', '--offline', '--json'], options, fetchedAt),
+    callSource(['profile', '--json'], options, fetchedAt),
     callSource(['brief', '--offline', '--json'], options, fetchedAt),
     callSource(['crew', 'status', '--json'], options, fetchedAt),
   ])
@@ -163,13 +268,10 @@ export async function loadSnapshot(options: LoadSnapshotOptions): Promise<Dashbo
   return {
     schemaVersion: 1,
     fetchedAt,
-    repository: { doctor, ready, plan },
+    repository: { doctor, ready, plan, profile },
     context: { brief, staged: stagedSource(options, fetchedAt) },
     work: { crew },
-    verification: {
-      status: 'unavailable',
-      reason: 'anvil does not persist verification results. Run `anvil crew verify` for a current verdict.',
-    },
+    verification: await verificationSource(options),
     notes: [
       'Read-only: refresh re-reads the CLI JSON contracts; it never runs setup, tests, or ship.',
       'Values are a snapshot, not a live view of an agent or a tracker.',
