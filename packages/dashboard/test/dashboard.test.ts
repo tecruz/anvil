@@ -263,9 +263,9 @@ describe('the dashboard server', () => {
     await withServer(async (server, _invoke, calls) => {
       await snapshotOf(await authed(server, '/api/snapshot'))
       await snapshotOf(await authed(server, '/api/snapshot'))
-      assert.equal(calls.length, 5)
+      assert.equal(calls.length, 6)
       await snapshotOf(await authed(server, '/api/snapshot?refresh=1'))
-      assert.equal(calls.length, 10)
+      assert.equal(calls.length, 12)
     })
   })
 
@@ -435,6 +435,7 @@ describe('the dashboard page', () => {
             },
           ],
         }),
+        profile: source({ files: [], commands: [] }),
       },
       context: {
         brief: source({ target: 'all', gaps: [] }),
@@ -470,7 +471,13 @@ describe('the dashboard page', () => {
           ],
         }),
       },
-      verification: { status: 'unavailable', reason: 'not persisted' },
+      verification: {
+        status: 'unavailable',
+        reason: 'not persisted',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
       notes: [],
     }
 
@@ -513,10 +520,16 @@ describe('the dashboard page', () => {
     const snapshot = {
       schemaVersion: 1 as const,
       fetchedAt: 'now',
-      repository: { doctor: source({}), ready: source({}), plan: source({}) },
+      repository: { doctor: source({}), ready: source({}), plan: source({}), profile: source({}) },
       context: { brief: source({}), staged: source({}) },
       work: { crew: source({ crew: [] }) },
-      verification: { status: 'unavailable' as const, reason: 'unavailable' },
+      verification: {
+        status: 'unavailable' as const,
+        reason: 'unavailable',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
       notes: [],
     }
     const context = createContext({ document, console })
@@ -546,10 +559,16 @@ describe('the dashboard page', () => {
     const snapshot = {
       schemaVersion: 1 as const,
       fetchedAt: 'now',
-      repository: { doctor: source({}), ready: source({}), plan: source({}) },
+      repository: { doctor: source({}), ready: source({}), plan: source({}), profile: source({}) },
       context: { brief: source({}), staged: source({}) },
       work: { crew: source({ crew: [{ key: 'claim-1' }] }) },
-      verification: { status: 'unavailable' as const, reason: 'unavailable' },
+      verification: {
+        status: 'unavailable' as const,
+        reason: 'unavailable',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
       notes: [],
     }
     const context = createContext({
