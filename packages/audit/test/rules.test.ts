@@ -118,20 +118,34 @@ describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions'
     assert.equal(f.fix?.target, 'AGENTS.md')
   })
 
-  test('equivalent npm shorthands count as documented', () => {
+  test('the valid npm test alias counts as documented', () => {
     const profile = profileOf({
       'package.json': scripts,
-      'AGENTS.md': '# App\n\nRun `npm test`, `npm lint`, `npm build`.\n',
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm run lint`, `npm run build`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
     const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'pass', f.detail)
   })
 
+  test('invalid npm shorthands do not count as documented', () => {
+    // `npm lint` and `npm build` are not npm commands -- npm answers
+    // "Unknown command" and exits 1. Only `npm test` is a real shorthand.
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm lint`, `npm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /lint/)
+    assert.match(f.detail, /build/)
+  })
+
   test('instructions naming the detected commands pass', () => {
     const profile = profileOf({
       'package.json': scripts,
-      'AGENTS.md': '# App\n\nRun `npm test`, `npm run lint`, `npm run build`.\n',
+      'AGENTS.md': '# App\n\nRun `npm run test`, `npm run lint`, `npm run build`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
     const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
@@ -158,6 +172,64 @@ describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions'
     const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'warn', f.detail)
     assert.match(f.detail, /npm run test/)
+  })
+
+  test('a different script with the same prefix does not document the detected command', () => {
+    // The node-npm fixture declares both `test` and `test:fast`. Documenting only
+    // `npm run test:fast` must not cover the detected `npm run test`.
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: {
+          test: 'vitest run',
+          'test:fast': 'vitest run --changed',
+          lint: 'eslint .',
+          build: 'tsc -p tsconfig.json',
+          typecheck: 'tsc --noEmit',
+        },
+      }),
+      'AGENTS.md': '# App\n\nRun `npm run test:fast`, `npm run lint`, `npm run build`, `npm run typecheck`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test\b/)
+  })
+
+  test('an existing blank instruction file does not hide missing detected commands', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '\n\n\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+  })
+
+  test('a code repo with instructions but no detected command reports na', () => {
+    const profile = profileOf({
+      'AGENTS.md': '# App\n\nRun `make check`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')
+  })
+
+  test('rules under a Cursor directory are read and cited by real file:line', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      '.cursor/rules/verify.mdc':
+        '---\ndescription: verify\n---\nRun `npm run test`, `npm run lint`, `npm run build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/verify.mdc:')),
+      `expected a real file:line, got ${f.evidence.join(', ')}`,
+    )
+    assert.ok(
+      !f.evidence.some((e) => e === '.cursor/rules'),
+      `a bare directory must not be evidence, got ${f.evidence.join(', ')}`,
+    )
   })
 
   test('a docs-only repo reports na', () => {

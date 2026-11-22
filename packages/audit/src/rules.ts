@@ -259,6 +259,66 @@ const AGENTS_COMMANDS: Rule = {
   },
 }
 
+interface InstructionSource {
+  /** Real repo-relative file path (never a bare directory). */
+  path: string
+  text: string
+  /** A 1-based line to cite, derived from the file's own content. */
+  line: number
+}
+
+/**
+ * Instruction text read for VERIFY_DOC_COVERAGE, from the real files.
+ *
+ * The engine builds `ctx.instructionsText` with `readFileSync(i.path)` for every
+ * instruction entry. A directory entry such as `.cursor/rules` throws EISDIR and
+ * contributes nothing, so commands actually documented in `.cursor/rules/verify.mdc`
+ * become invisible to a text comparison -- and the rule both warns about a gap that is
+ * not there and cites the bare directory as evidence. Here directory entries are expanded
+ * through `profile.files`, real file paths are kept, and a matching line is found in the
+ * file's content.
+ *
+ * `readSomething` distinguishes a file that was read but is blank (a real gap, once there
+ * are detected commands to document) from absent/unreadable instructions (nothing to
+ * compare, so `na`).
+ */
+function verifyInstructionSources(ctx: RuleContext): {
+  sources: InstructionSource[]
+  text: string
+  readSomething: boolean
+} {
+  const root = ctx.profile.root
+  const sources: InstructionSource[] = []
+  let readSomething = false
+
+  for (const instruction of ctx.profile.instructions) {
+    const path = instruction.path
+    const members = ctx.profile.files.filter((f) => f.startsWith(`${path}/`))
+    // A directory entry is expanded into the member files the walker recorded; a regular
+    // file has no such members and is read directly.
+    for (const member of members.length > 0 ? members : [path]) {
+      const text = readRepoText(root, member)
+      if (text === null) continue
+      readSomething = true
+      sources.push({ path: member, text, line: evidenceLine(text) })
+    }
+  }
+
+  return { sources, text: sources.map((s) => s.text).join('\n'), readSomething }
+}
+
+/** The line to cite for a file: its first command mention, else its first non-empty line. */
+function evidenceLine(text: string): number {
+  const rows = text.split('\n')
+  for (let i = 0; i < rows.length; i++) {
+    if (mentionsRunner(rows[i] ?? '')) return i + 1
+  }
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i] ?? '').trim() !== '') return i + 1
+  }
+  return 1
+}
+
 /**
  * A repository can name one generic command in its instructions and still leave the
  * commands anvil actually detected undocumented.
@@ -283,24 +343,10 @@ const VERIFY_DOC_COVERAGE: Rule = {
     if (!ctx.hasCode) return na('No source files, so there are no verify commands to document')
 
     const kinds = ['test', 'build', 'lint', 'typecheck'] as const
-    const text = ctx.instructionsText
-    if (text.trim() === '') return na('No instruction text to compare against detected commands')
-
-    const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
-    const documented: string[] = []
-    // `npm test` and `npm run test` are the same command; so are `npm run lint` and
-    // `npm lint`. The profile records whichever form the manifest produced, but a human
-    // may document the shorthand. Normalize the script invocation before comparing, or
-    // the rule warns on a repository whose instructions are correct.
-    const canonical = (value: string): string =>
-      value
-        .toLowerCase()
-        .replace(/\s+/g, ' ')
-        // `npm run test` and `npm test` are the same script invocation. Strip the
-        // optional `run` but keep the runner: a bare `test` would match any prose.
-        .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
-        .trim()
-    const instructionText = canonical(text)
+    // Collect the detected commands before looking at the instructions: with no detected
+    // command there is nothing an instruction file could have failed to document, and the
+    // rule stays `na` (docs-only repos included).
+    const detected: Array<{ kind: string; cmd: string; evidence: string | null }> = []
     for (const kind of kinds) {
       const entries = ctx.profile.commands[kind]
       if (entries === undefined || entries.length === 0) continue
@@ -310,44 +356,88 @@ const VERIFY_DOC_COVERAGE: Rule = {
       if (entry === undefined || entry.source !== 'detected') continue
       const cmd = entry.cmd.trim()
       if (cmd === '') continue
-      // Compare the whole command token sequence, not just its distinctive tail. `pnpm test`
-      // must not stand in for a detected `npm test`: the runner is part of the command.
-      // Word boundaries stop `npm test` matching inside `pnpm test`.
-      const normalized = canonical(cmd)
+      detected.push({ kind, cmd, evidence: entry.evidence ?? null })
+    }
+    if (detected.length === 0) return na('No detected verify command to document')
+
+    // Read the instruction files ourselves rather than trusting ctx.instructionsText:
+    // the engine's read of a directory entry throws EISDIR and contributes nothing.
+    const instructions = verifyInstructionSources(ctx)
+    const text = instructions.text
+    const instructionEvidence = (): string[] => instructions.sources.map((s) => `${s.path}:${s.line}`).slice(0, 6)
+    const target =
+      ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
+      instructions.sources[0]?.path ??
+      ctx.profile.instructions[0]?.path ??
+      'AGENTS.md'
+    const commandEvidence = (): string[] =>
+      detected.map((d) => d.evidence).filter((e): e is string => e !== null && e !== '')
+
+    if (text.trim() === '') {
+      if (!instructions.readSomething) {
+        return na('No readable instruction text to compare against detected commands')
+      }
+      // A file was read successfully but is blank. With detected commands in the tree the
+      // gap is real, not unknown, so this is a warning rather than `na`.
+      const names = detected.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+      return warn(
+        `Instructions are blank, but the repository has detected verify commands: ${names}. An agent that cannot see the real command will invent or omit the verify step.`,
+        [...new Set([...commandEvidence(), ...instructionEvidence()])].slice(0, 6),
+        {
+          ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+        },
+      )
+    }
+
+    const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    const documented: string[] = []
+    // `npm run test` and `npm test` are the same command: npm has a built-in `test`
+    // shorthand. `npm lint`, `npm build` and `npm typecheck` are NOT valid npm commands --
+    // npm answers "Unknown command" and exits 1 -- so `run` is kept for every other
+    // script. Normalizing only the genuine alias avoids claiming coverage for an
+    // invocation that would fail.
+    const canonical = (value: string): string =>
+      value
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .replace(/\bnpm\s+run\s+test\b/g, 'npm test')
+        .trim()
+    const instructionText = canonical(text)
+    // A script name may contain `:`, `.`, `_` and `-`, so the end of the matched command
+    // must be a full token boundary: otherwise `npm test` matches `npm test:fast`. The
+    // leading boundary still stops `npm test` matching inside `pnpm test`.
+    const token = 'a-z0-9:._-'
+    for (const entry of detected) {
+      const normalized = canonical(entry.cmd)
       const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const pattern = new RegExp(`(^|[^a-z0-9_-])${escaped}([^a-z0-9_-]|$)`, 'i')
+      const pattern = new RegExp(`(^|[^${token}])${escaped}([^${token}]|$)`, 'i')
       if (pattern.test(instructionText)) {
-        documented.push(kind)
+        documented.push(entry.kind)
         continue
       }
-      missing.push({ kind, cmd, evidence: entry.evidence ?? null })
+      missing.push(entry)
     }
 
     if (missing.length === 0) {
-      if (documented.length === 0) return na('No detected verify command to document')
       return pass(
         `${documented.length} detected verify command kind(s) appear in the instructions`,
-        ctx.profile.instructions.map((i) => i.path).slice(0, 6),
+        instructionEvidence(),
       )
     }
 
     const names = missing.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
-    const evidence: string[] = []
-    for (const entry of missing) {
-      if (entry.evidence) evidence.push(entry.evidence)
-    }
-    for (const instruction of ctx.profile.instructions.slice(0, 4)) evidence.push(instruction.path)
-    const target =
-      ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
-      ctx.profile.instructions[0]?.path ??
-      'AGENTS.md'
     const prefix =
       documented.length > 0
         ? `Some verify commands are documented, but ${names} are not.`
         : `Detected verify commands are not documented: ${names}.`
     return warn(
       `${prefix} An agent that cannot see the real command will invent or omit the verify step.`,
-      [...new Set(evidence)].slice(0, 6),
+      [
+        ...new Set([
+          ...missing.map((d) => d.evidence).filter((e): e is string => e !== null && e !== ''),
+          ...instructionEvidence(),
+        ]),
+      ].slice(0, 6),
       {
         ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
       },
