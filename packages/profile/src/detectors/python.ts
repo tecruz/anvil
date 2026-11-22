@@ -36,7 +36,7 @@ function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
 const UV_SAFE = [
   /^\[(?:project|tool\.uv\.workspace|tool\.uv\.sources)\]$/,
   /^(?:name|version)\s*=\s*["'][^"']+["']$/,
-  /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@]+["']\s*,?\s*)*\]$/,
+  /^dependencies\s*=\s*\[\s*(?:["'][^"'[\]@;\\]+["']\s*,?\s*)*\]$/,
   /^(?:members|exclude)\s*=\s*\[\s*(?:["'][^"'[\]]+["']\s*,?\s*)*\]$/,
   /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
   /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
@@ -436,7 +436,13 @@ export const pythonDetector: Detector = {
         names.set(pythonName(member.id), member.id)
         idsByPath.set(member.path, member.id)
       }
+      const oddUvHeader = [...ctx.files].some((file) => {
+        if (file !== 'pyproject.toml' && !file.endsWith('/pyproject.toml')) return false
+        const text = readTomlish(ctx, file)
+        return text !== null && /\[\s*tool\s*\.\s*uv\s*\.\s*["']workspace["']\s*\]/.test(text)
+      })
       const uvSafe =
+        !oddUvHeader &&
         linesWithin(workspaceText, UV_SAFE) &&
         members.every((member) => (member.manifest === null ? false : linesWithin(member.manifest, UV_SAFE)))
       const rootSources = uvSources(workspaceText)
@@ -453,6 +459,8 @@ export const pythonDetector: Detector = {
         )
         if (!uvSafe || resolved.unsupported) {
           draft.depsUnknownReasons.set(member.id, 'unsupported dependency syntax; dependencies left unknown')
+          const memberModule = draft.modules.find((module) => module.id === member.id)
+          if (memberModule !== undefined) memberModule.deps = []
           continue
         }
         const existing = draft.modules.find((module) => module.id === member.id)

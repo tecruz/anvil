@@ -343,7 +343,7 @@ const CARGO_SAFE = [
   /^(?:name|version|edition|resolver)\s*=\s*["'][^"']+["']$/,
   /^(?:members|version)\s*=\s*\[\s*(?:["'][^"']+["']\s*,?\s*)*\]$/,
   /^[\w-]+\s*=\s*["'][^"']+["']$/,
-  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"']+["']\s*\}$/,
+  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"'\\$]+["']\s*\}$/,
   /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
   /^[\w-]+\s*=\s*\[\]$/,
 ]
@@ -355,6 +355,8 @@ const GRADLE_SAFE = [
   /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"']+["']\)$/,
   /^dependencies\s*\{$/,
   /^\}$/,
+  /^\s+implementation\(project\(["'][\w:.-]+["']\)\)$/,
+  /^\s+\}$/,
   /^(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)$/,
   /^(?:implementation|api|testImplementation|runtimeOnly)\s+project\(["'][\w:.-]+["']\)$/,
 ]
@@ -485,6 +487,11 @@ export const rustDetector: Detector = {
       const text = read(ctx, file)
       return text !== null && /^\[workspace\]/m.test(text)
     })
+    const oddWorkspaceHeader = [...ctx.files].some((file) => {
+      if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
+      const text = read(ctx, file)
+      return text !== null && /\[\s*["']workspace["']\s*\]/.test(text)
+    })
     if (workspaceManifest !== undefined) {
       const workspaceRoot = workspaceManifest === 'Cargo.toml' ? '.' : workspaceManifest.slice(0, -'/Cargo.toml'.length)
       const workspaceText = read(ctx, workspaceManifest)
@@ -527,15 +534,20 @@ export const rustDetector: Detector = {
           for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
           return { ...workspace, shared }
         })
-      const cargoSafe = [...ctx.files]
-        .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
-        .every((file) => {
-          const text = read(ctx, file)
-          return text === null || linesWithin(text, CARGO_SAFE)
-        })
+      const cargoSafe =
+        !oddWorkspaceHeader &&
+        [...ctx.files]
+          .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+          .every((file) => {
+            const text = read(ctx, file)
+            return text !== null && linesWithin(text, CARGO_SAFE)
+          })
       if (!cargoSafe) {
-        for (const crate of crates)
+        for (const crate of crates) {
           draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo manifest syntax; dependencies left unknown')
+          const module = draft.modules.find((candidate) => candidate.id === crate.id)
+          if (module !== undefined) module.deps = []
+        }
       }
       for (const crate of cargoSafe ? crates : []) {
         if (crate.manifest === null) continue
@@ -1328,12 +1340,16 @@ export const jvmDetector: Detector = {
       // Subprojects from settings.gradle `include(...)`. Every declaration counts: a project
       // lists `include(":core")` and `include(":api")` on separate lines, or spells them as one
       // multiline call, and the Spring probe below only visits the modules collected here.
-      const settings = gradleFiles.find((f) => f.startsWith('settings.gradle'))
+      const allSettings = gradleFiles.filter((f) => /(?:^|\/)settings\.gradle(?:\.kts)?$/.test(f))
+      const settings = allSettings[0]
       if (settings !== undefined) {
         const text = read(ctx, settings)
         const gradleSafe =
           text !== null &&
-          linesWithin(text, GRADLE_SAFE) &&
+          allSettings.every((file) => {
+            const body = read(ctx, file)
+            return body !== null && linesWithin(body, GRADLE_SAFE)
+          }) &&
           [...ctx.files]
             .filter((file) => /(?:^|\/)build\.gradle(?:\.kts)?$/.test(file))
             .every((file) => {
