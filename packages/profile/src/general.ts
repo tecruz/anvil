@@ -194,6 +194,10 @@ export function globToRegExp(glob: string): RegExp {
   let body = ''
   for (let i = 0; i < glob.length; i++) {
     const ch = glob[i] as string
+    if (ch === '?') {
+      body += '[^/]'
+      continue
+    }
     if (ch === '*') {
       if (glob[i + 1] === '*') {
         // A double-star followed by a slash may match zero directories, so the pattern for
