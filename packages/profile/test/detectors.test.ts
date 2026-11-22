@@ -3097,7 +3097,7 @@ describe('module dependency completeness', () => {
     })
     assert.deepEqual(profile.modules.find((m) => m.id === 'crates/api')?.deps, [])
     assert.deepEqual(profile.diagnostics.unanalysedDeps, [
-      { id: 'crates/api', path: 'crates/api', reason: 'no dependency resolver for this ecosystem' },
+      { id: 'crates/api', path: 'crates/api', reason: 'unsupported Cargo manifest syntax; dependencies left unknown' },
     ])
   })
 })
