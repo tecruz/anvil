@@ -29,10 +29,10 @@ Five stages, and the order is the design:
    `diagnostics.unanalysedDeps`: a module with `deps: []` is either analysed (a manifest was
    read and no internal edge was found) or unknown, and only the first is allowed to look
    like a negative finding. Go workspace `require` edges, Node workspace dependencies,
-   Cargo path dependencies, uv workspace sources and Gradle `project(...)` calls are currently
+   Cargo path dependencies, uv workspace sources, Gradle `project(...)` calls and Maven reactor dependencies are currently
    resolved; other ecosystems are declared unanalysed rather than silently empty. A uv
    dependency becomes an edge only when `tool.uv.sources` declares it local, and a Gradle edge
-   only when the id is in the build's `include` set; a matching name is not enough.
+   only when the id is in the build's `include` set, and a Maven edge only when a declared dependency names another reactor coordinate. A matching name is not enough.
 3. **Plan / brief** — rank the gaps and emit the facts an LLM needs, so the model does
    the prose and anvil does the facts.
 4. **Init** — write the derived context into the repository, through a staging bundle

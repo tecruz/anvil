@@ -719,7 +719,7 @@ internal dependency edges no detector could resolve from a manifest. `anvil doct
 these reasons under `degraded` and prints `unknown (not analysed)` in the Modules table where
 it would otherwise print an empty dependency list. An empty `deps` array means "none found"
 only for analysed ecosystems (currently Node workspaces, Go workspaces, Cargo path
-dependencies, uv workspace sources and Gradle projects); for every other
+dependencies, uv workspace sources, Gradle projects and Maven reactor modules); for every other
 module it means "not analysed". `anvil doctor --strict` fails while any of these diagnostics
 stand. Raise `--max-files` when a real repository exceeds the default 20,000-file cap.
 
