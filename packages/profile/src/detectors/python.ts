@@ -187,10 +187,11 @@ function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
     .map((dir) => (base === '.' || dir === '.' ? dir : dir === base ? '.' : dir.slice(base.length + 1)))
   const out = new Set<string>()
   // uv's root project is always a workspace member, even when no glob names it.
-  if (tomlSection(text, /^\[project\]/) !== null) out.add('.')
+  if (tomlSection(text, /^\s*\[\s*["']?project["']?\s*\]/m) !== null) out.add('.')
   for (const pattern of declared) {
+    const normalized = pattern.replace(/^\.\//, '')
     for (const dir of projects) {
-      if (dir !== '.' && matchesGlob(dir, pattern)) out.add(dir)
+      if (dir !== '.' && matchesGlob(dir, normalized)) out.add(dir)
     }
   }
   for (const pattern of excluded) {
@@ -213,7 +214,7 @@ function uvSources(manifest: string): Map<string, UvSource> {
   const section = tomlSection(manifest, /^\[tool\.uv\.sources\]/)
   const out = new Map<string, UvSource>()
   if (section === null) return out
-  const entry = /(?:^|\n)\s*(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*\{([\s\S]*?)\}/g
+  const entry = /(?:^|\n)\s*(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*\{((?:[^"'}]|"[^"]*"|'[^']*')*)\}/g
   for (const match of section.matchAll(entry)) {
     const key = match[1] ?? match[2] ?? match[3]
     const body = match[4] ?? ''
@@ -229,7 +230,7 @@ function uvSources(manifest: string): Map<string, UvSource> {
   // a confident empty graph. Mark the whole manifest's sources as undecidable instead.
   const undecidable = [...section.matchAll(/(?:^|\n)\s*(?:"[^"]+"|'[^']+'|[\w.-]+)\s*=\s*([^\n]+)/g)].some((match) => {
     // A trailing TOML comment is inert: `# old marker = "..."` must not invalidate the source.
-    const value = (match[1] ?? '').replace(/\s+#.*$/, '')
+    const value = stripHashComment(match[1] ?? '')
     // workspace = "other-workspace" selects a different workspace, not the local boolean case.
     return /^\s*\[/.test(value) || /["']?\bmarker\b["']?\s*=/.test(value) || /\bworkspace\s*=\s*["']/.test(value)
   })
@@ -285,6 +286,7 @@ function uvDependencies(
   )
     return { deps: [], unsupported: true }
   const out = new Set<string>()
+  let unresolved = false
   for (const dep of raw) {
     const name = /^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)/.exec(dep)?.[1]
     if (name === undefined) continue
@@ -294,6 +296,7 @@ function uvDependencies(
     if (source.workspace !== null) {
       const id = names.get(key)
       if (id !== undefined && id !== self) out.add(id)
+      else if (id === undefined) unresolved = true
       continue
     }
     if (source.path !== null) {
@@ -301,9 +304,10 @@ function uvDependencies(
       const target = posix.normalize(posix.join(base, source.path)).replace(/\/+$/, '')
       const id = idsByPath.get(target)
       if (id !== undefined && id !== self) out.add(id)
+      else if (id === undefined) unresolved = true
     }
   }
-  return { deps: [...out].sort(), unsupported: false }
+  return { deps: [...out].sort(), unsupported: unresolved }
 }
 
 export const pythonDetector: Detector = {
