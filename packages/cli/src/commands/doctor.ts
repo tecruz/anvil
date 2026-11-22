@@ -128,6 +128,42 @@ export const profileCommand: Command = {
   },
 }
 
+/** A stack summary grouped by the directory that produced its evidence. */
+export interface StackLocation {
+  dir: string
+  stacks: string[]
+  evidence: string
+}
+
+/**
+ * Group the *existing* stacks by the directory of their first evidence file. This is a
+ * presentation of `ProjectProfile.stacks`, not a new detector or a second source of truth:
+ * the `stacks` array, playbook matching and `--json` output are untouched.
+ */
+export function stackLocations(profile: ProjectProfile): StackLocation[] {
+  const groups = new Map<string, { stacks: Set<string>; evidence: string | null }>()
+  const locationOf = (evidence: string): string => {
+    const normalized = evidence.replace(/\\/g, '/')
+    const slash = normalized.lastIndexOf('/')
+    return slash === -1 ? '.' : normalized.slice(0, slash)
+  }
+  for (const stack of profile.stacks) {
+    // addStack merges by id, so one stack can be supported by evidence in several
+    // directories. A shared stack belongs in every location that proves it.
+    const evidencePaths = stack.evidence.length > 0 ? stack.evidence : [undefined]
+    for (const evidence of evidencePaths) {
+      const dir = evidence === undefined ? '.' : locationOf(evidence)
+      const group = groups.get(dir) ?? { stacks: new Set<string>(), evidence: null }
+      group.stacks.add(stack.id)
+      if (group.evidence === null && evidence !== undefined) group.evidence = evidence
+      groups.set(dir, group)
+    }
+  }
+  return [...groups.entries()]
+    .map(([dir, group]) => ({ dir, stacks: [...group.stacks].sort(), evidence: group.evidence ?? 'unknown' }))
+    .sort((a, b) => a.dir.localeCompare(b.dir))
+}
+
 function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   const s = ctx.style
   const out: string[] = []
@@ -168,10 +204,19 @@ function renderProfile(ctx: CommandContext, p: ProjectProfile): string {
   if (p.modules.length > 0) {
     out.push('')
     out.push(s.bold('Modules'))
+    const unanalysed = new Set((p.diagnostics.unanalysedDeps ?? []).map((m) => m.id))
     out.push(
       renderTable(
         ['id', 'path', 'depends on'],
-        p.modules.map((m) => [m.id, m.path, m.deps.length === 0 ? s.dim('-') : m.deps.join(', ')]),
+        p.modules.map((m) => [
+          m.id,
+          m.path,
+          unanalysed.has(m.id)
+            ? s.dim('unknown (not analysed)')
+            : m.deps.length === 0
+              ? s.dim('none detected')
+              : m.deps.join(', '),
+        ]),
         s,
       ),
     )
@@ -283,6 +328,7 @@ export const doctorCommand: Command = {
 
     const failOn = parseSeverity(args.values['fail-on']) ?? (args.values.strict === true ? 'high' : null)
     const runners = runnersOf(profile)
+    const located = stackLocations(profile)
     // Advisory only: the candidate set is read-only evidence and is deliberately not a
     // Finding. It never enters the score, the grade, the threshold or the exit code.
     const tracker = detectTrackerCandidates(profile.root, profile.vcs.remote)
@@ -316,7 +362,7 @@ export const doctorCommand: Command = {
       ctx.outFailure(
         payload,
         err,
-        () => `${renderReport(ctx, report, runners, tracker)}\n\n${renderErrorText(err, ctx.style)}`,
+        () => `${renderReport(ctx, report, runners, tracker, located)}\n\n${renderErrorText(err, ctx.style)}`,
       )
       return err.exitCode
     }
@@ -337,13 +383,13 @@ export const doctorCommand: Command = {
       ctx.outFailure(
         payload,
         err,
-        () => `${renderReport(ctx, report, runners, tracker)}\n\n${renderErrorText(err, ctx.style)}`,
+        () => `${renderReport(ctx, report, runners, tracker, located)}\n\n${renderErrorText(err, ctx.style)}`,
       )
       return err.exitCode
     }
 
     // The report is the answer; the exit code is the verdict.
-    ctx.out(payload, () => renderReport(ctx, report, runners, tracker))
+    ctx.out(payload, () => renderReport(ctx, report, runners, tracker, located))
     return undefined
   },
 }
@@ -419,11 +465,23 @@ function barFor(score: number, s: Style): string {
   return score >= 70 ? s.green(bar) : score >= 40 ? s.yellow(bar) : s.red(bar)
 }
 
+/** The doctor report's stack-location block. Exported so the human output can be tested without a fixture. */
+export function renderStackLocations(ctx: CommandContext, located: readonly StackLocation[]): string {
+  if (located.length < 2) return ''
+  const s = ctx.style
+  const lines = [s.bold('Stack by location')]
+  for (const entry of located) {
+    lines.push(`  ${entry.dir.padEnd(24)} ${entry.stacks.join(', ')} ${s.dim(entry.evidence)}`)
+  }
+  return lines.join('\n')
+}
+
 function renderReport(
   ctx: CommandContext,
   report: ReadinessReport,
   runners: readonly RunnerSummary[] = [],
   tracker: TrackerDetection | null = null,
+  located: readonly StackLocation[] = [],
 ): string {
   const s = ctx.style
   const out: string[] = []
@@ -436,6 +494,11 @@ function renderReport(
         : s.red(report.grade)
   out.push(`${s.bold('AI readiness')}  ${String(report.score)}/100  ${grade}`)
   out.push('')
+  // A newcomer on a polyglot monorepo asks "which part uses what?", which the flat stack
+  // list in `anvil profile` does not answer. This is a presentation of the same
+  // ProjectProfile.stacks, shown only when evidence spans more than one directory.
+  const stackBlock = renderStackLocations(ctx, located)
+  if (stackBlock !== '') out.push(stackBlock, '')
   out.push(s.bold('By layer'))
   for (const layer of report.layers) {
     out.push(
