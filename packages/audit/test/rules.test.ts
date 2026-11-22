@@ -189,6 +189,91 @@ describe('INSTRUCTION_CONFLICT compares verify commands across instruction files
     })
     assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'warn')
   })
+
+  // Regression: the old pattern match kept only `npm run test`, dropping the script
+  // suffix, so `test:unit` and `test:integration` looked like the same command.
+  test('different script suffixes are different commands', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: {
+          'test:unit': 'node --test',
+          'test:integration': 'node --test',
+          'build:dev': 'tsc',
+          'build:prod': 'tsc',
+        },
+      }),
+      'AGENTS.md': '# App\n\nRun `npm run test:unit` then `npm run build:dev`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `npm run test:integration` then `npm run build:prod`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test:unit/, f.detail)
+    assert.match(f.detail, /test:integration/, f.detail)
+    assert.match(f.detail, /build:dev/, f.detail)
+    assert.match(f.detail, /build:prod/, f.detail)
+  })
+
+  // Regression: keeping only the first command per file made two files that list the
+  // same alternatives in a different order look like a conflict.
+  test('reordered lists of alternative commands agree', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test` or `pnpm test`.\n',
+      'CLAUDE.md': '# Claude\n\nRun `pnpm test` or `npm test`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: a fenced `text` block containing a runner in prose was treated as a
+  // command line, producing a conflict against a real command in the other file.
+  test('runner prose in a non-shell fence is not a command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\n```text\nIn the old setup, pnpm test was used for smoke tests.\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  test('a shell fence still requires a real command invocation', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'CLAUDE.md': '# Claude\n\n```bash\nThe npm test command runs the suite.\n```\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+  })
+
+  // Regression: detail named three conflicts while evidence carried at most six
+  // entries, so the third conflict's file:line locations never reached the report.
+  test('every reported conflict keeps the line evidence for each file', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({
+        scripts: { test: 'node --test', build: 'tsc', lint: 'biome check' },
+      }),
+      'AGENTS.md': 'Run `npm test`.\nRun `npm run build`.\nRun `npm run lint`.\n',
+      'CLAUDE.md': 'Run `pnpm test`.\nRun `pnpm build`.\nRun `pnpm lint`.\n',
+      '.cursorrules': 'Run `yarn test`.\nRun `yarn build`.\nRun `yarn lint`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    assert.equal(f.status, 'warn', f.detail)
+    for (const kind of ['test', 'build', 'lint']) {
+      assert.match(f.detail, new RegExp(kind), f.detail)
+    }
+    for (const file of ['AGENTS.md', 'CLAUDE.md', '.cursorrules']) {
+      for (const line of [1, 2, 3]) {
+        assert.ok(
+          f.evidence.includes(`${file}:${line}`),
+          `missing ${file}:${line} in evidence: ${f.evidence.join(', ')}`,
+        )
+      }
+    }
+  })
 })
 
 describe('AGENT_CONFIG catches rot that the profile walker cannot see', () => {

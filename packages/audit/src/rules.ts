@@ -15,7 +15,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, posix } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
-import { globToRegExp, mentionsRunner, normalizeRelPath, parseJsonc } from '@anvil/profile'
+import { globToRegExp, mentionsRunner, normalizeRelPath, parseJsonc, runnerAlternation } from '@anvil/profile'
 import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes, WARN_INSTRUCTION_BYTES } from './budget.ts'
 import type { Fix, Layer, PlaybookMatchInfo, Severity, Status } from './types.ts'
 
@@ -271,6 +271,63 @@ const AGENTS_COMMANDS: Rule = {
  * them per kind. Prose that merely mentions a runner is left alone, and one file alone can
  * never be a conflict.
  */
+
+/**
+ * Fence languages whose lines are commands rather than prose.
+ *
+ * A ```text block can discuss `pnpm test` without asking anyone to run it; reading its
+ * lines as commands invents a conflict with a real command in another file. An untyped
+ * fence stays eligible -- it is the commonest way documentation writes a shell block.
+ */
+const SHELL_FENCES = new Set([
+  '',
+  'bash',
+  'sh',
+  'shell',
+  'shellsession',
+  'shell-session',
+  'zsh',
+  'fish',
+  'console',
+  'terminal',
+  'powershell',
+  'ps1',
+  'cmd',
+  'bat',
+  'batch',
+])
+
+/**
+ * A command must *open* with a runner, allowing only a `$` prompt and a `cd ... &&`
+ * prefix. `In the old setup, pnpm test was used` contains a runner but is not an
+ * invocation. The runner list is the profile's own, so the two cannot drift apart.
+ */
+const COMMAND_START = new RegExp(
+  `^(?:\\$\\s*)?(?:cd\\s+\\S+\\s*&&\\s*)?(?:\\S*/)?(?:${runnerAlternation()})(?=\\s|;|&|$)`,
+)
+
+/**
+ * Stable comparison key for a documented verify command.
+ *
+ * The whole invocation is kept: `npm run test:unit` and `npm run test:integration`
+ * are different scripts, and comparing only the regex match (`npm run test`) made
+ * them look identical. The only normalisation is the genuinely equivalent `run`
+ * spelling (`npm run test` == `npm test`), plus shell noise that carries no meaning.
+ */
+function verifyCommandKey(raw: string): string {
+  let cmd = raw
+    .trim()
+    .replace(/^\$\s*/, '')
+    .replace(/^(?:cd\s+\S+\s*&&\s*)+/, '')
+  // Flags after the script are meaningful; the rest of a shell chain is a different
+  // command and is compared on its own line, not glued onto this one.
+  cmd = (cmd.split(/\s*&&\s*|\s*;\s*/)[0] ?? cmd).trim()
+  return cmd
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
+}
+
 const INSTRUCTION_CONFLICT: Rule = {
   id: 'INSTRUCTION_CONFLICT',
   layer: 'context',
@@ -301,6 +358,8 @@ const INSTRUCTION_CONFLICT: Rule = {
     if (files.length < 2) return na('Fewer than two instruction files, so they cannot disagree')
 
     // Test/build/lint/typecheck only: these are the verify commands an agent acts on.
+    // A pattern classifies a command into a kind; the stored key is the whole invocation,
+    // not the regex match, so a script suffix such as `test:unit` survives comparison.
     const patterns: ReadonlyArray<{ kind: string; re: RegExp }> = [
       {
         kind: 'test',
@@ -317,7 +376,11 @@ const INSTRUCTION_CONFLICT: Rule = {
       { kind: 'typecheck', re: /\btsc --noEmit\b|\btypecheck\b|\bpyright\b|\bmypy\b|\bphpstan\b/i },
     ]
 
-    const found = new Map<string, Array<{ cmd: string; evidence: string }>>()
+    interface CommandSite {
+      cmd: string
+      evidence: string
+    }
+    const found = new Map<string, CommandSite[]>()
     for (const instruction of files) {
       let text: string
       try {
@@ -326,16 +389,26 @@ const INSTRUCTION_CONFLICT: Rule = {
         continue
       }
       let fenced = false
+      let fenceLang = ''
       for (const [index, raw] of text.split('\n').entries()) {
-        if (/^\s*```/.test(raw)) {
-          fenced = !fenced
+        const fence = /^\s{0,4}(?:`{3,}|~{3,})([^\s`]*)/.exec(raw)
+        if (fence !== null) {
+          if (fenced) {
+            fenced = false
+            fenceLang = ''
+          } else {
+            fenced = true
+            fenceLang = (fence[1] ?? '').toLowerCase()
+          }
           continue
         }
-        // Only explicit commands count: a backtick code span, a line inside a fenced shell
-        // block, or a `$` prompt. Prose such as "we use npm for tests" is not a command, so
-        // it must never be reported as one file disagreeing with another.
+
+        // Only explicit commands count: a backtick code span, a line inside a shell
+        // fence, or a `$` prompt. A runner mentioned inside a sentence is not a command,
+        // so it must never be reported as one file disagreeing with another.
         const candidates: string[] = []
         if (fenced) {
+          if (!SHELL_FENCES.has(fenceLang)) continue
           const shell = raw.trim()
           if (shell !== '' && !shell.startsWith('#')) candidates.push(shell.replace(/^\$\s*/, ''))
         } else {
@@ -346,48 +419,50 @@ const INSTRUCTION_CONFLICT: Rule = {
           if (prompt?.[1] !== undefined) candidates.push(prompt[1])
         }
         for (const candidate of candidates) {
-          const line = candidate.trim().replace(/\s+/g, ' ')
-          if (line === '' || !mentionsRunner(line)) continue
+          if (!COMMAND_START.test(candidate)) continue
+          const cmd = verifyCommandKey(candidate)
+          if (cmd === '') continue
           for (const pattern of patterns) {
-            const match = pattern.re.exec(line)
-            if (match === null) continue
-            // `npm run test` and `npm test` are the same command; the runner stays part of
-            // it so `pnpm test` cannot be mistaken for `npm test`.
-            const cmd = match[0]
-              .replace(/\s+/g, ' ')
-              .toLowerCase()
-              .replace(/\b(npm|pnpm|yarn|bun)\s+run\s+/g, '$1 ')
-            const key = `${pattern.kind}`
-            const list = found.get(key) ?? []
+            if (!pattern.re.test(cmd)) continue
+            const list = found.get(pattern.kind) ?? []
             if (!list.some((entry) => entry.cmd === cmd && entry.evidence.startsWith(instruction))) {
               list.push({ cmd, evidence: `${instruction}:${index + 1}` })
             }
-            found.set(key, list)
+            found.set(pattern.kind, list)
             break
           }
         }
       }
     }
 
-    const issues: string[] = []
-    const evidence: string[] = []
+    // A conflict is a difference between the *sets* of commands each file gives for
+    // a kind. Keeping only the first command per file reported a false conflict when
+    // two files listed the same alternatives in a different order.
+    interface Conflict {
+      kind: string
+      byFile: ReadonlyMap<string, string[]>
+      lines: string[]
+    }
+    const conflicts: Conflict[] = []
     for (const [kind, entries] of found) {
-      const byFile = new Map<string, string>()
+      const perFile = new Map<string, Set<string>>()
       for (const entry of entries) {
         const path = entry.evidence.replace(/:\d+$/, '')
-        if (!byFile.has(path)) byFile.set(path, entry.cmd)
+        let set = perFile.get(path)
+        if (set === undefined) {
+          set = new Set()
+          perFile.set(path, set)
+        }
+        set.add(entry.cmd)
       }
-      if (byFile.size < 2) continue
-      const distinct = new Set(byFile.values())
-      if (distinct.size < 2) continue
-      issues.push(`${kind}: ${[...byFile].map(([path, cmd]) => `${path} says "${cmd}"`).join('; ')}`)
-      for (const [path, cmd] of byFile) {
-        const line = entries.find((e) => e.evidence.startsWith(path) && e.cmd === cmd)?.evidence ?? path
-        evidence.push(line)
-      }
+      if (perFile.size < 2) continue
+      const signatures = new Set([...perFile.values()].map((cmds) => [...cmds].sort().join('\u0000')))
+      if (signatures.size < 2) continue
+      const byFile = new Map([...perFile].map(([path, cmds]) => [path, [...cmds].sort()] as const))
+      conflicts.push({ kind, byFile, lines: entries.map((entry) => entry.evidence) })
     }
 
-    if (issues.length === 0) {
+    if (conflicts.length === 0) {
       return pass(
         found.size > 0
           ? `${found.size} verify command kind(s) agree across instruction files`
@@ -396,9 +471,20 @@ const INSTRUCTION_CONFLICT: Rule = {
       )
     }
 
+    // Cap what is reported, not each conflict's evidence: every disagreement named in
+    // `detail` must carry the file:line locations that support it. Capping evidence at
+    // a fixed six entries used to drop the locations of a conflict still in the detail.
+    const reported = conflicts.slice(0, 3)
+    const issues = reported.map(
+      ({ kind, byFile }) =>
+        `${kind}: ${[...byFile]
+          .map(([path, cmds]) => `${path} says ${cmds.map((cmd) => `"${cmd}"`).join(', ')}`)
+          .join('; ')}`,
+    )
+    const evidence = [...new Set(reported.flatMap((conflict) => conflict.lines))]
     return warn(
-      `Instruction files disagree on verify commands: ${issues.slice(0, 3).join(' | ')}. Two tools may verify with different commands.`,
-      [...new Set(evidence)].slice(0, 6),
+      `Instruction files disagree on verify commands: ${issues.join(' | ')}. Two tools may verify with different commands.`,
+      evidence,
       derived(
         files[0] ?? 'AGENTS.md',
         'Reconcile the verify commands across the instruction files, or point the secondary file at the same runners',
