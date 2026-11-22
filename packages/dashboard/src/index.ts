@@ -18,3 +18,20 @@ export {
   type StagedFileView,
   type StagedView,
 } from './snapshot.ts'
+export {
+  buildTaskBrief,
+  buildTaskHandoff,
+  buildTaskMap,
+  MAX_TASK_TEXT,
+  type TaskBlocker,
+  type TaskBrief,
+  type TaskBriefInput,
+  type TaskCheck,
+  type TaskGate,
+  type TaskHandoff,
+  TaskInputError,
+  type TaskMap,
+  type TaskMapEdge,
+  type TaskMapNode,
+  type TaskStartItem,
+} from './task.ts'

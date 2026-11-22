@@ -23,13 +23,34 @@ export const HTML = `<!doctype html>
   <button id="refresh" type="button">Refresh</button>
 </header>
 <nav>
-  <button class="tab active" data-view="repository" type="button">Repository</button>
+  <button class="tab active" data-view="task" type="button">Task brief</button>
+  <button class="tab" data-view="repository" type="button">Repository</button>
   <button class="tab" data-view="context" type="button">Context</button>
   <button class="tab" data-view="work" type="button">Work</button>
 </nav>
 <main>
   <p id="notes" class="notes"></p>
-  <section id="repository"></section>
+  <div id="snapshot-error" hidden></div>
+  <section id="task">
+    <div class="card">
+      <h2>Start from a task</h2>
+      <p class="muted">Paste a ticket or a task description. The brief is built from this repository's snapshot; the text is not sent anywhere else, and nothing is created in a tracker.</p>
+      <label class="muted" for="task-text">Task text</label>
+      <textarea id="task-text" rows="6" maxlength="4000" placeholder="Paste the ticket title and body, or describe the change you want to make."></textarea>
+      <div class="row">
+        <button id="task-submit" type="button">Build brief</button>
+        <span id="task-error" class="muted" role="status"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Or start from a repository suggestion</h2>
+      <p class="muted">From <code>anvil plan</code>, which reads this repository's own findings. These are engineering improvements, not confirmed team priorities.</p>
+      <div id="task-suggestions"></div>
+    </div>
+    <div id="task-brief"></div>
+    <div id="task-map"></div>
+  </section>
+  <section id="repository" hidden></section>
   <section id="context" hidden></section>
   <section id="work" hidden></section>
 </main>
@@ -46,11 +67,12 @@ h1 { margin: 0; font-size: 1.4rem; }
 #scope { color: #888; }
 #stamp { color: #888; font-size: 0.85rem; }
 #refresh { margin-left: auto; }
-nav { display: flex; gap: 0.5rem; padding: 1rem 0; }
+nav { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 1rem 0; }
 button { cursor: pointer; }
 .tab.active { font-weight: bold; text-decoration: underline; }
 section { max-width: 70rem; }
 h2 { font-size: 1.1rem; margin-top: 1.5rem; }
+h3 { font-size: 0.95rem; margin: 1rem 0 0.35rem; }
 .notes { color: #888; font-size: 0.85rem; }
 .card { border: 1px solid #8886; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
 .error { border-left: 4px solid #c33; background: #c33110; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
@@ -65,9 +87,29 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #8881; padding
 code { font-family: ui-monospace, monospace; }
 table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
+label { display: block; margin: 0.5rem 0 0.25rem; }
+textarea { width: 100%; padding: 0.5rem; border: 1px solid #8886; border-radius: 4px; background: transparent; color: inherit; font: inherit; resize: vertical; }
+.objective { white-space: pre-wrap; overflow-wrap: anywhere; }
+.path { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.suggestion { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; padding: 0.5rem 0; border-top: 1px solid #8884; }
+.suggestion:first-child { border-top: 0; }
+.suggestion .body { flex: 1 1 24rem; min-width: 0; }
+.check { padding: 0.4rem 0; border-top: 1px solid #8884; }
+.check:first-of-type { border-top: 0; }
+.check .path { display: block; margin-top: 0.15rem; }
+.gate { border-left: 4px solid #a608; }
+blockquote { margin: 0.4rem 0 0; padding-left: 0.6rem; border-left: 2px solid #8886; }
+ul { margin: 0.25rem 0; padding-left: 1.25rem; }
+li { margin: 0.2rem 0; }
+.mapgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0.6rem; }
+.mapcolumn { border: 1px solid #8884; border-radius: 4px; padding: 0.5rem; }
+.mapnode { display: block; width: 100%; text-align: left; margin: 0.25rem 0; padding: 0.35rem 0.5rem; border: 1px solid #8886; border-radius: 4px; background: transparent; color: inherit; overflow-wrap: anywhere; }
+.mapnode.selected { outline: 2px solid #282; }
+.mapnode.unknown { border-style: dashed; }
+.mapedge { padding: 0.2rem 0; border-top: 1px solid #8884; overflow-wrap: anywhere; }
 `
 
-export const JS = `const state = { view: 'repository', snapshot: null, loading: false };
+export const JS = `const state = { view: 'task', snapshot: null, loading: false, brief: null, taskError: null, taskPending: false, mapView: 'map', mapSearch: '', mapSelection: null };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -309,9 +351,330 @@ function renderWork(root, snap) {
   }
   const card = make('div', 'card');
   card.appendChild(make('h2', '', 'Verification'));
-  card.appendChild(badge('unavailable'));
+  card.appendChild(badge(snap.verification?.status === 'recorded' ? 'recorded' : 'unavailable'));
   card.appendChild(make('div', '', snap.verification.reason));
   parent.appendChild(card);
+}
+
+/** The brief itself: what to do, where to look, how to check, and what is still unknown. */
+function renderBrief(parent, brief) {
+  parent.replaceChildren();
+  if (!brief) return;
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Task brief'));
+  card.appendChild(make('div', 'muted', 'From the snapshot at ' + brief.generatedAt + '. Nothing was run, written or sent to a tracker.'));
+  card.appendChild(make('strong', '', brief.title));
+  if (brief.objective) card.appendChild(make('div', 'objective', brief.objective));
+
+  card.appendChild(make('h3', '', 'Start here'));
+  const start = Array.isArray(brief.startHere) ? brief.startHere : [];
+  if (start.length === 0) {
+    card.appendChild(make('div', 'muted', 'No file in this repository matched the task. It may be a new file, or the task needs more context.'));
+  } else {
+    const list = make('ul');
+    for (const item of start) {
+      const entry = make('li');
+      entry.appendChild(badge(item.kind));
+      entry.appendChild(make('code', 'path', item.path));
+      entry.appendChild(make('span', 'muted', ' · ' + item.reason));
+      list.appendChild(entry);
+    }
+    card.appendChild(list);
+  }
+
+  // The gate the ticket states, kept separate from the repository's own facts: one is a
+  // team decision quoted from the ticket, the other is measured from this checkout.
+  const gates = Array.isArray(brief.gates) ? brief.gates : [];
+  if (gates.length > 0) {
+    card.appendChild(make('h3', '', 'Approval gate (quoted from the task)'));
+    for (const gate of gates) {
+      const row = make('div', 'card gate');
+      const startLine = make('div', 'row');
+      if (gate.startNow) {
+        startLine.appendChild(badge('ok'));
+        startLine.appendChild(make('strong', '', 'Start now: '));
+        startLine.appendChild(make('span', '', gate.startNow));
+      }
+      if (gate.startNow) row.appendChild(startLine);
+      if (gate.waitFor) {
+        const waitLine = make('div', 'row');
+        waitLine.appendChild(badge('blocker'));
+        waitLine.appendChild(make('strong', '', 'Wait for approval: '));
+        waitLine.appendChild(make('span', '', gate.waitFor));
+        row.appendChild(waitLine);
+      }
+      if (!gate.startNow && !gate.waitFor) {
+        const unknownLine = make('div', 'row');
+        unknownLine.appendChild(badge('unknown'));
+        unknownLine.appendChild(make('span', '', 'Approval is required, but the task does not say what may start first.'));
+        row.appendChild(unknownLine);
+      }
+      row.appendChild(make('blockquote', 'muted', '“' + gate.evidence + '”'));
+      card.appendChild(row);
+    }
+  }
+
+  card.appendChild(make('h3', '', 'How to check'));
+  const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
+  if (checks.length === 0) {
+    card.appendChild(make('div', 'muted', 'No verification command was detected or declared for this repository.'));
+  } else {
+    for (const check of checks) {
+      const row = make('div', 'check');
+      row.appendChild(make('strong', '', check.kind));
+      row.appendChild(make('code', 'path', check.cmd));
+      const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
+      row.appendChild(make('div', 'muted', detail));
+      card.appendChild(row);
+    }
+  }
+  card.appendChild(make('div', 'muted', 'Not run: this page cannot execute commands. Run one in a worktree to produce evidence.'));
+
+  const verification = brief.verification || { status: 'unavailable', reason: '', evidence: [] };
+  card.appendChild(make('h3', '', 'Recorded verification'));
+  if (verification.status === 'recorded' && Array.isArray(verification.evidence) && verification.evidence.length > 0) {
+    for (const item of verification.evidence) {
+      const row = make('div', 'check');
+      row.appendChild(make('code', 'path', item.command));
+      const exitCode = item.exitCode === null || item.exitCode === undefined ? 'unknown' : String(item.exitCode);
+      const revision = item.revision || 'unknown revision';
+      const timestamp = item.timestamp || 'unknown time';
+      const revisionNote =
+        item.matchesCurrent === false
+          ? ' · recorded at a different commit than the one sampled at dashboard startup'
+          : item.matchesCurrent === null
+            ? ' · revision not compared (current revision unknown)'
+            : '';
+      row.appendChild(make('div', 'muted', 'exit ' + exitCode + ' · ' + revision + ' · ' + timestamp + revisionNote));
+      card.appendChild(row);
+    }
+  } else {
+    card.appendChild(make('div', 'muted', verification.reason || 'No bounded verification evidence has been recorded.'));
+  }
+
+  card.appendChild(make('h3', '', 'Blocked or missing'));
+  const blockers = Array.isArray(brief.blockers) ? brief.blockers : [];
+  const readiness = brief.readiness || {};
+  if (readiness.ok === false) {
+    // A failed readiness report is an absence of evidence, not a clean bill of health.
+    card.appendChild(make('div', 'error', 'anvil ready failed, so blockers and tool availability are unknown. Run anvil ready for a real answer.'));
+  } else if (blockers.length > 0) {
+    for (const blocker of blockers) {
+      const row = make('div', 'row');
+      row.appendChild(badge(blocker.status));
+      row.appendChild(make('strong', '', blocker.label));
+      if (blocker.reason) row.appendChild(make('span', '', blocker.reason));
+      card.appendChild(row);
+    }
+  } else if (readiness.checked === false) {
+    card.appendChild(make('div', 'muted', 'No blocker is reported, but the environment was not probed (anvil ready --check), so a missing tool or service would not appear here.'));
+  } else {
+    card.appendChild(make('div', 'muted', 'No blocked requirement is reported by anvil ready.'));
+  }
+
+  const handoff = brief.handoff;
+  if (handoff) {
+    card.appendChild(make('h3', '', 'Blocker handoff'));
+    const area = make('textarea');
+    area.rows = 12;
+    area.readOnly = true;
+    area.value = handoff.text || '';
+    card.appendChild(area);
+    const copy = make('button', '', 'Copy handoff');
+    copy.type = 'button';
+    copy.addEventListener('click', function () {
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(area.value).then(function () {
+          copy.textContent = 'Copied';
+        }, function () {
+          copy.textContent = 'Copy failed — select the text';
+        });
+        return;
+      }
+      if (typeof area.select === 'function') area.select();
+      copy.textContent = 'Selected — press Ctrl+C';
+    });
+    card.appendChild(copy);
+    card.appendChild(make('div', 'muted', handoff.available ? 'Copy this to the owner named in the ticket. The owner is never guessed from repository files.' : 'No measured blocker is available to hand off yet.'));
+  }
+
+  card.appendChild(make('h3', '', 'Unknowns'));
+  const unknowns = Array.isArray(brief.unknowns) ? brief.unknowns : [];
+  const list = make('ul');
+  for (const unknown of unknowns) list.appendChild(make('li', '', unknown));
+  card.appendChild(list);
+  parent.appendChild(card);
+}
+
+/**
+ * The task's 2D map. It is built from the brief's own file matches and the profile's module
+ * graph; selecting a node or edge shows the CLI value behind it. A list view stays available
+ * for scanning and keyboard use.
+ */
+function renderTaskMap(target, brief, restoreSearchFocus) {
+  target.replaceChildren();
+  if (!brief || !brief.map) return;
+  const map = brief.map;
+  const card = make('div', 'card');
+  card.appendChild(make('h2', '', 'Task map'));
+  card.appendChild(make('div', 'muted', map.focus + ' — subgraph plus one hop. Every node names the CLI value behind it.'));
+
+  const controls = make('div', 'row');
+  const search = make('input');
+  search.type = 'search';
+  search.placeholder = 'Filter modules, files and checks';
+  search.value = state.mapSearch;
+  search.addEventListener('input', function () {
+    state.mapSearch = search.value;
+    renderTaskMap(target, brief, true);
+  });
+  controls.appendChild(search);
+  for (const mode of ['map', 'list']) {
+    const button = make('button', '', mode === 'map' ? 'Map' : 'List');
+    button.type = 'button';
+    button.addEventListener('click', function () {
+      state.mapView = mode;
+      renderTaskMap(target, brief);
+    });
+    controls.appendChild(button);
+  }
+  card.appendChild(controls);
+
+  const query = state.mapSearch.trim().toLowerCase();
+  const nodes = (Array.isArray(map.nodes) ? map.nodes : []).filter(function (node) {
+    return query === '' || (node.label + ' ' + node.reason + ' ' + (node.evidence || '')).toLowerCase().includes(query);
+  });
+  const nodeIds = new Set(nodes.map(function (node) { return node.id; }));
+  const edges = (Array.isArray(map.edges) ? map.edges : []).filter(function (edge) {
+    return nodeIds.has(edge.from) && nodeIds.has(edge.to);
+  });
+
+  if (nodes.length === 0) {
+    card.appendChild(make('div', 'muted', 'No node matches that search.'));
+  } else if (state.mapView === 'list') {
+    const table = make('table');
+    const head = make('tr');
+    for (const label of ['node', 'kind', 'why', 'evidence']) head.appendChild(make('th', '', label));
+    table.appendChild(head);
+    for (const node of nodes) {
+      const row = make('tr');
+      for (const value of [node.label, node.kind, node.reason, node.evidence || 'unknown']) {
+        row.appendChild(make('td', '', value));
+      }
+      table.appendChild(row);
+    }
+    card.appendChild(table);
+  } else {
+    const grid = make('div', 'mapgrid');
+    for (const kind of ['file', 'module', 'check', 'unknown']) {
+      const column = make('div', 'mapcolumn');
+      column.appendChild(make('h3', '', kind));
+      for (const node of nodes.filter(function (n) { return n.kind === kind; })) {
+        const button = make('button', 'mapnode' + (node.kind === 'unknown' ? ' unknown' : '') + (state.mapSelection === node.id ? ' selected' : ''), node.label);
+        button.type = 'button';
+        button.addEventListener('click', function () {
+          state.mapSelection = node.id;
+          renderTaskMap(target, brief);
+        });
+        column.appendChild(button);
+      }
+      grid.appendChild(column);
+    }
+    card.appendChild(grid);
+    const edgeList = make('div');
+    for (const [edgeIndex, edge] of edges.entries()) {
+      const row = make('div', 'mapedge', edge.from + '  →  ' + edge.to + '  (' + edge.label + ')');
+      row.addEventListener('click', function () {
+        state.mapSelection = 'edge:' + String(edgeIndex);
+        renderTaskMap(target, brief);
+      });
+      edgeList.appendChild(row);
+    }
+    card.appendChild(edgeList);
+  }
+
+  const detail = make('div', 'muted');
+  const selectedNode = nodes.find(function (node) { return node.id === state.mapSelection; });
+  const selectedEdge =
+    typeof state.mapSelection === 'string' && state.mapSelection.startsWith('edge:')
+      ? edges[Number(state.mapSelection.slice(5))]
+      : null;
+  if (selectedNode) {
+    detail.textContent = selectedNode.label + ' — ' + selectedNode.reason + ' Evidence: ' + (selectedNode.evidence || 'unknown');
+  } else if (selectedEdge) {
+    detail.textContent = selectedEdge.from + ' → ' + selectedEdge.to + ' (' + selectedEdge.label + ') Evidence: ' + (selectedEdge.evidence || 'unknown');
+  } else {
+    detail.textContent = 'Select a node or edge to see its evidence.';
+  }
+  card.appendChild(detail);
+  if (map.hasUnknown) {
+    card.appendChild(make('div', 'muted', 'Dashed nodes are unknown, not "no dependency". The profile did not analyse them.'));
+  }
+  target.appendChild(card);
+  if (restoreSearchFocus && typeof search.focus === 'function') {
+    search.focus();
+    if (typeof search.setSelectionRange === 'function') search.setSelectionRange(search.value.length, search.value.length);
+  }
+}
+
+/** A derived fix reads as "action -- why"; the action is the useful heading for a task. */
+function suggestionAction(suggestion) {
+  const detail = String(suggestion.detail || '');
+  const marker = detail.indexOf(' -- ');
+  if (marker <= 0) return '';
+  return detail.slice(0, marker).trim();
+}
+
+/** Suggested contributions come only from derived plan fixes, never from external reading. */
+function renderSuggestions(parent, snap) {
+  parent.replaceChildren();
+  const plan = snap.repository.plan;
+  if (!plan || plan.ok === false) {
+    parent.appendChild(make('div', 'error', (plan && plan.error) || 'The plan source is unavailable.'));
+    return;
+  }
+  const all = plan.data && Array.isArray(plan.data.suggestions) ? plan.data.suggestions : [];
+  const suggestions = all.filter((entry) => entry && entry.tier === 'derived' && entry.external !== true).slice(0, 8);
+  if (suggestions.length === 0) {
+    parent.appendChild(make('div', 'muted', 'No repository suggestion is open. Paste a task above instead.'));
+    return;
+  }
+  for (const suggestion of suggestions) {
+    const row = make('div', 'suggestion');
+    const button = make('button', '', 'Build brief');
+    button.dataset.suggestion = suggestion.id || '';
+    const heading = suggestionAction(suggestion) || suggestion.title || suggestion.id || 'this suggestion';
+    button.setAttribute('aria-label', 'Build a brief from: ' + heading);
+    button.addEventListener('click', function () { requestBrief({ suggestionId: suggestion.id || '' }); });
+    row.appendChild(button);
+    const body = make('div', 'body');
+    body.appendChild(badge(suggestion.tier));
+    if (suggestion.severity) body.appendChild(badge(suggestion.severity));
+    body.appendChild(make('strong', '', suggestionAction(suggestion) || suggestion.title || suggestion.id || 'suggestion'));
+    if (suggestion.detail) body.appendChild(make('div', '', suggestion.detail));
+    if (Array.isArray(suggestion.evidence) && suggestion.evidence.length > 0) {
+      body.appendChild(make('div', 'muted', suggestion.evidence.join('; ')));
+    }
+    row.appendChild(body);
+    parent.appendChild(row);
+  }
+}
+
+function renderTask(root, snap) {
+  const submit = root.querySelector('#task-submit');
+  if (submit) {
+    submit.disabled = state.taskPending || !snap;
+    submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
+  }
+  if (!snap) return;
+  const suggestions = root.querySelector('#task-suggestions');
+  if (suggestions) renderSuggestions(suggestions, snap);
+  const target = root.querySelector('#task-brief');
+  if (target) renderBrief(target, state.brief);
+  const mapTarget = root.querySelector('#task-map');
+  if (mapTarget) renderTaskMap(mapTarget, state.brief);
+  const error = root.querySelector('#task-error');
+  if (error) error.textContent = state.taskError || '';
 }
 
 function render() {
@@ -322,14 +685,40 @@ function render() {
   const ready = snap.repository.ready;
   if (ready && ready.ok && ready.data && ready.data.root) root.querySelector('#scope').textContent = ready.data.root;
   root.querySelector('#notes').textContent = snap.notes.join(' ');
+  renderTask(root, snap);
   renderRepository(root, snap);
   renderContext(root, snap);
   renderWork(root, snap);
-  for (const section of ['repository', 'context', 'work']) {
+  for (const section of ['task', 'repository', 'context', 'work']) {
     root.querySelector('#' + section).hidden = section !== state.view;
   }
   for (const tab of document.querySelectorAll('.tab')) {
     tab.classList.toggle('active', tab.dataset.view === state.view);
+  }
+}
+
+async function requestBrief(input) {
+  if (state.taskPending) return;
+  state.taskPending = true;
+  state.taskError = null;
+  renderTask(document, state.snapshot);
+  try {
+    const response = await fetch('/api/brief', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+    const payload = await response.json().catch(function () { return null; });
+    if (!response.ok) throw new Error((payload && payload.error) || 'brief request failed: ' + response.status);
+    state.brief = payload;
+    state.mapSelection = null;
+    state.mapSearch = '';
+  } catch (error) {
+    state.taskError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.taskPending = false;
+    renderTask(document, state.snapshot);
   }
 }
 
@@ -340,16 +729,40 @@ async function load(refresh) {
   try {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
-    state.snapshot = await response.json();
+    const next = await response.json();
+    // A brief is bound to the snapshot it was built from; a refresh invalidates it, but the
+    // draft in the textarea belongs to the reader and is left alone.
+    if (state.snapshot) {
+      state.brief = null;
+      state.taskError = null;
+    }
+    state.snapshot = next;
+    showSnapshotError(null);
     render();
   } catch (error) {
-    const target = document.querySelector('#' + state.view);
-    target.replaceChildren();
-    target.appendChild(make('div', 'error', error instanceof Error ? error.message : String(error)));
+    // The form stays usable: a failed snapshot must not delete the draft the reader typed.
+    showSnapshotError(error instanceof Error ? error.message : String(error));
   } finally {
     state.loading = false;
     document.querySelector('#refresh').disabled = false;
   }
+}
+
+/** The snapshot error lives in its own node so it can coexist with the entry-point form. */
+function showSnapshotError(message) {
+  const node = document.querySelector('#snapshot-error');
+  if (!node) return;
+  node.replaceChildren();
+  if (!message) {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  // Never claim a fallback that does not exist: a first-load failure has no earlier snapshot.
+  const tail = state.snapshot
+    ? ' The form below still works from the last snapshot it loaded.'
+    : ' Nothing is loaded yet, so a brief cannot be built until a load succeeds. Press Refresh to retry.';
+  node.appendChild(make('div', 'error', 'Could not read the snapshot: ' + message + '.' + tail));
 }
 
 for (const tab of document.querySelectorAll('.tab')) {
@@ -359,5 +772,9 @@ for (const tab of document.querySelectorAll('.tab')) {
   });
 }
 document.querySelector('#refresh').addEventListener('click', function () { load(true); });
+document.querySelector('#task-submit').addEventListener('click', function () {
+  const field = document.querySelector('#task-text');
+  requestBrief({ text: field && typeof field.value === 'string' ? field.value : '' });
+});
 load(false);
 `
