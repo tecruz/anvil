@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/hy4-flash-free",
+  "providers": {
+    "opencode": {
+      "models": {
+        "beam-free": { "disabled": true },
+        "big-pickle": { "disabled": true },
+        "flint-40b-free": { "disabled": true },
+        "glm-5.3-flash-free": { "disabled": true },
+        "iceman-free": { "disabled": true },
+        "inkling-2-small-free": { "disabled": true },
+        "longcat-2.5-free": { "disabled": true },
+        "mimo-v2.6-flash-free": { "disabled": true },
+        "minimax-m3.1-flash-free": { "disabled": true },
+        "nemotron-3.5-lightning-free": { "disabled": true },
+        "nemotron-3.5-super-vl-free": { "disabled": true }
+      }
+    }
+  },
+  "policies": [
+    { "action": "provider.use", "resource": "*", "effect": "deny" },
+    { "action": "provider.use", "resource": "opencode", "effect": "allow" },
+    { "action": "tool.use", "resource": "subagent:*", "effect": "deny" },
+    { "action": "tool.use", "resource": "external_directory:*", "effect": "deny" }
+  ]
+}
