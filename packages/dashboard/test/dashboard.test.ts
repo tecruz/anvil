@@ -12,6 +12,7 @@ import { request as httpRequest } from 'node:http'
 import { describe, test } from 'node:test'
 import { createContext, runInContext } from 'node:vm'
 import {
+  actionArgv,
   createDashboardServer,
   type DashboardInvoke,
   type DashboardInvokeResult,
@@ -522,11 +523,58 @@ describe('the dashboard page', () => {
     runInContext(JS.replace('load(false);', ''), context)
     ;(context as unknown as { __snapshot: DashboardSnapshot }).__snapshot = snapshot as unknown as DashboardSnapshot
     runInContext(
-      "state.actionResult = { ok: false, command: 'anvil ship local-1 --probe', exitCode: 2, error: 'verify failed' }; renderWork(document, __snapshot); renderWork(document, __snapshot);",
+      "state.actionResult = { ok: false, command: 'anvil ship local-1 --probe --json', exitCode: 2, error: 'verify failed', stages: [], skipped: [], warnings: [] }; renderWork(document, __snapshot); renderWork(document, __snapshot);",
       context,
     )
     const work = nodes.get('#work')?.text() ?? ''
-    assert.match(work, /anvil ship local-1 --probe - verify failed/)
+    assert.match(work, /anvil ship local-1 --probe --json - verify failed/)
+  })
+
+  test('a failed refresh keeps the last snapshot and the refused action result', async () => {
+    const nodes = new Map<string, FakeElement>(
+      ['work', 'repository', 'context', 'refresh', 'refresh-error', 'scope', 'stamp', 'notes'].map((id) => [
+        `#${id}`,
+        new FakeElement('section'),
+      ]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
+    const snapshot = {
+      schemaVersion: 1 as const,
+      fetchedAt: 'now',
+      repository: { doctor: source({}), ready: source({}), plan: source({}) },
+      context: { brief: source({}), staged: source({}) },
+      work: { crew: source({ crew: [{ key: 'claim-1' }] }) },
+      verification: { status: 'unavailable' as const, reason: 'unavailable' },
+      notes: [],
+    }
+    const context = createContext({
+      document,
+      console,
+      window: { confirm: () => true },
+      fetch: async (url: string) => {
+        assert.match(url, /\/api\/snapshot\?refresh=1/)
+        return { ok: false, status: 500, json: async () => ({}) }
+      },
+    })
+    runInContext(JS.replace('load(false);', ''), context)
+    ;(context as unknown as { __snapshot: DashboardSnapshot }).__snapshot = snapshot as unknown as DashboardSnapshot
+    runInContext(
+      "state.snapshot = __snapshot; state.view = 'work'; state.actionResult = { ok: false, command: 'anvil ship claim-1 --probe --json', exitCode: 2, error: 'Refusing to ship without a passing verify', stages: [], skipped: [], warnings: [] }; render();",
+      context,
+    )
+    assert.match(nodes.get('#work')?.text() ?? '', /Refusing to ship/)
+
+    await runInContext('load(true)', context)
+
+    // The refusal and the last good snapshot survive; the refresh error is shown apart.
+    assert.match(nodes.get('#work')?.text() ?? '', /Refusing to ship/)
+    assert.match(nodes.get('#work')?.text() ?? '', /claim-1/)
+    assert.match(nodes.get('#refresh-error')?.text() ?? '', /snapshot request failed: 500/)
   })
 })
 
@@ -550,16 +598,16 @@ describe('dashboard gated actions', () => {
       const claim = await post(server, { action: 'claim', ref: 'anvil-88' })
       const claimText = await claim.text()
       assert.equal(claim.status, 200, claimText)
-      assert.equal((JSON.parse(claimText) as { command: string }).command, 'anvil claim anvil-88')
+      assert.equal((JSON.parse(claimText) as { command: string }).command, 'anvil claim anvil-88 --json')
 
       const verify = await post(server, { action: 'verify' })
       assert.equal(verify.status, 200)
       const ship = await post(server, { action: 'ship', ref: 'claim-1' })
       assert.equal(ship.status, 200)
       assert.deepEqual(calls, [
-        ['claim', 'anvil-88'],
-        ['crew', 'verify'],
-        ['ship', 'claim-1', '--probe'],
+        ['claim', 'anvil-88', '--json'],
+        ['crew', 'verify', '--json'],
+        ['ship', 'claim-1', '--probe', '--json'],
       ])
     })
   })
@@ -619,5 +667,154 @@ describe('dashboard gated actions', () => {
       assert.equal(res.status, 404)
       assert.doesNotMatch(JS, /session-token/)
     })
+  })
+
+  test('a full ticket URL with a query string is one argv value; the CLI resolves it', async () => {
+    const url = 'https://github.com/tecruz/anvil/issues/88?notification_referrer_id=1'
+    // The page never splits the reference: it stays one element, and --json is the only flag.
+    assert.deepEqual(actionArgv('claim', url), ['claim', url, '--json'])
+    await withServer(async (server, _invoke, calls) => {
+      const res = await post(server, { action: 'claim', ref: url })
+      assert.equal(res.status, 200, await res.clone().text())
+      const data = (await res.json()) as { command: string }
+      assert.equal(data.command, `anvil claim ${url} --json`)
+      assert.deepEqual(calls, [['claim', url, '--json']])
+    })
+  })
+
+  test('a zero exit with a failed CLI stage is not reported as a full success', async () => {
+    const stdout = JSON.stringify({
+      schemaVersion: 1,
+      ok: true,
+      command: 'ship',
+      data: {
+        schemaVersion: 1,
+        key: 'claim-1',
+        ok: true,
+        stages: [
+          { name: 'pr', ok: true, detail: 'opened #99' },
+          { name: 'ticket', ok: false, detail: 'PR opened but the ticket was not updated: gh failed' },
+        ],
+        skipped: [],
+        verification: [],
+        risk: { level: 'low', highPaths: [], mediumPaths: [] },
+      },
+    })
+    await withServer(
+      async (server) => {
+        const res = await post(server, { action: 'ship', ref: 'claim-1' })
+        assert.equal(res.status, 200)
+        const data = (await res.json()) as {
+          ok: boolean
+          exitCode: number
+          error: string | null
+          stages: Array<{ name: string; ok: boolean; detail: string }>
+        }
+        assert.equal(data.exitCode, 0)
+        assert.equal(data.ok, false, 'a FAIL stage must not be green even when the CLI exits zero')
+        assert.match(data.error ?? '', /ticket was not updated/)
+        assert.deepEqual(data.stages, [
+          { name: 'pr', ok: true, detail: 'opened #99' },
+          { name: 'ticket', ok: false, detail: 'PR opened but the ticket was not updated: gh failed' },
+        ])
+      },
+      { ship: { exitCode: 0, stdout, stderr: '' } },
+    )
+  })
+
+  test('skipped checks and warnings from the CLI JSON reach the page result', async () => {
+    const stdout = JSON.stringify({
+      schemaVersion: 1,
+      ok: true,
+      command: 'crew verify',
+      data: {
+        schemaVersion: 1,
+        ok: true,
+        results: [{ key: 'claim-1', worktree: '/w', ok: true, commands: [] }],
+        skipped: [{ key: 'claim-2', reason: 'worktree is gone: /gone' }],
+      },
+    })
+    const shipStdout = JSON.stringify({
+      schemaVersion: 1,
+      ok: true,
+      command: 'ship',
+      data: {
+        ok: true,
+        stages: [
+          { name: 'verify', ok: true, detail: '1 command(s) passed (inferred, not documented: npm test)' },
+          { name: 'ticket', ok: true, detail: 'skipped (--no-ticket-update)' },
+        ],
+        risk: { level: 'high', highPaths: ['.github/workflows/ci.yml'], mediumPaths: [] },
+      },
+    })
+    await withServer(
+      async (server) => {
+        const verify = (await (await post(server, { action: 'verify' })).json()) as { skipped: string[] }
+        assert.ok(verify.skipped.some((s) => /claim-2.*worktree is gone/.test(s)))
+
+        const ship = (await (await post(server, { action: 'ship', ref: 'claim-1' })).json()) as {
+          skipped: string[]
+          warnings: string[]
+        }
+        assert.ok(ship.skipped.some((s) => /ticket.*skipped/.test(s)))
+        assert.ok(ship.warnings.some((w) => /inferred/.test(w)))
+        assert.ok(ship.warnings.some((w) => /high risk/i.test(w)))
+      },
+      {
+        crew: { exitCode: 0, stdout, stderr: '' },
+        ship: { exitCode: 0, stdout: shipStdout, stderr: '' },
+      },
+    )
+  })
+
+  test('an invoker exception becomes a structured action error, not a plain-text 500', async () => {
+    const { invoke } = fakeInvoke()
+    const server = await createDashboardServer({
+      cwd: '/repo',
+      invoke,
+      invokeAction: async () => {
+        throw new Error('spawn anvil ETIMEDOUT')
+      },
+      readStaged: () => staged,
+      token: TOKEN,
+    })
+    try {
+      const res = await post(server, { action: 'verify' })
+      assert.equal(res.status, 200)
+      assert.match(res.headers.get('content-type') ?? '', /application\/json/)
+      const data = (await res.json()) as { ok: boolean; error: string | null; exitCode: number }
+      assert.equal(data.ok, false)
+      assert.notEqual(data.exitCode, 0)
+      assert.match(data.error ?? '', /ETIMEDOUT/)
+    } finally {
+      await server.close()
+    }
+  })
+
+  test('actions use the long-running runner, not the snapshot runner', async () => {
+    const { invoke } = fakeInvoke()
+    let snapshotCalls = 0
+    let actionCalls = 0
+    const server = await createDashboardServer({
+      cwd: '/repo',
+      invoke: async (args, cwd) => {
+        snapshotCalls += 1
+        return invoke(args, cwd)
+      },
+      invokeAction: async (args, cwd) => {
+        actionCalls += 1
+        return invoke(args, cwd)
+      },
+      readStaged: () => staged,
+      token: TOKEN,
+    })
+    try {
+      const res = await post(server, { action: 'verify' })
+      assert.equal(res.status, 200)
+      assert.equal(snapshotCalls, 0)
+      assert.equal(actionCalls, 1)
+    } finally {
+      await server.close()
+    }
   })
 })

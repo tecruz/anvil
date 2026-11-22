@@ -10,9 +10,9 @@
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
-import { createDashboardServer, type StagedFileView, type StagedView } from '@anvil/dashboard'
+import { createDashboardServer, type DashboardInvoke, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
-import { createCliInvoker } from '../mcp.ts'
+import { createCliInvoker, DASHBOARD_ACTION_TIMEOUT_MS } from '../mcp.ts'
 import type { Command } from './types.ts'
 
 function parsePort(value: unknown): number {
@@ -74,6 +74,33 @@ export function stagedView(repoRoot: string): StagedView {
   }
 }
 
+export interface DashboardInvokers {
+  /** Short runner for the read-only snapshot sources. */
+  invoke: DashboardInvoke
+  /** Long runner for the three gated actions, which may run multi-minute verification. */
+  invokeAction: DashboardInvoke
+}
+
+/**
+ * Two invokers, one transport. Snapshot reads stay fast; an action gets enough time for the
+ * CLI's ten-minute-per-check verification budget. The timeouts and entry are injectable so
+ * tests can prove a slow check survives on the action runner with a short wait.
+ */
+export function dashboardInvokers(
+  options: { entry?: string; snapshotTimeoutMs?: number; actionTimeoutMs?: number } = {},
+): DashboardInvokers {
+  const { entry, snapshotTimeoutMs, actionTimeoutMs = DASHBOARD_ACTION_TIMEOUT_MS } = options
+  // exactOptionalPropertyTypes: omit undefined keys rather than passing them through.
+  const invokeOptions = {
+    ...(entry === undefined ? {} : { entry }),
+    ...(snapshotTimeoutMs === undefined ? {} : { timeoutMs: snapshotTimeoutMs }),
+  }
+  return {
+    invoke: createCliInvoker(invokeOptions),
+    invokeAction: createCliInvoker({ ...invokeOptions, timeoutMs: actionTimeoutMs }),
+  }
+}
+
 export const dashboardCommand: Command = {
   name: 'dashboard',
   summary: 'Start a local overview of readiness, context and parallel work, with optional gated actions.',
@@ -116,10 +143,12 @@ export const dashboardCommand: Command = {
       })
     }
 
+    const { invoke, invokeAction } = dashboardInvokers()
     const server = await createDashboardServer({
       cwd: repoRoot,
       port,
-      invoke: createCliInvoker(),
+      invoke,
+      invokeAction,
       readStaged: () => stagedView(repoRoot),
     })
 

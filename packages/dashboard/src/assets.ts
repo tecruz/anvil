@@ -29,6 +29,7 @@ export const HTML = `<!doctype html>
 </nav>
 <main>
   <p id="notes" class="notes"></p>
+  <p id="refresh-error" class="error" hidden></p>
   <section id="repository"></section>
   <section id="context" hidden></section>
   <section id="work" hidden></section>
@@ -52,6 +53,7 @@ button { cursor: pointer; }
 section { max-width: 70rem; }
 h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 .notes { color: #888; font-size: 0.85rem; }
+.action-output { white-space: pre-wrap; }
 .card { border: 1px solid #8886; border-radius: 6px; padding: 0.75rem 1rem; margin: 0.5rem 0; }
 .error { border-left: 4px solid #c33; background: #c33110; padding: 0.5rem 0.75rem; margin: 0.5rem 0; }
 .badge { display: inline-block; border-radius: 4px; padding: 0 0.35rem; margin-right: 0.4rem; font-size: 0.8rem; border: 1px solid #8888; }
@@ -67,7 +69,7 @@ table { border-collapse: collapse; width: 100%; }
 th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8884; vertical-align: top; }
 `
 
-export const JS = `const state = { view: 'repository', snapshot: null, loading: false, actionResult: null };
+export const JS = `const state = { view: 'repository', snapshot: null, loading: false, actionResult: null, refreshError: null };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -371,16 +373,23 @@ function renderActions(parent) {
   });
   card.appendChild(verifyButton);
 
-  const output = make('div', state.actionResult ? (state.actionResult.ok ? 'muted' : 'error') : 'muted');
+  const output = make('div', (state.actionResult && !state.actionResult.ok ? 'error' : 'muted') + ' action-output');
   output.setAttribute('role', 'status');
   if (state.actionResult) output.textContent = formatActionResult(state.actionResult);
   card.appendChild(output);
   parent.appendChild(card);
 }
 
+/** Show the CLI's own verdict, not just its exit code: a partial ship has real FAIL stages. */
 function formatActionResult(result) {
   const detail = result.ok ? 'exit ' + result.exitCode : (result.error || 'refused');
-  return result.command + ' - ' + detail;
+  const lines = [result.command + ' - ' + detail];
+  for (const stage of result.stages || []) {
+    lines.push('  ' + (stage.ok ? 'ok  ' : 'FAIL') + ' ' + stage.name + ': ' + stage.detail);
+  }
+  if (result.skipped && result.skipped.length > 0) lines.push('  skipped: ' + result.skipped.join('; '));
+  if (result.warnings && result.warnings.length > 0) lines.push('  warning: ' + result.warnings.join('; '));
+  return lines.join('\\n');
 }
 
 async function runAction(body, button) {
@@ -393,10 +402,23 @@ async function runAction(body, button) {
       credentials: 'same-origin',
       body: JSON.stringify(body),
     });
-    const result = await response.json();
-    state.actionResult = response.ok ? result : { ok: false, command: 'anvil ' + body.action, error: result.error || ('HTTP ' + response.status) };
+    let result = null;
+    try { result = await response.json(); } catch { result = null; }
+    if (response.ok && result && typeof result === 'object') {
+      state.actionResult = result;
+    } else {
+      // A non-JSON error body is still shown as a readable failure, never as a parse error.
+      state.actionResult = {
+        ok: false, command: 'anvil ' + body.action, exitCode: response.status,
+        error: (result && result.error) || ('HTTP ' + response.status),
+        stages: [], skipped: [], warnings: [],
+      };
+    }
   } catch (error) {
-    state.actionResult = { ok: false, command: 'anvil ' + body.action, error: error instanceof Error ? error.message : String(error) };
+    state.actionResult = {
+      ok: false, command: 'anvil ' + body.action, error: error instanceof Error ? error.message : String(error),
+      stages: [], skipped: [], warnings: [],
+    };
   } finally {
     button.disabled = false;
   }
@@ -406,7 +428,16 @@ async function runAction(body, button) {
   await load(true);
 }
 
+/** A failed refresh is shown on its own line; it never overwrites the view or the action result. */
+function renderRefreshError() {
+  const target = document.querySelector('#refresh-error');
+  if (!target) return;
+  target.textContent = state.refreshError || '';
+  target.hidden = !state.refreshError;
+}
+
 function render() {
+  renderRefreshError();
   const snap = state.snapshot;
   const root = document;
   if (!snap) return;
@@ -433,11 +464,13 @@ async function load(refresh) {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
     state.snapshot = await response.json();
+    state.refreshError = null;
     render();
   } catch (error) {
-    const target = document.querySelector('#' + state.view);
-    target.replaceChildren();
-    target.appendChild(make('div', 'error', error instanceof Error ? error.message : String(error)));
+    // Keep the last good snapshot and any refused action result on screen. The refresh
+    // failure gets its own element, so a transient 500 cannot erase the CLI's answer.
+    state.refreshError = error instanceof Error ? error.message : String(error);
+    renderRefreshError();
   } finally {
     state.loading = false;
     document.querySelector('#refresh').disabled = false;

@@ -8,6 +8,7 @@
 
 export {
   type ActionResult,
+  type ActionStage,
   actionArgv,
   actionResult,
   DASHBOARD_ACTIONS,

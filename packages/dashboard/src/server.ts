@@ -14,7 +14,13 @@ import type { ServerResponse } from 'node:http'
 import { createServer, type Server } from 'node:http'
 import { actionArgv, actionResult, parseAction } from './actions.ts'
 import { CSS, HTML, JS } from './assets.ts'
-import { type DashboardSnapshot, type LoadSnapshotOptions, loadSnapshot } from './snapshot.ts'
+import {
+  type DashboardInvoke,
+  type DashboardInvokeResult,
+  type DashboardSnapshot,
+  type LoadSnapshotOptions,
+  loadSnapshot,
+} from './snapshot.ts'
 
 const COOKIE_PREFIX = 'anvil_dashboard'
 const CSP = [
@@ -34,6 +40,11 @@ export interface DashboardServerOptions extends Omit<LoadSnapshotOptions, 'now'>
   port?: number
   /** Injected for deterministic tests. */
   token?: string
+  /**
+   * Long-running runner for the three gated actions. Snapshot reads keep `invoke` (short
+   * timeout); ship verification may need ten minutes per check, so actions get their own.
+   */
+  invokeAction?: DashboardInvoke
 }
 
 export interface DashboardServerHandle {
@@ -92,6 +103,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? 0
   const token = options.token ?? randomBytes(24).toString('base64url')
+  const actionInvoke = options.invokeAction ?? options.invoke
   // Cookies are keyed by name and path, not by port, so every dashboard needs its own name.
   // A fixed `anvil_dashboard` cookie would let a second dashboard overwrite the first one's
   // token and lock the first browser session out on its next refresh.
@@ -178,7 +190,19 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           return
         }
         const argv = actionArgv(parsedAction.action, parsedAction.ref)
-        const result = await options.invoke(argv, options.cwd)
+        let result: DashboardInvokeResult
+        try {
+          result = await actionInvoke(argv, options.cwd)
+        } catch (thrown) {
+          // A timeout or spawn failure is an action outcome, not a server crash. Return the
+          // same JSON shape so the page can display the CLI runner's error beside the snapshot
+          // instead of replacing it with a JSON parse error from a plain-text 500.
+          result = {
+            exitCode: -1,
+            stdout: '',
+            stderr: thrown instanceof Error ? thrown.message : String(thrown),
+          }
+        }
         send(
           res,
           200,
