@@ -169,7 +169,7 @@ function pythonName(name: string): string {
 
 /** Regex source for a dotted `tool.uv.workspace.<leaf>` key, tolerant of quotes and spacing. */
 function dottedWorkspaceKey(leaf: string): string {
-  return `["']?tool["']?\\s*\\.\\s*["']?uv["']?\\s*\\.\\s*["']?workspace["']?\\s*\\.\\s*${leaf}`
+  return `(?:["']?tool["']?\\s*\\.\\s*["']?uv["']?\\s*\\.\\s*)?["']?workspace["']?\\s*\\.\\s*${leaf}`
 }
 
 /** The directories a uv workspace declares, after its `exclude` globs. */
@@ -189,7 +189,7 @@ function uvMembers(ctx: DetectorContext, text: string, base: string): string[] {
   // uv's root project is always a workspace member, even when no glob names it.
   if (tomlSection(text, /^\s*\[\s*["']?project["']?\s*\]/m) !== null) out.add('.')
   for (const pattern of declared) {
-    const normalized = pattern.replace(/^\.\//, '')
+    const normalized = pattern.replace(/^\.\//, '').replace(/\/+$/, '')
     for (const dir of projects) {
       if (dir !== '.' && matchesGlob(dir, normalized)) out.add(dir)
     }
@@ -460,7 +460,7 @@ export const pythonDetector: Detector = {
       const text = readTomlish(ctx, file)
       return (
         text !== null &&
-        /^\s*(?:\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]|["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\.)/m.test(
+        /^\s*(?:\[\s*["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\]|["']?tool["']?\s*\.\s*["']?uv["']?\s*\.\s*["']?workspace["']?\s*\.|["']?workspace["']?\s*\.)/m.test(
           text,
         )
       )
@@ -511,9 +511,12 @@ export const pythonDetector: Detector = {
       }
       const declared = tomlArray(workspaceText, 'members')
       const hiddenMember = declared.some((declaredPath) => {
-        if (/[*?]/.test(declaredPath)) return false
         const memberDir = declaredPath.replace(/^\.\//, '').replace(/\/+$/, '')
         const dir = workspaceBase === '.' ? memberDir : `${workspaceBase}/${memberDir}`
+        if (/[*?]/.test(memberDir)) {
+          const base = dir.slice(0, Math.max(0, dir.search(/[*?]/))).replace(/\/+$/, '')
+          return ![...ctx.files].some((file) => file === base || file.startsWith(`${base}/`))
+        }
         return ![...ctx.files].some((file) => file === `${dir}/pyproject.toml` || file.startsWith(`${dir}/`))
       })
       const uvSafe =
