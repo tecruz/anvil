@@ -19,6 +19,7 @@ import {
   type DetectorContext,
   filesUnder,
   hasFile,
+  markDepsAnalysed,
   setMonorepo,
 } from '../detector.ts'
 import { evidence, findLine, maskXmlComments } from '../manifest.ts'
@@ -186,6 +187,63 @@ export const kotlinMultiplatformDetector: Detector = {
 // Go
 // ---------------------------------------------------------------------------
 
+/**
+ * Workspace-internal `require` edges from one `go.mod`.
+ *
+ * Only module paths already present in this workspace count, and the current module is never
+ * its own dependency. A `require` inside a commented line is ignored, so a commented-out
+ * edge cannot silently appear in the module graph.
+ */
+function goWorkspaceRequires(mod: string, members: ReadonlySet<string>, self: string): string[] {
+  const out = new Set<string>()
+  let block = false
+  for (const raw of mod.split('\n')) {
+    const line = raw.replace(/\/\/.*$/, '').trim()
+    if (line === '') continue
+    if (/^require\s*\(/.test(line)) {
+      block = true
+      continue
+    }
+    if (block && line === ')') {
+      block = false
+      continue
+    }
+    const name = /^require\s+(\S+)/.exec(line)?.[1] ?? (block ? /^(\S+)\s+v\S+/.exec(line)?.[1] : undefined)
+    if (name === undefined || name === self || !members.has(name)) continue
+    out.add(name)
+  }
+  return [...out].sort()
+}
+
+/**
+ * Directories named by `use` in a `go.work`.
+ *
+ * Only these are workspace members. Scanning every `go.mod` in the tree would add an
+ * unrelated checkout or an example module to the graph, and would let a `require` create a
+ * dependency edge to one. Both spellings are read: `use ./one` and a parenthesised block.
+ */
+function goWorkMembers(text: string): string[] {
+  const out: string[] = []
+  let block = false
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\/\/.*$/, '').trim()
+    if (line === '') continue
+    if (/^use\s*\(/.test(line)) {
+      block = true
+      continue
+    }
+    if (block && line === ')') {
+      block = false
+      continue
+    }
+    const value = /^use\s+(\S+)/.exec(line)?.[1] ?? (block ? line.split(/\s+/)[0] : undefined)
+    if (value === undefined) continue
+    const path = posix.normalize(value.replace(/\\/g, '/')).replace(/\/+$/, '')
+    out.push(path === '.' || path === '' ? '.' : path)
+  }
+  return [...new Set(out)]
+}
+
 export const goDetector: Detector = {
   id: 'go',
   title: 'Go',
@@ -204,13 +262,29 @@ export const goDetector: Detector = {
     }
     if (hasFile(ctx, 'go.work')) {
       setMonorepo(draft, { tool: 'go-work', evidence: 'go.work', members: [] })
-      for (const f of ctx.files) {
-        if (!f.endsWith('/go.mod')) continue
-        const path = f === 'go.mod' ? '.' : f.slice(0, -'/go.mod'.length)
-        const inner = read(ctx, f)
+      const work = read(ctx, 'go.work')
+      const modules: Array<{ id: string; path: string; mod: string | null }> = []
+      for (const path of work === null ? [] : goWorkMembers(work)) {
+        const manifest = path === '.' ? 'go.mod' : `${path}/go.mod`
+        // A declared member with no manifest is not a module. A manifest that exists but cannot
+        // be read is different: keep it as a module with unknown deps, never mark it analysed.
+        if (!ctx.files.has(ctx.resolve(manifest))) continue
+        const inner = read(ctx, manifest)
         const name = inner === null ? path : (/^module\s+(\S+)/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'package', deps: [] })
+        modules.push({ id: name, path, mod: inner })
       }
+      // A `require` of another declared member is an internal edge. External requirements are
+      // deliberately not inferred as graph nodes: they are not modules here.
+      const ids = new Set(modules.map((m) => m.id))
+      for (const module of modules) {
+        if (module.mod === null) continue
+        const deps = goWorkspaceRequires(module.mod, ids, module.id)
+        const existing = draft.modules.find((m) => m.id === module.id)
+        if (existing !== undefined) existing.deps = deps
+        markDepsAnalysed(draft, module.id)
+      }
+      if (draft.monorepo !== null) draft.monorepo.members = [...ids]
     }
 
     // A fast subset exists only if the project says so: `go test -short`, or a
@@ -252,8 +326,191 @@ export const goDetector: Detector = {
 }
 
 // ---------------------------------------------------------------------------
+// Fail-closed manifest gates
+// ---------------------------------------------------------------------------
+
+function hasBlockComment(raw: string): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '/' && raw[i + 1] === '*') return true
+    if (ch === '*' && raw[i + 1] === '/') return true
+  }
+  return false
+}
+
+/** Strip a TOML/Groovy `#` comment only when it is outside a quoted string. */
+function stripHashComment(raw: string): string {
+  let quote: string | null = null
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (quote !== null) {
+      if (ch === '\\') {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === '#') return raw.slice(0, i)
+  }
+  return raw
+}
+
+function linesWithin(text: string, allowed: readonly RegExp[]): boolean {
+  for (const raw of text.split('\n')) {
+    if (hasBlockComment(raw)) return false
+    const line = stripHashComment(raw).trimEnd()
+    if (line === '' || allowed.some((pattern: RegExp) => pattern.test(line))) continue
+    return false
+  }
+  return true
+}
+
+const CARGO_SAFE = [
+  /^\[(?:workspace|package|dependencies|dev-dependencies|build-dependencies|workspace\.dependencies|features)\]$/,
+  /^(?:name|version|edition|resolver)\s*=\s*["'][^"']+["']$/,
+  /^(?:members|version)\s*=\s*\[\s*(?:["'][^"']+["']\s*,?\s*)*\]$/,
+  /^(?!workspace\s*=)[\w-]+\s*=\s*["'][^"']+["']$/,
+  /^[\w-]+\s*=\s*\{\s*path\s*=\s*["'][^"'\\$]+["']\s*\}$/,
+  /^[\w-]+\s*=\s*\{\s*workspace\s*=\s*true\s*\}$/,
+  /^[\w-]+\s*=\s*\[\]$/,
+]
+
+const GRADLE_SAFE = [
+  /^plugins\s*\{[^}]*\}$/,
+  /^rootProject\.name\s*=\s*["'][^"'$]+["']$/,
+  /^include\(["'][\w:.-]+["'](?:,\s*["'][\w:.-]+["'])*\)$/,
+  /^project\(["'][\w:.-]+["']\)\.projectDir\s*=\s*file\(["'][^"'\\$]+["']\)$/,
+  /^dependencies\s*\{\s*(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)\s*\}$/,
+  /^dependencies\s*\{$/,
+  /^\}$/,
+  /^\s+implementation\(project\(["'][\w:.-]+["']\)\)$/,
+  /^\s+\}$/,
+  /^(?:implementation|api|testImplementation|runtimeOnly)\s*\(\s*project\(["'][\w:.-]+["']\)\s*\)$/,
+  /^(?:implementation|api|testImplementation|runtimeOnly)\s+project\(["'][\w:.-]+["']\)$/,
+]
+
+// ---------------------------------------------------------------------------
 // Rust
 // ---------------------------------------------------------------------------
+
+/**
+ * Internal edges declared as Cargo path dependencies.
+ *
+ * Only a literal `path = "..."` inside a dependency table counts: it names a directory in
+ * this workspace, so the edge is declared rather than inferred. Registry dependencies are
+ * not workspace nodes and are deliberately ignored. The name of the crate is not trusted as
+ * an edge; the resolved directory is.
+ */
+type CargoDependencyEntry = { name: string; path: string | null; workspace: boolean; unsupported: boolean }
+
+// A source that needs registry/git resolution cannot be decided from the manifest alone. When one
+// appears in a dependency section the whole module's graph is unknown, never "analysed, no edges".
+const CARGO_UNRESOLVED_KEY =
+  /(?:\b|\.)(?:git|registry|registry-name|branch|tag|rev|features|default-features|optional)\b["']?\s*=/i
+
+/** Read dependency entries from a Cargo manifest, including `[dependencies.name]` tables. */
+function cargoDependencyEntries(manifest: string, workspaceSection: boolean): CargoDependencyEntry[] {
+  const out: CargoDependencyEntry[] = []
+  let inSection = false
+  let sectionCrate: string | null = null
+  let entry = ''
+  const flush = (): void => {
+    if (!inSection) return
+    const key = /^\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\s*=/.exec(entry)
+    const name = sectionCrate ?? key?.[1] ?? key?.[2] ?? key?.[3] ?? null
+    if (name === null) return
+    const path = /path\s*=\s*["']([^"']+)["']/.exec(entry)?.[1] ?? null
+    const workspace = /\bworkspace\s*=\s*true\b/.test(entry)
+    const unsupported = CARGO_UNRESOLVED_KEY.test(entry)
+    // More than one literal assignment in a single entry hides edges: fail closed rather than
+    // reading only the first path and claiming the rest do not exist.
+    const declarations = [...entry.matchAll(/^\s*[A-Za-z0-9_-]+\s*=/gm)].length
+    const ambiguous = declarations > 1 && sectionCrate === null
+    if (path !== null || workspace || unsupported || ambiguous)
+      out.push({ name, path, workspace, unsupported: unsupported || ambiguous })
+  }
+  for (const raw of manifest.split('\n')) {
+    const line = stripHashComment(raw).trim()
+    if (line.startsWith('[')) {
+      flush()
+      entry = ''
+      const table = /^\[(.+)\]$/.exec(line)?.[1] ?? ''
+      const prefixes = workspaceSection
+        ? ['workspace.dependencies']
+        : ['dependencies', 'dev-dependencies', 'build-dependencies']
+      let rest: string | null = null
+      for (const prefix of prefixes) {
+        if (table === prefix) rest = ''
+        else if (table.startsWith(`${prefix}.`)) rest = table.slice(prefix.length + 1)
+        // Target-scoped tables such as [target.'cfg(unix)'.dependencies] also declare deps.
+        else if (table.endsWith(`.${prefix}`)) rest = ''
+        else {
+          const scoped = table.indexOf(`.${prefix}.`)
+          if (scoped >= 0) rest = table.slice(scoped + prefix.length + 2)
+        }
+        if (rest !== null) break
+      }
+      inSection = rest !== null
+      sectionCrate = rest === '' || rest === null ? null : (rest.split('.')[0] ?? null)
+      continue
+    }
+    if (!inSection || line === '') continue
+    if (/^\s*(?:"[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=/.test(line)) {
+      flush()
+      entry = line
+    } else entry += `${entry === '' ? '' : '\n'}${line}`
+  }
+  flush()
+  return out
+}
+
+function cargoPathDependencies(
+  manifest: string,
+  cratePath: string,
+  paths: ReadonlySet<string>,
+  workspacePaths: ReadonlyMap<string, CargoDependencyEntry> = new Map(),
+  workspaceRoot = '.',
+): { paths: string[]; unsupported: boolean } {
+  const out = new Set<string>()
+  let unsupported = false
+  const add = (path: string, base: string): void => {
+    const normalized = posix.normalize(posix.join(base, path)).replace(/\/+$/, '')
+    // A path that does not resolve to a crate we can see cannot be proved safe: leave coverage
+    // unknown rather than silently dropping the edge (e.g. a member skipped by the walk).
+    if (normalized !== '' && paths.has(normalized)) out.add(normalized)
+    else unsupported = true
+  }
+  for (const entry of cargoDependencyEntries(manifest, false)) {
+    if (entry.unsupported) {
+      unsupported = true
+      continue
+    }
+    if (entry.path !== null) add(entry.path, cratePath)
+    else if (entry.workspace) {
+      const shared = workspacePaths.get(entry.name)
+      // A [workspace.dependencies] path is relative to the workspace root, not the member, and
+      // an unsupported inherited key makes this member unknown rather than analysed.
+      if (shared !== undefined && !shared.unsupported && shared.path !== null) add(shared.path, workspaceRoot)
+      else unsupported = true
+    }
+  }
+  for (const entry of cargoDependencyEntries(manifest, true)) if (entry.unsupported) unsupported = true
+  return { paths: [...out].sort(), unsupported }
+}
 
 export const rustDetector: Detector = {
   id: 'rust',
@@ -268,19 +525,132 @@ export const rustDetector: Detector = {
       evidence: [evidence('Cargo.toml', cargo === null ? null : findLine(cargo, /^\[package\]/))],
     })
 
-    if (cargo !== null && /\[workspace\]/.test(cargo)) {
+    // The workspace manifest may live in a subdirectory. Find the one that declares [workspace]
+    // so inherited paths resolve against it rather than against the repository root.
+    const workspaceManifest = [...ctx.files].find((file) => {
+      if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
+      const text = read(ctx, file)
+      return text !== null && /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*[.=])/m.test(text)
+    })
+    const oddWorkspaceHeader = [...ctx.files].some((file) => {
+      if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) return false
+      const text = read(ctx, file)
+      return text !== null && /\[\s*["']workspace["']\s*\]/.test(text)
+    })
+    if (oddWorkspaceHeader) {
+      for (const file of ctx.files) {
+        if (file !== 'Cargo.toml' && !file.endsWith('/Cargo.toml')) continue
+        const text = read(ctx, file)
+        if (text === null || !/\[\s*["']workspace["']\s*\]/.test(text)) continue
+        const path = file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length)
+        draft.depsUnknownReasons.set(path, 'unsupported Cargo manifest syntax; dependencies left unknown')
+      }
+    }
+    if (workspaceManifest !== undefined) {
+      const workspaceRoot = workspaceManifest === 'Cargo.toml' ? '.' : workspaceManifest.slice(0, -'/Cargo.toml'.length)
+      const workspaceText = read(ctx, workspaceManifest)
       setMonorepo(draft, {
         tool: 'cargo-workspace',
-        evidence: evidence('Cargo.toml', findLine(cargo, /\[workspace\]/)),
+        evidence: evidence(
+          workspaceManifest,
+          workspaceText === null ? null : findLine(workspaceText, /^\[workspace\]/),
+        ),
         members: [],
       })
+      const crates: Array<{ id: string; path: string; manifest: string | null }> = []
       for (const f of ctx.files) {
-        if (!f.endsWith('/Cargo.toml')) continue
+        // A root manifest with [package] is itself a crate and can be a path dependency target.
+        if (f !== 'Cargo.toml' && !f.endsWith('/Cargo.toml')) continue
         const path = f === 'Cargo.toml' ? '.' : f.slice(0, -'/Cargo.toml'.length)
         const inner = read(ctx, f)
+        if (f === 'Cargo.toml' && inner !== null && !/^\s*\[\s*["']?package["']?\s*\]/m.test(inner)) continue
         const name = inner === null ? path : (/^\s*name\s*=\s*["']([^"']+)["']/m.exec(inner)?.[1] ?? path)
         addModule(draft, { id: name, path, kind: 'crate', deps: [] })
+        crates.push({ id: name, path, manifest: inner })
       }
+      // A path dependency on another crate in this workspace is a declared internal edge.
+      // A manifest that cannot be read stays unknown rather than becoming an empty list.
+      const paths = new Set(crates.map((crate) => crate.path))
+      const idByPath = new Map(crates.map((crate) => [crate.path, crate.id]))
+      // A member inherits from the nearest enclosing [workspace.dependencies], not from an
+      // unrelated workspace elsewhere in the repository. Preserve each entry's unsupported flag
+      // so an inherited `features`/`git` source makes the member unknown too.
+      const workspaces = [...ctx.files]
+        .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+        .map((file) => ({
+          file,
+          root: file === 'Cargo.toml' ? '.' : file.slice(0, -'/Cargo.toml'.length),
+          text: read(ctx, file),
+        }))
+        .filter(
+          (workspace) =>
+            workspace.text !== null &&
+            /^\s*(?:\[\s*["']?workspace["']?\s*\]|["']?workspace["']?\s*\.)/m.test(workspace.text),
+        )
+        .map((workspace) => {
+          const shared = new Map<string, CargoDependencyEntry>()
+          for (const entry of cargoDependencyEntries(workspace.text as string, true)) shared.set(entry.name, entry)
+          return { ...workspace, shared }
+        })
+      // A literal member the walk never saw may still hold an unsupported table. Fail closed
+      // instead of treating its absence as an analysed, dependency-free crate.
+      const declaredMembers =
+        /^\s*(?:workspace\s*\.\s*)?members\s*=\s*\[([\s\S]*?)\]/m
+          .exec(workspaceText ?? '')
+          ?.slice(1)
+          .flatMap((body) => [...body.matchAll(/["']([^"']+)["']/g)].map((m) => m[1] ?? '')) ?? []
+      const hiddenMember = declaredMembers.some((declared) => {
+        const memberDir = declared.replace(/^\.\//, '').replace(/\/+$/, '')
+        const dir = workspaceRoot === '.' ? memberDir : `${workspaceRoot}/${memberDir}`
+        // A glob that matches no file visible to the walk may be hiding a skipped manifest.
+        const pattern = /[*?]/.test(memberDir) ? dir : null
+        if (pattern !== null) {
+          const base = pattern.slice(0, Math.max(0, pattern.search(/[*?]/))).replace(/\/+$/, '')
+          return ![...ctx.files].some((file) => file === base || file.startsWith(`${base}/`))
+        }
+        return ![...ctx.files].some((file) => file === `${dir}/Cargo.toml` || file.startsWith(`${dir}/`))
+      })
+      const cargoSafe =
+        !oddWorkspaceHeader &&
+        !hiddenMember &&
+        [...ctx.files]
+          .filter((file) => file === 'Cargo.toml' || file.endsWith('/Cargo.toml'))
+          .every((file) => {
+            const text = read(ctx, file)
+            return text !== null && linesWithin(text, CARGO_SAFE)
+          })
+      if (!cargoSafe) {
+        for (const crate of crates) {
+          draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo manifest syntax; dependencies left unknown')
+          const module = draft.modules.find((candidate) => candidate.id === crate.id)
+          if (module !== undefined) module.deps = []
+        }
+      }
+      for (const crate of cargoSafe ? crates : []) {
+        if (crate.manifest === null) continue
+        const enclosing = workspaces
+          .filter((w) => w.root === '.' || crate.path === w.root || crate.path.startsWith(`${w.root}/`))
+          .sort((a, b) => b.root.length - a.root.length)[0]
+        const inheritedUnsupported = enclosing === undefined
+        const resolved = cargoPathDependencies(
+          crate.manifest,
+          crate.path,
+          paths,
+          enclosing?.shared ?? new Map(),
+          enclosing?.root ?? workspaceRoot,
+        )
+        if (resolved.unsupported || inheritedUnsupported) {
+          draft.depsUnknownReasons.set(crate.id, 'unsupported Cargo dependency syntax; dependencies left unknown')
+          continue
+        }
+        const deps = [...new Set(resolved.paths.map((path) => idByPath.get(path) ?? path))].filter(
+          (id) => id !== crate.id,
+        )
+        const existing = draft.modules.find((module) => module.id === crate.id)
+        if (existing !== undefined) existing.deps = deps.sort()
+        markDepsAnalysed(draft, crate.id)
+      }
+      if (draft.monorepo !== null) draft.monorepo.members = crates.map((crate) => crate.id)
     }
 
     const commands: Array<['build' | 'test' | 'testFast' | 'lint' | 'format', CommandEntry]> = [
@@ -371,11 +741,21 @@ function maskGradleComments(text: string): string {
       continue
     }
     if (ch === '/' && text[i + 1] === '*') {
+      // Kotlin block comments nest. Stopping at the first `*/` treats the rest of the real
+      // comment as code, so a dependency written after it can become a false edge.
       const start = i
+      let depth = 1
       i += 2
-      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) i++
-      i = Math.min(n, i + 2)
-      blank(start, i)
+      while (i < n && depth > 0) {
+        if (text[i] === '/' && text[i + 1] === '*') {
+          depth++
+          i += 2
+        } else if (text[i] === '*' && text[i + 1] === '/') {
+          depth--
+          i += 2
+        } else i++
+      }
+      blank(start, Math.min(n, i))
       continue
     }
     if (ch === '"' || ch === "'") {
@@ -416,6 +796,30 @@ function maskGradleStrings(text: string): string {
   let i = 0
   while (i < n) {
     const ch = text[i] as string
+    // Groovy slashy strings use `/.../`. Without masking them, a documented dependency inside a
+    // string becomes a real edge. Only a slash in string position is treated this way, so normal
+    // division is not mistaken for a literal.
+    if (ch === '/' && text[i + 1] !== '/' && text[i + 1] !== '*') {
+      let previous = i - 1
+      while (previous >= 0 && /[ \t]/.test(text[previous] as string)) previous--
+      const before = previous < 0 ? '' : (text[previous] as string)
+      if (before === '' || '=(:,'.includes(before)) {
+        let end = i + 1
+        while (end < n && text[end] !== '\n') {
+          if (text[end] === '\\') {
+            end += 2
+            continue
+          }
+          if (text[end] === '/') break
+          end++
+        }
+        if (end < n && text[end] === '/') {
+          blank(i + 1, end)
+          i = end + 1
+          continue
+        }
+      }
+    }
     if (ch !== '"' && ch !== "'") {
       i++
       continue
@@ -550,6 +954,301 @@ function gradleProjectDirs(text: string, baseDir: string): Map<string, string | 
     out.set(path, value === null ? null : normalize(value))
   }
   return out
+}
+
+/** Gradle dependency configurations whose `project(...)` arguments are internal edges. */
+function gradleDependencyCall(name: string): boolean {
+  const known = new Set([
+    'add',
+    'implementation',
+    'api',
+    'compileOnly',
+    'runtimeOnly',
+    'annotationProcessor',
+    'kapt',
+    'ksp',
+    'testImplementation',
+    'testCompileOnly',
+    'testRuntimeOnly',
+    'androidTestImplementation',
+    'androidTestCompileOnly',
+    'androidTestRuntimeOnly',
+  ])
+  return known.has(name) || /(?:Implementation|CompileOnly|RuntimeOnly|Api)$/.test(name)
+}
+
+/** The index of the `)` closing the `(` at `open`, or -1. */
+function gradleMatchingParen(text: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '(') depth++
+    else if (ch === ')') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+type GradleDeps = { deps: string[]; unsupported: boolean }
+
+/**
+ * Read one `dependencies { ... }` body.
+ *
+ * Strings are masked before structure is read, so a `dependencies` block, a `}` or a
+ * `project(":x")` inside a literal cannot create an edge or end a block early. Masking preserves
+ * offsets, so literal values are read from the original source by index.
+ *
+ * Only a `project(...)` inside a dependency configuration call is an edge. A lookup assigned to
+ * a variable and then passed to a configuration, an interpolated path, an unknown configuration
+ * and a non-literal argument leave coverage unknown rather than a confident empty list.
+ */
+function gradleDependenciesBody(
+  text: string,
+  bodyStart: number,
+  body: string,
+  target: string,
+  members: ReadonlySet<string>,
+): GradleDeps {
+  const out = new Set<string>()
+  let unsupported = false
+  const literal = /(['"])(\u0000*)\1\s*\)/
+  const namedLiteral = /path\s*=\s*(['"])(\u0000*)\1\s*\)/
+  const literalProject = /\bproject\s*\(\s*(['"])(\u0000*)\1\s*\)/dg
+  const namedProject = /\bproject\s*\(\s*path\s*=\s*(['"])(\u0000*)\1\s*\)/dg
+  const isLookup = (before: string): boolean => /(?:=|\bval\b|\bvar\b)\s*$/.test(before)
+
+  // A lookup stored in a variable and later passed to a configuration cannot be resolved
+  // without evaluating code; record it so that use can be reported as unknown.
+  const assigned = new Map<string, string>()
+  for (const match of body.matchAll(/\b(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*project\s*\(\s*(['"])(\u0000*)\2\s*\)/dg)) {
+    const span = match.indices?.[3]
+    if (span === undefined) continue
+    assigned.set(match[1] ?? '', text.slice(bodyStart + span[0], bodyStart + span[1]))
+  }
+
+  const addProjectArgument = (raw: string, before: string, after: string, config: string): void => {
+    // A project call inside a larger expression is a lookup used to build some other value,
+    // not a direct dependency argument.
+    if (before.trim() !== '' && !/,$/.test(before.trim())) {
+      unsupported = true
+      return
+    }
+    if (after.trim() !== '' && !/^[,)]/.test(after.trim())) {
+      // A project lookup used in an expression is not an edge, but it may feed a dependency;
+      // leave coverage unknown instead of claiming a confident empty list.
+      unsupported = true
+      return
+    }
+    if (raw.includes('$')) {
+      unsupported = true // interpolated Kotlin/Groovy string
+      return
+    }
+    if (!gradleDependencyCall(config)) {
+      // An unknown configuration could hide a dependency; never report a confident negative.
+      unsupported = true
+      return
+    }
+    // Gradle resolves a project path without a leading ':' relative to the declaring project:
+    // `project("core")` in `:app` means `:app:core`, never `:core`. Only an absolute `:core`
+    // selects the root-level module. Do not fall back to a different member with the same tail.
+    const id = raw.startsWith(':') ? gradlePath(raw) : target === ':' ? `:${raw}` : `${target}:${raw}`
+    if (id === target || !members.has(id)) return
+    out.add(id)
+  }
+
+  for (const call of body.matchAll(/\b([A-Za-z_][\w.-]*)\s*\(/g)) {
+    const name = call[1] ?? ''
+    const callAt = call.index ?? 0
+    // A bare project lookup (`val other = project(":x")`) is not a dependency declaration.
+    if (name === 'project' && isLookup(body.slice(0, callAt))) continue
+    const open = callAt + call[0].length - 1
+    const close = gradleMatchingParen(body, open)
+    if (close < 0) {
+      unsupported = true
+      continue
+    }
+    const argsStart = open + 1
+    const args = body.slice(argsStart, close)
+    const recognized = gradleDependencyCall(name)
+
+    for (const pattern of [literalProject, namedProject]) {
+      for (const match of args.matchAll(pattern)) {
+        const span = match.indices?.[2]
+        if (span === undefined) continue
+        const raw = text.slice(bodyStart + argsStart + span[0], bodyStart + argsStart + span[1])
+        addProjectArgument(raw, args.slice(0, match.index), args.slice(match.index + match[0].length), name)
+      }
+    }
+
+    for (const match of args.matchAll(/\bproject\s*\(\s*/g)) {
+      const rest = args.slice(match.index + match[0].length)
+      if (literal.test(rest) || namedLiteral.test(rest)) continue
+      unsupported = true
+    }
+    if (recognized) {
+      // Gradle's type-safe `projects.core` accessors cannot be resolved without evaluating the
+      // generated model; do not silently report "no dependencies".
+      if (/\bprojects\s*\./.test(args)) unsupported = true
+      for (const variable of assigned.keys()) {
+        if (new RegExp(`\\b${variable}\\b`).test(args)) unsupported = true
+      }
+    }
+  }
+
+  // Groovy also allows `implementation project(":core")` without parentheses around the call.
+  for (const pattern of [
+    /\b([A-Za-z_][\w.-]*)\s+project\s*\(\s*(['"])(\u0000*)\2\s*\)/dg,
+    /\b([A-Za-z_][\w.-]*)\s+project\s*\(\s*path\s*=\s*(['"])(\u0000*)\3\s*\)/dg,
+  ]) {
+    for (const match of body.matchAll(pattern)) {
+      const span = match.indices?.[3]
+      if (span === undefined) continue
+      const raw = text.slice(bodyStart + span[0], bodyStart + span[1])
+      // Groovy statements have no closing parenthesis; the declaration ends at the newline or
+      // semicolon, which is what the "whole argument" check must look at.
+      const after = body.slice(match.index + match[0].length).split(/[\n;]/, 1)[0] ?? ''
+      addProjectArgument(raw, '', after, match[1] ?? '')
+    }
+  }
+
+  // Groovy command expressions also allow `implementation projects.core`.
+  for (const match of body.matchAll(/\b([A-Za-z_][\w.-]*)\s+(projects\s*\.[A-Za-z_][\w.]*)/g)) {
+    if (gradleDependencyCall(match[1] ?? '')) unsupported = true
+  }
+  return { deps: [...out].sort(), unsupported }
+}
+
+/** Parse the `dependencies` blocks in a region of masked Gradle source. */
+function gradleDependenciesIn(
+  text: string,
+  content: string,
+  from: number,
+  to: number,
+  target: string,
+  members: ReadonlySet<string>,
+  skipRanges: ReadonlyArray<readonly [number, number]> = [],
+): GradleDeps {
+  const out = new Set<string>()
+  let unsupported = false
+  const region = content.slice(from, to)
+  for (const block of region.matchAll(/\bdependencies\s*\{/g)) {
+    const open = from + (block.index ?? 0) + block[0].length - 1
+    if (skipRanges.some(([start, end]) => open >= start && open <= end)) continue
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0 || close > to) {
+      unsupported = true
+      continue
+    }
+    const parsed = gradleDependenciesBody(text, open + 1, content.slice(open + 1, close), target, members)
+    for (const dep of parsed.deps) out.add(dep)
+    unsupported ||= parsed.unsupported
+  }
+  return { deps: [...out].sort(), unsupported }
+}
+
+/** Internal edges declared in a Gradle build file, including `project(":api") { ... }` blocks. */
+function gradleProjectDependencies(
+  text: string,
+  members: ReadonlySet<string>,
+  self: string,
+  includeOwn = true,
+): GradleDeps {
+  const content = maskGradleStrings(maskGradleComments(text))
+  // A `project("...") { ... }` block configures a different module; its nested `dependencies`
+  // block must not be attributed to the script that happens to contain it.
+  const ranges: Array<readonly [number, number]> = []
+  for (const block of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000+)\1\s*\)\s*\{/dg)) {
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close >= 0) ranges.push([open, close])
+  }
+  const own = includeOwn
+    ? gradleDependenciesIn(text, content, 0, content.length, self, members, ranges)
+    : { deps: [] as string[], unsupported: false }
+  for (const block of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000+)\1\s*\)\s*\{/dg)) {
+    const span = block.indices?.[2]
+    if (span === undefined) continue
+    const id = text.slice(span[0], span[1])
+    if (id.includes('$')) {
+      // An interpolated selector cannot be resolved statically.
+      own.unsupported = true
+      continue
+    }
+    // A block configures one named project. Never attribute its dependencies to every member.
+    if (id !== self || !members.has(id)) continue
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0) continue
+    const nested = gradleDependenciesIn(text, content, open + 1, close, id, members)
+    for (const dep of nested.deps) own.deps.push(dep)
+    own.unsupported ||= nested.unsupported
+  }
+  own.deps = [...new Set(own.deps)].sort()
+  return own
+}
+
+/**
+ * True when a root build file declares project dependencies for an unknown set of modules
+ * (`subprojects { ... }` / `allprojects { ... }`). Those edges cannot be attributed safely, so
+ * every member's coverage must stay unknown rather than becoming a confident empty list.
+ */
+/** True when a root script selects a project with a computed rather than literal name. */
+function gradleRootComputedProjectSelector(text: string): boolean {
+  const content = maskGradleStrings(maskGradleComments(text))
+  for (const match of content.matchAll(/\bproject\s*\(\s*(['"])(\u0000*)\1\s*\)/dg)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    if (!/^\s*\{/.test(content.slice(open + 1))) continue
+    const span = match.indices?.[2]
+    if (span === undefined) return true
+    // A masked literal can hide interpolation; read the original value to see it.
+    if (text.slice(span[0], span[1]).includes('$')) return true
+  }
+  for (const match of content.matchAll(/\bproject\s*\(/g)) {
+    const open = (match.index ?? 0) + match[0].length - 1
+    const close = gradleMatchingParen(content, open)
+    if (close < 0 || !/^\s*\{/.test(content.slice(close + 1))) continue
+    if (!/^\s*(['"])\u0000+\1\s*$/.test(content.slice(open + 1, close))) return true
+  }
+  return false
+}
+
+/**
+ * Project-specific `buildFileName` declarations in a settings file.
+ *
+ * A `null` value means the name is computed and the effective build script is unknown, so no
+ * module's dependency list can be trusted. The ordinary DSL and the `project(":x") { ... }`
+ * form are both read; a script that renames the default is not parsed from the default name.
+ */
+type GradleScriptSelection = { names: Map<string, string | null>; ambiguous: boolean }
+
+/**
+ * Custom script selection is read-only but deliberately conservative.
+ *
+ * A settings file that writes `buildFileName` changes which script Gradle evaluates. Resolving
+ * that write safely would require evaluating arbitrary Kotlin/Groovy, so any write makes every
+ * module's dependency coverage unknown. Comparisons (`==`) are not writes and are ignored.
+ */
+function gradleBuildFileNameSelection(text: string): GradleScriptSelection {
+  const masked = maskGradleStrings(maskGradleComments(text))
+  const writes = [...masked.matchAll(/\bbuildFileName\s*=\s*(?!=)/g)].length
+  const compound = [...masked.matchAll(/\bbuildFileName\s*[+*/-]=/g)].length
+  // Groovy allows command-style calls without parentheses, so the method name alone is the signal.
+  const setters = [...masked.matchAll(/\bsetBuildFileName\b/g)].length
+  return { names: new Map(), ambiguous: writes > 0 || compound > 0 || setters > 0 }
+}
+
+function gradleRootWideProjectDeps(text: string, members: ReadonlySet<string>): boolean {
+  const content = maskGradleStrings(maskGradleComments(text))
+  for (const block of content.matchAll(/\b(?:subprojects|allprojects)\s*\{/g)) {
+    const open = (block.index ?? 0) + block[0].length - 1
+    const close = gradleMatchingBrace(content, open)
+    if (close < 0) continue
+    const parsed = gradleDependenciesIn(text, content, open + 1, close, '', members)
+    if (parsed.deps.length > 0 || parsed.unsupported) return true
+  }
+  return false
 }
 
 /**
@@ -718,20 +1417,156 @@ export const jvmDetector: Detector = {
       // Subprojects from settings.gradle `include(...)`. Every declaration counts: a project
       // lists `include(":core")` and `include(":api")` on separate lines, or spells them as one
       // multiline call, and the Spring probe below only visits the modules collected here.
-      const settings = gradleFiles.find((f) => f.startsWith('settings.gradle'))
+      const allSettings = gradleFiles.filter((f) => /(?:^|\/)settings\.gradle(?:\.kts)?$/.test(f))
+      const settings = allSettings[0]
       if (settings !== undefined) {
         const text = read(ctx, settings)
+        const gradleSafe =
+          text !== null &&
+          allSettings.every((file) => {
+            const body = read(ctx, file)
+            return body !== null && linesWithin(body, GRADLE_SAFE)
+          }) &&
+          [...ctx.files]
+            .filter((file) => /(?:^|\/)build\.gradle(?:\.kts)?$/.test(file))
+            .every((file) => {
+              const body = read(ctx, file)
+              return body !== null && linesWithin(body, GRADLE_SAFE)
+            })
         if (text !== null) {
           const settingsPath = ctx.resolve(settings)
           const settingsDir = settingsPath.includes('/') ? settingsPath.slice(0, settingsPath.lastIndexOf('/')) : ''
           const remaps = gradleProjectDirs(text, settingsDir)
-          const members = gradleIncludes(text)
-          for (const m of members) {
-            addModule(draft, { id: m, path: remaps.get(gradlePath(m)) ?? m, kind: 'project', deps: [] })
+          // Membership, module ids and build-file paths all use the same canonical `:a:b` form.
+          // Without this, `include("api")` reports `api` in the workspace but `:api` in the graph.
+          const declaredMembers = gradleIncludes(text).map(gradlePath)
+          // Declaring :app:core implicitly creates :app. Without it, a parent's build script is
+          // never read and its edges disappear.
+          const members = new Set<string>(declaredMembers)
+          for (const id of declaredMembers) {
+            const parts = id.split(':').filter((part) => part !== '')
+            for (let i = 1; i < parts.length; i++) members.add(`:${parts.slice(0, i).join(':')}`)
           }
-          if (draft.monorepo !== null) draft.monorepo.members = members
-          gradleMembers = members
-          for (const [id, dir] of remaps) gradleRemaps.set(id, dir)
+          const ids = new Set(members)
+          // A project's directory defaults to the path implied by its Gradle id, relative to the
+          // settings file. A computed projectDir is unknown: do not fall back to the default path,
+          // which may name a decoy outside this build.
+          const directories = new Map<string, string | null>()
+          for (const id of members) {
+            const declared = id.replace(/^:+/, '').replace(/:/g, '/')
+            const dir = remaps.has(id) ? (remaps.get(id) ?? null) : posix.join(settingsDir, declared)
+            directories.set(id, dir === null ? null : posix.normalize(dir).replace(/^\.\//, '').replace(/\/+$/, ''))
+          }
+          for (const [id, dir] of directories) {
+            addModule(draft, { id, path: dir ?? '', kind: 'project', deps: [] })
+          }
+          // Gradle evaluates exactly one script per project. When both DSL variants exist, or a
+          // computed buildFileName is used, the chosen script cannot be determined safely.
+          const scriptSelection = gradleBuildFileNameSelection(text)
+          const buildFileNames = scriptSelection.names
+          const chooseScript = (dir: string | null, id: string): { file: string | undefined; ambiguous: boolean } => {
+            if (dir === null) return { file: undefined, ambiguous: true }
+            // The project directory may be nested under the detected root; resolve every probe
+            // through the detector context rather than assuming repository-root paths.
+            const has = (file: string): boolean => ctx.files.has(ctx.resolve(file))
+            const resolve = (file: string): string => ctx.resolve(file)
+            const prefix = dir === '' || dir === '.' ? '' : `${dir}/`
+            const explicit = buildFileNames.get(id)
+            if (explicit === null) return { file: undefined, ambiguous: true }
+            if (explicit !== undefined) {
+              const file = `${prefix}${explicit}`
+              return has(file) ? { file: resolve(file), ambiguous: false } : { file: undefined, ambiguous: true }
+            }
+            const candidates = ['build.gradle.kts', 'build.gradle'].map((name) => `${prefix}${name}`).filter(has)
+            if (candidates.length > 1) return { file: undefined, ambiguous: true }
+            return { file: candidates[0] === undefined ? undefined : resolve(candidates[0]), ambiguous: false }
+          }
+          const rootChoice = chooseScript('', '')
+          const effectiveScripts = new Set<string>()
+          if (rootChoice.file !== undefined) effectiveScripts.add(rootChoice.file)
+          const choices = new Map<string, ReturnType<typeof chooseScript>>()
+          for (const [id, dir] of directories) {
+            const choice = chooseScript(dir, id)
+            choices.set(id, choice)
+            if (choice.file !== undefined) effectiveScripts.add(choice.file)
+          }
+          // If any custom-script write was seen, no script can be trusted; do not even read them.
+          const buildTexts = scriptSelection.ambiguous
+            ? []
+            : [...effectiveScripts]
+                .sort()
+                .map((file) => read(ctx, file))
+                .filter((value): value is string => value !== null)
+          // A wide or computed selector can add dependencies to an unknown set of modules, so no
+          // module's empty list can be trusted in that case.
+          const rootWide =
+            scriptSelection.ambiguous ||
+            buildTexts.some((body) => gradleRootWideProjectDeps(body, ids) || gradleRootComputedProjectSelector(body))
+          // Programmatic DependencyHandler.add(...) and a root-level project("app") selector
+          // cannot be attributed safely; leave every module unknown rather than confidently empty.
+          // A programmatic add on any script can configure a different project, and a conditional
+          // dependency block can change which edges exist; neither can be attributed safely.
+          const programmaticAdd = buildTexts.some((body) =>
+            /(?:\bdependencies|\)\s*\.dependencies)\s*\.\s*add\s*\(/.test(maskGradleComments(body)),
+          )
+          const conditionalDependencies = buildTexts.some((body) => {
+            const masked = maskGradleComments(body)
+            return /\bif\s*\([\s\S]*?\bdependencies\s*\{/.test(masked)
+          })
+          const rootMasked = rootChoice.file === undefined ? null : read(ctx, rootChoice.file)
+          const rootUnsupported =
+            rootMasked !== null &&
+            (/\bdependencies\s*\.\s*add\s*\(/.test(maskGradleComments(rootMasked)) ||
+              // A root project("app") or project("app:core") selector is relative; only an
+              // absolute project(":app") can be attributed safely.
+              /\bproject\s*\(\s*(['"])[^:'"][^'"]*\1\s*\)/.test(maskGradleComments(rootMasked)))
+          // An unresolved script for any project can configure any other project, so every
+          // member's dependency list becomes untrustworthy.
+          // A remapped project whose script is not visible to the walk cannot be checked; a
+          // dependency add there could configure any module, so no module's edges are trusted.
+          const scriptMissing = [...members, ...remaps.keys()].some((id) => choices.get(id)?.file === undefined)
+          const scriptAmbiguous =
+            rootChoice.ambiguous ||
+            scriptMissing ||
+            [...directories].filter(([, dir]) => dir !== null).some(([id]) => choices.get(id)?.ambiguous === true)
+          for (const [id, dir] of directories) {
+            const deps = new Set<string>()
+            const choice = choices.get(id) ?? { file: undefined, ambiguous: true }
+            let unsupported =
+              !gradleSafe ||
+              rootWide ||
+              rootUnsupported ||
+              programmaticAdd ||
+              conditionalDependencies ||
+              scriptAmbiguous ||
+              (dir !== null && choice.ambiguous)
+            let ownReadable = false
+            if (!scriptSelection.ambiguous && choice.file !== undefined) {
+              const body = read(ctx, choice.file)
+              if (body !== null) {
+                ownReadable = true
+                if (/\bdependencies\s*\.\s*add\s*\(/.test(maskGradleComments(body))) unsupported = true
+                const resolved = gradleProjectDependencies(body, ids, id)
+                for (const dep of resolved.deps) deps.add(dep)
+                unsupported ||= resolved.unsupported
+              }
+            }
+            for (const body of buildTexts) {
+              const fromBlock = gradleProjectDependencies(body, ids, id, false)
+              for (const dep of fromBlock.deps) deps.add(dep)
+              unsupported ||= fromBlock.unsupported
+            }
+            if (unsupported) {
+              draft.depsUnknownReasons.set(id, 'unsupported Gradle dependency syntax; dependencies left unknown')
+              continue
+            }
+            const existing = draft.modules.find((module) => module.id === id)
+            if (existing !== undefined) existing.deps = [...deps].sort()
+            if (ownReadable) markDepsAnalysed(draft, id)
+          }
+          if (draft.monorepo !== null) draft.monorepo.members = [...members]
+          gradleMembers = [...members]
+          for (const [id, dir] of directories) gradleRemaps.set(id, dir)
         }
       }
       if (!wrapper) {
