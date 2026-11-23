@@ -155,7 +155,7 @@ describe('applyStaging: failure at each mutation boundary', () => {
   })
 
   for (const linkType of ['hard link', 'directory alias']) {
-    test(`restores pre-apply content when two targets share a file through a ${linkType}`, (t) => {
+    test(`refuses before writing when two targets share a file through a ${linkType}`, (t) => {
       const repoRoot = temp('anvil-apply-alias-')
       const firstDir = join(repoRoot, 'a')
       const secondDir = join(repoRoot, 'b')
@@ -181,10 +181,28 @@ describe('applyStaging: failure at each mutation boundary', () => {
       const manifest = writeStaging(repoRoot, { inputHash: 'deadbeef', generator: 'test' }, contents)
       replaceWithDirectory(repoRoot, 'z/AGENTS.md')
       assert.equal(validateAll([...contents].map(([path, content]) => ({ path, content }))).ok, true)
-      assert.equal(checkApplyPreconditions(repoRoot, manifest, 'deadbeef').ok, true)
 
-      assert.throws(() => applyStaging(repoRoot, manifest), /after writing 2 file\(s\)/)
+      // Both staged paths resolve to one file, so the gate must refuse up front rather
+      // than let the later write clobber the earlier one. The refusal names both paths.
+      const check = checkApplyPreconditions(repoRoot, manifest, 'deadbeef')
+      assert.equal(check.ok, false)
+      assert.match(check.reason ?? '', /a\/AGENTS\.md and b\/AGENTS\.md.*same file/)
 
+      // applyStaging enforces the same guard itself. A write spy proves nothing is written:
+      // without the guard the first writes would land (and z/AGENTS.md would then fail as a
+      // directory), so reaching only the conflict error means the batch was refused first.
+      const written: string[] = []
+      assert.throws(
+        () =>
+          applyStaging(repoRoot, manifest, (target, content) => {
+            written.push(target)
+            writeFileSync(target, content, 'utf8')
+          }),
+        /a\/AGENTS\.md and b\/AGENTS\.md.*same file/,
+      )
+      assert.deepEqual(written, [], 'no file may be written when two names alias one document')
+
+      // Pre-apply content survives on both names, and the other paths are left untouched.
       assert.equal(readFileSync(join(firstDir, 'AGENTS.md'), 'utf8'), '# Original human guidance\n')
       assert.equal(readFileSync(join(secondDir, 'AGENTS.md'), 'utf8'), '# Original human guidance\n')
       assert.ok(statSync(join(repoRoot, 'z', 'AGENTS.md')).isDirectory())

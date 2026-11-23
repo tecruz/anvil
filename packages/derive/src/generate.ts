@@ -45,6 +45,49 @@ export interface GeneratedArtifact {
 
 const CODE_FENCE = '```'
 
+/** Tool-specific instruction files that can mirror the generated AGENTS.md baseline. */
+export const MIRROR_TARGETS = ['claude', 'cursor', 'copilot'] as const
+export type MirrorTarget = (typeof MIRROR_TARGETS)[number]
+
+export const MIRROR_PATHS: Readonly<Record<MirrorTarget, string>> = {
+  claude: 'CLAUDE.md',
+  cursor: '.cursor/rules/anvil.mdc',
+  copilot: '.github/copilot-instructions.md',
+}
+
+/** The path part of a `file:line` citation, normalized for comparison. */
+function evidenceFilePath(evidence: string): string {
+  return evidence.replace(/:\d+$/, '').replace(/\\/g, '/').replace(/^\.\//, '')
+}
+
+/** True when a citation points at a file the generated mirrors will overwrite. */
+function isReplacedEvidence(evidence: string | null | undefined, replaced: readonly string[]): boolean {
+  if (evidence === null || evidence === undefined) return false
+  const path = evidenceFilePath(evidence)
+  return replaced.some((candidate) => evidenceFilePath(candidate) === path)
+}
+
+/**
+ * Command kinds in display order, shared by AGENTS.md and the instruction mirrors.
+ *
+ * `verify` marks what an agent must run before claiming a change is done. One list keeps a
+ * changed-files-only project verifiable in both artifacts: with two lists, AGENTS.md
+ * listed `testFast` while the mirror claimed no verify commands were detected.
+ */
+const COMMAND_KINDS: ReadonlyArray<{
+  label: string
+  kind: keyof ProjectProfile['commands']
+  verify: boolean
+}> = [
+  { label: 'Install', kind: 'install', verify: false },
+  { label: 'Build', kind: 'build', verify: true },
+  { label: 'Test', kind: 'test', verify: true },
+  { label: 'Test (changed files only)', kind: 'testFast', verify: true },
+  { label: 'Lint', kind: 'lint', verify: true },
+  { label: 'Format', kind: 'format', verify: false },
+  { label: 'Typecheck', kind: 'typecheck', verify: true },
+]
+
 /** Best command for a kind, preferring documented, then detected, then inferred. */
 export function bestCommand(profile: ProjectProfile, kind: keyof ProjectProfile['commands']): CommandEntry | null {
   const entries = profile.commands[kind]
@@ -80,6 +123,28 @@ function chooseCommand(options: GenerateOptions, kind: keyof ProjectProfile['com
   }
   const entry = bestCommand(profile, kind)
   if (entry === null) return null
+  const replaced = options.replacedEvidencePaths ?? []
+  if (isReplacedEvidence(entry.evidence, replaced)) {
+    // A command documented in CLAUDE.md (or another mirror) gets a `file:line` citation
+    // pointing into the file this same bundle replaces with a generated stub. The line
+    // would land on the generated notice, not the command. Prefer a surviving source for
+    // the very same command so the provenance stays real.
+    const surviving = (profile.commands[kind] ?? []).find(
+      (candidate) => candidate.cmd === entry.cmd && !isReplacedEvidence(candidate.evidence, replaced),
+    )
+    if (surviving !== undefined) {
+      return {
+        cmd: surviving.cmd,
+        source: surviving.source,
+        evidence: surviving.evidence ?? null,
+        dir: profile.projectDir,
+      }
+    }
+    // No alternative: keep the command (it is still a verified fact and must not vanish
+    // from AGENTS.md) but drop the citation. The source label still records that the
+    // command was documented; it just no longer claims a line that will not exist.
+    return { cmd: entry.cmd, source: entry.source, evidence: null, dir: profile.projectDir }
+  }
   return {
     cmd: entry.cmd,
     source: entry.source,
@@ -152,6 +217,14 @@ export interface GenerateOptions {
    * for its kind, which is what makes an unrecognized technology usable.
    */
   declared?: ProjectConfig
+  /**
+   * Repo-relative paths this bundle will overwrite with generated mirrors.
+   *
+   * Set by `anvil init --with-mirrors`. A command whose only evidence is a line in one of
+   * these files would cite the replacement stub instead of the original document, so such
+   * a citation is re-sourced or dropped. The default three-file bundle leaves it alone.
+   */
+  replacedEvidencePaths?: readonly string[]
   /** Which artifacts to produce. */
   only?: 'agents-file' | 'skills' | 'all'
 }
@@ -184,15 +257,7 @@ export function generateAgentsFile(options: GenerateOptions): GeneratedArtifact 
   // agent cannot verify anything, which is the blocker the audit reports first.
   const commandRows: string[] = []
   let declaredRows = 0
-  for (const [label, kind] of [
-    ['Install', 'install'],
-    ['Build', 'build'],
-    ['Test', 'test'],
-    ['Test (changed files only)', 'testFast'],
-    ['Lint', 'lint'],
-    ['Format', 'format'],
-    ['Typecheck', 'typecheck'],
-  ] as Array<[string, keyof ProjectProfile['commands']]>) {
+  for (const { label, kind } of COMMAND_KINDS) {
     const chosen = chooseCommand(options, kind)
     const b = bullet(label, chosen, null, profile.projectDir)
     if (b !== null) commandRows.push(b)
@@ -396,6 +461,69 @@ export function generateVerifySkill(options: GenerateOptions): GeneratedArtifact
         ? 'Verify loop skill (no changed-files subset detected, so it uses the full suite)'
         : 'Verify loop skill using the detected changed-files test subset',
   }
+}
+
+/**
+ * Thin mirrors for tools that read their own instruction files.
+ *
+ * `AGENTS.md` stays the source of truth. The mirror deliberately does NOT copy the command
+ * strings: those carry a working directory and evidence (`cd apps/web && npm test`), and a
+ * copy that drops the directory would send an agent to the wrong place. Instead the mirror
+ * names which verify kinds exist -- derived from the exact same `chooseCommand` set the root
+ * file uses -- and points the reader at `AGENTS.md` for the commands and their directories.
+ * There is no second command text to drift.
+ */
+export function generateInstructionMirrors(
+  options: GenerateOptions,
+  targets: readonly MirrorTarget[] = MIRROR_TARGETS,
+): GeneratedArtifact[] {
+  const kinds: string[] = []
+  for (const spec of COMMAND_KINDS) {
+    if (spec.verify && chooseCommand(options, spec.kind) !== null) kinds.push(spec.label.toLowerCase())
+  }
+
+  const body = [
+    '# Repository instructions (anvil mirror)',
+    '',
+    'This file is generated by `anvil init --with-mirrors`.',
+    '`AGENTS.md` is the source of truth: read it before making changes. If this mirror and',
+    '`AGENTS.md` disagree, `AGENTS.md` wins. Do not edit this file by hand -- re-run',
+    '`anvil init` to refresh it.',
+    '',
+    '## Verification',
+    '',
+    ...(kinds.length > 0
+      ? [
+          `Verification kinds found here: ${kinds.join(', ')}. Read \`AGENTS.md\` for each exact command, its working directory and its evidence -- this mirror never copies them so they cannot drift.`,
+        ]
+      : [
+          'No verify commands were detected. Read `AGENTS.md` and `anvil profile` before claiming a change is verified.',
+        ]),
+    '',
+    'Read `AGENTS.md` in this repository for the full instructions, conventions and high-risk paths.',
+    '',
+  ].join('\n')
+
+  return targets.map((target) => {
+    const path = MIRROR_PATHS[target]
+    const content =
+      target === 'cursor'
+        ? [
+            '---',
+            'description: Repository verify commands generated by anvil init; AGENTS.md is the source of truth.',
+            'globs: ["**/*"]',
+            'alwaysApply: true',
+            '---',
+            '',
+            body,
+          ].join('\n')
+        : body
+    return {
+      path,
+      content,
+      reason: `Thin ${target} mirror deferring to the generated AGENTS.md (no copied commands)`,
+    }
+  })
 }
 
 /**

@@ -93,6 +93,21 @@ three files:
   verification commands.
 - `.opencode/commands/review-change.md` — a review command for the current diff.
 
+For a repository whose team reads another tool's instructions, add the opt-in mirrors:
+
+```bash
+anvil init --with-mirrors
+```
+
+This stages three thin files in addition to the default three: `CLAUDE.md`,
+`.cursor/rules/anvil.mdc`, and `.github/copilot-instructions.md`. They **point to**
+`AGENTS.md` as the source of truth instead of repeating command strings: each mirror names
+which verification kinds exist and sends the reader to `AGENTS.md` for the exact command,
+its working directory and its evidence, so there is no second copy to drift. They go
+through the same diff, validation and stale-bundle checks as `AGENTS.md`; nothing is
+written until `anvil init --apply`. The default stays the three-file bundle, and the
+option is never applied by `--only`.
+
 Then rank what is missing:
 
 ```bash
@@ -671,7 +686,7 @@ accepts. This table is the summary; the help text is the contract.
 | Command | What it does |
 | --- | --- |
 | `anvil doctor` | Audit AI-readiness and score the repository. `--layer`, `--fail-on <severity>`, `--strict`, `--max-files <n>`. |
-| `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--apply` writes them. |
+| `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--with-mirrors` also stages thin Claude/Cursor/Copilot instruction mirrors. `--apply` writes them. |
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
