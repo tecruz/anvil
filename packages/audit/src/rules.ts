@@ -15,7 +15,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, posix } from 'node:path'
 import type { CommandEntry, ProjectProfile } from '@anvil/profile'
-import { globToRegExp, mentionsRunner, normalizeRelPath, parseJsonc, runnerAlternation } from '@anvil/profile'
+import { globToRegExp, mentionsRunner, normalizeRelPath, parseJsonc } from '@anvil/profile'
 import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes, WARN_INSTRUCTION_BYTES } from './budget.ts'
 import type { Fix, Layer, PlaybookMatchInfo, Severity, Status } from './types.ts'
 
@@ -259,331 +259,288 @@ const AGENTS_COMMANDS: Rule = {
   },
 }
 
-/**
- * Two instruction sources can tell two agents to run different verify commands.
- *
- * `AGENTS_COMMANDS` passes as soon as any one file names a command, and
- * `VERIFY_DOC_COVERAGE` checks those commands against what anvil detected. Neither asks
- * whether the files agree with each other. A repo with AGENTS.md saying `npm test` and
- * CLAUDE.md saying `pnpm test` looks healthy while two tools verify differently.
- *
- * This rule extracts only explicit commands from recorded instruction files and compares
- * them per kind. Prose that merely mentions a runner is left alone, and one file alone can
- * never be a conflict.
- */
+interface InstructionSource {
+  /** Real repo-relative file path (never a bare directory). */
+  path: string
+  text: string
+  /** A 1-based line to cite, derived from the file's own content. */
+  line: number
+}
 
 /**
- * Fence languages whose lines are commands rather than prose.
+ * Instruction text read for VERIFY_DOC_COVERAGE, from the real files.
  *
- * A ```text block can discuss `pnpm test` without asking anyone to run it; reading its
- * lines as commands invents a conflict with a real command in another file. An untyped
- * fence stays eligible -- it is the commonest way documentation writes a shell block.
- */
-const SHELL_FENCES = new Set([
-  '',
-  'bash',
-  'sh',
-  'shell',
-  'shellsession',
-  'shell-session',
-  'zsh',
-  'fish',
-  'console',
-  'terminal',
-  'powershell',
-  'ps1',
-  'cmd',
-  'bat',
-  'batch',
-])
-
-/**
- * A command must *open* with a runner, allowing only a `$` prompt and a `cd ... &&`
- * prefix. `In the old setup, pnpm test was used` contains a runner but is not an
- * invocation. The runner list is the profile's own, so the two cannot drift apart.
+ * The engine builds `ctx.instructionsText` with `readFileSync(i.path)` for every
+ * instruction entry. A directory entry such as `.cursor/rules` throws EISDIR and
+ * contributes nothing, so commands actually documented in `.cursor/rules/verify.mdc`
+ * become invisible to a text comparison -- and the rule both warns about a gap that is
+ * not there and cites the bare directory as evidence. Here directory entries are expanded
+ * through `profile.files`, real file paths are kept, and a matching line is found in the
+ * file's content.
  *
- * The `cd` prefix is a working directory, not shell noise: `cd packages/api && npm test`
- * and `cd packages/web && npm test` verify different packages. It is kept in the
- * comparison key and stripped only when deciding what kind of command this is.
+ * `readSomething` distinguishes a file that was read but is blank (a real gap, once there
+ * are detected commands to document) from absent/unreadable instructions (nothing to
+ * compare, so `na`).
  */
-const CD_PREFIX = '(?:cd\\s+(?:"[^"]*"|\'[^\']*\'|\\S+)\\s*&&\\s*)'
-const COMMAND_START = new RegExp(`^(?:\\$\\s*)?(?:${CD_PREFIX})?(?:\\S*/)?(?:${runnerAlternation()})(?=\\s|;|&|$)`)
-const CD_PREFIXES = new RegExp(`^((?:${CD_PREFIX})+)`)
+function verifyInstructionSources(ctx: RuleContext): {
+  sources: InstructionSource[]
+  text: string
+  readSomething: boolean
+} {
+  const root = ctx.profile.root
+  const sources: InstructionSource[] = []
+  let readSomething = false
 
-/**
- * Console and session fences are transcripts, where output sits beside commands.
- * Only a `$` prompt makes a line in one of them an invocation.
- */
-const TRANSCRIPT_FENCES = new Set(['console', 'shellsession', 'shell-session'])
-
-/** Runners whose `run <script>` spelling is shorthand for the bare script form. */
-const SCRIPT_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'npx'])
-
-/**
- * Drop a trailing shell comment, respecting quotes and backslash escapes.
- *
- * `npm test # run the full suite` invokes exactly the command `npm test` does.
- * Comparing the comment as part of the command invented a conflict between two files
- * that agree. A `#` inside a quoted word is data, not a comment, so it stays.
- */
-function stripShellComment(line: string): string {
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i] as string
-    if (quote === "'") {
-      if (ch === "'") quote = null
-      continue
+  for (const instruction of ctx.profile.instructions) {
+    const path = instruction.path
+    const members = ctx.profile.files.filter((f) => f.startsWith(`${path}/`))
+    // A directory entry is expanded into the member files the walker recorded; a regular
+    // file has no such members and is read directly.
+    for (const member of members.length > 0 ? members : [path]) {
+      const text = readRepoText(root, member)
+      if (text === null) continue
+      readSomething = true
+      sources.push({ path: member, text, line: evidenceLine(text) })
     }
-    if (ch === '\\') {
-      i++ // escaped character: a literal `#`, or a quote that does not open a string
-      continue
-    }
-    if (quote === '"') {
-      if (ch === '"') quote = null
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      continue
-    }
-    // A comment starts a new word: after whitespace or a shell separator, but not
-    // inside a token such as `test#unit`.
-    if (ch === '#' && (i === 0 || /[\s;&|()]/.test(line[i - 1] as string))) return line.slice(0, i)
   }
-  return line
+
+  return { sources, text: sources.map((s) => s.text).join('\n'), readSomething }
 }
 
-/** Split off the `$` prompt and any leading `cd ... &&` prefixes. */
-function commandParts(raw: string): { prefix: string; body: string } {
-  const text = raw.trim().replace(/^\$\s*/, '')
-  const prefix = CD_PREFIXES.exec(text)?.[1] ?? ''
-  return { prefix, body: text.slice(prefix.length) }
+/** The line to cite for a file: its first command mention, else its first non-empty line. */
+function evidenceLine(text: string): number {
+  const rows = text.split('\n')
+  for (let i = 0; i < rows.length; i++) {
+    if (mentionsRunner(rows[i] ?? '')) return i + 1
+  }
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i] ?? '').trim() !== '') return i + 1
+  }
+  return 1
+}
+
+/** At most this many evidence entries go in a finding. */
+const EVIDENCE_CAP = 6
+
+/**
+ * Flags that turn a full-suite invocation into a narrower one.
+ *
+ * A `npm test -- --changed` or `npm test --watch` is a real command an agent can run, but it
+ * is documentation of a *subset* command, not coverage for the full suite anvil detected.
+ * Counting it as coverage is the false pass the review found: the agent follows the narrow
+ * command and leaves most of the suite unrun. The list mirrors the changed-files patterns
+ * used by the profile detectors, plus the watch forms a full-suite check can never use.
+ */
+const NARROWING_ARG =
+  /(?:^|\s)(?:--\s*)?(?:--?changed\b|--changedSince\b|--watch(?:All)?(?:=[^\s]*)?|-w\b|-k(?:\s|=)|--onlyChanged\b|--tests?\b|--testNamePattern\b|-t(?:\s|=)|--grep\b|-g(?:\s|=)|--filter\b|--include\b|--path\b|--file\b|--shard\b|nextest\b)/i
+
+/**
+ * The part of the text after an invocation that still belongs to that invocation. Prose
+ * punctuation (a backtick, a newline, a sentence-ending period) ends it; the rest is flags.
+ */
+function invocationArgs(rest: string): string {
+  const cut = /[`\n;]|\.(?=\s|$)/.exec(rest)
+  return cut === null ? rest : rest.slice(0, cut.index)
 }
 
 /**
- * The runner and its subcommand: the part of a command that says what is being run.
+ * Whether the text right after a command ends an invocation rather than extending its name.
  *
- * Later words are arguments -- or, in a console transcript, output. Classifying on
- * them made `npm warn exec ... vitest@3.2.4` look like a test command just because the
- * word `vitest` appeared in the message.
+ * `:` and `.` followed by a name character continue a script (`test:fast`, `test.unit`), so
+ * they cannot terminate it. A lone trailing `.` is prose punctuation and does terminate it.
  */
-function invocationHead(body: string): string {
-  const tokens = body.split(/\s+/).filter((token) => token !== '')
-  const runner = tokens[0]
-  if (runner === undefined) return ''
-  let at = 1
-  if (SCRIPT_RUNNERS.has(runner)) {
-    // Skip flags such as `npm --silent test`, but stop at a word: that is the
-    // subcommand (`test`, `warn`, `exec`, ...).
-    while (tokens[at]?.startsWith('-') === true) at++
+function endsInvocation(rest: string): boolean {
+  if (rest === '') return true
+  const first = rest[0] as string
+  if (first === ':') return false
+  if (first === '.') {
+    const second = rest[1]
+    return second === undefined || !/[a-z0-9:._-]/i.test(second)
   }
-  const second = tokens[at]
-  if (SCRIPT_RUNNERS.has(runner) && (second === 'run' || second === 'run-script')) {
-    const third = tokens[at + 1]
-    return third === undefined ? `${runner} ${second}` : `${runner} ${second} ${third}`
-  }
-  return second === undefined ? runner : `${runner} ${second}`
-}
-
-interface VerifyCommand {
-  /** Full comparison key: the `cd` prefix stays, because the directory is part of the command. */
-  key: string
-  /** Normalized invocation without the prefix, for deciding the command kind. */
-  body: string
+  return !/[a-z0-9_-]/i.test(first)
 }
 
 /**
- * Stable comparison key for a documented verify command.
+ * The 1-based line where `normalized` is written as a complete invocation, or null.
  *
- * The whole invocation is kept: `npm run test:unit` and `npm run test:integration`
- * are different scripts, and comparing only the regex match (`npm run test`) made
- * them look identical. The `cd ... &&` prefix is kept too: it names the working
- * directory, and two directories are two different verifications.
- *
- * The only normalisation is the genuinely equivalent `run` spelling for the npm
- * family (`npm run test` == `npm test`). `bun run test` is deliberately *not*
- * normalised: it runs the package script, while `bun test` is Bun's built-in runner.
+ * Each line is checked on its own: a command split across two instruction files is not a
+ * command anyone can copy. A match needs a leading token boundary (so `npm test` is not found
+ * inside `pnpm test`), a terminator that is not script-name punctuation, and no narrowing
+ * flags in its arguments.
  */
-function parseVerifyCommand(raw: string): VerifyCommand {
-  const { prefix, body: rawBody } = commandParts(raw)
-  // Flags after the script are meaningful; the rest of a shell chain is a different
-  // command and is compared on its own line, not glued onto this one.
-  const first = (rawBody.split(/\s*&&\s*|\s*;\s*/)[0] ?? rawBody).trim()
-  const body = first
-    .replace(/\s+/g, ' ')
-    .toLowerCase()
-    .replace(/\b(npm|pnpm|yarn)\s+run\s+/g, '$1 ')
-  return { key: `${prefix.replace(/\s+/g, ' ').toLowerCase()}${body}`, body }
+function documentsOnLine(lines: readonly string[], normalized: string): number | null {
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?<![a-z0-9:._-])${escaped}`, 'gi')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    for (const match of line.matchAll(pattern)) {
+      const rest = line.slice((match.index ?? 0) + (match[0]?.length ?? 0))
+      if (!endsInvocation(rest)) continue
+      if (NARROWING_ARG.test(invocationArgs(rest))) continue
+      return i + 1
+    }
+  }
+  return null
 }
 
-const INSTRUCTION_CONFLICT: Rule = {
-  id: 'INSTRUCTION_CONFLICT',
+/**
+ * Bound a finding's evidence without losing the sources it inspected.
+ *
+ * A flat `.slice(0, 6)` used to drop the last instruction file once four detected commands
+ * had contributed four `package.json` lines -- so a finding about three files cited two.
+ * Every inspected source keeps at least one entry; only the remaining citations are capped.
+ */
+function capEvidence(entries: readonly string[], sources: readonly string[]): string[] {
+  const unique = [...new Set(entries.filter((e) => e !== ''))]
+  if (unique.length <= EVIDENCE_CAP) return unique
+  const required = sources
+    .map((path) => unique.find((e) => e.startsWith(`${path}:`)) ?? path)
+    .filter((e, i, all) => all.indexOf(e) === i)
+  const rest = unique.filter((e) => !required.includes(e))
+  return [...required, ...rest].slice(0, Math.max(EVIDENCE_CAP, required.length))
+}
+
+/**
+ * A repository can name one generic command in its instructions and still leave the
+ * commands anvil actually detected undocumented.
+ *
+ * `AGENTS_COMMANDS` answers "does the text name any runnable command?" This rule answers
+ * the sharper question: "does it name the specific test/build/lint/typecheck commands this
+ * repository uses?" An agent that sees only `npm test` in prose but a detected
+ * `cargo test --workspace` will invent the wrong verify step. `anvil init` already stages
+ * those commands into AGENTS.md; this finding says when an existing file has not caught up.
+ *
+ * Deliberately narrow: only the primary detected command of each kind is required, declared
+ * commands are considered only when already present in the report, and a bare `npm test`
+ * in prose does not stand in for a specific detected runner. No command is invented.
+ */
+const VERIFY_DOC_COVERAGE: Rule = {
+  id: 'VERIFY_DOC_COVERAGE',
   layer: 'context',
   severity: 'medium',
-  title: 'Instruction files agree on how to verify',
-  order: 45,
+  title: 'Instructions document the detected verify commands',
+  order: 44,
   evaluate(ctx) {
-    // The profile records `.cursor/rules` as one directory entry, not the rule files the
-    // agent actually reads. Expand it so two Cursor rules can disagree with each other too.
-    const files: string[] = []
-    for (const instruction of ctx.profile.instructions) {
-      const path = instruction.path.replace(/\\/g, '/')
-      if (path.endsWith('/') || path === '.cursor/rules') {
-        let names: string[]
-        try {
-          names = readdirSync(join(ctx.profile.root, ...path.split('/').filter((p) => p !== '')))
-        } catch {
-          continue
-        }
-        for (const name of names) {
-          if (!/\.(md|mdc|rules)$/i.test(name)) continue
-          files.push(`${path.replace(/\/$/, '')}/${name}`)
-        }
-        continue
+    if (!ctx.hasCode) return na('No source files, so there are no verify commands to document')
+
+    const kinds = ['test', 'build', 'lint', 'typecheck'] as const
+    // Collect the detected commands before looking at the instructions: with no detected
+    // command there is nothing an instruction file could have failed to document, and the
+    // rule stays `na` (docs-only repos included).
+    const detected: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    for (const kind of kinds) {
+      const entries = ctx.profile.commands[kind]
+      if (entries === undefined || entries.length === 0) continue
+      // Only a command anvil found in this repository earns a coverage claim. An inferred
+      // convention is not a fact the instructions failed to document.
+      const entry = entries.find((candidate) => candidate.source === 'detected') ?? entries[0]
+      if (entry === undefined || entry.source !== 'detected') continue
+      const cmd = entry.cmd.trim()
+      if (cmd === '') continue
+      detected.push({ kind, cmd, evidence: entry.evidence ?? null })
+    }
+    if (detected.length === 0) return na('No detected verify command to document')
+
+    // Read the instruction files ourselves rather than trusting ctx.instructionsText:
+    // the engine's read of a directory entry throws EISDIR and contributes nothing.
+    const instructions = verifyInstructionSources(ctx)
+    const text = instructions.text
+    const sourcePaths = instructions.sources.map((s) => s.path)
+    const fallbackEvidence = (): string[] => instructions.sources.map((s) => `${s.path}:${s.line}`)
+    const target =
+      ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
+      instructions.sources[0]?.path ??
+      ctx.profile.instructions[0]?.path ??
+      'AGENTS.md'
+    const commandEvidence = (): string[] =>
+      detected.map((d) => d.evidence).filter((e): e is string => e !== null && e !== '')
+
+    if (text.trim() === '') {
+      if (!instructions.readSomething) {
+        return na('No readable instruction text to compare against detected commands')
       }
-      files.push(path)
-    }
-    if (files.length < 2) return na('Fewer than two instruction files, so they cannot disagree')
-
-    // Test/build/lint/typecheck only: these are the verify commands an agent acts on.
-    // A pattern classifies a command into a kind; the stored key is the whole invocation,
-    // not the regex match, so a script suffix such as `test:unit` survives comparison.
-    const patterns: ReadonlyArray<{ kind: string; re: RegExp }> = [
-      {
-        kind: 'test',
-        re: /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\bpytest\b|\bgo test\b|\bcargo test\b|\bdotnet test\b|\bmake test\b|\bjest\b|\bvitest\b|\bmix test\b|\bswift test\b|\bphpunit\b/i,
-      },
-      {
-        kind: 'build',
-        re: /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b|\bcargo build\b|\bgo build\b|\bdotnet build\b|\bmake (?:build|all)\b|\bgradlew? (?:build|assemble\w*)\b|\bswift build\b/i,
-      },
-      {
-        kind: 'lint',
-        re: /\b(?:npm|pnpm|yarn)\s+(?:run\s+)?lint\b|\beslint\b|\bruff check\b|\bgolangci-lint\b|\bcargo clippy\b|\bmake lint\b|\brubocop\b|\bswiftlint\b|\btflint\b|\bbiome (?:check|lint)\b/i,
-      },
-      { kind: 'typecheck', re: /\btsc --noEmit\b|\btypecheck\b|\bpyright\b|\bmypy\b|\bphpstan\b/i },
-    ]
-
-    interface CommandSite {
-      cmd: string
-      evidence: string
-    }
-    const found = new Map<string, CommandSite[]>()
-    for (const instruction of files) {
-      let text: string
-      try {
-        text = readFileSync(join(ctx.profile.root, ...instruction.split('/')), 'utf8')
-      } catch {
-        continue
-      }
-      let fenced = false
-      let fenceLang = ''
-      for (const [index, raw] of text.split('\n').entries()) {
-        const fence = /^\s{0,4}(?:`{3,}|~{3,})([^\s`]*)/.exec(raw)
-        if (fence !== null) {
-          if (fenced) {
-            fenced = false
-            fenceLang = ''
-          } else {
-            fenced = true
-            fenceLang = (fence[1] ?? '').toLowerCase()
-          }
-          continue
-        }
-
-        // Only explicit commands count: a backtick code span, a line inside a shell
-        // fence, or a `$` prompt. A runner mentioned inside a sentence is not a command,
-        // so it must never be reported as one file disagreeing with another.
-        const candidates: string[] = []
-        if (fenced) {
-          if (!SHELL_FENCES.has(fenceLang)) continue
-          const shell = raw.trim()
-          if (shell === '' || shell.startsWith('#')) continue
-          // In a transcript, an output line is not an invocation until a `$` prompt
-          // marks it as one.
-          if (TRANSCRIPT_FENCES.has(fenceLang) && !/^\$\s*/.test(shell)) continue
-          candidates.push(shell)
-        } else {
-          for (const span of raw.matchAll(/`([^`]+)`/g)) {
-            if (span[1] !== undefined) candidates.push(span[1])
-          }
-          const prompt = /^\s*\$\s+(.+)$/.exec(raw)
-          if (prompt?.[1] !== undefined) candidates.push(prompt[1])
-        }
-        for (const rawCandidate of candidates) {
-          const candidate = stripShellComment(rawCandidate).trim()
-          if (!COMMAND_START.test(candidate)) continue
-          const { key, body } = parseVerifyCommand(candidate)
-          if (key === '') continue
-          const head = invocationHead(body)
-          for (const pattern of patterns) {
-            if (!pattern.re.test(head)) continue
-            const list = found.get(pattern.kind) ?? []
-            if (!list.some((entry) => entry.cmd === key && entry.evidence.startsWith(instruction))) {
-              list.push({ cmd: key, evidence: `${instruction}:${index + 1}` })
-            }
-            found.set(pattern.kind, list)
-            break
-          }
-        }
-      }
-    }
-
-    // A conflict is a difference between the *sets* of commands each file gives for
-    // a kind. Keeping only the first command per file reported a false conflict when
-    // two files listed the same alternatives in a different order.
-    interface Conflict {
-      kind: string
-      byFile: ReadonlyMap<string, string[]>
-      lines: string[]
-    }
-    const conflicts: Conflict[] = []
-    for (const [kind, entries] of found) {
-      const perFile = new Map<string, Set<string>>()
-      for (const entry of entries) {
-        const path = entry.evidence.replace(/:\d+$/, '')
-        let set = perFile.get(path)
-        if (set === undefined) {
-          set = new Set()
-          perFile.set(path, set)
-        }
-        set.add(entry.cmd)
-      }
-      if (perFile.size < 2) continue
-      const signatures = new Set([...perFile.values()].map((cmds) => [...cmds].sort().join('\u0000')))
-      if (signatures.size < 2) continue
-      const byFile = new Map([...perFile].map(([path, cmds]) => [path, [...cmds].sort()] as const))
-      conflicts.push({ kind, byFile, lines: entries.map((entry) => entry.evidence) })
-    }
-
-    if (conflicts.length === 0) {
-      return pass(
-        found.size > 0
-          ? `${found.size} verify command kind(s) agree across instruction files`
-          : 'No verify commands in instruction files',
-        files.slice(0, 6),
+      // A file was read successfully but is blank. With detected commands in the tree the
+      // gap is real, not unknown, so this is a warning rather than `na`.
+      const names = detected.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+      return warn(
+        `Instructions are blank, but the repository has detected verify commands: ${names}. An agent that cannot see the real command will invent or omit the verify step.`,
+        capEvidence([...commandEvidence(), ...fallbackEvidence()], sourcePaths),
+        {
+          ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+        },
       )
     }
 
-    // Cap what is reported, not each conflict's evidence: every disagreement named in
-    // `detail` must carry the file:line locations that support it. Capping evidence at
-    // a fixed six entries used to drop the locations of a conflict still in the detail.
-    const reported = conflicts.slice(0, 3)
-    const issues = reported.map(
-      ({ kind, byFile }) =>
-        `${kind}: ${[...byFile]
-          .map(([path, cmds]) => `${path} says ${cmds.map((cmd) => `"${cmd}"`).join(', ')}`)
-          .join('; ')}`,
-    )
-    const evidence = [...new Set(reported.flatMap((conflict) => conflict.lines))]
+    const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    const documented: Array<{ kind: string; path: string; line: number }> = []
+    // `npm run test` and `npm test` are the same command: npm has a built-in `test`
+    // shorthand. `npm lint`, `npm build` and `npm typecheck` are NOT valid npm commands --
+    // npm answers "Unknown command" and exits 1 -- so `run` is kept for every other
+    // script. Normalizing only the genuine alias avoids claiming coverage for an
+    // invocation that would fail.
+    const canonical = (value: string): string =>
+      value
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .replace(/\bnpm\s+run\s+test\b/g, 'npm test')
+        .trim()
+    // Canonicalize one line at a time: collapsing the whole file's whitespace would erase
+    // the line numbers the evidence has to cite. Each source is searched separately too, so
+    // a command split across two files cannot pass as documented.
+    const prepared = instructions.sources.map((source) => ({
+      ...source,
+      lines: source.text.split('\n').map((line) => canonical(line)),
+    }))
+    for (const entry of detected) {
+      const normalized = canonical(entry.cmd)
+      let found: { path: string; line: number } | null = null
+      for (const source of prepared) {
+        const line = documentsOnLine(source.lines, normalized)
+        if (line !== null) {
+          found = { path: source.path, line }
+          break
+        }
+      }
+      if (found !== null) {
+        documented.push({ kind: entry.kind, path: found.path, line: found.line })
+      } else {
+        missing.push(entry)
+      }
+    }
+
+    const documentedEvidence = documented.map((d) => `${d.path}:${d.line}`)
+    // A source that actually documents a command is already represented by that line; only
+    // sources with no match need the first-command fallback to stay in the provenance.
+    const documentedPaths = new Set(documented.map((d) => d.path))
+    const otherEvidence = instructions.sources
+      .filter((s) => !documentedPaths.has(s.path))
+      .map((s) => `${s.path}:${s.line}`)
+
+    if (missing.length === 0) {
+      return pass(
+        `${documented.length} detected verify command kind(s) appear in the instructions`,
+        capEvidence([...documentedEvidence, ...otherEvidence], sourcePaths),
+      )
+    }
+
+    const names = missing.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+    const prefix =
+      documented.length > 0
+        ? `Some verify commands are documented, but ${names} are not.`
+        : `Detected verify commands are not documented: ${names}.`
     return warn(
-      `Instruction files disagree on verify commands: ${issues.join(' | ')}. Two tools may verify with different commands.`,
-      evidence,
-      derived(
-        files[0] ?? 'AGENTS.md',
-        'Reconcile the verify commands across the instruction files, or point the secondary file at the same runners',
-        0.75,
+      `${prefix} An agent that cannot see the real command will invent or omit the verify step.`,
+      capEvidence(
+        [
+          ...missing.map((d) => d.evidence).filter((e): e is string => e !== null && e !== ''),
+          ...documentedEvidence,
+          ...otherEvidence,
+        ],
+        sourcePaths,
       ),
+      {
+        ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+      },
     )
   },
 }
@@ -2111,7 +2068,7 @@ const RISK_MAP: Rule = {
 export const RULES: readonly Rule[] = [
   AGENTS_FILE,
   AGENTS_COMMANDS,
-  INSTRUCTION_CONFLICT,
+  VERIFY_DOC_COVERAGE,
   INSTRUCTION_BUDGET,
   ARCH_DOC,
   MODULE_MAP,
