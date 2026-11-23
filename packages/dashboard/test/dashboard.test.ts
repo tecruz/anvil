@@ -53,8 +53,26 @@ function fakeInvoke(overrides: Partial<Record<string, DashboardInvokeResult>> = 
       const key = args[0] ?? ''
       if (key in overrides) return overrides[key] as DashboardInvokeResult
       if (key === 'doctor') return envelope({ score: 94, grade: 'A', findings: [], degraded: [] })
-      if (key === 'ready') return envelope({ status: 'unknown', root: '/repo', checked: false, tools: [] })
+      if (key === 'ready') {
+        return envelope({
+          status: 'unknown',
+          root: '/repo',
+          projectDir: '',
+          checked: false,
+          tools: [],
+          commands: [{ kind: 'test', cmd: 'npm test', source: 'documented', evidence: 'README.md:3', dir: '' }],
+        })
+      }
       if (key === 'plan') return envelope({ score: 94, suggestions: [], satisfied: 2 })
+      if (key === 'profile') {
+        return envelope({
+          root: '/repo',
+          projectDir: '',
+          files: ['README.md', 'AGENTS.md'],
+          commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'README.md:3' }] },
+          diagnostics: { truncated: false, fileLimit: 20000, failedDetectors: [] },
+        })
+      }
       if (key === 'brief') return envelope({ target: 'all', gaps: ['No AGENTS.md'] })
       if (key === 'crew') return envelope({ crew: [], active: 0 })
       return envelope({})
@@ -78,6 +96,22 @@ async function withServer<T>(
 
 function authed(server: DashboardServerHandle, path: string): Promise<Response> {
   return fetch(new URL(path, server.url), { headers: { cookie: `${server.cookieName}=${TOKEN}` } })
+}
+
+function authedPost(
+  server: DashboardServerHandle,
+  path: string,
+  body: unknown,
+  contentType = 'application/json',
+  origin?: string,
+): Promise<Response> {
+  const url = new URL(path, server.url)
+  const headers: Record<string, string> = {
+    cookie: `${server.cookieName}=${TOKEN}`,
+    'content-type': contentType,
+    origin: origin ?? url.origin,
+  }
+  return fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) })
 }
 
 function rawGet(
@@ -184,6 +218,166 @@ describe('the dashboard server', () => {
     })
   })
 
+  test('a brief needs an existing snapshot and never starts a CLI load', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      // The page has not loaded yet: no POST may warm the cache by spawning commands.
+      const cold = await authedPost(server, '/api/brief', { text: 'Update README.md' })
+      assert.equal(cold.status, 409)
+      assert.match(((await cold.json()) as { error: string }).error, /No snapshot yet/)
+      assert.equal(calls.length, 0)
+
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const afterLoad = calls.length
+      assert.equal(afterLoad, 6)
+
+      const warm = await authedPost(server, '/api/brief', { text: 'Update README.md' })
+      assert.equal(warm.status, 200)
+      assert.equal(calls.length, afterLoad)
+    })
+  })
+
+  test('a brief is built from the snapshot and never runs a command', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const text = 'Update README.md to document the test command.'
+      const response = await authedPost(server, '/api/brief', { text })
+      assert.equal(response.status, 200)
+      const brief = (await response.json()) as {
+        title: string
+        startHere: Array<{ path: string }>
+        howToCheck: Array<{ cmd: string }>
+        gates: unknown[]
+        unknowns: string[]
+      }
+      assert.equal(brief.title, text)
+      assert.equal(brief.startHere[0]?.path, 'README.md')
+      assert.equal(brief.howToCheck[0]?.cmd, 'npm test')
+      assert.match(brief.unknowns.join(' '), /read-only/)
+
+      const before = calls.length
+      const again = await authedPost(server, '/api/brief', { text })
+      assert.equal(again.status, 200)
+      assert.equal(calls.length, before)
+    })
+  })
+
+  test('a brief quotes a stated approval gate without inferring one from the repository', async () => {
+    await withServer(async (server) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const response = await authedPost(server, '/api/brief', {
+        text: 'The audit and proposal are approved before implementation. Update README.md.',
+      })
+      assert.equal(response.status, 200)
+      const brief = (await response.json()) as {
+        gates: Array<{ kind: string; startNow: string | null; waitFor: string | null; evidence: string }>
+      }
+      assert.equal(brief.gates.length, 1)
+      assert.equal(brief.gates[0]?.kind, 'approval')
+      assert.match(brief.gates[0]?.startNow ?? '', /audit and proposal/)
+      assert.match(brief.gates[0]?.waitFor ?? '', /implementation/)
+      assert.match(brief.gates[0]?.evidence ?? '', /approved before implementation/)
+    })
+  })
+
+  test('a brief can start from a derived plan suggestion', async () => {
+    const plan = envelope({
+      score: 94,
+      satisfied: 0,
+      suggestions: [
+        {
+          id: 'fix:TEST_FAST',
+          tier: 'derived',
+          title: 'A changed-files test subset is documented',
+          detail: 'Document a changed-files test command -- no changed-files subset is documented.',
+          evidence: ['README.md:3'],
+        },
+      ],
+    })
+    await withServer(
+      async (server) => {
+        await snapshotOf(await authed(server, '/api/snapshot'))
+        const response = await authedPost(server, '/api/brief', { suggestionId: 'fix:TEST_FAST' })
+        assert.equal(response.status, 200)
+        const brief = (await response.json()) as {
+          title: string
+          source: { suggestionId: string | null; text: string | null }
+          startHere: Array<{ path: string }>
+          unknowns: string[]
+        }
+        assert.equal(brief.title, 'Document a changed-files test command')
+        assert.equal(brief.source.suggestionId, 'fix:TEST_FAST')
+        assert.equal(brief.source.text, null)
+        assert.equal(brief.startHere[0]?.path, 'README.md')
+        assert.match(brief.unknowns.join(' '), /engineering improvement/)
+      },
+      { plan },
+    )
+  })
+
+  test('the brief route refuses bad input without reading a path or a command', async () => {
+    await withServer(async (server) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      for (const body of [
+        {},
+        { text: 'x', suggestionId: 'fix:TEST_FAST' },
+        { text: 'x', extra: true },
+        { text: 42 },
+        { suggestionId: 'not-in-the-plan' },
+        'not json',
+      ]) {
+        const response = await authedPost(server, '/api/brief', body)
+        assert.equal(response.status, 400, JSON.stringify(body))
+      }
+
+      const wrongType = await authedPost(server, '/api/brief', { text: 'x' }, 'text/plain')
+      assert.equal(wrongType.status, 415)
+
+      const tooLarge = await authedPost(server, '/api/brief', { text: 'x'.repeat(40_000) })
+      assert.equal(tooLarge.status, 413)
+
+      const get = await authed(server, '/api/brief')
+      assert.equal(get.status, 405)
+      assert.equal(get.headers.get('allow'), 'POST')
+
+      const anonymous = await fetch(new URL('/api/brief', server.url), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: new URL(server.url).origin },
+        body: JSON.stringify({ text: 'x' }),
+      })
+      assert.equal(anonymous.status, 401)
+    })
+  })
+
+  test('the brief route needs the session cookie and a same-origin header', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const url = new URL('/api/brief', server.url)
+      const noCookie = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: url.origin },
+        body: JSON.stringify({ text: 'x' }),
+      })
+      assert.equal(noCookie.status, 401)
+
+      const foreignOrigin = await authedPost(
+        server,
+        '/api/brief',
+        { text: 'x' },
+        'application/json',
+        'https://evil.example',
+      )
+      assert.equal(foreignOrigin.status, 403)
+
+      const missingOrigin = await fetch(url, {
+        method: 'POST',
+        headers: { cookie: `${server.cookieName}=${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: 'x' }),
+      })
+      assert.equal(missingOrigin.status, 403)
+      assert.equal(calls.length, 6, 'a rejected POST must not invoke the CLI')
+    })
+  })
+
   test('a snapshot combines every source and labels verification unavailable', async () => {
     await withServer(async (server) => {
       const snapshot = await snapshotOf(await authed(server, '/api/snapshot'))
@@ -191,12 +385,14 @@ describe('the dashboard server', () => {
       const doctor = snapshot.repository.doctor.data as { score: number }
       const ready = snapshot.repository.ready.data as { root: string }
       const plan = snapshot.repository.plan.data as { satisfied: number }
+      const profile = snapshot.repository.profile.data as { files: string[] }
       const brief = snapshot.context.brief.data as { target: string }
       const stagedData = snapshot.context.staged.data as StagedView
       const crew = snapshot.work.crew.data as { active: number }
       assert.equal(doctor.score, 94)
       assert.equal(ready.root, '/repo')
       assert.equal(plan.satisfied, 2)
+      assert.deepEqual(profile.files, ['README.md', 'AGENTS.md'])
       assert.equal(brief.target, 'all')
       assert.equal(stagedData.files[0]?.path, '.anvil/AGENTS.md')
       assert.equal(crew.active, 0)
@@ -303,6 +499,101 @@ describe('the snapshot reader', () => {
     assert.match(file?.error ?? '', /could not be read/)
   })
 
+  test('opt-in verification evidence is bounded and recorded beside the sources', async () => {
+    const { invoke } = fakeInvoke()
+    const record = {
+      command: 'npm test',
+      revision: 'abcdef1234',
+      exitCode: 0,
+      timestamp: '2026-11-20T10:00:00.000Z',
+    }
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      readVerification: () => [
+        record,
+        { command: '' },
+        { note: 'not a command' },
+        'ignored',
+        { command: ' ', revision: 'bogus', exitCode: 0.5, timestamp: 'not a date' },
+        { ...record, revision: 'a'.repeat(40) },
+        { ...record, timestamp: '2026-02-31T00:00:00.000Z' },
+        { ...record, exitCode: 3010 },
+        ...Array.from({ length: 20 }, () => ({ command: '' })),
+      ],
+    })
+    assert.equal(snapshot.verification.status, 'recorded')
+    assert.deepEqual(snapshot.verification.evidence, [
+      { ...record, matchesCurrent: null },
+      { ...record, revision: 'a'.repeat(40), matchesCurrent: null },
+      { ...record, exitCode: 3010, matchesCurrent: null },
+    ])
+    assert.equal(snapshot.verification.currentRevision, null)
+    assert.ok(snapshot.verification.incompleteCount > 0)
+  })
+
+  test('verification records are bound to the revision sampled by the CLI', async () => {
+    const { invoke } = fakeInvoke()
+    const current = {
+      command: 'npm test',
+      revision: 'abcdef1234',
+      exitCode: 0,
+      timestamp: '2026-11-20T10:00:00.000Z',
+    }
+    const stale = { ...current, revision: 'fffffffff', command: 'npm run lint' }
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      currentRevision: 'abcdef1234',
+      readVerification: () => [stale, current],
+    })
+    assert.equal(snapshot.verification.status, 'recorded')
+    assert.equal(snapshot.verification.currentRevision, 'abcdef1234')
+    assert.deepEqual(
+      snapshot.verification.evidence.map((item) => item.matchesCurrent),
+      [false, true],
+    )
+    assert.match(snapshot.verification.reason, /different revision/)
+  })
+
+  test('verification compares commit ids case-insensitively', async () => {
+    const { invoke } = fakeInvoke()
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      currentRevision: 'ABCDEF1234',
+      readVerification: () => [
+        {
+          command: 'npm test',
+          revision: 'abcdef1234-dirty',
+          exitCode: 0,
+          timestamp: '2026-11-20T10:00:00.000Z',
+        },
+      ],
+    })
+    assert.deepEqual(
+      snapshot.verification.evidence.map((item) => item.matchesCurrent),
+      [true],
+    )
+    assert.doesNotMatch(snapshot.verification.reason, /different revision/)
+  })
+
+  test('a store of only incomplete records says so instead of claiming no evidence', async () => {
+    const { invoke } = fakeInvoke()
+    const snapshot = await loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      readVerification: () => [{ command: 'npm test', revision: null, exitCode: 0, timestamp: null }],
+    })
+    assert.equal(snapshot.verification.status, 'unavailable')
+    assert.equal(snapshot.verification.incompleteCount, 1)
+    assert.match(snapshot.verification.reason, /incomplete/)
+  })
+
   test('a thrown invocation becomes one error, not a rejected promise', async () => {
     const { invoke } = fakeInvoke()
     const snapshot = await loadSnapshot({
@@ -327,7 +618,16 @@ describe('the dashboard page', () => {
     dataset: Record<string, string> = {}
     hidden = false
     disabled = false
+    value = ''
+    focused = false
     classList = { toggle() {} }
+    listeners: Record<string, Array<() => void>> = {}
+
+    focus(): void {
+      this.focused = true
+    }
+
+    setSelectionRange(): void {}
 
     readonly tag: string
 
@@ -344,9 +644,15 @@ describe('the dashboard page', () => {
       this.children = nodes
     }
 
-    addEventListener(): void {}
+    addEventListener(type: string, callback: () => void): void {
+      const list = this.listeners[type] ?? []
+      list.push(callback)
+      this.listeners[type] = list
+    }
 
     setAttribute(): void {}
+
+    select(): void {}
 
     text(): string {
       return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
@@ -379,10 +685,23 @@ describe('the dashboard page', () => {
 
   test('the views surface blocker causes, read errors, orphaned work and plan details', () => {
     const nodes = new Map<string, FakeElement>(
-      ['repository', 'context', 'work', 'refresh', 'scope', 'stamp', 'notes'].map((id) => [
-        `#${id}`,
-        new FakeElement('section'),
-      ]),
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'task-map',
+        'snapshot-error',
+        'repository',
+        'context',
+        'work',
+        'refresh',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
     )
     const document = {
       createElement: (tag: string) => new FakeElement(tag),
@@ -435,7 +754,13 @@ describe('the dashboard page', () => {
             },
           ],
         }),
-        profile: source({ files: [], commands: [] }),
+        profile: source({
+          root: '/repo',
+          projectDir: '',
+          files: ['AGENTS.md', 'src/app.ts', 'src/app.test.ts'],
+          commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'AGENTS.md:3' }] },
+          diagnostics: { truncated: false, fileLimit: 20000, failedDetectors: [] },
+        }),
       },
       context: {
         brief: source({ target: 'all', gaps: [] }),
@@ -483,11 +808,87 @@ describe('the dashboard page', () => {
 
     const context = createContext({ document })
     ;(context as Record<string, unknown>).__snapshot = snapshot
+    ;(context as Record<string, unknown>).__brief = {
+      schemaVersion: 1,
+      generatedAt: 'now',
+      source: { suggestionId: null, text: 'Remove visit status' },
+      title: 'Remove visit status',
+      objective: 'Remove visit status; notes and rating are lost.',
+      startHere: [
+        {
+          path: 'app/src/main/kotlin/com/example/UnvisitedConfirmationDialog.kt',
+          reason: 'path matches "unvisited"',
+          kind: 'source',
+        },
+        {
+          path: 'app/src/test/kotlin/com/example/CountryDetailViewModelTest.kt',
+          reason: 'test for the detail screen',
+          kind: 'test',
+        },
+      ],
+      howToCheck: [
+        {
+          kind: 'test',
+          cmd: './gradlew testDebugUnitTest',
+          source: 'documented',
+          evidence: 'README.md:140',
+          cwd: '.',
+        },
+      ],
+      blockers: [{ label: 'java', status: 'missing', reason: 'not on PATH' }],
+      gates: [
+        {
+          kind: 'approval',
+          startNow: 'audit and proposal',
+          waitFor: 'implementation',
+          evidence: 'The audit and proposal are approved before implementation.',
+        },
+      ],
+      readiness: { ok: true, checked: true, status: 'blocked' },
+      unknowns: ['No approval gate was found in the pasted text.'],
+      map: {
+        schemaVersion: 1,
+        focus: 'Remove visit status',
+        nodes: [
+          {
+            id: 'file:a',
+            label: 'UnvisitedConfirmationDialog.kt',
+            kind: 'file',
+            reason: 'matched',
+            evidence: 'anvil profile --json: files[a]',
+          },
+        ],
+        edges: [],
+        hasUnknown: false,
+      },
+    }
     runInContext(JS.replace('load(false);', ''), context)
     runInContext(
-      'renderRepository(document, __snapshot); renderContext(document, __snapshot); renderWork(document, __snapshot);',
+      'state.brief = __brief; renderTask(document, __snapshot); renderRepository(document, __snapshot); renderContext(document, __snapshot); renderWork(document, __snapshot);',
       context,
     )
+
+    const suggestions = nodes.get('#task-suggestions')?.text() ?? ''
+    assert.match(suggestions, /Add test command/)
+    assert.match(suggestions, /Document npm test in AGENTS\.md/)
+
+    const task = nodes.get('#task-brief')?.text() ?? ''
+    assert.match(task, /Start here/)
+    assert.match(task, /UnvisitedConfirmationDialog\.kt/)
+    assert.match(task, /CountryDetailViewModelTest\.kt/)
+    assert.match(task, /Start now:\s+audit and proposal/)
+    assert.match(task, /Wait for approval:\s+implementation/)
+    assert.match(task, /approved before implementation/)
+    assert.match(task, /\.\/gradlew testDebugUnitTest/)
+    assert.match(task, /Not run/)
+    assert.match(task, /java/)
+    assert.match(task, /No approval gate was found/)
+
+    const taskMap = nodes.get('#task-map')?.text() ?? ''
+    assert.match(taskMap, /Task map/)
+    assert.match(taskMap, /UnvisitedConfirmationDialog\.kt/)
+    assert.match(taskMap, /Map/)
+    assert.match(taskMap, /List/)
 
     const repository = nodes.get('#repository')?.text() ?? ''
     assert.match(repository, /docs\/requirements\.md/)
@@ -509,6 +910,7 @@ describe('the dashboard page', () => {
   test('an action result stays visible across a re-render', () => {
     const nodes = new Map<string, FakeElement>([
       ['#work', new FakeElement('section')],
+      ['#task-submit', new FakeElement('button')],
       ['#refresh', new FakeElement('button')],
     ])
     const document = {
@@ -545,10 +947,24 @@ describe('the dashboard page', () => {
 
   test('a failed refresh keeps the last snapshot and the refused action result', async () => {
     const nodes = new Map<string, FakeElement>(
-      ['work', 'repository', 'context', 'refresh', 'refresh-error', 'scope', 'stamp', 'notes'].map((id) => [
-        `#${id}`,
-        new FakeElement('section'),
-      ]),
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'task-map',
+        'snapshot-error',
+        'work',
+        'repository',
+        'context',
+        'refresh',
+        'refresh-error',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
     )
     const document = {
       createElement: (tag: string) => new FakeElement(tag),
@@ -594,6 +1010,193 @@ describe('the dashboard page', () => {
     assert.match(nodes.get('#work')?.text() ?? '', /Refusing to ship/)
     assert.match(nodes.get('#work')?.text() ?? '', /claim-1/)
     assert.match(nodes.get('#refresh-error')?.text() ?? '', /snapshot request failed: 500/)
+  })
+
+  test('a failed snapshot keeps the entry-point form and says the report is missing', () => {
+    const nodes = new Map<string, FakeElement>(
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'snapshot-error',
+        'refresh-error',
+        'repository',
+        'context',
+        'work',
+        'refresh',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
+    )
+    // The draft a reader already typed; a failed refresh must not delete it.
+    const draft = nodes.get('#task-text')
+    assert.ok(draft !== undefined)
+    draft.value = 'A ticket I am still writing'
+
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document })
+    runInContext(JS.replace('load(false);', ''), context)
+
+    runInContext('showSnapshotError("snapshot request failed: 500")', context)
+    const banner = nodes.get('#snapshot-error')
+    assert.equal(banner?.hidden, false)
+    // A first-load failure has no earlier snapshot, so it must not promise one.
+    assert.match(banner?.text() ?? '', /Could not read the snapshot: snapshot request failed: 500/)
+    assert.match(banner?.text() ?? '', /Nothing is loaded yet/)
+    assert.doesNotMatch(banner?.text() ?? '', /last snapshot/)
+    assert.equal(draft.value, 'A ticket I am still writing')
+
+    runInContext('showSnapshotError(null)', context)
+    assert.equal(banner?.hidden, true)
+  })
+
+  test('a brief with failed readiness says so instead of reporting no blockers', () => {
+    const target = new FakeElement('div')
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => (id === '#task-brief' ? target : new FakeElement('button')),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    runInContext(JS.replace('load(false);', ''), context)
+
+    ;(context as Record<string, unknown>).__failed = {
+      title: 'Update README.md',
+      startHere: [],
+      howToCheck: [],
+      blockers: [],
+      gates: [],
+      readiness: { ok: false, checked: false, status: null },
+      unknowns: [],
+    }
+    runInContext('renderBrief(document.querySelector("#task-brief"), __failed)', context)
+    const failed = target.text()
+    assert.match(failed, /anvil ready failed, so blockers and tool availability are unknown/)
+    assert.doesNotMatch(failed, /No blocked requirement is reported/)
+
+    // Unprobed is not failed, and not a clean report either.
+    ;(context as Record<string, unknown>).__unprobed = {
+      ...((context as Record<string, unknown>).__failed as Record<string, unknown>),
+      readiness: { ok: true, checked: false, status: 'unknown' },
+    }
+    runInContext('renderBrief(document.querySelector("#task-brief"), __unprobed)', context)
+    const unprobed = target.text()
+    assert.match(unprobed, /environment was not probed/)
+    assert.doesNotMatch(unprobed, /anvil ready failed/)
+  })
+
+  test('a selected edge shows the edge evidence, not its destination node', () => {
+    const target = new FakeElement('div')
+    const brief = {
+      title: 'Task',
+      map: {
+        schemaVersion: 1,
+        focus: 'Task',
+        nodes: [
+          {
+            id: 'file:a',
+            label: 'a.ts',
+            kind: 'file',
+            reason: 'matched',
+            evidence: 'anvil profile --json: files[a.ts]',
+          },
+          {
+            id: 'module:x',
+            label: 'x',
+            kind: 'module',
+            reason: 'dependency',
+            evidence: 'anvil profile --json: modules[x]',
+          },
+        ],
+        edges: [
+          { from: 'file:a', to: 'module:x', label: 'located in', evidence: 'anvil profile --json: edge-evidence' },
+        ],
+        hasUnknown: false,
+      },
+    }
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext("state.mapSelection = 'edge:0'; renderTaskMap(__target, __brief)", context)
+    const text = target.text()
+    assert.match(text, /edge-evidence/)
+    assert.match(text, /file:a → module:x/)
+  })
+
+  test('filtering restores focus to the search input', () => {
+    const target = new FakeElement('div')
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = { map: { nodes: [], edges: [], focus: '', hasUnknown: false } }
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext('renderTaskMap(__target, __brief, true)', context)
+    const inputs: FakeElement[] = []
+    const visit = (node: FakeElement): void => {
+      if (node.tag === 'input') inputs.push(node)
+      for (const child of node.children) visit(child)
+    }
+    visit(target)
+    assert.equal(inputs.length, 1)
+    assert.equal(inputs[0]?.focused, true)
+  })
+
+  test('the blocker handoff is copyable and keeps its measured text', () => {
+    const target = new FakeElement('div')
+    const brief = {
+      title: 'Blocked task',
+      startHere: [],
+      howToCheck: [],
+      blockers: [{ label: 'java', status: 'missing', reason: 'not on PATH' }],
+      readiness: { ok: true, checked: true, status: 'blocked' },
+      gates: [],
+      unknowns: [],
+      handoff: {
+        available: true,
+        text: 'Blocker handoff: Blocked task\n\n- java (missing): not on PATH',
+      },
+    }
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    runInContext(JS.replace('load(false);', ''), context)
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext('renderBrief(__target, __brief)', context)
+    const all: FakeElement[] = []
+    const visit = (node: FakeElement): void => {
+      all.push(node)
+      for (const child of node.children) visit(child)
+    }
+    visit(target)
+    const area = all.find((node) => node.tag === 'textarea')
+    const copy = all.find((node) => node.tag === 'button' && node.textContent === 'Copy handoff')
+    assert.ok(area)
+    assert.ok(copy)
+    assert.match(area?.value ?? '', /java \(missing\): not on PATH/)
+    copy?.listeners.click?.[0]?.()
+    assert.equal(copy?.textContent, 'Selected — press Ctrl+C')
   })
 })
 
