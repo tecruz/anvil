@@ -96,247 +96,272 @@ describe('a probed MCP file is visible to the rule', () => {
   })
 })
 
-describe('INSTRUCTION_CONFLICT compares verify commands across instruction files', () => {
-  test('different test commands in two files warn with evidence from both', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `pnpm test`.\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
-    assert.equal(f.status, 'warn', f.detail)
-    assert.match(f.detail, /test/)
-    assert.ok(
-      f.evidence.some((e) => e.startsWith('AGENTS.md:')),
-      f.evidence.join(', '),
-    )
-    assert.ok(
-      f.evidence.some((e) => e.startsWith('CLAUDE.md:')),
-      f.evidence.join(', '),
-    )
+describe('VERIFY_DOC_COVERAGE compares detected verify commands to instructions', () => {
+  const scripts = JSON.stringify({
+    scripts: { test: 'node --test', lint: 'biome check', build: 'tsc -p tsconfig.json' },
   })
 
-  test('matching commands across files pass', () => {
+  test('a detected command absent from instructions is named with its evidence', () => {
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun the checks before shipping.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+    assert.match(f.detail, /npm run test/)
+    assert.ok(
+      f.evidence.some((e) => /package\.json:\d+/.test(e)),
+      `expected file:line evidence, got ${f.evidence.join(', ')}`,
+    )
+    assert.equal(f.fix?.target, 'AGENTS.md')
+  })
+
+  test('the valid npm test alias counts as documented', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm run lint`, `npm run build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'pass', f.detail)
   })
 
-  test('a single instruction file is na, not a conflict', () => {
+  test('invalid npm shorthands do not count as documented', () => {
+    // `npm lint` and `npm build` are not npm commands -- npm answers
+    // "Unknown command" and exits 1. Only `npm test` is a real shorthand.
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test`.\n',
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm test`, `npm lint`, `npm build`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'na')
-  })
-
-  test('prose that is not a command is left alone', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nWe use npm for packages and npm test is mentioned in prose.\n',
-      'CLAUDE.md': '# Claude\n\nTests are important. Use pnpm for speed.\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    assert.equal(
-      finding(audit(profile), 'INSTRUCTION_CONFLICT').status,
-      'pass',
-      finding(audit(profile), 'INSTRUCTION_CONFLICT').detail,
-    )
-  })
-
-  test('equivalent npm shorthands across files pass', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm run test`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `npm test`.\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
-  })
-
-  test('two Cursor rule files under .cursor/rules are compared', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      '.cursor/rules/a.mdc': '---\ndescription: a\n---\n\nRun `npm test`.\n',
-      '.cursor/rules/b.mdc': '---\ndescription: b\n---\n\nRun `pnpm test`.\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'warn', f.detail)
-    assert.ok(
-      f.evidence.some((e) => e.startsWith('.cursor/rules/a.mdc:')),
-      f.evidence.join(', '),
-    )
-    assert.ok(
-      f.evidence.some((e) => e.startsWith('.cursor/rules/b.mdc:')),
-      f.evidence.join(', '),
-    )
+    assert.match(f.detail, /lint/)
+    assert.match(f.detail, /build/)
   })
 
-  test('a command inside a fenced shell block counts', () => {
+  test('instructions naming the detected commands pass', () => {
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\n```bash\nnpm test\n```\n',
-      'CLAUDE.md': '# Claude\n\n```bash\npnpm test\n```\n',
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm run test`, `npm run lint`, `npm run build`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'warn')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
   })
 
-  // Regression: the old pattern match kept only `npm run test`, dropping the script
-  // suffix, so `test:unit` and `test:integration` looked like the same command.
-  test('different script suffixes are different commands', () => {
+  test('an unrelated runnable command does not hide a missing detected one', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `npm run typecheck` before shipping.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /test/)
+  })
+
+  test('a different runner does not count as documenting the detected command', () => {
+    const profile = profileOf({
+      'package.json': scripts,
+      'AGENTS.md': '# App\n\nRun `pnpm test`, `pnpm lint`, `pnpm build`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test/)
+  })
+
+  test('a different script with the same prefix does not document the detected command', () => {
+    // The node-npm fixture declares both `test` and `test:fast`. Documenting only
+    // `npm run test:fast` must not cover the detected `npm run test`.
     const profile = profileOf({
       'package.json': JSON.stringify({
         scripts: {
-          'test:unit': 'node --test',
-          'test:integration': 'node --test',
-          'build:dev': 'tsc',
-          'build:prod': 'tsc',
+          test: 'vitest run',
+          'test:fast': 'vitest run --changed',
+          lint: 'eslint .',
+          build: 'tsc -p tsconfig.json',
+          typecheck: 'tsc --noEmit',
         },
       }),
-      'AGENTS.md': '# App\n\nRun `npm run test:unit` then `npm run build:dev`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `npm run test:integration` then `npm run build:prod`.\n',
+      'AGENTS.md': '# App\n\nRun `npm run test:fast`, `npm run lint`, `npm run build`, `npm run typecheck`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'warn', f.detail)
-    assert.match(f.detail, /test:unit/, f.detail)
-    assert.match(f.detail, /test:integration/, f.detail)
-    assert.match(f.detail, /build:dev/, f.detail)
-    assert.match(f.detail, /build:prod/, f.detail)
+    assert.match(f.detail, /npm run test\b/)
   })
 
-  // Regression: keeping only the first command per file made two files that list the
-  // same alternatives in a different order look like a conflict.
-  test('reordered lists of alternative commands agree', () => {
+  test('an existing blank instruction file does not hide missing detected commands', () => {
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test` or `pnpm test`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `pnpm test` or `npm test`.\n',
+      'package.json': scripts,
+      'AGENTS.md': '\n\n\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
   })
 
-  // Regression: a fenced `text` block containing a runner in prose was treated as a
-  // command line, producing a conflict against a real command in the other file.
-  test('runner prose in a non-shell fence is not a command', () => {
+  test('a code repo with instructions but no detected command reports na', () => {
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test`.\n',
-      'CLAUDE.md': '# Claude\n\n```text\nIn the old setup, pnpm test was used for smoke tests.\n```\n',
+      'AGENTS.md': '# App\n\nRun `make check`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+    assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')
   })
 
-  test('a shell fence still requires a real command invocation', () => {
+  test('rules under a Cursor directory are read and cited by real file:line', () => {
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\nRun `npm test`.\n',
-      'CLAUDE.md': '# Claude\n\n```bash\nThe npm test command runs the suite.\n```\n',
+      'package.json': scripts,
+      '.cursor/rules/verify.mdc':
+        '---\ndescription: verify\n---\nRun `npm run test`, `npm run lint`, `npm run build`.\n',
       'src/index.ts': 'export const app = 1\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+    assert.ok(
+      f.evidence.some((e) => e.startsWith('.cursor/rules/verify.mdc:')),
+      `expected a real file:line, got ${f.evidence.join(', ')}`,
+    )
+    assert.ok(
+      !f.evidence.some((e) => e === '.cursor/rules'),
+      `a bare directory must not be evidence, got ${f.evidence.join(', ')}`,
+    )
   })
 
-  // Regression: detail named three conflicts while evidence carried at most six
-  // entries, so the third conflict's file:line locations never reached the report.
-  test('every reported conflict keeps the line evidence for each file', () => {
+  test('a docs-only repo reports na', () => {
+    const profile = profileOf({ 'README.md': '# Docs\n' })
+    assert.equal(finding(audit(profile), 'VERIFY_DOC_COVERAGE').status, 'na')
+  })
+
+  // PR94 second review, blocker 1, repro A: a full stop ends a sentence, not a script name.
+  test('a prose mention ending in a period documents the detected command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'AGENTS.md': '# App\n\nRun npm test.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+  })
+
+  // PR94 second review, blocker 1, repro B: `npm test -- --changed` is a subset, not the
+  // full suite anvil detected, so naming it does not document the detected command.
+  test('a changed-only invocation does not document the full-suite command', () => {
+    const profile = profileOf({
+      'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+      'AGENTS.md': '# App\n\nRun `npm test -- --changed`.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    assert.match(f.detail, /npm run test\b/)
+  })
+
+  test('watch and changed flags in other spellings are not full-suite coverage', () => {
+    for (const documented of ['npm test --changed', 'npm test --watch', 'npm test -w', 'npm test -- --watch']) {
+      const profile = profileOf({
+        'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }),
+        'AGENTS.md': `# App\n\nRun \`${documented}\`.\n`,
+        'src/index.ts': 'export const app = 1\n',
+      })
+      const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+      assert.equal(f.status, 'warn', `${documented}: ${f.detail}`)
+    }
+  })
+
+  // PR94 second review, blocker 2, repro A: a title that happens to say "(npm)" is not where
+  // the commands are. Each covered command must carry the line it is actually written on.
+  test('each covered command cites the line where it is actually documented', () => {
     const profile = profileOf({
       'package.json': JSON.stringify({
-        scripts: { test: 'node --test', build: 'tsc', lint: 'biome check' },
+        scripts: {
+          test: 'node --test',
+          build: 'tsc -p tsconfig.json',
+          lint: 'biome check',
+          typecheck: 'tsc --noEmit',
+        },
       }),
-      'AGENTS.md': 'Run `npm test`.\nRun `npm run build`.\nRun `npm run lint`.\n',
-      'CLAUDE.md': 'Run `pnpm test`.\nRun `pnpm build`.\nRun `pnpm lint`.\n',
-      '.cursorrules': 'Run `yarn test`.\nRun `yarn build`.\nRun `yarn lint`.\n',
+      'AGENTS.md': [
+        '# Monorepo (npm)', // 1 — mentions npm, documents nothing
+        '', // 2
+        '## Commands', // 3
+        '', // 4
+        '- Test: `npm run test`', // 5
+        '- Build: `npm run build`', // 6
+        '- Lint: `npm run lint`', // 7
+        '- Typecheck: `npm run typecheck`', // 8
+        '', // 9
+      ].join('\n'),
       'src/index.ts': 'export const app = 1\n',
     })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
-    assert.equal(f.status, 'warn', f.detail)
-    for (const kind of ['test', 'build', 'lint']) {
-      assert.match(f.detail, new RegExp(kind), f.detail)
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'pass', f.detail)
+    for (const line of [5, 6, 7, 8]) {
+      assert.ok(f.evidence.includes(`AGENTS.md:${line}`), `expected AGENTS.md:${line}, got ${f.evidence.join(', ')}`)
     }
-    for (const file of ['AGENTS.md', 'CLAUDE.md', '.cursorrules']) {
-      for (const line of [1, 2, 3]) {
-        assert.ok(
-          f.evidence.includes(`${file}:${line}`),
-          `missing ${file}:${line} in evidence: ${f.evidence.join(', ')}`,
-        )
-      }
+    assert.ok(
+      !f.evidence.includes('AGENTS.md:1'),
+      `a title that merely says "npm" is not evidence, got ${f.evidence.join(', ')}`,
+    )
+  })
+
+  // PR94 second review, blocker 2, repro B: four missing scripts carry four package.json
+  // lines, and a flat six-entry cap used to drop GEMINI.md from the cited sources entirely.
+  test('every inspected instruction file stays in the evidence under the cap', () => {
+    const manifest = [
+      '{',
+      '  "scripts": {',
+      '    "test": "node --test",',
+      '    "build": "tsc -p tsconfig.json",',
+      '    "lint": "biome check",',
+      '    "typecheck": "tsc --noEmit"',
+      '  }',
+      '}',
+    ].join('\n')
+    const profile = profileOf({
+      'package.json': manifest,
+      'AGENTS.md': '# App\n\nSee the docs.\n',
+      'CLAUDE.md': '# Claude\n\nNotes.\n',
+      'GEMINI.md': '# Gemini\n\nNotes.\n',
+      'src/index.ts': 'export const app = 1\n',
+    })
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
+    assert.equal(f.status, 'warn', f.detail)
+    for (const path of ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']) {
+      assert.ok(
+        f.evidence.some((e) => e.startsWith(`${path}:`)),
+        `expected ${path} in evidence, got ${f.evidence.join(', ')}`,
+      )
     }
   })
 
-  // Regression: a trailing shell comment is documentation, not part of the invocation.
-  test('a shell comment outside quotes does not create a conflict', () => {
+  // PR94 second review, blocker 2, repro C: the Flutter detector already knows the line that
+  // declares the SDK; the finding used to drop it and cite a bare pubspec.yaml.
+  test('the detector declaring line reaches the finding', () => {
+    const pubspec = [
+      'name: app',
+      'environment:',
+      '  sdk: ">=3.0.0 <4.0.0"',
+      'dependencies:',
+      '  flutter:',
+      '    sdk: flutter',
+      '',
+    ].join('\n')
     const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
-      'CLAUDE.md': '# Claude\n\n```sh\nnpm test # run the full suite\n```\n',
-      'src/index.ts': 'export const app = 1\n',
+      'pubspec.yaml': pubspec,
+      'AGENTS.md': '# App\n\nSee the docs.\n',
+      'lib/main.dart': 'void main() {}\n',
     })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
-  })
-
-  // Regression: a console fence is a transcript. An output line that happens to name a
-  // runner must not be read as an invoked command.
-  test('console output naming a runner is not an invoked command', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
-      'CLAUDE.md':
-        '# Claude\n\n```console\nnpm warn exec The following package was not found and will be installed: vitest@3.2.4\n```\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
-  })
-
-  test('a $ prompt in a console fence still marks a command', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\n```sh\nnpm test\n```\n',
-      'CLAUDE.md': '# Claude\n\n```console\n$ npm test\nnpm warn exec vitest@3.2.4\n```\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    assert.equal(finding(audit(profile), 'INSTRUCTION_CONFLICT').status, 'pass')
-  })
-
-  // Regression: the `cd ... &&` prefix is a working directory, not shell noise. Two
-  // files running the same script in different packages verify different things.
-  test('the same command in different working directories is a conflict', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
-      'AGENTS.md': '# App\n\n```sh\ncd packages/api && npm test\n```\n',
-      'CLAUDE.md': '# Claude\n\n```sh\ncd packages/web && npm test\n```\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
+    const f = finding(audit(profile), 'VERIFY_DOC_COVERAGE')
     assert.equal(f.status, 'warn', f.detail)
-    assert.match(f.detail, /packages\/api/, f.detail)
-    assert.match(f.detail, /packages\/web/, f.detail)
-  })
-
-  // Regression: `bun run test` runs the package script, while `bun test` is Bun's
-  // built-in runner. Normalising `run` for bun collapsed two different commands.
-  test('bun run test and bun test are different commands', () => {
-    const profile = profileOf({
-      'package.json': JSON.stringify({ scripts: { test: 'vitest' } }),
-      'AGENTS.md': '# App\n\nRun `bun run test`.\n',
-      'CLAUDE.md': '# Claude\n\nRun `bun test`.\n',
-      'src/index.ts': 'export const app = 1\n',
-    })
-    const f = finding(audit(profile), 'INSTRUCTION_CONFLICT')
-    assert.equal(f.status, 'warn', f.detail)
-    assert.match(f.detail, /bun run test/, f.detail)
-    assert.match(f.detail, /bun test/, f.detail)
+    assert.ok(
+      f.evidence.some((e) => e === 'pubspec.yaml:5'),
+      `expected the declaring line pubspec.yaml:5, got ${f.evidence.join(', ')}`,
+    )
   })
 })
 

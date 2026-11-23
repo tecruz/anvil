@@ -189,9 +189,13 @@ export const flutterDetector: Detector = {
     // Flutter's own subcommands, applicable because the pubspec declares the SDK. `build` has no
     // platform-independent form -- it is `flutter build apk` or `flutter build ios` -- so it is
     // marked inferred and the reader picks.
-    addCommand(draft, 'install', { cmd: 'flutter pub get', source: 'detected', evidence: 'pubspec.yaml' })
-    addCommand(draft, 'test', { cmd: 'flutter test', source: 'detected', evidence: 'pubspec.yaml' })
-    addCommand(draft, 'lint', { cmd: 'flutter analyze', source: 'detected', evidence: 'pubspec.yaml' })
+    // The SDK declaration line already located above is the evidence for these commands:
+    // they are applicable *because* the pubspec declares Flutter, so citing the bare file
+    // loses the one fact an agent can check. Carry the line into downstream findings.
+    const declaration = evidence('pubspec.yaml', line)
+    addCommand(draft, 'install', { cmd: 'flutter pub get', source: 'detected', evidence: declaration })
+    addCommand(draft, 'test', { cmd: 'flutter test', source: 'detected', evidence: declaration })
+    addCommand(draft, 'lint', { cmd: 'flutter analyze', source: 'detected', evidence: declaration })
     addCommand(draft, 'build', { cmd: 'flutter build apk', source: 'inferred' })
   },
 }
