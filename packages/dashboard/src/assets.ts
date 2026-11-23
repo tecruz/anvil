@@ -39,7 +39,7 @@ export const HTML = `<!doctype html>
       <label class="muted" for="task-text">Task text</label>
       <textarea id="task-text" rows="6" maxlength="4000" placeholder="Paste the ticket title and body, or describe the change you want to make."></textarea>
       <div class="row">
-        <button id="task-submit" type="button">Build brief</button>
+        <button id="task-submit" type="button" disabled>Build brief</button>
         <span id="task-error" class="muted" role="status"></span>
       </div>
     </div>
@@ -118,6 +118,16 @@ function make(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
+}
+
+// A build must not be submitted before there is a snapshot to build from, nor while a
+// snapshot load is pending. Clicking during the first load used to POST with an empty cache,
+// get a 409, and leave the "Reload the page" error on screen after the load succeeded.
+function renderTaskSubmit(root) {
+  const submit = root.querySelector('#task-submit');
+  if (!submit) return;
+  submit.disabled = state.loading || state.taskPending || !state.snapshot;
+  submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
 }
 
 // Exact statuses, not substrings: unavailable contains available, but it is an absence
@@ -508,6 +518,11 @@ function renderBrief(parent, brief) {
   parent.appendChild(card);
 }
 
+/** A stable key for an edge: its endpoints, never its position in a filtered list. */
+function edgeSelectionKey(edge) {
+  return 'edge:' + edge.from + '::' + edge.to;
+}
+
 /**
  * The task's 2D map: a subgraph of the matched files, their modules, one-hop dependencies and
  * verify commands. Selecting a node or edge shows the CLI value behind it; the list view is a
@@ -551,6 +566,17 @@ function renderTaskMap(target, brief, restoreSearchFocus) {
     return nodeIds.has(edge.from) && nodeIds.has(edge.to);
   });
 
+  // Filtering must not silently retarget the selected edge to whatever now sits at the same
+  // index. A selection the filter hides is cleared explicitly instead of being re-pointed.
+  if (state.mapSelection !== null) {
+    const stillVisible =
+      nodes.some(function (node) { return node.id === state.mapSelection; }) ||
+      (typeof state.mapSelection === 'string' &&
+        state.mapSelection.startsWith('edge:') &&
+        edges.some(function (edge) { return edgeSelectionKey(edge) === state.mapSelection; }));
+    if (!stillVisible) state.mapSelection = null;
+  }
+
   if (nodes.length === 0) {
     card.appendChild(make('div', 'muted', 'No node matches that search.'));
   } else if (state.mapView === 'list') {
@@ -584,10 +610,10 @@ function renderTaskMap(target, brief, restoreSearchFocus) {
     }
     card.appendChild(grid);
     const edgeList = make('div');
-    for (const [edgeIndex, edge] of edges.entries()) {
+    for (const edge of edges) {
       const row = make('div', 'mapedge', edge.from + '  →  ' + edge.to + '  (' + edge.label + ')');
       row.addEventListener('click', function () {
-        state.mapSelection = 'edge:' + String(edgeIndex);
+        state.mapSelection = edgeSelectionKey(edge);
         renderTaskMap(target, brief);
       });
       edgeList.appendChild(row);
@@ -599,7 +625,7 @@ function renderTaskMap(target, brief, restoreSearchFocus) {
   const selectedNode = nodes.find(function (node) { return node.id === state.mapSelection; });
   const selectedEdge =
     typeof state.mapSelection === 'string' && state.mapSelection.startsWith('edge:')
-      ? edges[Number(state.mapSelection.slice(5))]
+      ? edges.find(function (candidate) { return edgeSelectionKey(candidate) === state.mapSelection; })
       : null;
   if (selectedNode) {
     detail.textContent = selectedNode.label + ' — ' + selectedNode.reason + ' Evidence: ' + (selectedNode.evidence || 'unknown');
@@ -663,11 +689,7 @@ function renderSuggestions(parent, snap) {
 }
 
 function renderTask(root, snap) {
-  const submit = root.querySelector('#task-submit');
-  if (submit) {
-    submit.disabled = state.taskPending || !snap;
-    submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
-  }
+  renderTaskSubmit(root);
   if (!snap) return;
   const suggestions = root.querySelector('#task-suggestions');
   if (suggestions) renderSuggestions(suggestions, snap);
@@ -804,6 +826,8 @@ function render() {
   renderRefreshError();
   const snap = state.snapshot;
   const root = document;
+  // Runs before the early return so the button is disabled during the first, still-pending load.
+  renderTaskSubmit(root);
   if (!snap) return;
   root.querySelector('#stamp').textContent = 'snapshot ' + snap.fetchedAt;
   const ready = snap.repository.ready;
@@ -866,6 +890,7 @@ async function load(refresh) {
   if (state.loading) return;
   state.loading = true;
   document.querySelector('#refresh').disabled = true;
+  renderTaskSubmit(document);
   try {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
@@ -874,8 +899,10 @@ async function load(refresh) {
     // draft in the textarea belongs to the reader and is left alone.
     if (state.snapshot) {
       state.brief = null;
-      state.taskError = null;
     }
+    // A snapshot arriving clears any brief error, including a 409 from a build that raced the
+    // first load. Leaving it set showed a stale "Reload the page" over a good snapshot.
+    state.taskError = null;
     state.snapshot = next;
     showSnapshotError(null);
     state.refreshError = null;
@@ -890,6 +917,7 @@ async function load(refresh) {
   } finally {
     state.loading = false;
     document.querySelector('#refresh').disabled = false;
+    renderTaskSubmit(document);
   }
 }
 

@@ -44,6 +44,7 @@ interface SnapshotOptions {
   suggestions?: unknown[]
   modules?: unknown[]
   unanalysedDeps?: unknown[]
+  files?: string[]
 }
 
 function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
@@ -51,7 +52,7 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
   const profile = {
     root: '/repo',
     projectDir: 'app',
-    files: FILES,
+    files: options.files ?? FILES,
     modules: options.modules ?? [],
     commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'README.md:3' }] },
     diagnostics: {
@@ -436,6 +437,31 @@ describe('the task-centred 2D map', () => {
     )
     assert.ok(
       map.edges.some((edge) => edge.from === 'module:app' && edge.to === 'module:core' && edge.evidence !== null),
+      JSON.stringify(map.edges),
+    )
+  })
+
+  test('the root module at path "." contains a nested task file', () => {
+    // A single-module repo reports its module at path '.'. A nested file such as
+    // src/server.ts is inside it, so the map must carry the module node and a containment edge.
+    const snapshot = makeSnapshot({
+      files: ['src/server.ts', 'README.md'],
+      modules: [{ id: 'acme-api', path: '.', kind: 'package', deps: [] }],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Update src/server.ts' })
+    assert.ok(
+      brief.startHere.some((item) => item.path === 'src/server.ts'),
+      'the nested file must be matched',
+    )
+    const map = buildTaskMap(snapshot, brief)
+    assert.ok(
+      map.nodes.some((node) => node.id === 'module:acme-api' && node.kind === 'module'),
+      JSON.stringify(map.nodes),
+    )
+    assert.ok(
+      map.edges.some(
+        (edge) => edge.from === 'file:src/server.ts' && edge.to === 'module:acme-api' && edge.label === 'located in',
+      ),
       JSON.stringify(map.edges),
     )
   })

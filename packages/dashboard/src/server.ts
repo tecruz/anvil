@@ -30,6 +30,16 @@ import { buildTaskBrief, type TaskBriefInput, TaskInputError } from './task.ts'
 const COOKIE_PREFIX = 'anvil_dashboard'
 /** Enough for a 4,000-character task plus JSON escaping; never an unbounded upload. */
 const MAX_BODY_BYTES = 32 * 1024
+/**
+ * Strict JSON media type: `application/json` with optional, well-formed parameters.
+ *
+ * The old `/^application\/json(?:;|$)/i` accepted any garbage after a semicolon, so
+ * `application/json;not-a-parameter` reached the route — and, on `/api/action`, the runner.
+ * A parameter is `tchar "=" (tchar / quoted-string)` with optional whitespace; anything else
+ * (a missing `=`, an empty value, a second media type, `application/jsonp`) is refused with 415.
+ */
+const JSON_CONTENT_TYPE =
+  /^application\/json(?:\s*;\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=\s*(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[^"\\]|\\.)*"))*\s*$/i
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
@@ -240,7 +250,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           sendJson(res, 403, { error: 'Forbidden origin' })
           return
         }
-        if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) {
+        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
           sendJson(res, 415, { error: 'Use Content-Type: application/json.' })
           return
         }
@@ -301,7 +311,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) {
+        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
           send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
           return
         }

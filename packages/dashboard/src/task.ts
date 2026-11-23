@@ -841,13 +841,20 @@ export function buildTaskMap(
 
   const moduleId = (value: Record<string, unknown>): string => asString(value.id) ?? asString(value.path) ?? 'unknown'
   const modulePath = (value: Record<string, unknown>): string => asString(value.path) ?? 'unknown'
+  /**
+   * Whether a module's path contains a task file. A module at `.` is the repository root, so it
+   * contains every repo-relative task file — including nested ones such as `src/server.ts`.
+   * Treating nested paths as outside the root dropped the only module node and its containment
+   * edge in single-module repositories whose module path is `.`.
+   */
+  const containsTaskFile = (path: string, itemPath: string): boolean =>
+    path === '.' || itemPath === path || itemPath.startsWith(`${path}/`)
   const relevance = (value: Record<string, unknown>): string | null => {
     const path = modulePath(value)
     for (const item of brief.startHere) {
-      if (path !== '.' && (item.path === path || item.path.startsWith(`${path}/`))) {
-        return `path matches task file ${item.path}`
+      if (containsTaskFile(path, item.path)) {
+        return path === '.' ? `root module contains task file ${item.path}` : `path matches task file ${item.path}`
       }
-      if (path === '.' && !item.path.includes('/')) return `root module contains task file ${item.path}`
     }
     return null
   }
@@ -883,8 +890,7 @@ export function buildTaskMap(
       evidence: `anvil profile --json: modules[${id}]`,
     })
     for (const item of brief.startHere) {
-      const path = modulePath(module)
-      if (path === '.' ? item.path.includes('/') : !(item.path === path || item.path.startsWith(`${path}/`))) continue
+      if (!containsTaskFile(modulePath(module), item.path)) continue
       edges.push({
         from: `file:${item.path}`,
         to: `module:${id}`,

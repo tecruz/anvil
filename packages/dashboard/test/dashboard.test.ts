@@ -386,6 +386,33 @@ describe('the dashboard server', () => {
     })
   })
 
+  test('the brief route accepts a valid charset but refuses malformed media-type parameters', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const callsBefore = calls.length
+      for (const contentType of [
+        'application/json',
+        'application/json; charset=utf-8',
+        'application/json;charset=UTF-8',
+        'application/json; charset="utf-8"',
+      ]) {
+        const res = await authedPost(server, '/api/brief', { text: 'Update README.md' }, contentType)
+        assert.equal(res.status, 200, `${contentType}: ${await res.clone().text()}`)
+      }
+      for (const contentType of [
+        'application/jsonp',
+        'application/json;not-a-parameter',
+        'application/json; charset',
+        'application/json; =utf-8',
+        'text/plain',
+      ]) {
+        const res = await authedPost(server, '/api/brief', { text: 'Update README.md' }, contentType)
+        assert.equal(res.status, 415, contentType)
+      }
+      assert.equal(calls.length, callsBefore, 'a rejected POST must not invoke the CLI')
+    })
+  })
+
   test('the brief route needs the session cookie and a same-origin header', async () => {
     await withServer(async (server, _invoke, calls) => {
       await snapshotOf(await authed(server, '/api/snapshot'))
@@ -746,6 +773,100 @@ describe('the dashboard page', () => {
       return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
     }
   }
+
+  test('a build during a pending first snapshot is disabled and a finished load clears the brief error', async () => {
+    const nodes = new Map<string, FakeElement>(
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'task-map',
+        'snapshot-error',
+        'refresh-error',
+        'repository',
+        'context',
+        'work',
+        'refresh',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
+    const snapshot = {
+      schemaVersion: 1 as const,
+      fetchedAt: 'now',
+      repository: {
+        doctor: source({}),
+        ready: source({}),
+        plan: source({ suggestions: [] }),
+        profile: source({ files: [], modules: [] }),
+      },
+      context: { brief: source({}), staged: source({}) },
+      work: { crew: source({ crew: [] }) },
+      verification: {
+        status: 'unavailable' as const,
+        reason: 'unavailable',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
+      notes: [],
+    }
+
+    // A controllable, delayed invoker: the snapshot fetch resolves only when the test releases it.
+    let resolveSnapshot: (() => void) | null = null
+    const fetched: string[] = []
+    const fetchStub = async (url: string) => {
+      fetched.push(url)
+      if (url.startsWith('/api/snapshot')) {
+        return await new Promise((resolve) => {
+          resolveSnapshot = () => resolve({ ok: true, json: async () => snapshot })
+        })
+      }
+      // The brief POST races the still-pending first load and hits the no-snapshot 409.
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({ error: 'No snapshot yet. Reload the page, then build the brief.' }),
+      }
+    }
+    const context = createContext({ document, console, fetch: fetchStub })
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext('__state = state', context)
+    const stateRef = (context as Record<string, unknown>).__state as {
+      taskError: string | null
+      loading: boolean
+      taskPending: boolean
+    }
+
+    const loading = runInContext('load(false)', context) as Promise<void>
+    assert.equal(nodes.get('#task-submit')?.disabled, true, 'submit is disabled while the first snapshot loads')
+    assert.equal(stateRef.loading, true)
+
+    // Reproduce the racing build: the 409 is recorded as the brief error.
+    const building = runInContext('requestBrief({ text: "Update src/server.ts" })', context) as Promise<void>
+    await building
+    assert.match(stateRef.taskError ?? '', /Reload the page/, 'the racing 409 set the brief error')
+
+    // Release the delayed snapshot load.
+    assert.ok(resolveSnapshot !== null, 'the snapshot fetch must still be pending')
+    ;(resolveSnapshot as () => void)()
+    await loading
+
+    assert.equal(stateRef.taskError, null, 'the arriving snapshot clears the stale brief error')
+    assert.equal(nodes.get('#task-error')?.textContent, '', 'the stale error is no longer on screen')
+    assert.equal(nodes.get('#task-submit')?.disabled, false, 'submit works once a snapshot exists')
+    assert.deepEqual(fetched, ['/api/snapshot', '/api/brief'])
+  })
 
   test('the claim input keeps long nested issue URLs instead of truncating them', () => {
     const parent = new FakeElement('div')
@@ -1243,10 +1364,54 @@ describe('the dashboard page', () => {
     ;(context as Record<string, unknown>).__target = target
     ;(context as Record<string, unknown>).__brief = brief
     runInContext(JS.replace('load(false);', ''), context)
-    runInContext("state.mapSelection = 'edge:0'; renderTaskMap(__target, __brief)", context)
+    runInContext("state.mapSelection = 'edge:file:a::module:x'; renderTaskMap(__target, __brief)", context)
     const text = target.text()
     assert.match(text, /edge-evidence/)
     assert.match(text, /file:a → module:x/)
+  })
+
+  test('filtering does not silently switch the selected edge to a different edge', () => {
+    const target = new FakeElement('div')
+    const brief = {
+      title: 'Task',
+      map: {
+        schemaVersion: 1,
+        focus: 'Task',
+        nodes: [
+          { id: 'file:a', label: 'alpha.ts', kind: 'file', reason: 'alpha file', evidence: 'alpha-node-evidence' },
+          { id: 'module:x', label: 'alpha', kind: 'module', reason: 'alpha module', evidence: 'alpha-module-evidence' },
+          { id: 'file:b', label: 'beta.ts', kind: 'file', reason: 'beta file', evidence: 'beta-node-evidence' },
+          { id: 'module:y', label: 'beta', kind: 'module', reason: 'beta module', evidence: 'beta-module-evidence' },
+        ],
+        edges: [
+          { from: 'file:a', to: 'module:x', label: 'located in', evidence: 'alpha-edge-evidence' },
+          { from: 'file:b', to: 'module:y', label: 'located in', evidence: 'beta-edge-evidence' },
+        ],
+        hasUnknown: false,
+      },
+    }
+    const fakeDocument = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: () => new FakeElement('button'),
+      querySelectorAll: () => [],
+    }
+    const context = createContext({ document: fakeDocument })
+    ;(context as Record<string, unknown>).__target = target
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext(JS.replace('load(false);', ''), context)
+
+    runInContext("state.mapSelection = 'edge:file:a::module:x'; renderTaskMap(__target, __brief)", context)
+    assert.match(target.text(), /alpha-edge-evidence/, 'the first edge shows its own evidence')
+
+    // Filtering to beta hides the selected edge. It must not silently become the beta edge,
+    // which is what happened when selection was an index into the filtered edge list.
+    runInContext("state.mapSearch = 'beta'; renderTaskMap(__target, __brief)", context)
+    assert.doesNotMatch(target.text(), /beta-edge-evidence/)
+    assert.match(target.text(), /Select a node or edge/)
+
+    // Selecting the still-visible edge explicitly keeps working.
+    runInContext("state.mapSelection = 'edge:file:b::module:y'; renderTaskMap(__target, __brief)", context)
+    assert.match(target.text(), /beta-edge-evidence/)
   })
 
   test('filtering restores focus to the search input', () => {
@@ -1405,6 +1570,24 @@ describe('dashboard gated actions', () => {
       const res = await post(server, { action: 'verify' }, { contentType: 'application/jsonp' })
       assert.equal(res.status, 415)
       assert.deepEqual(calls, [])
+    })
+  })
+
+  test('a malformed media-type parameter is refused with 415 and never reaches the runner', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      for (const contentType of [
+        'application/json;not-a-parameter',
+        'application/json; charset',
+        'application/json; =utf-8',
+      ]) {
+        const res = await post(server, { action: 'verify' }, { contentType })
+        assert.equal(res.status, 415, contentType)
+      }
+      assert.deepEqual(calls, [], 'a malformed Content-Type must never invoke the runner')
+
+      const valid = await post(server, { action: 'verify' }, { contentType: 'application/json; charset=utf-8' })
+      assert.equal(valid.status, 200, await valid.clone().text())
+      assert.deepEqual(calls, [['crew', 'verify', '--json']], 'a valid charset parameter reaches the runner')
     })
   })
 
