@@ -141,6 +141,44 @@ function rawGet(
   })
 }
 
+/** A POST with an explicit Host and Origin, so cross-loopback-name forgery can be reproduced. */
+function rawPost(
+  server: DashboardServerHandle,
+  path: string,
+  body: unknown,
+  options: { host: string; origin?: string | undefined; contentType?: string | undefined },
+): Promise<{ status: number | undefined; body: string }> {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(body)
+    const headers: Record<string, string> = {
+      host: options.host,
+      cookie: `${server.cookieName}=${TOKEN}`,
+      'content-type': options.contentType ?? 'application/json',
+      'content-length': String(Buffer.byteLength(payload)),
+    }
+    if (options.origin !== undefined) headers.origin = options.origin
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port: server.port,
+        method: 'POST',
+        path,
+        headers,
+      },
+      (res) => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          text += chunk
+        })
+        res.on('end', () => resolve({ status: res.statusCode, body: text }))
+      },
+    )
+    req.on('error', reject)
+    req.end(payload)
+  })
+}
+
 describe('the dashboard server', () => {
   test('the one-time URL sets an HttpOnly cookie and serves local assets', async () => {
     await withServer(async (server) => {
@@ -375,6 +413,56 @@ describe('the dashboard server', () => {
       })
       assert.equal(missingOrigin.status, 403)
       assert.equal(calls.length, 6, 'a rejected POST must not invoke the CLI')
+    })
+  })
+
+  test('the brief route binds Origin to the request Host, not either loopback name', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      await snapshotOf(await authed(server, '/api/snapshot'))
+      const host = `127.0.0.1:${String(server.port)}`
+      const opposite = `localhost:${String(server.port)}`
+
+      const matching = await rawPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md' },
+        {
+          host,
+          origin: `http://${host}`,
+        },
+      )
+      assert.equal(matching.status, 200, matching.body)
+
+      // A POST that arrives on 127.0.0.1 but claims localhost as its origin (and the mirror
+      // case) must be refused: both names are individually allowed as Host, but not swapped.
+      const oppositeName = await rawPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md' },
+        {
+          host,
+          origin: `http://${opposite}`,
+        },
+      )
+      assert.equal(oppositeName.status, 403, oppositeName.body)
+      assert.match(oppositeName.body, /Forbidden origin/)
+
+      const foreign = await rawPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md' },
+        {
+          host,
+          origin: 'https://evil.example',
+        },
+      )
+      assert.equal(foreign.status, 403, foreign.body)
+
+      const missing = await rawPost(server, '/api/brief', { text: 'Update README.md' }, { host })
+      assert.equal(missing.status, 403, missing.body)
+
+      // The brief still reads only the warmed cache; none of these POSTs invoke the CLI.
+      assert.equal(calls.length, 6)
     })
   })
 
@@ -658,6 +746,30 @@ describe('the dashboard page', () => {
       return [this.textContent, ...this.children.map((child) => child.text())].filter(Boolean).join('\n')
     }
   }
+
+  test('the claim input keeps long nested issue URLs instead of truncating them', () => {
+    const parent = new FakeElement('div')
+    const context = createContext({
+      document: {
+        createElement: (tag: string) => new FakeElement(tag),
+        querySelector: () => ({ addEventListener() {} }),
+        querySelectorAll: () => [],
+      },
+      __parent: parent,
+    })
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext('renderActions(__parent)', context)
+    let claim: FakeElement | undefined
+    const walk = (node: FakeElement): void => {
+      if ((node as unknown as { placeholder?: string }).placeholder === 'ticket reference') claim = node
+      for (const child of node.children) walk(child)
+    }
+    walk(parent)
+    assert.ok(claim, 'the claim input must be rendered')
+    // The server accepts ticket URLs up to 500 characters (MAX_TICKET_URL_LENGTH); the UI bound
+    // must match or a 233-char GitLab issue URL silently loses its `/-/issues/123` suffix.
+    assert.equal((claim as unknown as { maxLength: number }).maxLength, 500)
+  })
 
   test('status badges are matched exactly, not by substring', () => {
     const context = createContext({
@@ -1261,6 +1373,53 @@ describe('dashboard gated actions', () => {
       assert.equal((await post(server, { action: 'verify' }, { origin: 'https://evil.example' })).status, 403)
       assert.equal((await post(server, { action: 'verify' }, { contentType: 'text/plain' })).status, 415)
       assert.deepEqual(calls, [])
+    })
+  })
+
+  test('the action route binds Origin to the request Host, not either loopback name', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      const host = `127.0.0.1:${String(server.port)}`
+      const opposite = `localhost:${String(server.port)}`
+
+      const matching = await rawPost(
+        server,
+        '/api/action',
+        { action: 'verify' },
+        {
+          host,
+          origin: `http://${host}`,
+        },
+      )
+      assert.equal(matching.status, 200, matching.body)
+
+      for (const origin of [`http://${opposite}`, 'https://evil.example', undefined]) {
+        const res = await rawPost(server, '/api/action', { action: 'verify' }, { host, origin })
+        assert.equal(res.status, 403, res.body)
+      }
+      assert.deepEqual(calls, [['crew', 'verify', '--json']], 'only the matching-origin POST invokes the runner')
+    })
+  })
+
+  test('application/jsonp is refused with 415 and never reaches the runner', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      const res = await post(server, { action: 'verify' }, { contentType: 'application/jsonp' })
+      assert.equal(res.status, 415)
+      assert.deepEqual(calls, [])
+    })
+  })
+
+  test('a long nested GitLab issue URL is preserved as one bounded argv value', async () => {
+    const base = 'https://gitlab.example.com/group/subgroup/project/-/issues/123?notification_referrer_id='
+    const url = `${base}${'a'.repeat(233 - base.length)}`
+    assert.equal(url.length, 233)
+    assert.match(url, /\/-\/issues\/123/)
+    assert.deepEqual(actionArgv('claim', url), ['claim', url, '--json'])
+    await withServer(async (server, _invoke, calls) => {
+      const res = await post(server, { action: 'claim', ref: url })
+      assert.equal(res.status, 200, await res.clone().text())
+      const data = (await res.json()) as { command: string }
+      assert.equal(data.command, `anvil claim ${url} --json`)
+      assert.deepEqual(calls, [['claim', url, '--json']])
     })
   })
 

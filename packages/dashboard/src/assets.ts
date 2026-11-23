@@ -694,7 +694,9 @@ function renderActions(parent) {
   const ticket = make('input');
   ticket.type = 'text';
   ticket.placeholder = 'ticket reference';
-  ticket.maxLength = 200;
+  // Match the server's MAX_TICKET_URL_LENGTH (500): a 200-char cap silently cut nested issue
+  // URLs such as https://gitlab.example.com/group/project/-/issues/123, dropping the ref.
+  ticket.maxLength = 500;
   claimRow.appendChild(ticket);
   const claimButton = make('button', '', 'Claim');
   claimButton.type = 'button';

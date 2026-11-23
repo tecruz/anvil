@@ -152,7 +152,15 @@ export const dashboardCommand: Command = {
     // Resolve the bounded evidence store and sample the HEAD commit once with read-only Git
     // flags. A page load or refresh never launches Git: a brief only reads the cached snapshot.
     const store = evidenceStore(repoRoot)
-    const currentRevision = await headRevision(repoRoot)
+    // The revision is provenance, not a gate. A missing or broken Git (ToolMissing, a failed
+    // probe, a non-repository worktree) must not stop the read-only dashboard from listening:
+    // leave currentRevision null so the snapshot reports verification as explicitly unknown.
+    let currentRevision: string | null = null
+    try {
+      currentRevision = await headRevision(repoRoot)
+    } catch {
+      currentRevision = null
+    }
     const { invoke, invokeAction } = dashboardInvokers()
     const server = await createDashboardServer({
       cwd: repoRoot,

@@ -157,11 +157,18 @@ function hostAllowed(host: string | undefined, expectedHost: string, port: numbe
   return allowed.has(host.toLowerCase())
 }
 
-/** POSTs must come from this dashboard's own page, never from another origin or a form. */
-function originAllowed(origin: string | undefined, expectedHost: string, port: number): boolean {
-  if (origin === undefined) return false
-  const allowed = new Set([`http://${expectedHost}:${String(port)}`, `http://localhost:${String(port)}`])
-  return allowed.has(origin.toLowerCase())
+/**
+ * POSTs must come from this dashboard's own page, never from another origin or a form.
+ *
+ * The Origin must match the Host header the request actually arrived on: a browser derives both
+ * from the same URL, so any mismatch is a forgery. `hostAllowed` above already rejects rebound
+ * Host values, so binding Origin to the request's own Host cannot widen the set of accepted
+ * hosts — it only stops a POST sent to `127.0.0.1` from claiming `localhost` as its origin (or
+ * the reverse), which is the cross-loopback-name bypass this check exists to prevent.
+ */
+function originAllowed(origin: string | undefined, host: string | undefined): boolean {
+  if (origin === undefined || host === undefined) return false
+  return origin.toLowerCase() === `http://${host.toLowerCase()}`
 }
 
 export async function createDashboardServer(options: DashboardServerOptions): Promise<DashboardServerHandle> {
@@ -229,7 +236,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           sendJson(res, 401, { error: 'Unauthorized' })
           return
         }
-        if (!originAllowed(req.headers.origin, host, boundPort)) {
+        if (!originAllowed(req.headers.origin, req.headers.host)) {
           sendJson(res, 403, { error: 'Forbidden origin' })
           return
         }
@@ -290,11 +297,11 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!originAllowed(req.headers.origin, host, boundPort)) {
+        if (!originAllowed(req.headers.origin, req.headers.host)) {
           send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) {
+        if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] ?? '')) {
           send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
           return
         }

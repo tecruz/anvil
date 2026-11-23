@@ -252,10 +252,11 @@ interface StartedDashboard {
 }
 
 /** Start the real CLI server and read its one-time URL from the JSON envelope on stdout. */
-function startDashboard(entry: string, cwd: string): Promise<StartedDashboard> {
+function startDashboard(entry: string, cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<StartedDashboard> {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(process.execPath, [entry, 'dashboard', '--repo', cwd, '--port', '0', '--json'], {
       cwd,
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
@@ -391,6 +392,40 @@ describe('the dashboard through the real CLI', () => {
       }
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a startup revision probe that cannot find Git still leaves the dashboard listening', async () => {
+    const bundle = resolve(TEST_DIR, '..', 'dist', 'cli.js')
+    const entry = existsSync(bundle) ? bundle : resolve(TEST_DIR, '..', 'src', 'main.ts')
+    const root = mkdtempSync(join(tmpdir(), 'anvil-dashboard-no-git-'))
+    const emptyPath = mkdtempSync(join(tmpdir(), 'anvil-no-git-path-'))
+    try {
+      spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: root, stdio: 'pipe' })
+      // A PATH with no Git on it makes the startup rev-parse probe throw TOOL_MISSING. The
+      // read-only dashboard must still listen and report the revision as explicitly unknown.
+      const env: NodeJS.ProcessEnv = { ...process.env, PATH: emptyPath, Path: emptyPath }
+      const started = await startDashboard(entry, root, env)
+      try {
+        const boot = await fetch(started.url, { redirect: 'manual' })
+        assert.equal(boot.status, 302)
+        const cookie = (boot.headers.get('set-cookie') ?? '').split(';')[0] ?? ''
+        assert.notEqual(cookie, '')
+
+        const snapshot = await fetch(new URL('/api/snapshot', started.url), { headers: { cookie } })
+        assert.equal(snapshot.status, 200, await snapshot.clone().text())
+        const data = (await snapshot.json()) as {
+          verification: { status: string; currentRevision: string | null }
+        }
+        assert.equal(data.verification.status, 'unavailable')
+        assert.equal(data.verification.currentRevision, null)
+        assert.doesNotMatch(started.stderr(), /TOOL_MISSING/)
+      } finally {
+        await stopDashboard(started)
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(emptyPath, { recursive: true, force: true })
     }
   })
 })

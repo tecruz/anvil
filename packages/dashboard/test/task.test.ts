@@ -394,6 +394,9 @@ describe('buildTaskBrief', () => {
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x', suggestionId: 'fix:TEST_FAST' }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { suggestionId: 'fix:NOT_THERE' }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x'.repeat(MAX_TASK_TEXT + 1) }), TaskInputError)
+    // The cap is on the raw text: padding with 4,001 spaces then a real character must not trim
+    // down to a one-character task that slips past the documented 4,000-character limit.
+    assert.throws(() => buildTaskBrief(makeSnapshot(), { text: `${' '.repeat(MAX_TASK_TEXT + 1)}x` }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { suggestionId: '../etc' }), TaskInputError)
   })
 

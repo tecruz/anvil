@@ -977,16 +977,19 @@ export function buildTaskMap(
  * into a fact.
  */
 export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInput): TaskBrief {
-  const text = (input.text ?? '').trim()
+  const rawText = input.text ?? ''
   const suggestionId = (input.suggestionId ?? '').trim()
+  // Enforce the documented 4,000-character cap on the raw text, before trimming: trimming
+  // first would let 4,001 spaces plus a real character through as a one-character task.
+  if (rawText.length > MAX_TASK_TEXT) {
+    throw new TaskInputError(`Task text is limited to ${String(MAX_TASK_TEXT)} characters.`)
+  }
+  const text = rawText.trim()
   if (text === '' && suggestionId === '') {
     throw new TaskInputError('Pick a suggestion or paste a task first.')
   }
   if (text !== '' && suggestionId !== '') {
     throw new TaskInputError('Choose one entry point: a suggestion or pasted task text.')
-  }
-  if (text.length > MAX_TASK_TEXT) {
-    throw new TaskInputError(`Task text is limited to ${String(MAX_TASK_TEXT)} characters.`)
   }
   if (suggestionId !== '' && !/^[A-Za-z0-9:_-]{1,200}$/.test(suggestionId)) {
     throw new TaskInputError('That suggestion id is not valid.')

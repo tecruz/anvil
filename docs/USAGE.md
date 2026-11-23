@@ -753,7 +753,7 @@ Pasted task text stays on the loopback page: it is limited to 4,000 characters, 
 local server only, and not stored. The suggestions are engineering improvements derived from
 this repository's own findings, not a team's priorities. Building a brief does not create a
 tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
-reads the snapshot the page already loaded, and a reload is required before the first brief.
+reads the snapshot the page loads when it opens, so the first brief works without a reload.
 
 Verification has no green-by-absence state. A page load or a brief never runs a verify command or
 a write action; a refresh re-reads the CLI's existing read-only JSON contracts (`doctor`, `ready`, `plan`,
