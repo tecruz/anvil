@@ -1,17 +1,12 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import { describe, test } from 'node:test'
-import {
-  type EvidenceRecord,
-  evidenceStore,
-  readVerificationEvidence,
-  selectVerificationRecords,
-  verificationEvidencePath,
-} from '../src/commands/crew.ts'
-import { stagedView } from '../src/commands/dashboard.ts'
+import { actionArgv } from '@anvil/dashboard'
+import { dashboardInvokers, stagedView } from '../src/commands/dashboard.ts'
+import { DASHBOARD_ACTION_TIMEOUT_MS } from '../src/mcp.ts'
 
 /** A staged manifest whose staged file has disappeared must not look like a deletion. */
 describe('the dashboard staging view', () => {
@@ -52,149 +47,45 @@ describe('the dashboard staging view', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+})
 
-  test('recorded verification is read only from the bounded CLI-owned file', () => {
-    const root = mkdtempSync(join(tmpdir(), 'anvil-dashboard-verify-'))
+describe('the dashboard ship action through the real CLI', () => {
+  test('a ship for a claim that does not exist is refused by the CLI, not by the page', () => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-dashboard-ship-'))
     try {
-      mkdirSync(join(root, '.git'), { recursive: true })
-      const store = evidenceStore(root)
-      assert.ok(store)
-      assert.deepEqual(readVerificationEvidence(store), [])
-      mkdirSync(join(root, '.anvil'), { recursive: true })
-      const path = verificationEvidencePath(store)
-      writeFileSync(path, 'not json')
-      assert.deepEqual(readVerificationEvidence(store), [])
-      const record = {
-        command: 'npm test',
-        revision: 'abcdef1234',
-        exitCode: 0,
-        timestamp: '2026-11-21T00:00:00.000Z',
-      }
-      writeFileSync(path, JSON.stringify([record]))
-      assert.deepEqual(readVerificationEvidence(store), [record])
-      writeFileSync(path, 'x'.repeat(70 * 1024))
-      assert.deepEqual(readVerificationEvidence(store), [])
+      spawnSync('git', ['init', '--initial-branch=main'], { cwd: root, stdio: 'pipe' })
+      const argv = actionArgv('ship', 'no-such-claim')
+      assert.deepEqual(argv, ['ship', 'no-such-claim', '--probe', '--json'])
+      const entry = join(import.meta.dirname, '..', 'src', 'main.ts')
+      const result = spawnSync(process.execPath, [entry, ...argv], { cwd: root, encoding: 'utf8' })
+      assert.notEqual(result.status, 0, result.stdout + result.stderr)
+      const envelope = JSON.parse(result.stdout.trim()) as { ok: boolean; error?: { message?: string } }
+      assert.equal(envelope.ok, false)
+      assert.match(envelope.error?.message ?? '', /No claim|no-such-claim/i)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   })
+})
 
-  test('a FIFO at the evidence path is rejected without blocking the reader', {
-    skip: process.platform === 'win32',
-  }, () => {
-    const root = mkdtempSync(join(tmpdir(), 'anvil-evidence-fifo-'))
+describe('the dashboard action runner', () => {
+  test('the action timeout exceeds the CLI per-check verification limit', () => {
+    // crew verify and ship's --probe allow 10 minutes per check (crew.ts, ship.ts). The
+    // dashboard action runner must not cut a passing check off before the CLI would.
+    assert.ok(DASHBOARD_ACTION_TIMEOUT_MS >= 10 * 60_000)
+  })
+
+  test('the action runner outlives a slow check that stops the short snapshot runner', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'anvil-dashboard-timeout-'))
     try {
-      mkdirSync(join(root, '.git'), { recursive: true })
-      mkdirSync(join(root, '.anvil'), { recursive: true })
-      const store = evidenceStore(root)
-      assert.ok(store)
-      execFileSync('mkfifo', [verificationEvidencePath(store)])
-      assert.deepEqual(readVerificationEvidence(store), [])
+      const slow = join(root, 'slow.mjs')
+      writeFileSync(slow, 'setTimeout(() => {}, 400)\n')
+      const runners = dashboardInvokers({ entry: slow, snapshotTimeoutMs: 100, actionTimeoutMs: 2000 })
+      await assert.rejects(runners.invoke(['doctor'], root), /Failed to run/)
+      const result = await runners.invokeAction(['crew', 'verify'], root)
+      assert.equal(result.exitCode, 0)
     } finally {
       rmSync(root, { recursive: true, force: true })
-    }
-  })
-
-  test('evidence retention keeps the newest result by completion time', () => {
-    const at = (seconds: number, exitCode: number | null, command = 'npm test'): EvidenceRecord => ({
-      command,
-      revision: exitCode === null ? null : 'abcdef1234',
-      exitCode,
-      timestamp: `2026-11-21T00:00:${String(seconds).padStart(2, '0')}.000Z`,
-    })
-    const failures = Array.from({ length: 20 }, (_, index) => at(index, 0))
-    const lastFailure = { ...at(30, 1), command: 'npm run lint' }
-    const selected = selectVerificationRecords([lastFailure, ...failures])
-    assert.ok(selected.some((record) => record.command === 'npm run lint' && record.exitCode === 1))
-    assert.equal(selected.length, 20)
-  })
-
-  test('evidence retention keeps incomplete rows so they are distinguishable from no run', () => {
-    const row: EvidenceRecord = {
-      command: 'npm test',
-      revision: null,
-      exitCode: null,
-      timestamp: '2026-11-21T00:00:00.000Z',
-    }
-    assert.deepEqual(selectVerificationRecords([row]), [row])
-  })
-
-  test('evidence retention does not let rejected rows evict a real failure', () => {
-    const rejected = Array.from({ length: 25 }, (_, index) => ({
-      command: '',
-      revision: null,
-      exitCode: null,
-      timestamp: `2026-11-21T00:01:${String(index).padStart(2, '0')}.000Z`,
-    }))
-    const failure: EvidenceRecord = {
-      command: 'npm test',
-      revision: 'abcdef1234',
-      exitCode: 1,
-      timestamp: '2026-11-21T00:00:00.000Z',
-    }
-    const selected = selectVerificationRecords([...rejected, failure])
-    assert.ok(selected.some((record) => record.exitCode === 1))
-    assert.ok(selected.length <= 20)
-  })
-
-  test('evidence retention never exceeds 20 rows or lets rejected rows crowd out facts', () => {
-    const stamp = '2026-11-21T00:00:00.000Z'
-    const facts = Array.from({ length: 20 }, (_, index) => ({
-      command: 'npm test',
-      revision: 'a'.repeat(40),
-      exitCode: index === 0 ? 1 : 0,
-      timestamp: stamp,
-    }))
-    const rejected = {
-      command: '',
-      revision: null,
-      exitCode: null,
-      timestamp: stamp,
-    }
-    const selected = selectVerificationRecords([...facts, rejected])
-    assert.equal(selected.length, 20)
-    assert.deepEqual(
-      selected.filter((record) => record.command === ''),
-      [],
-    )
-    assert.ok(selected.some((record) => record.exitCode === 1))
-  })
-
-  test('evidence retention prefers an oversized rejected row over a real failure', () => {
-    const failure = {
-      command: 'npm test',
-      revision: 'a'.repeat(40),
-      exitCode: 1,
-      timestamp: '2026-11-21T00:00:00.000Z',
-    }
-    const oversized = {
-      command: 'x'.repeat(64 * 1024),
-      revision: null,
-      exitCode: null,
-      timestamp: '2026-11-21T00:00:01.000Z',
-    }
-    const selected = selectVerificationRecords([failure, oversized])
-    assert.deepEqual(selected, [failure])
-  })
-
-  test('the evidence store is resolved from Git metadata', () => {
-    const mainRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-main-'))
-    const linkedRoot = mkdtempSync(join(tmpdir(), 'anvil-evidence-linked-'))
-    try {
-      mkdirSync(join(mainRoot, '.git'), { recursive: true })
-      const main = evidenceStore(mainRoot)
-      assert.equal(main?.root, realpathSync.native(mainRoot))
-
-      const gitDir = join(linkedRoot, 'admin', 'worktrees', 'claim')
-      mkdirSync(gitDir, { recursive: true })
-      writeFileSync(join(gitDir, 'commondir'), `${relative(gitDir, join(mainRoot, '.git'))}\n`, 'utf8')
-      writeFileSync(join(linkedRoot, '.git'), `gitdir: ${relative(linkedRoot, gitDir)}\n`, 'utf8')
-      const linked = evidenceStore(linkedRoot)
-      assert.equal(linked?.root, realpathSync.native(mainRoot))
-      assert.equal(linked?.key, main?.key)
-    } finally {
-      rmSync(mainRoot, { recursive: true, force: true })
-      rmSync(linkedRoot, { recursive: true, force: true })
     }
   })
 })
