@@ -27,6 +27,7 @@ import {
   clearStaging,
   type GeneratedArtifact,
   generateAgentsFile,
+  generateInstructionMirrors,
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
@@ -34,6 +35,7 @@ import {
   INTENDED_BEHAVIOR_QUESTION,
   INTENDED_BEHAVIOR_QUESTION_ID,
   inspectStaging,
+  MIRROR_TARGETS,
   readManifest,
   readRepoFile,
   readStaged,
@@ -44,7 +46,7 @@ import {
   writeStaging,
 } from '@anvil/derive'
 import { loadBuiltins, matchPlaybooks } from '@anvil/playbooks'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, emptyProfile, type ProjectProfile } from '@anvil/profile'
 import { excerptKey } from '../src/brief.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -84,6 +86,13 @@ function profileIn(root: string): ProjectProfile {
 
 function matchesFor(profile: ProjectProfile) {
   return matchPlaybooks(profile, loadBuiltins().playbooks)
+}
+
+/** A minimal profile with hand-picked command evidence, for generation-only tests. */
+function profileWithCommands(commands: ProjectProfile['commands']): ProjectProfile {
+  const profile = emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' })
+  profile.commands = commands
+  return profile
 }
 
 // ===========================================================================
@@ -800,6 +809,47 @@ describe('staging lifecycle', () => {
     assert.match(onDisk, /## Commands/, 'and the verified baseline must survive')
   })
 
+  test('two manifest entries that resolve to the same file are refused before any write', () => {
+    // Regression: a checked-in `CLAUDE.md -> AGENTS.md` symlink makes the mirror and the
+    // canonical file the same document. Staging/apply used to pass and report both written,
+    // leaving the mirror stub in AGENTS.md and losing its verification commands.
+    const dir = materialize('node-npm')
+    const canonical = join(dir, 'AGENTS.md')
+    const before = '# Canonical\n\nRun `npm test` to verify.\n'
+    writeFileSync(canonical, before, 'utf8')
+    try {
+      symlinkSync('AGENTS.md', join(dir, 'CLAUDE.md'))
+    } catch {
+      // Windows needs elevated privileges for file symlinks; a hard link aliases the
+      // same inode and exercises the same conflicting-target guard.
+      linkSync(canonical, join(dir, 'CLAUDE.md'))
+    }
+
+    const manifest = writeStaging(
+      dir,
+      { inputHash: 'test', generator: 'test' },
+      new Map([
+        ['AGENTS.md', '# Canonical from anvil\n'],
+        ['CLAUDE.md', '# Mirror stub\n'],
+      ]),
+    )
+    const check = checkApplyPreconditions(dir, manifest, 'test')
+    assert.equal(check.ok, false, 'the apply gate must refuse aliased targets')
+    assert.match(check.reason ?? '', /AGENTS\.md and CLAUDE\.md.*same file/)
+
+    const written: string[] = []
+    assert.throws(
+      () =>
+        applyStaging(dir, manifest, (target, content) => {
+          written.push(target)
+          writeFileSync(target, content, 'utf8')
+        }),
+      /AGENTS\.md and CLAUDE\.md.*same file/,
+    )
+    assert.deepEqual(written, [], 'no file may be written when two names alias one document')
+    assert.equal(readFileSync(canonical, 'utf8'), before, 'the canonical file must survive intact')
+  })
+
   test('apply validates every staged file before writing any of them', () => {
     // A partial apply is worse than no apply: file 1 on disk with file 2 missing leaves
     // the repo in an unreviewable half-state. applyStaging must read all content and
@@ -1074,6 +1124,10 @@ describe('artifact validation', () => {
       ['.opencode/commands/c.md', 'command'],
       ['.agents/skills/s/SKILL.md', 'skill'],
       ['AGENTS.md', 'agents-file'],
+      ['CLAUDE.md', 'mirror'],
+      ['.cursorrules', 'mirror'],
+      ['.cursor/rules/anvil.mdc', 'mirror'],
+      ['.github/copilot-instructions.md', 'mirror'],
     ] as const) {
       const v = validateArtifact(path, '---\nname: s\ndescription: d\n---\n\nbody\n')
       assert.equal(v.kind, kind, path)
@@ -1102,6 +1156,132 @@ describe('generated artifacts are valid', () => {
       assert.ok(summary.ok, `${fixture}: ${summary.errors.map((e) => `${e.path} ${e.message}`).join('; ')}`)
     })
   }
+})
+
+describe('opt-in instruction mirrors', () => {
+  test('generates one thin mirror per tool, all naming AGENTS.md as the source of truth', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const options = { profile, matches: matchesFor(profile) }
+    const mirrors = generateInstructionMirrors(options)
+    assert.deepEqual(
+      mirrors.map((m) => m.path),
+      ['CLAUDE.md', '.cursor/rules/anvil.mdc', '.github/copilot-instructions.md'],
+    )
+    assert.deepEqual(MIRROR_TARGETS, ['claude', 'cursor', 'copilot'])
+    for (const mirror of mirrors) {
+      assert.match(mirror.content, /AGENTS\.md/)
+      assert.match(mirror.content, /source of truth/)
+      assert.equal(validateArtifact(mirror.path, mirror.content).ok, true, mirror.path)
+    }
+  })
+
+  test('mirrors never copy a command string or a working directory', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const options = { profile, matches: matchesFor(profile) }
+    const agents = generateAgentsFile(options).content
+    const commandRows = agents
+      .split('\n')
+      .filter((l) => l.startsWith('- **'))
+      .map((l) => l.trim())
+    assert.ok(commandRows.length > 0, 'fixture must have command rows to protect against')
+    for (const mirror of generateInstructionMirrors(options)) {
+      for (const row of commandRows) {
+        assert.equal(mirror.content.includes(row), false, `${mirror.path} copied a command row: ${row}`)
+      }
+      assert.equal(mirror.content.includes('cd '), false, `${mirror.path} copied a directory-sensitive command`)
+      assert.match(mirror.content, /Read `AGENTS\.md` for each exact command/)
+    }
+  })
+
+  test('mirrors name only the verify kinds the same command set produced', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const mirrors = generateInstructionMirrors({ profile, matches: matchesFor(profile) })
+    for (const mirror of mirrors) {
+      assert.match(mirror.content, /test/)
+      assert.equal(mirror.content.includes('npm run test'), false)
+    }
+    // A docs-only repo has no verify kinds, so the mirror says so instead of inventing one.
+    const empty = emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' })
+    const emptyMirrors = generateInstructionMirrors({ profile: empty, matches: [] }, ['claude'])
+    assert.match(emptyMirrors[0]?.content ?? '', /No verify commands were detected/)
+  })
+
+  test('a subset of tools can be requested', () => {
+    const dir = materialize('node-npm')
+    const profile = profileIn(dir)
+    const mirrors = generateInstructionMirrors({ profile, matches: matchesFor(profile) }, ['copilot'])
+    assert.deepEqual(
+      mirrors.map((m) => m.path),
+      ['.github/copilot-instructions.md'],
+    )
+  })
+
+  test('a mirror without a pointer to AGENTS.md warns instead of passing silently', () => {
+    const v = validateArtifact('CLAUDE.md', 'Do whatever the README says.\n')
+    assert.equal(v.ok, true)
+    assert.ok(v.warnings.some((w) => w.includes('AGENTS.md')))
+  })
+
+  test('a mirror with only frontmatter is an error, not a silent pass', () => {
+    // The frontmatter description mentions AGENTS.md, but the file has no instructions at
+    // all. Checking the whole string let this through the apply gate.
+    const frontmatterOnly =
+      '---\ndescription: Repository verify commands generated by anvil init; AGENTS.md is the source of truth.\nglobs: ["**/*"]\nalwaysApply: true\n---\n'
+    const v = validateArtifact('.cursor/rules/anvil.mdc', frontmatterOnly)
+    assert.equal(v.ok, false)
+    assert.ok(v.errors.some((e) => /body/i.test(e)))
+  })
+
+  test('a nonempty frontmatter body without the pointer still warns', () => {
+    const v = validateArtifact(
+      '.cursor/rules/anvil.mdc',
+      '---\ndescription: verify\nalwaysApply: true\n---\n\nDo the work.\n',
+    )
+    assert.equal(v.ok, true)
+    assert.ok(v.warnings.some((w) => w.includes('AGENTS.md')))
+  })
+
+  test('a changed-files-only project is not told no verify commands exist', () => {
+    const profile = profileWithCommands({
+      testFast: [{ cmd: 'make test-changed', source: 'documented', evidence: 'Makefile:2' }],
+    })
+    const mirrors = generateInstructionMirrors({ profile, matches: [] }, ['claude'])
+    const content = mirrors[0]?.content ?? ''
+    assert.doesNotMatch(content, /No verify commands were detected/)
+    assert.match(content, /test \(changed files only\)/)
+  })
+
+  test('AGENTS.md never cites a mirror that init will replace as command evidence', () => {
+    const documentedOnly = profileWithCommands({
+      test: [{ cmd: 'npm run test:unit', source: 'documented', evidence: 'CLAUDE.md:3' }],
+    })
+    const options = { profile: documentedOnly, matches: [], replacedEvidencePaths: ['CLAUDE.md'] }
+    const agents = generateAgentsFile(options).content
+    assert.match(agents, /`npm run test:unit`/, 'the command itself must survive')
+    assert.doesNotMatch(agents, /CLAUDE\.md:\d+/, 'a replaced stub must not be cited as evidence')
+
+    // A surviving source for the same command is preferred over dropping the citation.
+    const withSurvivor = profileWithCommands({
+      test: [
+        { cmd: 'npm run test:unit', source: 'documented', evidence: 'CLAUDE.md:3' },
+        { cmd: 'npm run test:unit', source: 'documented', evidence: 'README.md:9' },
+      ],
+    })
+    const surviving = generateAgentsFile({
+      profile: withSurvivor,
+      matches: [],
+      replacedEvidencePaths: ['CLAUDE.md'],
+    }).content
+    assert.match(surviving, /README\.md:9/)
+    assert.doesNotMatch(surviving, /CLAUDE\.md:\d+/)
+
+    // Without mirrors the original citation is still valid, so it must be untouched.
+    const untouched = generateAgentsFile({ profile: documentedOnly, matches: [] }).content
+    assert.match(untouched, /CLAUDE\.md:3/)
+  })
 })
 
 describe('generated AGENTS.md contains only verifiable claims', () => {

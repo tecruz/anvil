@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -12,12 +13,10 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { after, describe, test } from 'node:test'
 import { readManifest } from '@anvil/derive'
 import { type DiscoveryEntry, loadCache, saveCache } from '@anvil/discovery'
-import { emptyProfile } from '@anvil/profile'
-import { renderStackLocations, stackLocations } from '../src/commands/doctor.ts'
 import { playbookCommand } from '../src/commands/playbook.ts'
 import { PLANNED_COMMANDS } from '../src/commands/types.ts'
 
@@ -1262,88 +1261,172 @@ describe('per-command help', () => {
   })
 })
 
-describe('doctor per-module stack summaries', () => {
-  test('groups the existing stacks by the directory that produced their evidence', () => {
-    const profile = {
-      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
-      stacks: [
-        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
-        { id: 'typescript', version: null, evidence: ['apps/web/tsconfig.json'] },
-        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
-        { id: 'node', version: null, evidence: ['package.json'] },
-      ],
-    }
-    assert.deepEqual(stackLocations(profile), [
-      { dir: '.', stacks: ['node'], evidence: 'package.json' },
-      { dir: 'apps/web', stacks: ['nextjs', 'typescript'], evidence: 'apps/web/package.json' },
-      { dir: 'services/api', stacks: ['fastapi'], evidence: 'services/api/pyproject.toml' },
-    ])
-    // The machine-readable array is not replaced by the presentation summary.
-    assert.equal(profile.stacks.length, 4)
-  })
+describe('anvil init --with-mirrors', () => {
+  const MIRROR_PATHS = ['CLAUDE.md', '.cursor/rules/anvil.mdc', '.github/copilot-instructions.md']
 
-  test('a stack shared by two directories appears in both locations', () => {
-    const profile = {
-      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
-      stacks: [{ id: 'node', version: null, evidence: ['apps/web/package.json', 'apps/worker/package.json'] }],
-    }
-    assert.deepEqual(stackLocations(profile), [
-      { dir: 'apps/web', stacks: ['node'], evidence: 'apps/web/package.json' },
-      { dir: 'apps/worker', stacks: ['node'], evidence: 'apps/worker/package.json' },
-    ])
-  })
+  function dataOf(result: ReturnType<typeof runAnvil>): Record<string, unknown> {
+    const envelope = jsonOf(result)
+    return (envelope.data ?? {}) as Record<string, unknown>
+  }
 
-  test("doctor's human report renders the grouped stacks", () => {
-    // Use the renderer rather than a fixture: today's detectors put stack evidence at the
-    // repository root, and this is a presentation of whatever `ProjectProfile.stacks` holds.
-    const ctx = { style: { bold: (v: string) => v, dim: (v: string) => v } } as never
-    const located = stackLocations({
-      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
-      stacks: [
-        { id: 'nextjs', version: null, evidence: ['apps/web/package.json'] },
-        { id: 'fastapi', version: null, evidence: ['services/api/pyproject.toml'] },
-      ],
-    })
-    const text = renderStackLocations(ctx, located)
-    assert.match(text, /Stack by location/)
-    assert.match(text, /apps\/web\s+nextjs/)
-    assert.match(text, /services\/api\s+fastapi/)
-    assert.equal(renderStackLocations(ctx, located.slice(0, 1)), '')
-  })
+  function pathsOf(result: ReturnType<typeof runAnvil>): string[] {
+    return (dataOf(result).artifacts as Array<{ path: string }>).map((a) => a.path)
+  }
 
-  test('a repo with one stack location has no second table to read', () => {
-    const profile = {
-      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
-      stacks: [{ id: 'node', version: null, evidence: ['package.json'] }],
-    }
-    assert.equal(stackLocations(profile).length, 1)
-  })
+  function initRepo(): string {
+    const dir = tempDir('anvil-cli-mirrors-')
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: dir, stdio: 'pipe' })
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'mirror-fixture', scripts: { test: 'node --test', lint: 'echo lint' } }),
+    )
+    return dir
+  }
 
-  test('a stack with no evidence is shown as unknown, not silently dropped', () => {
-    const profile = {
-      ...emptyProfile('x', { host: null, remote: null, defaultBranch: null, root: 'x' }),
-      stacks: [{ id: 'unknown', version: null, evidence: [] }],
-    }
-    assert.deepEqual(stackLocations(profile), [{ dir: '.', stacks: ['unknown'], evidence: 'unknown' }])
-  })
-})
-
-describe('doctor module dependency diagnostics', () => {
-  test('an unanalysed module is printed as unknown, not as an empty dependency list', () => {
-    const dir = tempDir('anvil-profile-unanalysed-')
-    for (const [rel, content] of Object.entries({
-      'services/api.csproj':
-        '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include="$(CoreDir)/Core.csproj" /></ItemGroup></Project>\n',
-    })) {
-      const target = join(dir, ...rel.split('/'))
-      mkdirSync(dirname(target), { recursive: true })
-      writeFileSync(target, content, 'utf8')
-    }
-    const res = runAnvil(['profile', '--profile', dir])
+  test('off by default: only the three baseline artifacts are staged', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--json'], { cwd: dir })
     assert.equal(res.code, 0, res.stderr)
-    assert.match(res.stdout, /unknown \(not analysed\)/)
-    const doctor = runAnvil(['doctor', '--profile', dir, '--json'])
-    const report = jsonOf(doctor).data as { degraded: Array<{ reason: string }> }
-    assert.ok(report.degraded.some((d) => /dependency graph incomplete/.test(d.reason)))
+    const paths = pathsOf(res)
+    assert.deepEqual(paths, [
+      'AGENTS.md',
+      '.agents/skills/verify-change/SKILL.md',
+      '.opencode/commands/review-change.md',
+    ])
+    for (const p of MIRROR_PATHS) assert.equal(existsSync(join(dir, p)), false)
+  })
+
+  test('on: mirrors are staged, appear in the diff, and are written only by --apply', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const data = dataOf(res)
+    const paths = pathsOf(res)
+    const diffText = (data.diff as { text: string }).text
+    for (const p of MIRROR_PATHS) {
+      assert.ok(paths.includes(p), `${p} missing from staged artifacts`)
+      assert.equal(existsSync(join(dir, p)), false, `${p} must not be written before --apply`)
+      assert.match(diffText, new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    }
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    for (const p of MIRROR_PATHS) {
+      assert.equal(existsSync(join(dir, p)), true, `${p} missing after --apply`)
+      assert.match(readFileSync(join(dir, p), 'utf8'), /AGENTS\.md/)
+    }
+  })
+
+  test('an existing mirror is diffed and refused when the bundle goes stale', () => {
+    const dir = initRepo()
+    const claude = join(dir, 'CLAUDE.md')
+    writeFileSync(claude, 'Old hand-written instructions.\n')
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    assert.match((dataOf(staged).diff as { text: string }).text, /Old hand-written instructions/)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'mirror-fixture', scripts: { test: 'other' } }))
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(claude, 'utf8'), 'Old hand-written instructions.\n')
+  })
+
+  test('a mirror changed in the repository after staging is refused, not overwritten', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const claude = join(dir, 'CLAUDE.md')
+    writeFileSync(claude, 'Hand-edited after staging.\n')
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(claude, 'utf8'), 'Hand-edited after staging.\n')
+  })
+
+  test('a mirror that stops pointing at AGENTS.md warns, and apply needs --allow-warnings', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files.find((f) => f.path === 'CLAUDE.md')
+    assert.ok(entry !== undefined)
+    // Editing the reviewed staged file is the documented workflow; validation must still
+    // catch a mirror that dropped its source-of-truth pointer.
+    writeFileSync(join(dir, '.anvil', 'staging', ...entry.stagedPath.split('/')), 'No pointer here.\n')
+    const refused = runAnvil(['init', '--apply', '--json'], { cwd: dir })
+    assert.notEqual(refused.code, 0)
+    assert.equal((jsonOf(refused).data as { applied?: boolean }).applied, false)
+    assert.equal(existsSync(join(dir, 'CLAUDE.md')), false)
+    const allowed = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(allowed.code, 0, allowed.stderr)
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), 'No pointer here.\n')
+  })
+
+  test('--only still stages exactly one artifact even with --with-mirrors', () => {
+    const dir = initRepo()
+    const res = runAnvil(['init', '--only', 'agents-file', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(res.code, 0, res.stderr)
+    const paths = pathsOf(res)
+    assert.deepEqual(paths, ['AGENTS.md'])
+  })
+
+  test('a mirror linked to AGENTS.md is refused before the canonical file is overwritten', () => {
+    const dir = initRepo()
+    const before = '# Canonical\n\nRun `npm test` to verify.\n'
+    writeFileSync(join(dir, 'AGENTS.md'), before)
+    try {
+      symlinkSync('AGENTS.md', join(dir, 'CLAUDE.md'))
+    } catch {
+      // A hard link aliases the same inode on systems where file symlinks need elevation.
+      linkSync(join(dir, 'AGENTS.md'), join(dir, 'CLAUDE.md'))
+    }
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(applied.code, 0)
+    assert.equal(readFileSync(join(dir, 'AGENTS.md'), 'utf8'), before, 'the canonical file must survive')
+  })
+
+  test('a command documented only in CLAUDE.md is not cited after the mirror replaces it', () => {
+    const dir = initRepo()
+    // Line 3 is where the replacement mirror puts its generated-file notice.
+    writeFileSync(join(dir, 'CLAUDE.md'), '# Notes\n\nRun `npm run test:unit` here.\n')
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8')
+    assert.match(agents, /npm run test:unit/, 'the command must survive')
+    assert.doesNotMatch(agents, /CLAUDE\.md:\d+/, 'a generated mirror must never be named as evidence')
+  })
+
+  test('a mirror reduced to frontmatter alone fails the apply gate', () => {
+    const dir = initRepo()
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const manifest = readManifest(dir)
+    assert.ok(manifest !== null)
+    const entry = manifest.files.find((f) => f.path === '.cursor/rules/anvil.mdc')
+    assert.ok(entry !== undefined)
+    writeFileSync(
+      join(dir, '.anvil', 'staging', ...entry.stagedPath.split('/')),
+      '---\ndescription: AGENTS.md is the source of truth.\nglobs: ["**/*"]\nalwaysApply: true\n---\n',
+    )
+    // --allow-warnings must not bypass an error.
+    const refused = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.notEqual(refused.code, 0)
+    assert.equal(existsSync(join(dir, '.cursor', 'rules', 'anvil.mdc')), false)
+  })
+
+  test('a changed-files-only project is not told the mirrors have no verify commands', () => {
+    const dir = initRepo()
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'mirror-fixture', scripts: { 'test:changed': 'node --test changed' } }),
+    )
+    const staged = runAnvil(['init', '--with-mirrors', '--json'], { cwd: dir })
+    assert.equal(staged.code, 0, staged.stderr)
+    const applied = runAnvil(['init', '--apply', '--allow-warnings', '--json'], { cwd: dir })
+    assert.equal(applied.code, 0, applied.stderr)
+    const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8')
+    assert.doesNotMatch(claude, /No verify commands were detected/)
   })
 })

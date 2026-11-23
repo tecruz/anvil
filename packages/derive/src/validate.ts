@@ -23,7 +23,7 @@
 
 import { estimateTokens, FAIL_INSTRUCTION_BYTES, formatBytes } from '@anvil/audit'
 
-export type ArtifactKind = 'agent' | 'command' | 'skill' | 'agents-file'
+export type ArtifactKind = 'agent' | 'command' | 'skill' | 'agents-file' | 'mirror'
 
 export const SKILL_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/
 export const SKILL_DESCRIPTION_MAX = 1024
@@ -131,6 +131,11 @@ export function classifyArtifact(path: string): ArtifactKind | null {
   if (/(^|\/)\.claude\/skills\/[^/]+\/SKILL\.md$/.test(p)) return 'skill'
   if (/^\.opencode\/skills\/[^/]+\/SKILL\.md$/.test(p)) return 'skill'
   if (/(^|\/)AGENTS\.md$/.test(p)) return 'agents-file'
+  // Opt-in thin mirrors generated alongside AGENTS.md by `anvil init --with-mirrors`.
+  if (/^CLAUDE\.md$/.test(p)) return 'mirror'
+  if (/^\.cursorrules$/.test(p)) return 'mirror'
+  if (/^\.cursor\/rules\/[^/]+\.mdc$/.test(p)) return 'mirror'
+  if (/^\.github\/copilot-instructions\.md$/.test(p)) return 'mirror'
   return null
 }
 
@@ -148,6 +153,7 @@ export function validateArtifact(path: string, content: string): ArtifactValidat
   }
 
   if (kind === 'agents-file') return validateAgentsFile(path, content)
+  if (kind === 'mirror') return validateMirror(path, content)
   if (kind === 'agent') return validateAgent(path, content)
   if (kind === 'command') return validateCommand(path, content)
   return validateSkill(path, content)
@@ -183,6 +189,28 @@ function validateAgentsFile(path: string, content: string): ArtifactValidation {
     warnings.push('Contains @file references but does not instruct the agent to read them, so they will not be loaded.')
   }
   return result(path, 'agents-file', errors, warnings)
+}
+
+/**
+ * A mirror must carry an instructions body and must point at the source of truth.
+ *
+ * The Cursor mirror has frontmatter, and its `description` mentions `AGENTS.md`. Reading
+ * the whole file let a mirror reduced to frontmatter alone pass: the description supplied
+ * both the "nonempty" verdict and the pointer, while the tool loaded no instructions at
+ * all. Frontmatter and body are therefore checked separately.
+ */
+function validateMirror(path: string, content: string): ArtifactValidation {
+  const errors: string[] = []
+  const warnings: string[] = []
+  const { body } = parseFrontmatter(content)
+
+  if (body.trim() === '') {
+    errors.push(`${path} has no instructions body; frontmatter alone is not a mirror`)
+  }
+  if (!/AGENTS\.md/.test(body)) {
+    warnings.push('Mirror body does not point at AGENTS.md, so it can drift from the baseline')
+  }
+  return result(path, 'mirror', errors, warnings)
 }
 
 /**

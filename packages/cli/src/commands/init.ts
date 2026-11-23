@@ -25,11 +25,14 @@ import {
   type FileDiff,
   type GeneratedArtifact,
   generateAgentsFile,
+  generateInstructionMirrors,
   generateReviewCommand,
   generateVerifySkill,
   generationInputs,
   hashInputs,
   inspectStaging,
+  MIRROR_PATHS,
+  MIRROR_TARGETS,
   readManifest,
   readRepoFile,
   readStaged,
@@ -262,7 +265,7 @@ function renderBrief(ctx: CommandContext, brief: Brief): string {
 export const initCommand: Command = {
   name: 'init',
   summary: 'Derive AGENTS.md, skills and commands from detected facts.',
-  usage: 'anvil init [--apply] [--profile <dir>] [--only <artifact>] [--json]',
+  usage: 'anvil init [--apply] [--profile <dir>] [--only <artifact>] [--with-mirrors] [--json]',
   details: [
     'Without --apply, nothing is written to the repository: artifacts are built into',
     '.anvil/staging/ and a unified diff is printed.',
@@ -276,6 +279,10 @@ export const initCommand: Command = {
     'changed in the meantime is detected instead of silently overwritten.',
     '',
     '--only agents-file|verify-skill|review-command',
+    '',
+    '--with-mirrors additionally stages thin CLAUDE.md, Cursor-rule and Copilot-instructions',
+    'mirrors of the same verify commands. Off by default; AGENTS.md remains the source of',
+    'truth. Existing targets go through the same diff and stale-bundle checks.',
   ].join('\n'),
   flags: {
     json: { type: 'boolean', short: 'j' },
@@ -283,6 +290,7 @@ export const initCommand: Command = {
     profile: { type: 'string' },
     only: { type: 'string' },
     apply: { type: 'boolean' },
+    'with-mirrors': { type: 'boolean' },
     'allow-warnings': { type: 'boolean' },
   },
 
@@ -292,6 +300,7 @@ export const initCommand: Command = {
     const loaded = await loadAll(ctx, dir)
     const { root, profile, matches, playbooks, declared } = loaded
 
+    const withMirrors = args.values['with-mirrors'] === true
     const only = (args.values.only as string | undefined) ?? null
     if (only !== null && !['agents-file', 'verify-skill', 'review-command'].includes(only)) {
       throw new AnvilError(ErrorCode.Usage, `Unknown --only artifact: ${only}`, {
@@ -310,7 +319,7 @@ export const initCommand: Command = {
       return applyFlow(ctx, root, currentHash, args.values.json === true, args.values['allow-warnings'] === true)
 
     // ---- build and stage ----
-    const artifacts = buildArtifacts(profile, matches, declared, only)
+    const artifacts = buildArtifacts(profile, matches, declared, only, withMirrors)
     if (artifacts.length === 0) {
       throw new AnvilError(ErrorCode.Usage, 'Nothing to generate for this repository', {
         hint: 'A root AGENTS.md is always generated. The others need a test or lint command; check `anvil profile`.',
@@ -372,18 +381,30 @@ function buildArtifacts(
   matches: readonly MatchResult[],
   declared: ProjectConfig | undefined,
   only: string | null,
+  withMirrors: boolean,
 ): GeneratedArtifact[] {
   const options = declared === undefined ? { profile, matches } : { profile, matches, declared }
+  // A command documented only in a file this bundle replaces must not cite the generated
+  // stub as its evidence. Only opt-in mirror runs overwrite those paths; the default
+  // three-file bundle keeps every original citation.
+  const generationOptions =
+    withMirrors && only === null
+      ? { ...options, replacedEvidencePaths: MIRROR_TARGETS.map((target) => MIRROR_PATHS[target]) }
+      : options
   const out: GeneratedArtifact[] = []
-  if (only === null || only === 'agents-file') out.push(generateAgentsFile(options))
+  if (only === null || only === 'agents-file') out.push(generateAgentsFile(generationOptions))
   if (only === null || only === 'verify-skill') {
-    const skill = generateVerifySkill(options)
+    const skill = generateVerifySkill(generationOptions)
     if (skill !== null) out.push(skill)
   }
   if (only === null || only === 'review-command') {
-    const cmd = generateReviewCommand(options)
+    const cmd = generateReviewCommand(generationOptions)
     if (cmd !== null) out.push(cmd)
   }
+  // Mirrors are opt-in and never produced by --only: they are a separate bundle choice,
+  // not an artifact kind. They use the same options object, so the commands in them are
+  // exactly the ones the root AGENTS.md got.
+  if (withMirrors && only === null) out.push(...generateInstructionMirrors(options, MIRROR_TARGETS))
   return out
 }
 
