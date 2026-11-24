@@ -241,6 +241,34 @@ describe('buildTaskBrief', () => {
     }
   })
 
+  test('a clause-local waiver does not suppress an explicit gate in another clause', () => {
+    const text = 'No approval is required to audit, but implementation requires approval.'
+    const brief = buildTaskBrief(makeSnapshot(), { text })
+    assert.equal(brief.gates.length, 1, text)
+    assert.equal(brief.gates[0]?.kind, 'approval')
+    assert.match(brief.gates[0]?.evidence ?? '', /implementation requires approval/)
+
+    const waiverNote = brief.unknowns.find((note) => /says approval is not required/.test(note))
+    assert.ok(waiverNote, 'the waiver is still quoted as a note')
+    assert.match(waiverNote ?? '', /No approval is required to audit/)
+    assert.doesNotMatch(
+      waiverNote ?? '',
+      /implementation requires approval/,
+      'the waiver must not label the whole sentence',
+    )
+  })
+
+  test('a pure waiver and a single explicit gate keep their existing readings', () => {
+    const waived = buildTaskBrief(makeSnapshot(), { text: 'No approval is required for the audit.' })
+    assert.deepEqual(waived.gates, [])
+    assert.match(waived.unknowns.join('\n'), /says approval is not required/)
+
+    const gated = buildTaskBrief(makeSnapshot(), { text: 'Implementation requires approval before merge.' })
+    assert.equal(gated.gates.length, 1)
+    assert.equal(gated.gates[0]?.waitFor, 'merge')
+    assert.match(gated.gates[0]?.evidence ?? '', /requires approval before merge/)
+  })
+
   test('uncertain approval wording is shown without assigning a gate', () => {
     for (const text of [
       'Approval might be needed before implementation.',

@@ -748,7 +748,10 @@ function readApproval(text: string): ApprovalReading {
     if (sentence.length > 300 || !APPROVAL_MENTION.test(sentence)) continue
 
     // Classify each clause independently; a waiver of one step doesn't waive another.
-    for (const part of sentence.split(';')) {
+    // `; ` and `, but` are both clause boundaries in prose. Without the second one,
+    // "No approval is required to audit, but implementation requires approval." reads as a
+    // pure waiver and the explicit gate in the second clause disappears.
+    for (const part of sentence.split(/;\s*|,\s*but\b/i)) {
       const clause = part.trim()
       if (!APPROVAL_MENTION.test(clause)) continue
       const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)

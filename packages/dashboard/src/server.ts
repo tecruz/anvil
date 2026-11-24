@@ -35,11 +35,12 @@ const MAX_BODY_BYTES = 32 * 1024
  *
  * The old `/^application\/json(?:;|$)/i` accepted any garbage after a semicolon, so
  * `application/json;not-a-parameter` reached the route — and, on `/api/action`, the runner.
- * A parameter is `tchar "=" (tchar / quoted-string)` with optional whitespace; anything else
- * (a missing `=`, an empty value, a second media type, `application/jsonp`) is refused with 415.
+ * A parameter is `tchar "=" (tchar / quoted-string)`: optional whitespace is allowed around a
+ * semicolon, but never around `=`. Anything else (a missing `=`, a value with whitespace before
+ * the `=`, an empty value, a second media type, `application/jsonp`) is refused with 415.
  */
 const JSON_CONTENT_TYPE =
-  /^application\/json(?:\s*;\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=\s*(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[^"\\]|\\.)*"))*\s*$/i
+  /^application\/json(?:\s*;\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+=(?:[!#$%&'*+\-.^_`|~0-9A-Za-z]+|"(?:[^"\\]|\\.)*"))*\s*$/i
 const CSP = [
   "default-src 'none'",
   "script-src 'self'",
@@ -280,6 +281,23 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           send(res, 405, 'Method not allowed\n', 'text/plain; charset=utf-8')
           return
         }
+        // Check every header before touching the body. A rejected POST must never parse
+        // attacker-controlled text, and a wrong media type must be answered with 415 rather
+        // than a 400 from a body that happened not to be JSON. The token stays HttpOnly: the
+        // browser proves the session with its cookie, and Origin + JSON content type prove this
+        // came from the dashboard page, not a form or another site.
+        if (cookie === null || !sameToken(cookie, token)) {
+          send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
+          return
+        }
+        if (!originAllowed(req.headers.origin, req.headers.host)) {
+          send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
+          return
+        }
+        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
+          send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
+          return
+        }
         const chunks: Buffer[] = []
         let size = 0
         for await (const chunk of req) {
@@ -298,21 +316,6 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           body = parsed as Record<string, unknown>
         } catch {
           send(res, 400, 'Expected a JSON object\n', 'text/plain; charset=utf-8')
-          return
-        }
-        // The token stays HttpOnly: the browser proves the session with its cookie, and the
-        // Origin + JSON content type prove this came from the dashboard page, not a form or
-        // another site. No token is exposed to page JavaScript.
-        if (cookie === null || !sameToken(cookie, token)) {
-          send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
-          return
-        }
-        if (!originAllowed(req.headers.origin, req.headers.host)) {
-          send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
-          return
-        }
-        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
-          send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
           return
         }
         const parsedAction = parseAction(body.action, body.ref)

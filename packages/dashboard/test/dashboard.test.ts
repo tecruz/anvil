@@ -404,6 +404,7 @@ describe('the dashboard server', () => {
         'application/json;not-a-parameter',
         'application/json; charset',
         'application/json; =utf-8',
+        'application/json; charset = utf-8',
         'text/plain',
       ]) {
         const res = await authedPost(server, '/api/brief', { text: 'Update README.md' }, contentType)
@@ -759,6 +760,16 @@ describe('the dashboard page', () => {
       this.children = nodes
     }
 
+    querySelectorAll(selector: string): FakeElement[] {
+      const found: FakeElement[] = []
+      const visit = (node: FakeElement): void => {
+        if (selector === 'button' && node.tag === 'button') found.push(node)
+        for (const child of node.children) visit(child)
+      }
+      visit(this)
+      return found
+    }
+
     addEventListener(type: string, callback: () => void): void {
       const list = this.listeners[type] ?? []
       list.push(callback)
@@ -866,6 +877,119 @@ describe('the dashboard page', () => {
     assert.equal(nodes.get('#task-error')?.textContent, '', 'the stale error is no longer on screen')
     assert.equal(nodes.get('#task-submit')?.disabled, false, 'submit works once a snapshot exists')
     assert.deepEqual(fetched, ['/api/snapshot', '/api/brief'])
+  })
+
+  test('a brief from a superseded snapshot is discarded after a refresh', async () => {
+    const nodes = new Map<string, FakeElement>(
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'task-map',
+        'snapshot-error',
+        'refresh-error',
+        'repository',
+        'context',
+        'work',
+        'refresh',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
+    }
+    const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
+    const snapshot = (fetchedAt: string): object => ({
+      schemaVersion: 1,
+      fetchedAt,
+      repository: {
+        doctor: source({}),
+        ready: source({}),
+        plan: source({ suggestions: [{ id: 'fix:A', tier: 'derived', detail: 'Fix A -- because A' }] }),
+        profile: source({ files: [], modules: [] }),
+      },
+      context: { brief: source({}), staged: source({}) },
+      work: { crew: source({ crew: [] }) },
+      verification: {
+        status: 'unavailable',
+        reason: 'unavailable',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
+      notes: [],
+    })
+    const snapshotA = snapshot('A')
+    const snapshotB = snapshot('B')
+    const briefA = { title: 'Brief from A', generatedAt: 'A', map: { nodes: [], edges: [] } }
+
+    type Reply = { ok: boolean; json: () => Promise<unknown> }
+    const deferred = (): { promise: Promise<Reply>; resolve: (reply: Reply) => void } => {
+      let resolve!: (reply: Reply) => void
+      const promise = new Promise<Reply>((done) => {
+        resolve = done
+      })
+      return { promise, resolve }
+    }
+    const delayedSnapshot = deferred()
+    const delayedBrief = deferred()
+    const fetched: string[] = []
+    let snapshotRequests = 0
+    const fetchStub = (url: string): Promise<Reply> => {
+      fetched.push(url)
+      if (url.startsWith('/api/snapshot')) {
+        snapshotRequests += 1
+        if (snapshotRequests === 1) return Promise.resolve({ ok: true, json: async () => snapshotA })
+        return delayedSnapshot.promise
+      }
+      return delayedBrief.promise
+    }
+    const context = createContext({ document, console, fetch: fetchStub })
+    runInContext(JS.replace('load(false);', ''), context)
+    runInContext('__state = state', context)
+    const stateRef = (context as Record<string, unknown>).__state as {
+      brief: unknown
+      snapshot: unknown
+      snapshotGeneration: number
+      loading: boolean
+    }
+
+    await (runInContext('load(false)', context) as Promise<void>)
+    const suggestions = nodes.get('#task-suggestions')
+    assert.ok(suggestions)
+    assert.equal(suggestions.children.length, 1)
+    const suggestionButton = suggestions.children[0]?.children[0]
+    assert.ok(suggestionButton)
+    assert.equal(suggestionButton.disabled, false, 'the suggestion entry point works with a snapshot')
+    assert.equal(nodes.get('#task-submit')?.disabled, false)
+
+    const refreshing = runInContext('load(true)', context) as Promise<void>
+    assert.equal(stateRef.loading, true)
+    assert.equal(nodes.get('#task-submit')?.disabled, true, 'pasted-text build is disabled during a refresh')
+    assert.equal(suggestionButton.disabled, true, 'suggestion build is disabled during a refresh')
+
+    // A build already in flight from the old generation still has to be discarded once the
+    // refresh delivers a newer snapshot before its answer arrives.
+    const building = runInContext('requestBrief({ suggestionId: "fix:A" })', context) as Promise<void>
+    assert.deepEqual(fetched, ['/api/snapshot', '/api/snapshot?refresh=1', '/api/brief'])
+    delayedSnapshot.resolve({ ok: true, json: async () => snapshotB })
+    await refreshing
+    assert.equal(stateRef.snapshotGeneration, 2)
+    assert.equal(stateRef.brief, null, 'the refresh clears the previous brief')
+
+    delayedBrief.resolve({ ok: true, json: async () => briefA })
+    await building
+    assert.equal(stateRef.snapshot, snapshotB)
+    assert.equal(stateRef.brief, null, 'the stale brief must not be applied to snapshot B')
+    assert.equal(nodes.get('#task-brief')?.children.length, 0, 'the stale brief is not rendered')
+    assert.equal(nodes.get('#task-map')?.children.length, 0, 'the stale map is not rendered')
   })
 
   test('the claim input keeps long nested issue URLs instead of truncating them', () => {
@@ -1588,6 +1712,45 @@ describe('dashboard gated actions', () => {
       const valid = await post(server, { action: 'verify' }, { contentType: 'application/json; charset=utf-8' })
       assert.equal(valid.status, 200, await valid.clone().text())
       assert.deepEqual(calls, [['crew', 'verify', '--json']], 'a valid charset parameter reaches the runner')
+    })
+  })
+
+  test('the action route checks headers before the body, so plain text is 415 with no runner call', async () => {
+    await withServer(async (server, _invoke, calls) => {
+      const url = new URL('/api/action', server.url)
+      const rawPost = (contentType: string, body: string): Promise<Response> =>
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            cookie: `${server.cookieName}=${TOKEN}`,
+            origin: url.origin,
+            'content-type': contentType,
+          },
+          body,
+        })
+
+      for (const contentType of [
+        'application/json',
+        'application/json; charset=utf-8',
+        'application/json; charset="utf-8"',
+      ]) {
+        const res = await rawPost(contentType, JSON.stringify({ action: 'verify' }))
+        assert.equal(res.status, 200, `${contentType}: ${await res.clone().text()}`)
+      }
+      assert.equal(calls.length, 3, 'a valid media type reaches the runner')
+
+      const before = calls.length
+      const rejected: Array<[string, string]> = [
+        ['application/json; charset = utf-8', JSON.stringify({ action: 'verify' })],
+        ['application/jsonp', JSON.stringify({ action: 'verify' })],
+        ['application/json;not-a-parameter', JSON.stringify({ action: 'verify' })],
+        ['text/plain', 'this is plain text, not a JSON object'],
+      ]
+      for (const [contentType, body] of rejected) {
+        const res = await rawPost(contentType, body)
+        assert.equal(res.status, 415, `${contentType}: ${await res.clone().text()}`)
+      }
+      assert.equal(calls.length, before, 'a rejected Content-Type must never invoke the runner')
     })
   })
 

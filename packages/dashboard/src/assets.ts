@@ -111,7 +111,7 @@ li { margin: 0.2rem 0; }
 .mapedge { padding: 0.2rem 0; border-top: 1px solid #8884; overflow-wrap: anywhere; }
 `
 
-export const JS = `const state = { view: 'task', snapshot: null, loading: false, brief: null, taskError: null, taskPending: false, mapView: 'map', mapSearch: '', mapSelection: null, actionResult: null, refreshError: null };
+export const JS = `const state = { view: 'task', snapshot: null, snapshotGeneration: 0, loading: false, brief: null, taskError: null, taskPending: false, mapView: 'map', mapSearch: '', mapSelection: null, actionResult: null, refreshError: null };
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -123,11 +123,23 @@ function make(tag, className, text) {
 // A build must not be submitted before there is a snapshot to build from, nor while a
 // snapshot load is pending. Clicking during the first load used to POST with an empty cache,
 // get a 409, and leave the "Reload the page" error on screen after the load succeeded.
-function renderTaskSubmit(root) {
+// Both entry points share this gate: the suggestion buttons used to stay live during Refresh,
+// so a click could pin a brief to a snapshot that was about to be replaced.
+function briefEntriesDisabled() {
+  return state.loading || state.taskPending || !state.snapshot;
+}
+
+function renderBriefEntries(root) {
+  const disabled = briefEntriesDisabled();
   const submit = root.querySelector('#task-submit');
-  if (!submit) return;
-  submit.disabled = state.loading || state.taskPending || !state.snapshot;
-  submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
+  if (submit) {
+    submit.disabled = disabled;
+    submit.textContent = state.taskPending ? 'Building...' : 'Build brief';
+  }
+  const suggestions = root.querySelector('#task-suggestions');
+  if (suggestions && typeof suggestions.querySelectorAll === 'function') {
+    for (const button of suggestions.querySelectorAll('button')) button.disabled = disabled;
+  }
 }
 
 // Exact statuses, not substrings: unavailable contains available, but it is an absence
@@ -671,6 +683,9 @@ function renderSuggestions(parent, snap) {
     const row = make('div', 'suggestion');
     const button = make('button', '', 'Build brief');
     button.dataset.suggestion = suggestion.id || '';
+    // The same gate as the pasted-text submit: no build is possible without a loaded
+    // snapshot, and none may start while a load/refresh is in flight.
+    button.disabled = briefEntriesDisabled();
     const heading = suggestionAction(suggestion) || suggestion.title || suggestion.id || 'this suggestion';
     button.setAttribute('aria-label', 'Build a brief from: ' + heading);
     button.addEventListener('click', function () { requestBrief({ suggestionId: suggestion.id || '' }); });
@@ -689,7 +704,7 @@ function renderSuggestions(parent, snap) {
 }
 
 function renderTask(root, snap) {
-  renderTaskSubmit(root);
+  renderBriefEntries(root);
   if (!snap) return;
   const suggestions = root.querySelector('#task-suggestions');
   if (suggestions) renderSuggestions(suggestions, snap);
@@ -826,8 +841,8 @@ function render() {
   renderRefreshError();
   const snap = state.snapshot;
   const root = document;
-  // Runs before the early return so the button is disabled during the first, still-pending load.
-  renderTaskSubmit(root);
+  // Runs before the early return so both build buttons are disabled during a pending load.
+  renderBriefEntries(root);
   if (!snap) return;
   root.querySelector('#stamp').textContent = 'snapshot ' + snap.fetchedAt;
   const ready = snap.repository.ready;
@@ -847,6 +862,10 @@ function render() {
 
 async function requestBrief(input) {
   if (state.taskPending) return;
+  // A brief is a view over one particular snapshot. Remember which generation it belongs
+  // to: if a refresh delivers a newer snapshot before the answer arrives, the answer is
+  // stale and must not be painted over the new snapshot.
+  const generation = state.snapshotGeneration;
   state.taskPending = true;
   state.taskError = null;
   renderTask(document, state.snapshot);
@@ -858,6 +877,7 @@ async function requestBrief(input) {
       body: JSON.stringify(input),
     });
     const payload = await response.json().catch(function () { return null; });
+    if (generation !== state.snapshotGeneration) return;
     if (!response.ok) throw new Error((payload && payload.error) || 'brief request failed: ' + response.status);
     state.brief = payload;
     state.mapSelection = null;
@@ -866,6 +886,7 @@ async function requestBrief(input) {
     state.taskError = error instanceof Error ? error.message : String(error);
   } finally {
     state.taskPending = false;
+    renderBriefEntries(document);
     renderTask(document, state.snapshot);
   }
 }
@@ -890,7 +911,7 @@ async function load(refresh) {
   if (state.loading) return;
   state.loading = true;
   document.querySelector('#refresh').disabled = true;
-  renderTaskSubmit(document);
+  renderBriefEntries(document);
   try {
     const response = await fetch('/api/snapshot' + (refresh ? '?refresh=1' : ''), { credentials: 'same-origin' });
     if (!response.ok) throw new Error('snapshot request failed: ' + response.status);
@@ -900,6 +921,9 @@ async function load(refresh) {
     if (state.snapshot) {
       state.brief = null;
     }
+    // Supersede any brief still in flight: its response is bound to the previous snapshot and
+    // must be discarded even if it arrives after this one. The counter also tags future builds.
+    state.snapshotGeneration += 1;
     // A snapshot arriving clears any brief error, including a 409 from a build that raced the
     // first load. Leaving it set showed a stale "Reload the page" over a good snapshot.
     state.taskError = null;
@@ -917,7 +941,7 @@ async function load(refresh) {
   } finally {
     state.loading = false;
     document.querySelector('#refresh').disabled = false;
-    renderTaskSubmit(document);
+    renderBriefEntries(document);
   }
 }
 
