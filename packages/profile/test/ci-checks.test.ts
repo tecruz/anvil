@@ -152,6 +152,7 @@ describe('detectCiChecks', () => {
       - run: npm run clean
       - run: npm test&&npm publish
       - run: npm test; npm pack
+      - run: npm test & npm publish
       - run: npm test
 `
     const dir = repo({ '.github/workflows/fixture.yml': workflow })
@@ -207,7 +208,7 @@ describe('detectCiChecks', () => {
   build:
     steps:
       - run: npm test
-        working-directory: packages/web
+        working-directory: packages/web # repository-relative
       - name: lint
         working-directory: packages/core
         run: npm run lint
@@ -247,8 +248,8 @@ describe('detectCiChecks', () => {
     steps:
       - run: |-
           cat <<'EOF'
-          npm run not-executed
-          run: npm run also-not-executed
+          - run: npm run not-executed
+          npm run also-not-executed
           EOF
       - run: npm test
 `

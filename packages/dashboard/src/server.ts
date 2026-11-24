@@ -257,7 +257,10 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', `http://${host}`)
-      if (!hostAllowed(singleHeader(req, 'host'), host, boundPort)) {
+      // Read the request's Host once. Both the DNS-rebinding check and the Origin binding
+      // below must use the same single value, never re-read the raw header.
+      const requestHost = singleHeader(req, 'host')
+      if (!hostAllowed(requestHost, host, boundPort)) {
         send(res, 403, 'Forbidden host\n', 'text/plain; charset=utf-8')
         return
       }
@@ -281,7 +284,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           sendJson(res, 401, { error: 'Unauthorized' })
           return
         }
-        if (!originAllowed(singleHeader(req, 'origin'), singleHeader(req, 'host'))) {
+        if (!originAllowed(singleHeader(req, 'origin'), requestHost)) {
           sendJson(res, 403, { error: 'Forbidden origin' })
           return
         }
@@ -333,7 +336,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!originAllowed(singleHeader(req, 'origin'), singleHeader(req, 'host'))) {
+        if (!originAllowed(singleHeader(req, 'origin'), requestHost)) {
           send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
           return
         }

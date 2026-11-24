@@ -644,7 +644,7 @@ function ciCheckCommand(raw: string): string | null {
   if (cmd === '') return null
   // A compound step can publish or delete while it tests. Refuse the whole step rather than
   // recommending the first half of a command whose side effects the reader did not ask for.
-  if (cmd.includes('<<') || /&&|\|\||[|;]/.test(cmd)) return null
+  if (cmd.includes('<<') || /&&|\|\||[&|;]/.test(cmd)) return null
   if (/\s(?:--version|--help|-v)\b/i.test(cmd) || /\brun\s+clean\b/i.test(cmd) || CI_NON_CHECKS.test(cmd)) {
     return null
   }
@@ -701,6 +701,12 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? ''
+      // Heredoc text must be skipped before any step parsing. A line such as `- run: npm test`
+      // inside `cat <<'EOF'` is shell input, not a workflow step, even while a block is open.
+      if (heredocEnd !== null) {
+        if (line.trim() === heredocEnd) heredocEnd = null
+        continue
+      }
       // Any new step ends the previous one's runner and working directory, including an
       // unnamed `- uses:` or `- id:` step. Without this, a host step after an emulator step
       // would inherit `device` and a later step would inherit the earlier directory.
@@ -710,7 +716,6 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
         withContext = false
         stepDir = undefined
         blockIndent = -1
-        heredocEnd = null
       }
       if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
       // A trailing YAML comment is still the same key. Missing it kept `with` active while an
@@ -718,7 +723,12 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       if (/^\s+with\s*:\s*(?:#.*)?$/.test(line)) withContext = true
       if (/^\s+env\s*:\s*(?:#.*)?$/.test(line)) withContext = false
       const dirMatch = /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line)
-      if (dirMatch !== null) stepDir = (dirMatch[1] as string).replace(/^['"]|['"]$/g, '')
+      if (dirMatch !== null) {
+        stepDir = (dirMatch[1] as string)
+          .replace(/\s+#.*$/, '')
+          .trim()
+          .replace(/^['"]|['"]$/g, '')
+      }
 
       const block = /^\s*(?:-\s*)?run\s*:\s*[|>][-+]?(?:\s|$)/.exec(line)
       if (block !== null) {
@@ -730,10 +740,6 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       }
       if (blockIndent >= 0) {
         if (line.trim() === '') continue
-        if (heredocEnd !== null) {
-          if (line.trim() === heredocEnd) heredocEnd = null
-          continue
-        }
         const here = /<<\s*['"]?([\w-]+)['"]?/.exec(line)
         if (here !== null) {
           heredocEnd = here[1] as string
@@ -808,7 +814,7 @@ function extractCommand(line: string): string | null {
 }
 
 /** Operators that may publish, delete or chain after the command the reader wanted. */
-const COMPOUND_SHELL = /&&|\|\||[|;]/
+const COMPOUND_SHELL = /&&|\|\||[&|;]/
 
 /**
  * The first command of a compound line.
