@@ -344,6 +344,22 @@ describe('buildTaskBrief', () => {
     )
   })
 
+  test('waivers joined without a comma still leave a later explicit gate in place', () => {
+    for (const text of [
+      'No approval is required to audit but implementation requires approval.',
+      'No approval is required to audit, whereas implementation requires approval.',
+      'No approval is required to audit, and implementation requires approval.',
+      'Implementation requires approval; no approval is required to audit.',
+    ]) {
+      const brief = buildTaskBrief(makeSnapshot(), { text })
+      assert.equal(brief.gates.length, 1, text)
+      assert.match(brief.gates[0]?.evidence ?? '', /implementation requires approval/i, text)
+      const waiverNote = brief.unknowns.find((note) => /says approval is not required/.test(note))
+      assert.ok(waiverNote, `the waiver is still quoted as a note: ${text}`)
+      assert.doesNotMatch(waiverNote ?? '', /implementation requires approval/i, text)
+    }
+  })
+
   test('a pure waiver and a single explicit gate keep their existing readings', () => {
     const waived = buildTaskBrief(makeSnapshot(), { text: 'No approval is required for the audit.' })
     assert.deepEqual(waived.gates, [])

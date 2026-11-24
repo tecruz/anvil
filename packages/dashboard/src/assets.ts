@@ -861,6 +861,14 @@ function render() {
   }
 }
 
+/** Bind a brief request to the snapshot the page is actually showing. */
+function briefRequest(input) {
+  const request = Object.assign({}, input);
+  const fetchedAt = state.snapshot && state.snapshot.fetchedAt;
+  if (typeof fetchedAt === 'string') request.snapshotFetchedAt = fetchedAt;
+  return request;
+}
+
 async function requestBrief(input) {
   if (state.taskPending) return;
   // A brief is a view over one particular snapshot. Remember which generation it belongs
@@ -875,7 +883,7 @@ async function requestBrief(input) {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify(briefRequest(input)),
     });
     const payload = await response.json().catch(function () { return null; });
     if (generation !== state.snapshotGeneration) return;
@@ -884,7 +892,12 @@ async function requestBrief(input) {
     state.mapSelection = null;
     state.mapSearch = '';
   } catch (error) {
-    state.taskError = error instanceof Error ? error.message : String(error);
+    // The failure belongs to the snapshot that started this request. A refresh may have
+    // delivered a newer snapshot while the request was in flight; showing the old error over
+    // that snapshot left a stale "Reload the page" message on a page that had recovered.
+    if (generation === state.snapshotGeneration) {
+      state.taskError = error instanceof Error ? error.message : String(error);
+    }
   } finally {
     state.taskPending = false;
     renderBriefEntries(document);

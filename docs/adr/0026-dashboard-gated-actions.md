@@ -29,10 +29,16 @@ Add **exactly three** actions to the 2D Work view: `claim`, `crew verify` and `s
   has no second implementation of those rules.
 - POST requires the session cookie (the token stays HttpOnly and is never served to page
   JavaScript), an `Origin` header matching this dashboard's own Host header, and a JSON content
-  type. The Host check and CSP from ADR-0025 still apply, the action body is bounded at 4 KB,
+  type. Each of those headers is read from the raw request exactly once: a repeated field is
+   ambiguous and is refused rather than resolved to one value. JSON bodies are decoded as strict
+   UTF-8, so an invalid byte is a bad request rather than a replacement character inside a
+   string. The Host check and CSP from ADR-0025 still apply, the action body is bounded at 4 KB,
   and POST is allowed on two routes only: `/api/brief` (read-only — derives a brief from the
   cached snapshot, stores nothing and starts no CLI process) and `/api/action` (the three gated
-  actions). There is still no route that accepts a raw command or path.
+  actions). A brief request carries the `fetchedAt` of the snapshot the page is showing; if
+   another tab has refreshed the shared cache, the old tab gets a 409 instead of a brief built
+   from a snapshot it is not displaying. There is still no route that accepts a raw command or
+   path.
 - Every action requires an explicit browser confirmation. The result, including the CLI's
   own refusal, is printed beside the snapshot and kept across refreshes; a failure is never
   rendered as a green result.

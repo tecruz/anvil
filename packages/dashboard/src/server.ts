@@ -16,6 +16,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createServer, type Server } from 'node:http'
+import { TextDecoder } from 'node:util'
 import { actionArgv, actionResult, parseAction } from './actions.ts'
 import { CSS, HTML, JS } from './assets.ts'
 import {
@@ -115,7 +116,7 @@ function readJsonBody(req: IncomingMessage, limit: number): Promise<BodyRead> {
         return
       }
       try {
-        resolve({ ok: true, value: JSON.parse(Buffer.concat(chunks).toString('utf8')) })
+        resolve({ ok: true, value: parseStrictJson(Buffer.concat(chunks)) })
       } catch {
         resolve({ ok: false, status: 400, message: 'Request body must be a JSON object.' })
       }
@@ -133,7 +134,9 @@ function briefInput(value: unknown): TaskBriefInput {
   }
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
-    if (key !== 'text' && key !== 'suggestionId') throw new TaskInputError(`Unknown field: ${key}`)
+    if (key !== 'text' && key !== 'suggestionId' && key !== 'snapshotFetchedAt') {
+      throw new TaskInputError(`Unknown field: ${key}`)
+    }
   }
   if (record.text !== undefined && typeof record.text !== 'string') {
     throw new TaskInputError('`text` must be a string.')
@@ -141,10 +144,40 @@ function briefInput(value: unknown): TaskBriefInput {
   if (record.suggestionId !== undefined && typeof record.suggestionId !== 'string') {
     throw new TaskInputError('`suggestionId` must be a string.')
   }
+  if (
+    record.snapshotFetchedAt !== undefined &&
+    (typeof record.snapshotFetchedAt !== 'string' || record.snapshotFetchedAt.length > 64)
+  ) {
+    throw new TaskInputError('`snapshotFetchedAt` must be a short string.')
+  }
   const input: TaskBriefInput = {}
   if (record.text !== undefined) input.text = record.text as string
   if (record.suggestionId !== undefined) input.suggestionId = record.suggestionId as string
+  if (record.snapshotFetchedAt !== undefined) input.snapshotFetchedAt = record.snapshotFetchedAt as string
   return input
+}
+
+/**
+ * Read a header exactly once. Two fields with the same name are ambiguous: a proxy or a
+ * forged request could put a valid value first and a different one second, so both POST
+ * routes refuse the request instead of picking one.
+ */
+function singleHeader(req: IncomingMessage, name: string): string | undefined {
+  let value: string | undefined
+  let count = 0
+  const wanted = name.toLowerCase()
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if ((req.rawHeaders[i] ?? '').toLowerCase() !== wanted) continue
+    count++
+    value = req.rawHeaders[i + 1]
+  }
+  return count === 1 ? value : undefined
+}
+
+/** Strict UTF-8: an invalid byte must be a bad request, never a replacement character in JSON. */
+function parseStrictJson(bytes: Buffer): unknown {
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  return JSON.parse(text)
 }
 
 function cookieValue(header: string | undefined, name: string): string | null {
@@ -223,7 +256,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
   const server: Server = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url ?? '/', `http://${host}`)
-      if (!hostAllowed(req.headers.host, host, boundPort)) {
+      if (!hostAllowed(singleHeader(req, 'host'), host, boundPort)) {
         send(res, 403, 'Forbidden host\n', 'text/plain; charset=utf-8')
         return
       }
@@ -233,7 +266,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         return
       }
 
-      const cookie = cookieValue(req.headers.cookie, cookieName)
+      const cookie = cookieValue(singleHeader(req, 'cookie'), cookieName)
 
       if (url.pathname === '/api/brief') {
         if (req.method !== 'POST') {
@@ -247,11 +280,12 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           sendJson(res, 401, { error: 'Unauthorized' })
           return
         }
-        if (!originAllowed(req.headers.origin, req.headers.host)) {
+        if (!originAllowed(singleHeader(req, 'origin'), singleHeader(req, 'host'))) {
           sendJson(res, 403, { error: 'Forbidden origin' })
           return
         }
-        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
+        const contentType = singleHeader(req, 'content-type')
+        if (contentType === undefined || !JSON_CONTENT_TYPE.test(contentType)) {
           sendJson(res, 415, { error: 'Use Content-Type: application/json.' })
           return
         }
@@ -265,6 +299,13 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           const current = cachedSnapshot()
           if (current === null) {
             sendJson(res, 409, { error: 'No snapshot yet. Reload the page, then build the brief.' })
+            return
+          }
+          // The page's snapshot id is part of the request contract. Without it, a tab left on
+          // an older snapshot would accept a brief built from a newer one cached after another
+          // tab refreshed — correct data shown under the wrong snapshot.
+          if (input.snapshotFetchedAt !== undefined && input.snapshotFetchedAt !== current.fetchedAt) {
+            sendJson(res, 409, { error: 'The snapshot changed. Refresh the page before building a brief.' })
             return
           }
           sendJson(res, 200, buildTaskBrief(current, input))
@@ -290,11 +331,12 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
           send(res, 401, 'Unauthorized\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!originAllowed(req.headers.origin, req.headers.host)) {
+        if (!originAllowed(singleHeader(req, 'origin'), singleHeader(req, 'host'))) {
           send(res, 403, 'Forbidden origin\n', 'text/plain; charset=utf-8')
           return
         }
-        if (!JSON_CONTENT_TYPE.test(req.headers['content-type'] ?? '')) {
+        const contentType = singleHeader(req, 'content-type')
+        if (contentType === undefined || !JSON_CONTENT_TYPE.test(contentType)) {
           send(res, 415, 'Expected application/json\n', 'text/plain; charset=utf-8')
           return
         }
@@ -311,7 +353,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
         }
         let body: Record<string, unknown>
         try {
-          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          const parsed: unknown = parseStrictJson(Buffer.concat(chunks))
           if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('bad body')
           body = parsed as Record<string, unknown>
         } catch {

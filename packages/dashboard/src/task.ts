@@ -23,6 +23,12 @@ export interface TaskBriefInput {
   text?: string
   /** A `plan` suggestion id, when the user starts from a repository finding. */
   suggestionId?: string
+  /**
+   * The `fetchedAt` of the snapshot the page is showing. The server refuses a brief whose
+   * cached snapshot has moved on, so a second tab cannot render a brief from a newer
+   * snapshot under an older page. Absent is allowed for callers that have no snapshot id.
+   */
+  snapshotFetchedAt?: string
 }
 
 export interface TaskStartItem {
@@ -688,6 +694,12 @@ export function buildTaskHandoff(
 const APPROVAL_MENTION = /\bapprov\w*\b|\bsign-?off\b/i
 const UNCERTAIN_WORDING = /\b(?:if|whether|unless|may|might|could|maybe|possibly|perhaps|potentially)\b/i
 
+/**
+ * Clause boundaries inside one sentence. A waiver in the first clause must not swallow a
+ * requirement in the second, so every common adversative or conjunctive join is a boundary.
+ */
+const CLAUSE_BOUNDARY = /;\s*|,\s*(?:but|and|whereas|while|though|however)\b|\s+(?:but|whereas|while|though)\b/i
+
 /** One of these must be present before any sentence is treated as a requirement. */
 const GATE_PATTERNS: RegExp[] = [
   /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
@@ -783,11 +795,12 @@ function readApproval(text: string): ApprovalReading {
     const sentence = cleanSentence(raw)
     if (sentence.length > 300 || !APPROVAL_MENTION.test(sentence)) continue
 
-    // Classify each clause independently; a waiver of one step doesn't waive another.
-    // `; ` and `, but` are both clause boundaries in prose. Without the second one,
-    // "No approval is required to audit, but implementation requires approval." reads as a
-    // pure waiver and the explicit gate in the second clause disappears.
-    for (const part of sentence.split(/;\s*|,\s*but\b/i)) {
+    // Classify each clause independently; a waiver of one step doesn't waive another. A
+    // semicolon and every adversative/conjunctive boundary carry a separate clause: "no
+    // approval is required to audit but implementation requires approval" and "...whereas
+    // implementation..." both state a gate after a waiver. Missing a boundary read the whole
+    // sentence as a waiver and erased the explicit requirement.
+    for (const part of sentence.split(CLAUSE_BOUNDARY)) {
       const clause = part.trim()
       if (!APPROVAL_MENTION.test(clause)) continue
       const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)
