@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
-import { detectCiChecks } from '@anvil/profile'
+import { buildProfile, detectCiChecks } from '@anvil/profile'
 
 const temps: string[] = []
 after(() => {
@@ -221,6 +221,52 @@ describe('detectCiChecks', () => {
         ['npm run lint', 'packages/core'],
       ],
     )
+  })
+
+  test('a commented env mapping ends with context on an emulator step', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          script: npm run test:device
+        env: # data only
+          script: npm run not-executed
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => check.cmd),
+      ['npm run test:device'],
+    )
+  })
+
+  test('a heredoc body is skipped, including with a stripped block scalar', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - run: |-
+          cat <<'EOF'
+          npm run not-executed
+          run: npm run also-not-executed
+          EOF
+      - run: npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => check.cmd),
+      ['npm test'],
+    )
+  })
+
+  test('a compound command written in prose is not a documented command', () => {
+    const dir = repo({ 'README.md': 'Run `npm test&&npm publish` to check and release.\n' })
+    const { profile } = buildProfile(dir, { root: dir, host: null, remote: null, defaultBranch: null })
+    const all = Object.values(profile.commands)
+      .flat()
+      .map((entry) => entry?.cmd)
+    assert.ok(!all.some((cmd) => typeof cmd === 'string' && /&&|\|\||[|;]/.test(cmd)))
   })
 
   test('device checks survive the cap even when ordinary checks come first', () => {

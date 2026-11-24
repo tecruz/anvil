@@ -480,7 +480,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
     dir: string,
     scope: TaskCheck['scope'] = 'local',
   ): void => {
-    if (checks.length >= MAX_CHECK_ITEMS || cmd === '') return
+    if (cmd === '') return
     if (seen.has(cmd)) {
       // A device row carries the emulator's own directory and evidence. When a local row
       // declared the same command, replace it rather than keeping the local provenance.
@@ -492,6 +492,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       }
       return
     }
+    if (checks.length >= MAX_CHECK_ITEMS) return
     seen.add(cmd)
     checks.push({
       kind,
@@ -860,7 +861,9 @@ function readApproval(text: string): ApprovalReading {
     }
 
     for (const part of remainder.split(CLAUSE_BOUNDARY)) {
-      const clause = part.trim()
+      // Removing a waiver can leave a leading conjunction. An anchored pattern such as "do
+      // not X without approval" must still be read from the start of its clause.
+      const clause = part.trim().replace(/^(?:and|but|whereas|while|though|however)\s+/i, '')
       if (!APPROVAL_MENTION.test(clause)) continue
       if (uncertain || UNCERTAIN_WORDING.test(clause)) {
         note(`Approval is mentioned but not stated as a requirement: “${clause}”`)

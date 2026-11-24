@@ -679,6 +679,7 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
     let blockIndent = -1
     let blockScope: CiCheck['scope'] = 'ci'
     let blockLines = 0
+    let heredocEnd: string | null = null
     type Pending = { raw: string; scope: CiCheck['scope']; line: number }
     let pending: Pending[] = []
 
@@ -709,22 +710,35 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
         withContext = false
         stepDir = undefined
         blockIndent = -1
+        heredocEnd = null
       }
       if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
-      if (/^\s+with\s*:\s*$/.test(line)) withContext = true
-      if (/^\s+env\s*:\s*$/.test(line)) withContext = false
+      // A trailing YAML comment is still the same key. Missing it kept `with` active while an
+      // `env:` mapping followed, so data under `env.script` was reported as an executed check.
+      if (/^\s+with\s*:\s*(?:#.*)?$/.test(line)) withContext = true
+      if (/^\s+env\s*:\s*(?:#.*)?$/.test(line)) withContext = false
       const dirMatch = /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line)
       if (dirMatch !== null) stepDir = (dirMatch[1] as string).replace(/^['"]|['"]$/g, '')
 
-      const block = /^\s*(?:-\s*)?run\s*:\s*([|>])(?:\s|$)/.exec(line)
+      const block = /^\s*(?:-\s*)?run\s*:\s*[|>][-+]?(?:\s|$)/.exec(line)
       if (block !== null) {
         blockIndent = line.length - line.trimStart().length
         blockScope = emulatorStep ? 'device' : 'ci'
         blockLines = 0
+        heredocEnd = null
         continue
       }
       if (blockIndent >= 0) {
         if (line.trim() === '') continue
+        if (heredocEnd !== null) {
+          if (line.trim() === heredocEnd) heredocEnd = null
+          continue
+        }
+        const here = /<<\s*['"]?([\w-]+)['"]?/.exec(line)
+        if (here !== null) {
+          heredocEnd = here[1] as string
+          continue
+        }
         const indent = line.length - line.trimStart().length
         if (indent > blockIndent) {
           // Stay inside the block until it dedents. A heredoc body can contain lines that look
@@ -783,15 +797,18 @@ function extractCommand(line: string): string | null {
   const inline = /`([^`]{3,140})`/.exec(line)
   if (inline !== null) {
     const candidate = firstCommand((inline[1] as string).trim())
-    if (RUNNABLE_START.test(candidate)) return candidate
+    if (!COMPOUND_SHELL.test(candidate) && RUNNABLE_START.test(candidate)) return candidate
   }
   const plain = /^\s{0,4}(?:\$\s*)?((?:\.{1,2}\/)?[a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
   if (plain !== null) {
     const candidate = firstCommand((plain[1] as string).trim())
-    if (candidate.includes(' ')) return candidate
+    if (!COMPOUND_SHELL.test(candidate) && candidate.includes(' ')) return candidate
   }
   return null
 }
+
+/** Operators that may publish, delete or chain after the command the reader wanted. */
+const COMPOUND_SHELL = /&&|\|\||[|;]/
 
 /**
  * The first command of a compound line.

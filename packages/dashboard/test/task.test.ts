@@ -273,6 +273,31 @@ describe('buildTaskBrief', () => {
     assert.match(brief.unknowns.join('\n'), /TalkBack/)
   })
 
+  test('a device row replaces a local row even when the check list is full', () => {
+    const snapshot = makeSnapshot({
+      commands: [
+        { kind: 'testFast', cmd: 'npm run t1', source: 'declared', evidence: 'anvil.config.json', dir: '' },
+        { kind: 'test', cmd: 'npm run t2', source: 'declared', evidence: 'anvil.config.json', dir: '' },
+        { kind: 'lint', cmd: 'npm run t3', source: 'declared', evidence: 'anvil.config.json', dir: '' },
+        { kind: 'typecheck', cmd: 'npm run t4', source: 'declared', evidence: 'anvil.config.json', dir: '' },
+        { kind: 'build', cmd: 'npm run test', source: 'declared', evidence: 'README.md:5', dir: '' },
+      ],
+      ciChecks: [
+        { cmd: 'npm run d1', scope: 'device', evidence: '.github/workflows/ci.yml:1' },
+        { cmd: 'npm run d2', scope: 'device', evidence: '.github/workflows/ci.yml:2' },
+        { cmd: 'npm run d3', scope: 'device', evidence: '.github/workflows/ci.yml:3' },
+        { cmd: 'npm run test', scope: 'device', evidence: '.github/workflows/ci.yml:4', dir: 'android' },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
+    const row = brief.howToCheck.find((check) => check.cmd === 'npm run test')
+    assert.equal(brief.howToCheck.length, 8)
+    assert.equal(row?.scope, 'device')
+    assert.equal(row?.evidence, '.github/workflows/ci.yml:4')
+    assert.equal(row?.cwd, 'android')
+  })
+
   test('a declared check in a nested directory outranks a stale root README command', () => {
     // Acceptance case: the nested-project fixture. The root README points at a retired
     // command; the owner-declared check lives in packages/sub. The brief must follow the
@@ -384,6 +409,7 @@ describe('buildTaskBrief', () => {
       'Implementation requires approval and no approval is required to audit.',
       'No approval is required to audit and approval is required before implementation.',
       'Implementation requires approval and approval is optional for the audit.',
+      'No approval is required to audit and do not implement without approval.',
       'Implementation requires approval; no approval is required to audit.',
     ]) {
       const brief = buildTaskBrief(makeSnapshot(), { text })
