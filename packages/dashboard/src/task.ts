@@ -480,7 +480,18 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
     dir: string,
     scope: TaskCheck['scope'] = 'local',
   ): void => {
-    if (checks.length >= MAX_CHECK_ITEMS || cmd === '' || seen.has(cmd)) return
+    if (checks.length >= MAX_CHECK_ITEMS || cmd === '') return
+    if (seen.has(cmd)) {
+      // A device row carries the emulator's own directory and evidence. When a local row
+      // declared the same command, replace it rather than keeping the local provenance.
+      if (scope === 'device') {
+        const index = checks.findIndex((check) => check.cmd === cmd)
+        if (index >= 0) {
+          checks[index] = { kind: 'device', cmd, source, evidence, cwd: dir === '' ? '.' : dir, scope: 'device' }
+        }
+      }
+      return
+    }
     seen.add(cmd)
     checks.push({
       kind,
@@ -709,13 +720,6 @@ const UNCERTAIN_WORDING = /\b(?:if|whether|unless|may|might|could|maybe|possibly
  */
 const CLAUSE_BOUNDARY = /;\s*|,\s*(?:but|and|whereas|while|though|however)\b|\s+(?:but|whereas|while|though)\b/i
 
-/**
- * A bare `and` is only a clause boundary when the next clause states approval itself. Splitting
- * every `and` would break noun phrases such as "the audit and proposal are approved".
- */
-const BARE_APPROVAL_AND =
-  /\s+and\s+(?=[^.;]{0,60}?(?:\brequires?\s+(?:approval|sign-?off)\b|\bno\s+(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?(?:required|needed)\b))/i
-
 /** One of these must be present before any sentence is treated as a requirement. */
 const GATE_PATTERNS: RegExp[] = [
   /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
@@ -804,33 +808,69 @@ interface ApprovalReading {
  * notes, and "approval may be needed" becomes a note too. A wrong gate would send someone
  * to wait for permission the ticket says they do not need.
  */
+/**
+ * Pull waiver clauses out of a sentence before looking for requirements. Splitting on every
+ * conjunction is not safe: "the audit and proposal are approved" is one noun phrase. Removing
+ * the waiver instead leaves the requirement intact no matter how the two were joined, and the
+ * removed clause is still returned for the quoted note.
+ */
+function stripWaivers(sentence: string): { text: string; waivers: string[] } {
+  const waivers: string[] = []
+  let text = sentence
+  const joins = /[;,]|\s+(?:but|and|whereas|while|though|however)\s+/gi
+  for (const pattern of NO_APPROVAL_PATTERNS) {
+    const boundary = new RegExp(
+      `[^;]{0,80}?${pattern.source}[^;]{0,120}?(?=$|[;,]|\\s+(?:but|and|whereas|while|though|however)\\s+)`,
+      'gi',
+    )
+    text = text.replace(boundary, (whole) => {
+      // Keep only the text after the last join: a waiver can follow a gate in the same
+      // sentence, and the gate must survive when this clause is removed.
+      let last = -1
+      const scan = new RegExp(joins.source, joins.flags)
+      for (let found = scan.exec(whole); found !== null; found = scan.exec(whole)) {
+        last = found.index + found[0].length
+      }
+      const clean = whole
+        .slice(last === -1 ? 0 : last)
+        .trim()
+        .replace(/^[;,]+|[;,]+$/g, '')
+      if (clean !== '') waivers.push(clean)
+      // Keep the text before the last join, so a gate stated earlier in the sentence survives.
+      return `${last === -1 ? '' : whole.slice(0, last)} `
+    })
+  }
+  return { text, waivers }
+}
+
 function readApproval(text: string): ApprovalReading {
   const gates: TaskGate[] = []
   const notes: string[] = []
+  const note = (value: string): void => {
+    if (notes.length < 3) notes.push(value)
+  }
   for (const raw of sentences(text)) {
     const sentence = cleanSentence(raw)
     if (sentence.length > 300 || !APPROVAL_MENTION.test(sentence)) continue
 
-    // Classify each clause independently; a waiver of one step doesn't waive another. A
-    // semicolon and every adversative/conjunctive boundary carry a separate clause: "no
-    // approval is required to audit but implementation requires approval" and "...whereas
-    // implementation..." both state a gate after a waiver. Missing a boundary read the whole
-    // sentence as a waiver and erased the explicit requirement.
-    for (const part of sentence.split(CLAUSE_BOUNDARY).flatMap((clause) => clause.split(BARE_APPROVAL_AND))) {
+    const uncertain = sentence.endsWith('?')
+    const { text: remainder, waivers } = stripWaivers(sentence)
+    for (const waiver of waivers) {
+      note(`The task says approval is not required: “${waiver}” Confirm with the owner if that is current.`)
+    }
+
+    for (const part of remainder.split(CLAUSE_BOUNDARY)) {
       const clause = part.trim()
       if (!APPROVAL_MENTION.test(clause)) continue
-      const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)
-      if (!uncertain && NO_APPROVAL_PATTERNS.some((pattern) => pattern.test(clause))) {
-        if (notes.length < 3) {
-          notes.push(`The task says approval is not required: “${clause}” Confirm with the owner if that is current.`)
-        }
+      if (uncertain || UNCERTAIN_WORDING.test(clause)) {
+        note(`Approval is mentioned but not stated as a requirement: “${clause}”`)
         continue
       }
 
       const order = START_NOW.exec(clause)?.groups
       const blocked = NOT_WITHOUT.exec(clause)?.groups ?? WAIT_FOR.exec(clause)?.groups
-      if (uncertain || (!order && !blocked && !GATE_PATTERNS.some((pattern) => pattern.test(clause)))) {
-        if (notes.length < 3) notes.push(`Approval is mentioned but not stated as a requirement: “${clause}”`)
+      if (!order && !blocked && !GATE_PATTERNS.some((pattern) => pattern.test(clause))) {
+        note(`Approval is mentioned but not stated as a requirement: “${clause}”`)
         continue
       }
 

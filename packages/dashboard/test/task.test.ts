@@ -258,7 +258,7 @@ describe('buildTaskBrief', () => {
           cmd: './gradlew connectedDebugAndroidTest',
           evidence: '.github/workflows/ci.yml:17',
           scope: 'device',
-          dir: 'app',
+          dir: 'android',
         },
         { cmd: 'npm test', evidence: '.github/workflows/ci.yml:30', scope: 'ci', dir: 'packages/b' },
       ],
@@ -266,7 +266,8 @@ describe('buildTaskBrief', () => {
 
     const brief = buildTaskBrief(snapshot, { text: 'Verify the map accessibility change' })
     assert.equal(brief.howToCheck[0]?.scope, 'device')
-    assert.equal(brief.howToCheck[0]?.cwd, 'app')
+    assert.equal(brief.howToCheck[0]?.cwd, 'android')
+    assert.equal(brief.howToCheck[0]?.evidence, '.github/workflows/ci.yml:17')
     assert.equal(brief.howToCheck[1]?.cmd, 'npm test')
     assert.equal(brief.howToCheck[1]?.cwd, 'packages/b')
     assert.match(brief.unknowns.join('\n'), /TalkBack/)
@@ -381,11 +382,13 @@ describe('buildTaskBrief', () => {
       'No approval is required to audit, and implementation requires approval.',
       'No approval is required to audit and implementation requires approval.',
       'Implementation requires approval and no approval is required to audit.',
+      'No approval is required to audit and approval is required before implementation.',
+      'Implementation requires approval and approval is optional for the audit.',
       'Implementation requires approval; no approval is required to audit.',
     ]) {
       const brief = buildTaskBrief(makeSnapshot(), { text })
       assert.equal(brief.gates.length, 1, text)
-      assert.match(brief.gates[0]?.evidence ?? '', /implementation requires approval/i, text)
+      assert.equal(brief.gates[0]?.kind, 'approval', text)
       const waiverNote = brief.unknowns.find((note) => /says approval is not required/.test(note))
       assert.ok(waiverNote, `the waiver is still quoted as a note: ${text}`)
       assert.doesNotMatch(waiverNote ?? '', /implementation requires approval/i, text)

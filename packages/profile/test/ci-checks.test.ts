@@ -144,6 +144,85 @@ describe('detectCiChecks', () => {
     )
   })
 
+  test('compound steps, version probes and clean scripts are not checks', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - run: node -v
+      - run: npm run clean
+      - run: npm test&&npm publish
+      - run: npm test; npm pack
+      - run: npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => check.cmd),
+      ['npm test'],
+    )
+  })
+
+  test('only with.script on an emulator step is an executed device check', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - uses: reactivecircus/android-emulator-runner@v2
+        env:
+          script: npm run not-executed
+        with:
+          script: ./gradlew on-device
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.scope]),
+      [['./gradlew on-device', 'device']],
+    )
+  })
+
+  test('heredoc text inside a block scalar is not a workflow step', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - run: |
+          cat <<'EOF'
+          one
+          two
+          three
+          four
+          run: npm run not-executed
+          EOF
+      - run: npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => check.cmd),
+      ['npm test'],
+    )
+  })
+
+  test('working-directory written after run still belongs to that step', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - run: npm test
+        working-directory: packages/web
+      - name: lint
+        working-directory: packages/core
+        run: npm run lint
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir ?? null]),
+      [
+        ['npm test', 'packages/web'],
+        ['npm run lint', 'packages/core'],
+      ],
+    )
+  })
+
   test('device checks survive the cap even when ordinary checks come first', () => {
     const steps = Array.from({ length: 12 }, (_, i) => `      - run: npm run check${String(i)}\n`).join('')
     const workflow = `jobs:\n  build:\n    steps:\n${steps}      - name: Device\n        uses: reactivecircus/android-emulator-runner@v2\n        with:\n          script: ./gradlew connectedDebugAndroidTest\n`

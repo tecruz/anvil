@@ -641,7 +641,11 @@ const CI_BLOCK_RUNNER =
 
 function ciCheckCommand(raw: string): string | null {
   let cmd = raw.trim().replace(/^['"]|['"]$/g, '')
-  if (cmd === '' || cmd.includes('<<') || /\s(?:--version|--help)\b/.test(cmd) || CI_NON_CHECKS.test(cmd)) {
+  if (cmd === '') return null
+  // A compound step can publish or delete while it tests. Refuse the whole step rather than
+  // recommending the first half of a command whose side effects the reader did not ask for.
+  if (cmd.includes('<<') || /&&|\|\||[|;]/.test(cmd)) return null
+  if (/\s(?:--version|--help|-v)\b/i.test(cmd) || /\brun\s+clean\b/i.test(cmd) || CI_NON_CHECKS.test(cmd)) {
     return null
   }
   cmd = firstCommand(cmd)
@@ -670,10 +674,29 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
     if (text === null) continue
     const lines = text.split('\n')
     let emulatorStep = false
+    let withContext = false
     let stepDir: string | undefined
     let blockIndent = -1
     let blockScope: CiCheck['scope'] = 'ci'
     let blockLines = 0
+    type Pending = { raw: string; scope: CiCheck['scope']; line: number }
+    let pending: Pending[] = []
+
+    // A step's `working-directory` may be written after its `run:`. Flush at the step boundary
+    // so the directory is known before the command is recorded.
+    const flush = (): void => {
+      for (const item of pending) {
+        const cmd = ciCheckCommand(item.raw)
+        if (cmd === null) continue
+        const key = `${item.scope} ${cmd}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const check: CiCheck = { cmd, evidence: evidence(rel, item.line), scope: item.scope }
+        if (stepDir !== undefined && stepDir !== '') check.dir = stepDir
+        ;(item.scope === 'device' ? device : normal).push(check)
+      }
+      pending = []
+    }
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? ''
@@ -681,24 +704,17 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       // unnamed `- uses:` or `- id:` step. Without this, a host step after an emulator step
       // would inherit `device` and a later step would inherit the earlier directory.
       if (/^\s*-\s+[a-z][\w-]*\s*:/i.test(line)) {
+        flush()
         emulatorStep = false
+        withContext = false
         stepDir = undefined
         blockIndent = -1
       }
       if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
+      if (/^\s+with\s*:\s*$/.test(line)) withContext = true
+      if (/^\s+env\s*:\s*$/.test(line)) withContext = false
       const dirMatch = /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line)
       if (dirMatch !== null) stepDir = (dirMatch[1] as string).replace(/^['"]|['"]$/g, '')
-
-      const add = (raw: string, scope: CiCheck['scope']): void => {
-        const cmd = ciCheckCommand(raw)
-        if (cmd === null) return
-        const key = `${scope} ${cmd}`
-        if (seen.has(key)) return
-        seen.add(key)
-        const check: CiCheck = { cmd, evidence: evidence(rel, i + 1), scope }
-        if (stepDir !== undefined && stepDir !== '') check.dir = stepDir
-        ;(scope === 'device' ? device : normal).push(check)
-      }
 
       const block = /^\s*(?:-\s*)?run\s*:\s*([|>])(?:\s|$)/.exec(line)
       if (block !== null) {
@@ -710,24 +726,32 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       if (blockIndent >= 0) {
         if (line.trim() === '') continue
         const indent = line.length - line.trimStart().length
-        if (indent > blockIndent && blockLines < MAX_BLOCK_LINES) {
-          blockLines++
-          if (CI_BLOCK_RUNNER.test(line.trim())) add(line.trim(), blockScope)
+        if (indent > blockIndent) {
+          // Stay inside the block until it dedents. A heredoc body can contain lines that look
+          // like YAML keys; interpreting those as steps is how `run: npm test` became a check.
+          if (blockLines < MAX_BLOCK_LINES) {
+            blockLines++
+            if (CI_BLOCK_RUNNER.test(line.trim())) pending.push({ raw: line.trim(), scope: blockScope, line: i + 1 })
+          }
           continue
         }
         blockIndent = -1
+        if (!/^\s*-\s+[a-z]/i.test(line)) continue
       }
 
       const run = /^\s*(?:-\s*)?run\s*:\s*(.+?)\s*$/.exec(line)
       if (run !== null) {
-        add(run[1] as string, emulatorStep ? 'device' : 'ci')
+        pending.push({ raw: run[1] as string, scope: emulatorStep ? 'device' : 'ci', line: i + 1 })
         continue
       }
-      // `script:` is the command an emulator runner executes; the same key inside
-      // `with:` or `env:` on a host step is not an executed check.
+      // `script:` is the command an emulator runner executes in `with:`. The same key under
+      // `env:` is data, not an executed check.
       const script = /^\s*script\s*:\s*(.+?)\s*$/.exec(line)
-      if (script !== null && emulatorStep) add(script[1] as string, 'device')
+      if (script !== null && emulatorStep && withContext) {
+        pending.push({ raw: script[1] as string, scope: 'device', line: i + 1 })
+      }
     }
+    flush()
   }
 
   // Device suites take the cap first. A long list of ordinary CI steps must not crowd out
