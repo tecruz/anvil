@@ -200,6 +200,8 @@ export interface CiCheck {
   cmd: string
   /** `file:line` in the workflow that contains the command. */
   evidence: string
+  /** A step's own `working-directory`, when the workflow declares one. */
+  dir?: string
   /**
    * `device` for emulator/attached-device suites, which a JVM-only run cannot replace;
    * `ci` for everything else CI runs. Neither is claimed to have passed.

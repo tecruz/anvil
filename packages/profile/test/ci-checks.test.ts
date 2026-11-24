@@ -58,17 +58,99 @@ describe('detectCiChecks', () => {
     assert.deepEqual(
       checks.map((check) => [check.cmd, check.scope]),
       [
+        ['./gradlew jacocoCombinedReport --no-daemon', 'device'],
         ['./gradlew koverXmlReport koverHtmlReport --no-daemon', 'ci'],
         ['./gradlew spotlessCheck --no-daemon', 'ci'],
-        ['./gradlew jacocoCombinedReport --no-daemon', 'device'],
       ],
     )
-    assert.equal(checks[0]?.evidence, '.github/workflows/ci.yml:8')
-    assert.equal(checks[2]?.evidence, '.github/workflows/ci.yml:19')
+    assert.equal(checks[0]?.evidence, '.github/workflows/ci.yml:19')
+    assert.equal(checks[1]?.evidence, '.github/workflows/ci.yml:8')
   })
 
   test('returns no checks when no workflow ran a command', () => {
     const dir = repo({ '.github/workflows/ci.yml': 'name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n' })
     assert.deepEqual(detectCiChecks(dir, new Set(['.github/workflows/ci.yml'])), [])
+  })
+
+  test('setup, cleanup, release and provenance steps are not checks', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - run: npm test
+      - run: rm -rf eval-results/latest.json
+      - run: npm publish dist/pkg.tgz --provenance
+      - run: sha256sum --check SHA256SUMS
+      - run: git push origin main
+      - run: npm ci
+      - run: node --version
+      - run: |
+          node --input-type=commonjs <<'NODE
+          const fs = require('node:fs');
+          NODE
+          npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => check.cmd),
+      ['npm test'],
+    )
+  })
+
+  test('a block scalar and an inline run step are both read with the step working directory', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - name: Block
+        working-directory: packages/b
+        run: |
+          npm test
+          echo not-a-check
+      - run: npm run lint
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir ?? null]),
+      [
+        ['npm test', 'packages/b'],
+        ['npm run lint', null],
+      ],
+    )
+  })
+
+  test('device scope belongs to the emulator step and does not leak to the next step', () => {
+    const workflow = `jobs:
+  build:
+    steps:
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          script: ./gradlew jacocoCombinedReport
+      - id: host_check
+        run: npm test
+      - name: Test
+        run: npm test
+        env:
+          script: npm run not-a-step
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.scope]),
+      [
+        ['./gradlew jacocoCombinedReport', 'device'],
+        ['npm test', 'ci'],
+      ],
+    )
+  })
+
+  test('device checks survive the cap even when ordinary checks come first', () => {
+    const steps = Array.from({ length: 12 }, (_, i) => `      - run: npm run check${String(i)}\n`).join('')
+    const workflow = `jobs:\n  build:\n    steps:\n${steps}      - name: Device\n        uses: reactivecircus/android-emulator-runner@v2\n        with:\n          script: ./gradlew connectedDebugAndroidTest\n`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.equal(checks.length, 12)
+    assert.equal(checks[0]?.scope, 'device')
+    assert.equal(checks[0]?.cmd, './gradlew connectedDebugAndroidTest')
   })
 })

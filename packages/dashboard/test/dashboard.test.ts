@@ -98,12 +98,13 @@ function authed(server: DashboardServerHandle, path: string): Promise<Response> 
   return fetch(new URL(path, server.url), { headers: { cookie: `${server.cookieName}=${TOKEN}` } })
 }
 
-function authedPost(
+async function authedPost(
   server: DashboardServerHandle,
   path: string,
   body: unknown,
   contentType = 'application/json',
   origin?: string,
+  bindSnapshot = true,
 ): Promise<Response> {
   const url = new URL(path, server.url)
   const headers: Record<string, string> = {
@@ -111,7 +112,14 @@ function authedPost(
     'content-type': contentType,
     origin: origin ?? url.origin,
   }
-  return fetch(url, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) })
+  let payload = typeof body === 'string' ? body : JSON.stringify(body)
+  if (path === '/api/brief' && bindSnapshot && body !== null && typeof body === 'object' && !Array.isArray(body)) {
+    const snapshot = (await snapshotOf(await authed(server, '/api/snapshot'))) as DashboardSnapshot & {
+      snapshotId: string
+    }
+    payload = JSON.stringify({ ...body, snapshotId: snapshot.snapshotId })
+  }
+  return fetch(url, { method: 'POST', headers, body: payload })
 }
 
 function rawGet(
@@ -259,7 +267,14 @@ describe('the dashboard server', () => {
   test('a brief needs an existing snapshot and never starts a CLI load', async () => {
     await withServer(async (server, _invoke, calls) => {
       // The page has not loaded yet: no POST may warm the cache by spawning commands.
-      const cold = await authedPost(server, '/api/brief', { text: 'Update README.md' })
+      const cold = await authedPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md' },
+        'application/json',
+        undefined,
+        false,
+      )
       assert.equal(cold.status, 409)
       assert.match(((await cold.json()) as { error: string }).error, /No snapshot yet/)
       assert.equal(calls.length, 0)
@@ -304,20 +319,58 @@ describe('the dashboard server', () => {
       const first = await snapshotOf(await authed(server, '/api/snapshot'))
       await new Promise((resolve) => setTimeout(resolve, 15))
       const refreshed = await snapshotOf(await authed(server, '/api/snapshot?refresh=1'))
-      assert.notEqual(refreshed.fetchedAt, first.fetchedAt)
+      assert.notEqual(
+        (refreshed as DashboardSnapshot & { snapshotId: string }).snapshotId,
+        (first as DashboardSnapshot & { snapshotId: string }).snapshotId,
+      )
 
-      const stale = await authedPost(server, '/api/brief', {
-        text: 'Update README.md',
-        snapshotFetchedAt: first.fetchedAt,
-      })
+      const stale = await authedPost(
+        server,
+        '/api/brief',
+        {
+          text: 'Update README.md',
+          snapshotId: (first as DashboardSnapshot & { snapshotId: string }).snapshotId,
+        },
+        'application/json',
+        undefined,
+        false,
+      )
       assert.equal(stale.status, 409)
       assert.match(((await stale.json()) as { error: string }).error, /snapshot changed/)
 
-      const fresh = await authedPost(server, '/api/brief', {
-        text: 'Update README.md',
-        snapshotFetchedAt: refreshed.fetchedAt,
-      })
+      const fresh = await authedPost(
+        server,
+        '/api/brief',
+        {
+          text: 'Update README.md',
+          snapshotId: (refreshed as DashboardSnapshot & { snapshotId: string }).snapshotId,
+        },
+        'application/json',
+        undefined,
+        false,
+      )
       assert.equal(fresh.status, 200, await fresh.clone().text())
+
+      // Identity is required. A caller that omits it, or supplies another tab's id, cannot get
+      // a brief from the shared cache.
+      const missing = await authedPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md' },
+        'application/json',
+        undefined,
+        false,
+      )
+      assert.equal(missing.status, 409)
+      const wrong = await authedPost(
+        server,
+        '/api/brief',
+        { text: 'Update README.md', snapshotId: 'stale' },
+        'application/json',
+        undefined,
+        false,
+      )
+      assert.equal(wrong.status, 409)
     })
   })
 
@@ -468,47 +521,35 @@ describe('the dashboard server', () => {
 
   test('the brief route binds Origin to the request Host, not either loopback name', async () => {
     await withServer(async (server, _invoke, calls) => {
-      await snapshotOf(await authed(server, '/api/snapshot'))
+      const snapshot = (await snapshotOf(await authed(server, '/api/snapshot'))) as DashboardSnapshot & {
+        snapshotId: string
+      }
+      const bound = { text: 'Update README.md', snapshotId: snapshot.snapshotId }
       const host = `127.0.0.1:${String(server.port)}`
       const opposite = `localhost:${String(server.port)}`
 
-      const matching = await rawPost(
-        server,
-        '/api/brief',
-        { text: 'Update README.md' },
-        {
-          host,
-          origin: `http://${host}`,
-        },
-      )
+      const matching = await rawPost(server, '/api/brief', bound, {
+        host,
+        origin: `http://${host}`,
+      })
       assert.equal(matching.status, 200, matching.body)
 
       // A POST that arrives on 127.0.0.1 but claims localhost as its origin (and the mirror
       // case) must be refused: both names are individually allowed as Host, but not swapped.
-      const oppositeName = await rawPost(
-        server,
-        '/api/brief',
-        { text: 'Update README.md' },
-        {
-          host,
-          origin: `http://${opposite}`,
-        },
-      )
+      const oppositeName = await rawPost(server, '/api/brief', bound, {
+        host,
+        origin: `http://${opposite}`,
+      })
       assert.equal(oppositeName.status, 403, oppositeName.body)
       assert.match(oppositeName.body, /Forbidden origin/)
 
-      const foreign = await rawPost(
-        server,
-        '/api/brief',
-        { text: 'Update README.md' },
-        {
-          host,
-          origin: 'https://evil.example',
-        },
-      )
+      const foreign = await rawPost(server, '/api/brief', bound, {
+        host,
+        origin: 'https://evil.example',
+      })
       assert.equal(foreign.status, 403, foreign.body)
 
-      const missing = await rawPost(server, '/api/brief', { text: 'Update README.md' }, { host })
+      const missing = await rawPost(server, '/api/brief', bound, { host })
       assert.equal(missing.status, 403, missing.body)
 
       // The brief still reads only the warmed cache; none of these POSTs invoke the CLI.
@@ -1041,9 +1082,10 @@ describe('the dashboard page', () => {
       querySelectorAll: () => [],
     }
     const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
-    const snapshot = (fetchedAt: string): object => ({
+    const snapshot = (snapshotId: string): object => ({
       schemaVersion: 1,
-      fetchedAt,
+      snapshotId,
+      fetchedAt: 'now',
       repository: {
         doctor: source({}),
         ready: source({}),
@@ -1090,7 +1132,7 @@ describe('the dashboard page', () => {
 
     await (runInContext('load(false)', context) as Promise<void>)
     const building = runInContext('requestBrief({ text: "Update README.md" })', context) as Promise<void>
-    assert.deepEqual(briefBodies, [{ text: 'Update README.md', snapshotFetchedAt: 'A' }])
+    assert.deepEqual(briefBodies, [{ text: 'Update README.md', snapshotId: 'A' }])
 
     const refreshing = runInContext('load(true)', context) as Promise<void>
     resolveRefresh({ ok: true, json: async () => snapshot('B') })

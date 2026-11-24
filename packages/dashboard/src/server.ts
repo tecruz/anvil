@@ -134,7 +134,7 @@ function briefInput(value: unknown): TaskBriefInput {
   }
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
-    if (key !== 'text' && key !== 'suggestionId' && key !== 'snapshotFetchedAt') {
+    if (key !== 'text' && key !== 'suggestionId' && key !== 'snapshotId') {
       throw new TaskInputError(`Unknown field: ${key}`)
     }
   }
@@ -144,16 +144,13 @@ function briefInput(value: unknown): TaskBriefInput {
   if (record.suggestionId !== undefined && typeof record.suggestionId !== 'string') {
     throw new TaskInputError('`suggestionId` must be a string.')
   }
-  if (
-    record.snapshotFetchedAt !== undefined &&
-    (typeof record.snapshotFetchedAt !== 'string' || record.snapshotFetchedAt.length > 64)
-  ) {
-    throw new TaskInputError('`snapshotFetchedAt` must be a short string.')
+  if (record.snapshotId !== undefined && (typeof record.snapshotId !== 'string' || record.snapshotId.length > 64)) {
+    throw new TaskInputError('`snapshotId` must be a short string.')
   }
   const input: TaskBriefInput = {}
   if (record.text !== undefined) input.text = record.text as string
   if (record.suggestionId !== undefined) input.suggestionId = record.suggestionId as string
-  if (record.snapshotFetchedAt !== undefined) input.snapshotFetchedAt = record.snapshotFetchedAt as string
+  if (record.snapshotId !== undefined) input.snapshotId = record.snapshotId as string
   return input
 }
 
@@ -227,6 +224,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
   // Port 0 is resolved by the OS. The Host check must use the bound port, not the request.
   let boundPort = port
   let cache: DashboardSnapshot | null = null
+  let cacheId = 0
   let pending: Promise<DashboardSnapshot> | null = null
 
   const snapshot = (refresh: boolean): Promise<DashboardSnapshot> => {
@@ -235,6 +233,9 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
       pending = loadSnapshot(options)
         .then((value) => {
           cache = value
+          // A server-issued generation, not a wall-clock timestamp: two loads in the same
+          // millisecond still get different ids, so a tab can never mistake B's brief for A's.
+          cacheId += 1
           return value
         })
         .finally(() => {
@@ -301,10 +302,11 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
             sendJson(res, 409, { error: 'No snapshot yet. Reload the page, then build the brief.' })
             return
           }
-          // The page's snapshot id is part of the request contract. Without it, a tab left on
-          // an older snapshot would accept a brief built from a newer one cached after another
-          // tab refreshed — correct data shown under the wrong snapshot.
-          if (input.snapshotFetchedAt !== undefined && input.snapshotFetchedAt !== current.fetchedAt) {
+          // The page's generation is required, not optional: without it, a tab left on an older
+          // snapshot would accept a brief built from a newer one cached after another tab
+          // refreshed — correct data shown under the wrong snapshot. A counter, unlike a
+          // timestamp, changes even when two loads happen in the same millisecond.
+          if (input.snapshotId === undefined || input.snapshotId !== String(cacheId)) {
             sendJson(res, 409, { error: 'The snapshot changed. Refresh the page before building a brief.' })
             return
           }
@@ -432,7 +434,7 @@ export async function createDashboardServer(options: DashboardServerOptions): Pr
       }
       if (url.pathname === '/api/snapshot') {
         const value = await snapshot(url.searchParams.get('refresh') === '1')
-        send(res, 200, JSON.stringify(value), 'application/json; charset=utf-8')
+        send(res, 200, JSON.stringify({ ...value, snapshotId: String(cacheId) }), 'application/json; charset=utf-8')
         return
       }
       send(res, 404, 'Not found\n', 'text/plain; charset=utf-8')

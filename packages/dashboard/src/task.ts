@@ -24,11 +24,11 @@ export interface TaskBriefInput {
   /** A `plan` suggestion id, when the user starts from a repository finding. */
   suggestionId?: string
   /**
-   * The `fetchedAt` of the snapshot the page is showing. The server refuses a brief whose
-   * cached snapshot has moved on, so a second tab cannot render a brief from a newer
-   * snapshot under an older page. Absent is allowed for callers that have no snapshot id.
+   * The server-issued generation id of the snapshot the page is showing. Required at the HTTP
+   * boundary: a second tab must not be able to render a brief from a newer cached snapshot
+   * under an older page.
    */
-  snapshotFetchedAt?: string
+  snapshotId?: string
 }
 
 export interface TaskStartItem {
@@ -462,6 +462,15 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
   const projectDir = asString(ready?.projectDir) ?? asString(profile?.projectDir) ?? ''
   const checks: TaskCheck[] = []
   const seen = new Set<string>()
+  // A device command declared locally is still a device command. Keep that provenance so the
+  // brief says it needs an emulator, even though no CI row survives the deduplication below.
+  const deviceCommands = new Set(
+    (profile === null ? [] : asArray(profile.ciChecks))
+      .map(asRecord)
+      .filter((entry) => entry !== null && asString(entry.scope) === 'device')
+      .map((entry) => asString((entry as Record<string, unknown>).cmd))
+      .filter((cmd): cmd is string => cmd !== null),
+  )
 
   const add = (
     kind: string,
@@ -479,7 +488,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       source,
       evidence,
       cwd: dir === '' ? '.' : dir,
-      scope,
+      scope: deviceCommands.has(cmd) ? 'device' : scope,
     })
   }
 
@@ -496,7 +505,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
     for (const entry of entries) {
       const cmd = asString(entry.cmd) ?? ''
       const scope = asString(entry.scope) === 'device' ? 'device' : 'ci'
-      add(scope, cmd, 'ci workflow', asString(entry.evidence), projectDir, scope)
+      add(scope, cmd, 'ci workflow', asString(entry.evidence), asString(entry.dir) ?? projectDir, scope)
     }
   }
 
@@ -700,6 +709,13 @@ const UNCERTAIN_WORDING = /\b(?:if|whether|unless|may|might|could|maybe|possibly
  */
 const CLAUSE_BOUNDARY = /;\s*|,\s*(?:but|and|whereas|while|though|however)\b|\s+(?:but|whereas|while|though)\b/i
 
+/**
+ * A bare `and` is only a clause boundary when the next clause states approval itself. Splitting
+ * every `and` would break noun phrases such as "the audit and proposal are approved".
+ */
+const BARE_APPROVAL_AND =
+  /\s+and\s+(?=[^.;]{0,60}?(?:\brequires?\s+(?:approval|sign-?off)\b|\bno\s+(?:approval|sign-?off)\s+(?:(?:is|are)\s+)?(?:required|needed)\b))/i
+
 /** One of these must be present before any sentence is treated as a requirement. */
 const GATE_PATTERNS: RegExp[] = [
   /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
@@ -800,7 +816,7 @@ function readApproval(text: string): ApprovalReading {
     // approval is required to audit but implementation requires approval" and "...whereas
     // implementation..." both state a gate after a waiver. Missing a boundary read the whole
     // sentence as a waiver and erased the explicit requirement.
-    for (const part of sentence.split(CLAUSE_BOUNDARY)) {
+    for (const part of sentence.split(CLAUSE_BOUNDARY).flatMap((clause) => clause.split(BARE_APPROVAL_AND))) {
       const clause = part.trim()
       if (!APPROVAL_MENTION.test(clause)) continue
       const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)

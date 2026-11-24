@@ -625,20 +625,43 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
 
 const MAX_CI_CHECKS = 12
 const MAX_CI_COMMAND = 160
-
-const CI_SETUP_COMMANDS = /^(?:chmod|sudo|cd|echo|git|mkdir|cp|mv)\s/
+const MAX_BLOCK_LINES = 5
 
 /**
- * Verification commands CI actually runs, read from the workflow's `run:` steps.
+ * Setup, cleanup, release and provenance steps are not checks an agent should be told to run.
+ * A workflow may legitimately contain them; presenting `rm -rf` or `npm publish` as "how to
+ * check" is worse than leaving the check unknown.
+ */
+const CI_NON_CHECKS =
+  /^(?:rm|rmdir|del|erase|chmod|sudo|cd|echo|mkdir|cp|mv|git\s+(?:push|commit|tag|release)|npm\s+(?:ci|install|pack|publish)|pnpm\s+(?:install|pack|publish)|yarn\s+(?:install|publish)|sha256sum|docker\s+push)\b/i
+
+/** Only recognise a familiar test/build runner from a block scalar; other lines are a script. */
+const CI_BLOCK_RUNNER =
+  /^(?:npm|pnpm|yarn|node|nodejs|python3?|pytest|go|cargo|make|gradlew|\.{1,2}\/gradlew|dotnet|mvn|\.{1,2}\/mvnw|jest|vitest|ruff|eslint|tsc)\s/
+
+function ciCheckCommand(raw: string): string | null {
+  let cmd = raw.trim().replace(/^['"]|['"]$/g, '')
+  if (cmd === '' || cmd.includes('<<') || /\s(?:--version|--help)\b/.test(cmd) || CI_NON_CHECKS.test(cmd)) {
+    return null
+  }
+  cmd = firstCommand(cmd)
+  if (cmd.length > MAX_CI_COMMAND) cmd = cmd.slice(0, MAX_CI_COMMAND)
+  return RUNNABLE_START.test(cmd) ? cmd : null
+}
+
+/**
+ * Verification commands CI actually runs, read from workflow steps.
  *
  * A documented README command answers "what do I run locally"; CI can run a different,
  * broader set. Recording both with file:line evidence lets a brief distinguish the fast
  * loop from the coverage, formatting and device suites that gate a merge, without running
  * any of them. This is detection, not verification: a listed command has no pass/fail
- * attached, and a workflow with no `run:` steps yields no checks, never a green claim.
+ * attached, and a workflow with no check steps yields none, never a green claim. Steps whose
+ * shape is not understood (other block scalars, matrix expressions) are skipped, not guessed.
  */
 export function detectCiChecks(root: string, files: ReadonlySet<string>): CiCheck[] {
-  const out: CiCheck[] = []
+  const device: CiCheck[] = []
+  const normal: CiCheck[] = []
   const seen = new Set<string>()
 
   for (const rel of [...files].sort()) {
@@ -647,32 +670,69 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
     if (text === null) continue
     const lines = text.split('\n')
     let emulatorStep = false
+    let stepDir: string | undefined
+    let blockIndent = -1
+    let blockScope: CiCheck['scope'] = 'ci'
+    let blockLines = 0
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i] ?? ''
-      if (/^\s*-\s*name\s*:/.test(line)) emulatorStep = false
-      if (/^\s*uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
-      // `run:` is a shell step; `script:` is the command an emulator runner executes on
-      // the device. Folded block scalars (`run: |`) put commands on following lines,
-      // which are ignored rather than guessed from arbitrary YAML prose.
-      const match = /^\s*(?:run|script)\s*:\s*(.+?)\s*$/.exec(line)
-      if (match === null) continue
-      let cmd = (match[1] as string).trim().replace(/^['"]|['"]$/g, '')
-      if (cmd === '' || cmd === '|' || cmd === '>' || CI_SETUP_COMMANDS.test(cmd)) continue
-      cmd = firstCommand(cmd)
-      if (cmd.length > MAX_CI_COMMAND) cmd = cmd.slice(0, MAX_CI_COMMAND)
-      if (!RUNNABLE_START.test(cmd)) continue
-      const scope: CiCheck['scope'] =
-        emulatorStep || /\bconnected\w*AndroidTest\b|\battached\w*AndroidTest\b|\bemulator\b/i.test(cmd)
-          ? 'device'
-          : 'ci'
-      const key = `${scope} ${cmd}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push({ cmd, evidence: evidence(rel, i + 1), scope })
-      if (out.length >= MAX_CI_CHECKS) return out
+      // Any new step ends the previous one's runner and working directory, including an
+      // unnamed `- uses:` or `- id:` step. Without this, a host step after an emulator step
+      // would inherit `device` and a later step would inherit the earlier directory.
+      if (/^\s*-\s+[a-z][\w-]*\s*:/i.test(line)) {
+        emulatorStep = false
+        stepDir = undefined
+        blockIndent = -1
+      }
+      if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
+      const dirMatch = /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line)
+      if (dirMatch !== null) stepDir = (dirMatch[1] as string).replace(/^['"]|['"]$/g, '')
+
+      const add = (raw: string, scope: CiCheck['scope']): void => {
+        const cmd = ciCheckCommand(raw)
+        if (cmd === null) return
+        const key = `${scope} ${cmd}`
+        if (seen.has(key)) return
+        seen.add(key)
+        const check: CiCheck = { cmd, evidence: evidence(rel, i + 1), scope }
+        if (stepDir !== undefined && stepDir !== '') check.dir = stepDir
+        ;(scope === 'device' ? device : normal).push(check)
+      }
+
+      const block = /^\s*(?:-\s*)?run\s*:\s*([|>])(?:\s|$)/.exec(line)
+      if (block !== null) {
+        blockIndent = line.length - line.trimStart().length
+        blockScope = emulatorStep ? 'device' : 'ci'
+        blockLines = 0
+        continue
+      }
+      if (blockIndent >= 0) {
+        if (line.trim() === '') continue
+        const indent = line.length - line.trimStart().length
+        if (indent > blockIndent && blockLines < MAX_BLOCK_LINES) {
+          blockLines++
+          if (CI_BLOCK_RUNNER.test(line.trim())) add(line.trim(), blockScope)
+          continue
+        }
+        blockIndent = -1
+      }
+
+      const run = /^\s*(?:-\s*)?run\s*:\s*(.+?)\s*$/.exec(line)
+      if (run !== null) {
+        add(run[1] as string, emulatorStep ? 'device' : 'ci')
+        continue
+      }
+      // `script:` is the command an emulator runner executes; the same key inside
+      // `with:` or `env:` on a host step is not an executed check.
+      const script = /^\s*script\s*:\s*(.+?)\s*$/.exec(line)
+      if (script !== null && emulatorStep) add(script[1] as string, 'device')
     }
   }
-  return out
+
+  // Device suites take the cap first. A long list of ordinary CI steps must not crowd out
+  // the one check a local JVM run cannot stand in for.
+  return [...device, ...normal].slice(0, MAX_CI_CHECKS)
 }
 
 function looksLikeCommandLine(line: string, inFence = false): boolean {

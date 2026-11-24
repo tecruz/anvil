@@ -762,7 +762,8 @@ local server only, and not stored. The suggestions are engineering improvements 
 this repository's own findings, not a team's priorities. Building a brief does not create a
 tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
 reads the snapshot the page loads when it opens, so the first brief works without a reload. The
-request names that snapshot; if another tab refreshes the shared cache first, the older tab is
+request carries the server-issued generation of that snapshot; if another tab refreshes the
+shared cache first, the older tab is
 told to refresh rather than shown a brief built from a snapshot it is not displaying.
 
 Verification has no green-by-absence state. A page load or a brief never runs a verify command or

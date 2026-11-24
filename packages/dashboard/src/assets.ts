@@ -864,8 +864,8 @@ function render() {
 /** Bind a brief request to the snapshot the page is actually showing. */
 function briefRequest(input) {
   const request = Object.assign({}, input);
-  const fetchedAt = state.snapshot && state.snapshot.fetchedAt;
-  if (typeof fetchedAt === 'string') request.snapshotFetchedAt = fetchedAt;
+  const snapshotId = state.snapshot && state.snapshot.snapshotId;
+  if (typeof snapshotId === 'string') request.snapshotId = snapshotId;
   return request;
 }
 

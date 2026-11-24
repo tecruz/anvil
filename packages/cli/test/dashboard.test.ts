@@ -347,6 +347,8 @@ describe('the dashboard through the real CLI', () => {
         // Warm the cache exactly as the page does; a POST alone must not build a snapshot.
         const snapshot = await fetch(new URL('/api/snapshot', started.url), { headers: { cookie } })
         assert.equal(snapshot.status, 200, await snapshot.clone().text())
+        const snapshotId = ((await snapshot.json()) as { snapshotId?: string }).snapshotId
+        assert.equal(typeof snapshotId, 'string')
 
         const briefUrl = new URL('/api/brief', started.url)
         const briefResponse = await fetch(briefUrl, {
@@ -354,6 +356,7 @@ describe('the dashboard through the real CLI', () => {
           headers: { cookie, 'content-type': 'application/json', origin: briefUrl.origin },
           body: JSON.stringify({
             text: 'The audit and proposal are approved before implementation. Update README.md.',
+            snapshotId,
           }),
         })
         assert.equal(briefResponse.status, 200, await briefResponse.clone().text())

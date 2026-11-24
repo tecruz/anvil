@@ -35,10 +35,11 @@ Add **exactly three** actions to the 2D Work view: `claim`, `crew verify` and `s
    string. The Host check and CSP from ADR-0025 still apply, the action body is bounded at 4 KB,
   and POST is allowed on two routes only: `/api/brief` (read-only — derives a brief from the
   cached snapshot, stores nothing and starts no CLI process) and `/api/action` (the three gated
-  actions). A brief request carries the `fetchedAt` of the snapshot the page is showing; if
-   another tab has refreshed the shared cache, the old tab gets a 409 instead of a brief built
-   from a snapshot it is not displaying. There is still no route that accepts a raw command or
-   path.
+  actions). A brief request carries a required, server-issued generation id for the snapshot
+   the page is showing; if another tab has refreshed the shared cache, the old tab gets a 409
+   instead of a brief built from a snapshot it is not displaying. A counter is used rather than
+   a timestamp because two loads can share a millisecond. There is still no route that accepts
+   a raw command or path.
 - Every action requires an explicit browser confirmation. The result, including the CLI's
   own refusal, is printed beside the snapshot and kept across refreshes; a failure is never
   rendered as a green result.

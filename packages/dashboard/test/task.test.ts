@@ -242,6 +242,36 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /were not run/)
   })
 
+  test('a locally declared device check keeps device scope and its own working directory', () => {
+    const snapshot = makeSnapshot({
+      commands: [
+        {
+          kind: 'test',
+          cmd: './gradlew connectedDebugAndroidTest',
+          source: 'declared',
+          evidence: 'anvil.config.json',
+          dir: 'app',
+        },
+      ],
+      ciChecks: [
+        {
+          cmd: './gradlew connectedDebugAndroidTest',
+          evidence: '.github/workflows/ci.yml:17',
+          scope: 'device',
+          dir: 'app',
+        },
+        { cmd: 'npm test', evidence: '.github/workflows/ci.yml:30', scope: 'ci', dir: 'packages/b' },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the map accessibility change' })
+    assert.equal(brief.howToCheck[0]?.scope, 'device')
+    assert.equal(brief.howToCheck[0]?.cwd, 'app')
+    assert.equal(brief.howToCheck[1]?.cmd, 'npm test')
+    assert.equal(brief.howToCheck[1]?.cwd, 'packages/b')
+    assert.match(brief.unknowns.join('\n'), /TalkBack/)
+  })
+
   test('a declared check in a nested directory outranks a stale root README command', () => {
     // Acceptance case: the nested-project fixture. The root README points at a retired
     // command; the owner-declared check lives in packages/sub. The brief must follow the
@@ -349,6 +379,8 @@ describe('buildTaskBrief', () => {
       'No approval is required to audit but implementation requires approval.',
       'No approval is required to audit, whereas implementation requires approval.',
       'No approval is required to audit, and implementation requires approval.',
+      'No approval is required to audit and implementation requires approval.',
+      'Implementation requires approval and no approval is required to audit.',
       'Implementation requires approval; no approval is required to audit.',
     ]) {
       const brief = buildTaskBrief(makeSnapshot(), { text })
