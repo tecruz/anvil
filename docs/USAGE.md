@@ -715,7 +715,15 @@ The page has four views. **Task brief** is the entry point: paste a ticket or ta
 description, or choose one of the repository suggestions from `anvil plan`. Either way it
 shows the likely files to start from, the verification commands with the source and working
 directory that established them, the required needs `anvil ready` reports as blocked, and
-what the page cannot know. The same brief includes a **task map**: a 2D subgraph of the
+what the page cannot know.
+
+**How to check** separates three kinds of command. `local` is the fast loop an agent can run
+now, from `anvil ready` or the detected commands. `ci` is what the repository's own workflow
+files run — a coverage task or formatter may be the merge gate even when the README names a
+smaller test. `device` is an emulator or attached-device suite; TalkBack, focus order, insets
+and 200% font scaling still need manual validation. Every row names the command, its source
+and `file:line` evidence, and its working directory. None of them has been run by the page,
+and none carries a pass claim. The same brief includes a **task map**: a 2D subgraph of the
 matched files, the modules containing them, their declared one-hop dependencies and the
 verify commands. It opens filtered to the task, supports a text filter and a list view, and
 shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as

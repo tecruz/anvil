@@ -16,7 +16,7 @@ import type { DashboardSnapshot, VerificationEvidence } from './snapshot.ts'
 export const MAX_TASK_TEXT = 4000
 const MAX_START_ITEMS = 5
 const MAX_TEST_ITEMS = 3
-const MAX_CHECK_ITEMS = 4
+const MAX_CHECK_ITEMS = 8
 
 export interface TaskBriefInput {
   /** Pasted task or ticket text. Untrusted. Exactly one of `text` and `suggestionId`. */
@@ -37,6 +37,11 @@ export interface TaskCheck {
   source: string
   evidence: string | null
   cwd: string
+  /**
+   * `local` is a fast check an agent can run now; `ci` is what the merge gate runs;
+   * `device` needs an emulator or physical device. None is a claim that it passed.
+   */
+  scope: 'local' | 'ci' | 'device'
 }
 
 export interface TaskBlocker {
@@ -452,7 +457,14 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
   const checks: TaskCheck[] = []
   const seen = new Set<string>()
 
-  const add = (kind: string, cmd: string, source: string, evidence: string | null, dir: string): void => {
+  const add = (
+    kind: string,
+    cmd: string,
+    source: string,
+    evidence: string | null,
+    dir: string,
+    scope: TaskCheck['scope'] = 'local',
+  ): void => {
     if (checks.length >= MAX_CHECK_ITEMS || cmd === '' || seen.has(cmd)) return
     seen.add(cmd)
     checks.push({
@@ -461,7 +473,25 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       source,
       evidence,
       cwd: dir === '' ? '.' : dir,
+      scope,
     })
+  }
+
+  // CI commands are read from workflow files by the profile, never from the pasted task.
+  // They fill the slots after the local loop, so a duplicate local command stays local.
+  const addCiChecks = (): void => {
+    if (profile === null) return
+    // Device suites are the easiest check to lose to the item cap and the hardest to replace
+    // with a local run, so they take the first CI slots regardless of workflow file order.
+    const entries = asArray(profile.ciChecks)
+      .map(asRecord)
+      .filter((entry): entry is Record<string, unknown> => entry !== null)
+      .sort((a, b) => Number(asString(b.scope) === 'device') - Number(asString(a.scope) === 'device'))
+    for (const entry of entries) {
+      const cmd = asString(entry.cmd) ?? ''
+      const scope = asString(entry.scope) === 'device' ? 'device' : 'ci'
+      add(scope, cmd, 'ci workflow', asString(entry.evidence), projectDir, scope)
+    }
   }
 
   if (ready !== null) {
@@ -494,17 +524,23 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
         }
       }
     }
-    if (checks.length > 0) return checks
+    if (checks.length > 0) {
+      addCiChecks()
+      return checks
+    }
   }
 
-  if (profile === null) return checks
-  const commands = asRecord(profile.commands)
-  if (commands === null) return checks
-  for (const kind of ['testFast', 'test', 'lint', 'typecheck', 'build']) {
-    const entry = asRecord(asArray(commands[kind])[0])
-    if (entry === null) continue
-    add(kind, asString(entry.cmd) ?? '', asString(entry.source) ?? 'unknown', asString(entry.evidence), projectDir)
+  if (profile !== null) {
+    const commands = asRecord(profile.commands)
+    if (commands !== null) {
+      for (const kind of ['testFast', 'test', 'lint', 'typecheck', 'build']) {
+        const entry = asRecord(asArray(commands[kind])[0])
+        if (entry === null) continue
+        add(kind, asString(entry.cmd) ?? '', asString(entry.source) ?? 'unknown', asString(entry.evidence), projectDir)
+      }
+    }
   }
+  addCiChecks()
   return checks
 }
 
@@ -1109,6 +1145,11 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   }
   if (checks.length === 0) {
     unknowns.push('No verification command was detected or declared for this repository.')
+  }
+  if (checks.some((check) => check.scope === 'device')) {
+    unknowns.push(
+      'Device checks need an emulator or device and were not run. TalkBack, focus order and 200% font scaling need manual validation.',
+    )
   }
 
   const pasted = suggestion === null ? titleAndObjective(text) : null

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
-  "runId": "747f803b-c3f7-4291-9e67-f521fe7d6634",
-  "startedAt": "2026-11-24T09:46:43.544Z",
-  "completedAt": "2026-11-24T09:47:09.214Z",
+  "runId": "de70ddd2-be5b-4bbb-a86d-d196f3160bdf",
+  "startedAt": "2026-11-24T10:49:58.314Z",
+  "completedAt": "2026-11-24T10:50:26.928Z",
   "completionState": "completed",
-  "commitSha": "3f4e844bda61bc23cd0c0ab23debd822b3bf2502",
-  "implementation": "5ba69c9380a1841819be1685510d3bf9707301762b0e4c6671ad4cc5703e8fd1",
-  "bundleDigest": "3faa271ae3787936179a90723355a01de1b539fd02223c0ed6e3b907622a5354",
+  "commitSha": "05e39f1ad319915a3a5f4a4f03fa6e3f44954e6f",
+  "implementation": "b1dd1811a925a30f7b6361cda9f3e02a73f921c962a02ec6e835254e2116587f",
+  "bundleDigest": "0f73c8a8c56082289a8cee48341f0b302716cf749a73bcfecc8ce1ce976cd653",
   "harnessDigest": "4c2c03085b9a8872c9c1c10c38a69961ea41f460b670e7bd4fe5e9c48783f53e",
   "models": [
     {
@@ -19,7 +19,7 @@
   "publishTranscripts": false,
   "subset": false,
   "repetitions": 1,
-  "seed": "4ad00f1a-4a1c-420b-9747-ad9ed8d0c01d",
+  "seed": "678bde16-9b09-4288-8f51-2daec29a806a",
   "order": "alternate",
   "scenarioHashes": {
     "tiny-code-change": {
@@ -71,8 +71,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:43.642Z",
-          "completedAt": "2026-11-24T09:46:45.530Z",
+          "startedAt": "2026-11-24T10:49:58.411Z",
+          "completedAt": "2026-11-24T10:50:00.801Z",
           "state": "completed"
         }
       ],
@@ -82,7 +82,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1871,
+      "durationMs": 2371,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -97,8 +97,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:45.534Z",
-          "completedAt": "2026-11-24T09:46:49.151Z",
+          "startedAt": "2026-11-24T10:50:00.805Z",
+          "completedAt": "2026-11-24T10:50:04.884Z",
           "state": "completed"
         }
       ],
@@ -108,7 +108,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3600,
+      "durationMs": 4059,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -123,8 +123,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:49.160Z",
-          "completedAt": "2026-11-24T09:46:50.764Z",
+          "startedAt": "2026-11-24T10:50:04.891Z",
+          "completedAt": "2026-11-24T10:50:06.670Z",
           "state": "completed"
         }
       ],
@@ -134,7 +134,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 1587,
+      "durationMs": 1759,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -149,8 +149,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:50.767Z",
-          "completedAt": "2026-11-24T09:46:54.766Z",
+          "startedAt": "2026-11-24T10:50:06.675Z",
+          "completedAt": "2026-11-24T10:50:10.728Z",
           "state": "completed"
         }
       ],
@@ -160,7 +160,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3975,
+      "durationMs": 4031,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -175,8 +175,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:54.779Z",
-          "completedAt": "2026-11-24T09:46:57.862Z",
+          "startedAt": "2026-11-24T10:50:10.739Z",
+          "completedAt": "2026-11-24T10:50:13.640Z",
           "state": "completed"
         }
       ],
@@ -186,7 +186,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 3052,
+      "durationMs": 2877,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -201,8 +201,8 @@
       "hiddenVerifyCount": 1,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:46:57.872Z",
-          "completedAt": "2026-11-24T09:47:02.664Z",
+          "startedAt": "2026-11-24T10:50:13.645Z",
+          "completedAt": "2026-11-24T10:50:18.666Z",
           "state": "completed"
         }
       ],
@@ -212,7 +212,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 4764,
+      "durationMs": 4996,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -227,8 +227,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:47:02.679Z",
-          "completedAt": "2026-11-24T09:47:05.063Z",
+          "startedAt": "2026-11-24T10:50:18.680Z",
+          "completedAt": "2026-11-24T10:50:21.557Z",
           "state": "completed"
         }
       ],
@@ -238,7 +238,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 2357,
+      "durationMs": 2845,
       "transcript": "",
       "skillInstall": "not-requested"
     },
@@ -253,8 +253,8 @@
       "hiddenVerifyCount": 0,
       "attempts": [
         {
-          "startedAt": "2026-11-24T09:47:05.067Z",
-          "completedAt": "2026-11-24T09:47:09.142Z",
+          "startedAt": "2026-11-24T10:50:21.563Z",
+          "completedAt": "2026-11-24T10:50:26.792Z",
           "state": "completed"
         }
       ],
@@ -264,7 +264,7 @@
       "repetition": 0,
       "costUsd": null,
       "tokens": null,
-      "durationMs": 4048,
+      "durationMs": 5194,
       "transcript": "",
       "skillInstall": "not-requested"
     }

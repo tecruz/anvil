@@ -12,6 +12,7 @@ import { ecosystemDetectors } from './detectors/ecosystems.ts'
 import { additionalDetectors } from './detectors/more.ts'
 import {
   addRiskHeuristics,
+  detectCiChecks,
   detectDocs,
   detectDocumentedCommands,
   detectGenericTooling,
@@ -180,6 +181,10 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     })
   }
 
+  // What CI runs is a separate answer from what the README tells an agent to run locally.
+  // Both are recorded so a brief can show the fast loop beside the merge gate.
+  const ciChecks = detectCiChecks(root, fileSet)
+
   // Fail closed: an unknown module must not retain edges from any detector.
   for (const module of draft.modules) {
     if (draft.depsUnknownReasons.has(module.id)) module.deps = []
@@ -198,6 +203,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     docs: detectDocs(root),
     files,
     projectDir,
+    ciChecks,
     diagnostics: {
       truncated,
       fileLimit,

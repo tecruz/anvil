@@ -1190,6 +1190,7 @@ describe('the dashboard page', () => {
           source: 'documented',
           evidence: 'README.md:140',
           cwd: '.',
+          scope: 'local',
         },
       ],
       blockers: [{ label: 'java', status: 'missing', reason: 'not on PATH' }],

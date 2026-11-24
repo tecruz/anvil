@@ -181,8 +181,30 @@ export interface ProjectProfile {
    * directory from an evidence path, and would then be the one guessing.
    */
   projectDir: string
+  /**
+   * Checks the repository's own CI workflows run, with the workflow line that says so.
+   *
+   * These are kept separate from `commands`: a documented `testDebugUnitTest` is the fast
+   * local loop, while CI may run a coverage task, a formatter and an emulator suite. A brief
+   * that showed only the local command would let a green local run stand in for CI. Additive
+   * in schema version 1: an older profile without the field carries no CI checks, never an
+   * empty claim that CI runs nothing.
+   */
+  ciChecks: CiCheck[]
   /** How complete the walk and detector run were. Additive in schema version 1. */
   diagnostics: ProfileDiagnostics
+}
+
+/** A verification command read from a CI workflow, never run during detection. */
+export interface CiCheck {
+  cmd: string
+  /** `file:line` in the workflow that contains the command. */
+  evidence: string
+  /**
+   * `device` for emulator/attached-device suites, which a JVM-only run cannot replace;
+   * `ci` for everything else CI runs. Neither is claimed to have passed.
+   */
+  scope: 'ci' | 'device'
 }
 
 export interface InstructionFile {
@@ -229,6 +251,7 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     instructions: [],
     files: [],
     projectDir: '',
+    ciChecks: [],
     diagnostics: {
       truncated: false,
       fileLimit: 0,

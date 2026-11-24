@@ -45,6 +45,7 @@ export {
   addRiskHeuristics,
   COMMAND_RUNNERS,
   type DocumentedCommand,
+  detectCiChecks,
   detectDocs,
   detectDocumentedCommands,
   detectGenericTooling,
@@ -78,6 +79,7 @@ export {
   type TrackerState,
 } from './trackers.ts'
 export {
+  type CiCheck,
   type CommandEntry,
   type CommandKind,
   type CommandSource,

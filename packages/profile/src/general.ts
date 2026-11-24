@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { addCommand, addRisk, addTool, COMMIT_HOOK_FILES, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
-import type { CommandKind, Docs, InstructionFile } from './types.ts'
+import type { CiCheck, CommandKind, Docs, InstructionFile } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
 
 /**
@@ -618,6 +618,58 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
         out.push({ kind: pattern.kind, cmd, evidence: evidence(rel, i + 1) })
         break
       }
+    }
+  }
+  return out
+}
+
+const MAX_CI_CHECKS = 12
+const MAX_CI_COMMAND = 160
+
+const CI_SETUP_COMMANDS = /^(?:chmod|sudo|cd|echo|git|mkdir|cp|mv)\s/
+
+/**
+ * Verification commands CI actually runs, read from the workflow's `run:` steps.
+ *
+ * A documented README command answers "what do I run locally"; CI can run a different,
+ * broader set. Recording both with file:line evidence lets a brief distinguish the fast
+ * loop from the coverage, formatting and device suites that gate a merge, without running
+ * any of them. This is detection, not verification: a listed command has no pass/fail
+ * attached, and a workflow with no `run:` steps yields no checks, never a green claim.
+ */
+export function detectCiChecks(root: string, files: ReadonlySet<string>): CiCheck[] {
+  const out: CiCheck[] = []
+  const seen = new Set<string>()
+
+  for (const rel of [...files].sort()) {
+    if (!rel.startsWith('.github/workflows/') || !/\.ya?ml$/.test(rel)) continue
+    const { text } = readText(join(root, ...rel.split('/')))
+    if (text === null) continue
+    const lines = text.split('\n')
+    let emulatorStep = false
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? ''
+      if (/^\s*-\s*name\s*:/.test(line)) emulatorStep = false
+      if (/^\s*uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
+      // `run:` is a shell step; `script:` is the command an emulator runner executes on
+      // the device. Folded block scalars (`run: |`) put commands on following lines,
+      // which are ignored rather than guessed from arbitrary YAML prose.
+      const match = /^\s*(?:run|script)\s*:\s*(.+?)\s*$/.exec(line)
+      if (match === null) continue
+      let cmd = (match[1] as string).trim().replace(/^['"]|['"]$/g, '')
+      if (cmd === '' || cmd === '|' || cmd === '>' || CI_SETUP_COMMANDS.test(cmd)) continue
+      cmd = firstCommand(cmd)
+      if (cmd.length > MAX_CI_COMMAND) cmd = cmd.slice(0, MAX_CI_COMMAND)
+      if (!RUNNABLE_START.test(cmd)) continue
+      const scope: CiCheck['scope'] =
+        emulatorStep || /\bconnected\w*AndroidTest\b|\battached\w*AndroidTest\b|\bemulator\b/i.test(cmd)
+          ? 'device'
+          : 'ci'
+      const key = `${scope} ${cmd}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ cmd, evidence: evidence(rel, i + 1), scope })
+      if (out.length >= MAX_CI_CHECKS) return out
     }
   }
   return out

@@ -445,7 +445,8 @@ function renderBrief(parent, brief) {
   } else {
     for (const check of checks) {
       const row = make('div', 'check');
-      row.appendChild(make('strong', '', check.kind));
+      const scope = check.scope === 'device' ? 'device · manual' : check.scope === 'ci' ? 'CI' : 'local';
+      row.appendChild(make('strong', '', check.kind + ' · ' + scope));
       row.appendChild(make('code', 'path', check.cmd));
       const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
       row.appendChild(make('div', 'muted', detail));

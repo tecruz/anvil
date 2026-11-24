@@ -41,6 +41,7 @@ interface SnapshotOptions {
   truncated?: boolean
   failedDetectors?: number
   commands?: unknown[]
+  ciChecks?: unknown[]
   suggestions?: unknown[]
   modules?: unknown[]
   unanalysedDeps?: unknown[]
@@ -54,6 +55,7 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
     projectDir: 'app',
     files: options.files ?? FILES,
     modules: options.modules ?? [],
+    ciChecks: options.ciChecks ?? [],
     commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'README.md:3' }] },
     diagnostics: {
       unanalysedDeps: options.unanalysedDeps ?? [],
@@ -174,6 +176,90 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /No approval gate was found/)
     assert.match(unknowns, /read-only/)
     assert.match(unknowns, /Verification history/)
+  })
+
+  test('a verification plan separates the fast local loop from CI and device checks', () => {
+    // Acceptance case: CountryTracker's README names the fast JVM test and detekt, while its
+    // workflow runs Kover, the formatter and an emulator-backed coverage task. One green
+    // local run must not stand in for the merge gate or for device validation.
+    const snapshot = makeSnapshot({
+      checked: false,
+      commands: [
+        {
+          kind: 'testFast',
+          cmd: './gradlew testDebugUnitTest',
+          source: 'documented',
+          evidence: 'README.md:140',
+          dir: '',
+        },
+        { kind: 'lint', cmd: './gradlew detekt', source: 'documented', evidence: 'README.md:133', dir: '' },
+        { kind: 'build', cmd: './gradlew assembleDebug', source: 'documented', evidence: 'AGENTS.md:25', dir: '' },
+      ],
+      ciChecks: [
+        {
+          cmd: './gradlew koverXmlReport koverHtmlReport --no-daemon',
+          evidence: '.github/workflows/ci.yml:45',
+          scope: 'ci',
+        },
+        { cmd: './gradlew spotlessCheck --no-daemon', evidence: '.github/workflows/ci.yml:233', scope: 'ci' },
+        {
+          cmd: './gradlew jacocoCombinedReport --no-daemon',
+          evidence: '.github/workflows/ci.yml:129',
+          scope: 'device',
+        },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { text: 'Localize the map accessibility descriptions' })
+    const check = (cmd: string): (typeof brief.howToCheck)[number] | undefined =>
+      brief.howToCheck.find((entry) => entry.cmd === cmd)
+
+    const fast = check('./gradlew testDebugUnitTest')
+    assert.equal(fast?.scope, 'local')
+    assert.equal(fast?.kind, 'testFast')
+    assert.equal(fast?.cwd, '.')
+    assert.equal(fast?.evidence, 'README.md:140')
+
+    const kover = check('./gradlew koverXmlReport koverHtmlReport --no-daemon')
+    assert.equal(kover?.scope, 'ci')
+    assert.equal(kover?.source, 'ci workflow')
+    assert.equal(kover?.evidence, '.github/workflows/ci.yml:45')
+
+    assert.equal(check('./gradlew spotlessCheck --no-daemon')?.scope, 'ci')
+    assert.equal(check('./gradlew jacocoCombinedReport --no-daemon')?.scope, 'device')
+
+    // The fast loop stays first. A device suite takes the first CI slot so it cannot be
+    // crowded out by workflow steps that a local run could stand in for.
+    const cmds = brief.howToCheck.map((entry) => entry.cmd)
+    assert.ok(cmds.indexOf('./gradlew testDebugUnitTest') < cmds.indexOf('./gradlew jacocoCombinedReport --no-daemon'))
+    assert.ok(
+      cmds.indexOf('./gradlew jacocoCombinedReport --no-daemon') <
+        cmds.indexOf('./gradlew koverXmlReport koverHtmlReport --no-daemon'),
+    )
+
+    const unknowns = brief.unknowns.join('\n')
+    assert.match(unknowns, /TalkBack/)
+    assert.match(unknowns, /were not run/)
+  })
+
+  test('a declared check in a nested directory outranks a stale root README command', () => {
+    // Acceptance case: the nested-project fixture. The root README points at a retired
+    // command; the owner-declared check lives in packages/sub. The brief must follow the
+    // declaration and carry its working directory, not the stale prose.
+    const snapshot = makeSnapshot({
+      commands: [
+        { kind: 'test', cmd: 'node verify.js', source: 'declared', evidence: 'anvil.config.json', dir: 'packages/sub' },
+        { kind: 'test', cmd: 'npm run test:old', source: 'documented', evidence: 'README.md:8', dir: '' },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { text: 'Find and run the supported verification check' })
+    assert.equal(brief.howToCheck[0]?.cmd, 'node verify.js')
+    assert.equal(brief.howToCheck[0]?.scope, 'local')
+    assert.equal(brief.howToCheck[0]?.source, 'declared')
+    assert.equal(brief.howToCheck[0]?.evidence, 'anvil.config.json')
+    assert.equal(brief.howToCheck[0]?.cwd, 'packages/sub')
+    assert.ok(!brief.howToCheck.some((check) => check.cmd === 'npm run test:old'))
   })
 
   test('the approval gate a ticket states is quoted, with what may start first', () => {
