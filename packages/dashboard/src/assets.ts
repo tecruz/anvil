@@ -447,9 +447,12 @@ function renderBrief(parent, brief) {
     const boundary = selection.complete === null
       ? 'Workflow check coverage is unknown because the profile source failed. This is not an exhaustive CI inventory.'
       : selection.complete
-        ? 'Selected checks include every workflow check the profile detected; it is not an exhaustive CI inventory and not a pass claim.'
+        ? 'Selected checks include every runnable workflow check the profile detected; it is not an exhaustive CI inventory and not a pass claim.' +
+          (selection.referenceOnlyChecks > 0
+            ? ' ' + selection.referenceOnlyChecks + ' release, deploy or source-mutating step(s) are listed as unknowns, not as checks.'
+            : '')
         : 'Selected ' + selection.selected + ' check(s); the profile detected ' + selection.detectedCiChecks +
-          ' workflow check(s). This is not an exhaustive CI inventory.';
+          ' workflow step(s). This is not an exhaustive CI inventory.';
     card.appendChild(make('div', 'muted', boundary));
   }
   if (checks.length === 0) {
@@ -460,7 +463,10 @@ function renderBrief(parent, brief) {
       const scope = check.scope === 'device' ? 'device · manual' : check.scope === 'ci' ? 'CI' : 'local';
       row.appendChild(make('strong', '', check.kind + ' · ' + scope));
       row.appendChild(make('code', 'path', check.cmd));
-      const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
+      const detail = check.cwdUnknown
+        ? 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') +
+          ' · working directory not established by the workflow; read that line before running'
+        : 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
       row.appendChild(make('div', 'muted', detail));
       card.appendChild(row);
     }

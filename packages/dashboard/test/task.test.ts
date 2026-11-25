@@ -164,7 +164,7 @@ describe('buildTaskBrief', () => {
       brief.howToCheck.map((check) => check.kind),
       ['testFast', 'test', 'lint', 'build'],
     )
-    assert.deepEqual(brief.checkSelection, { selected: 4, detectedCiChecks: 0, complete: true })
+    assert.deepEqual(brief.checkSelection, { selected: 4, detectedCiChecks: 0, referenceOnlyChecks: 0, complete: true })
     assert.equal(brief.howToCheck[0]?.cmd, 'npm run test:changed')
     assert.equal(brief.howToCheck[0]?.cwd, 'app')
     assert.equal(brief.howToCheck[0]?.source, 'documented')
@@ -228,7 +228,7 @@ describe('buildTaskBrief', () => {
 
     assert.equal(check('./gradlew spotlessCheck --no-daemon')?.scope, 'ci')
     assert.equal(check('./gradlew jacocoCombinedReport --no-daemon')?.scope, 'device')
-    assert.deepEqual(brief.checkSelection, { selected: 6, detectedCiChecks: 3, complete: true })
+    assert.deepEqual(brief.checkSelection, { selected: 6, detectedCiChecks: 3, referenceOnlyChecks: 0, complete: true })
 
     // The fast loop stays first. A device suite takes the first CI slot so it cannot be
     // crowded out by workflow steps that a local run could stand in for.
@@ -244,20 +244,109 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /were not run/)
   })
 
-  test('workflow commands without a declared directory do not borrow the project directory', () => {
+  test('workflow commands use the declared directory or the documented root, never the project directory', () => {
     const snapshot = makeSnapshot({
       commands: [],
       ciChecks: [
         { cmd: 'npm run ci-only', evidence: '.github/workflows/ci.yml:10', scope: 'ci' },
         { cmd: 'npm run e2e', evidence: '.github/workflows/ci.yml:20', scope: 'device', dir: 'android' },
+        {
+          cmd: 'npm run matrix',
+          evidence: '.github/workflows/ci.yml:30',
+          scope: 'ci',
+          dir: '$' + '{{ matrix.package }}',
+        },
       ],
     })
     const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
     const root = brief.howToCheck.find((check) => check.cmd === 'npm run ci-only')
     const device = brief.howToCheck.find((check) => check.cmd === 'npm run e2e')
-    // The fixture's projectDir is `app`; an undeclared workflow directory must not inherit it.
+    const matrix = brief.howToCheck.find((check) => check.cmd === 'npm run matrix')
+    // The fixture's projectDir is `app`. An undeclared step directory is GitHub's documented
+    // repository-root default, never the detected project directory.
     assert.equal(root?.cwd, '.')
+    assert.equal(root?.cwdUnknown, undefined)
     assert.equal(device?.cwd, 'android')
+    assert.equal(device?.cwdUnknown, undefined)
+    // An expression is not a directory: say it is unknown instead of showing Go-template text.
+    assert.equal(matrix?.cwdUnknown, true)
+    assert.equal(matrix?.cwd, '')
+    assert.doesNotMatch(matrix?.cwd ?? '', /\$\{\{/)
+    assert.match(brief.unknowns.join('\n'), /do not declare a usable working directory/)
+  })
+
+  test('the same command in two directories stays two checks and is not reported complete when one is dropped', () => {
+    const snapshot = makeSnapshot({
+      commands: [],
+      ciChecks: Array.from({ length: 7 }, (_, index) => ({
+        cmd: 'npm test',
+        evidence: `.github/workflows/ci.yml:${index + 1}`,
+        scope: 'ci',
+        dir: `packages/p${index}`,
+      })),
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
+    // Seven distinct CI checks plus the local fallback fill the list exactly; none may collapse
+    // by command text alone.
+    assert.equal(brief.howToCheck.length, 8)
+    assert.equal(new Set(brief.howToCheck.map((check) => check.cwd)).size, 8)
+    assert.deepEqual(brief.checkSelection, {
+      selected: 8,
+      detectedCiChecks: 7,
+      referenceOnlyChecks: 0,
+      complete: true,
+    })
+
+    const overflowing = makeSnapshot({
+      commands: [],
+      ciChecks: Array.from({ length: 12 }, (_, index) => ({
+        cmd: 'npm test',
+        evidence: `.github/workflows/ci.yml:${index + 1}`,
+        scope: 'ci',
+        dir: `packages/p${index}`,
+      })),
+    })
+    const partial = buildTaskBrief(overflowing, { text: 'Verify the change' })
+    assert.equal(partial.howToCheck.length, 8)
+    // Twelve distinct checks were detected; five do not fit, so coverage is not complete.
+    assert.deepEqual(partial.checkSelection, {
+      selected: 8,
+      detectedCiChecks: 12,
+      referenceOnlyChecks: 0,
+      complete: false,
+    })
+    assert.match(partial.unknowns.join('\n'), /5 detected workflow check\(s\) are not in this short list/)
+  })
+
+  test('release and deploy steps are never offered as checks', () => {
+    const snapshot = makeSnapshot({
+      commands: [],
+      ciChecks: [
+        {
+          cmd: './gradlew assembleRelease --no-daemon',
+          evidence: '.github/workflows/ci.yml:40',
+          scope: 'ci',
+          referenceOnly: true,
+        },
+        {
+          cmd: 'python3 scripts/sync-docs-versions.py',
+          evidence: '.github/workflows/ci.yml:41',
+          scope: 'ci',
+          referenceOnly: true,
+        },
+        { cmd: 'npm test', evidence: '.github/workflows/ci.yml:42', scope: 'ci', dir: 'app' },
+      ],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
+    assert.deepEqual(
+      brief.howToCheck.map((check) => check.cmd),
+      ['npm test'],
+    )
+    const unknowns = brief.unknowns.join('\n')
+    assert.match(unknowns, /not offered as checks/)
+    assert.match(unknowns, /assembleRelease/)
+    // A reference row is counted separately, never as an omitted runnable check.
+    assert.deepEqual(brief.checkSelection, { selected: 1, detectedCiChecks: 3, referenceOnlyChecks: 2, complete: true })
   })
 
   test('the selected list says when detected workflow checks are omitted', () => {
@@ -271,7 +360,12 @@ describe('buildTaskBrief', () => {
     })
     const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
     assert.equal(brief.howToCheck.length, 8)
-    assert.deepEqual(brief.checkSelection, { selected: 8, detectedCiChecks: 12, complete: false })
+    assert.deepEqual(brief.checkSelection, {
+      selected: 8,
+      detectedCiChecks: 12,
+      referenceOnlyChecks: 0,
+      complete: false,
+    })
     // Eight selected rows, one local default command and three workflow rows do not fit.
     assert.match(
       brief.unknowns.join('\n'),
@@ -576,7 +670,7 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /No verification command/)
     assert.match(unknowns, /README\.md/)
     // A failed profile is unknown coverage, not "every detected check is shown".
-    assert.deepEqual(brief.checkSelection, { selected: 0, detectedCiChecks: 0, complete: null })
+    assert.deepEqual(brief.checkSelection, { selected: 0, detectedCiChecks: 0, referenceOnlyChecks: 0, complete: null })
     assert.match(unknowns, /Workflow check coverage is unknown/)
     assert.equal(brief.readiness.checked, false)
   })

@@ -722,16 +722,28 @@ can run now, from `anvil ready` or the detected commands. `ci` is what the repos
 workflow files run — a coverage task or formatter may be the merge gate even when the README
 names a smaller test. `device` is an emulator or attached-device suite; TalkBack, focus order,
 insets and 200% font scaling still need manual validation. Every row names the command, its
-source and `file:line` evidence, and its working directory. None of them has been run by the
-page, and none carries a pass claim.
+source and `file:line` evidence, and the working directory that established it. None of them has
+been run by the page, and none carries a pass claim.
 
 The list is a **selection**, not an exhaustive CI inventory. The brief records how many workflow
-checks the profile detected, whether the profile source was available, and whether the short list
-includes all of them; when coverage is unknown or any are omitted, the unknowns say so explicitly.
-A workflow command with no declared `working-directory` is shown as running from the repository
-root (`.`), never from a guessed project directory. To inspect the merge gates yourself, open the
-cited workflow files — a short list, a source label or an evidence line is not a pass. The same
-brief includes a **task map**: a 2D subgraph of the
+steps the profile detected, whether the profile source was available, and whether the short list
+includes every runnable one; when coverage is unknown or any are omitted, the unknowns say so
+explicitly.
+
+Two kinds of step are deliberately kept out of the runnable list:
+
+- **Release, deploy and source-mutating steps.** `npm publish`, `assembleRelease`, a deploy job and
+  a docs sync without `--check` are gates to read, not checks to run. They are listed once in the
+  unknowns so you can open the cited workflow line; they are never offered as a command.
+- **Steps with no usable directory.** `working-directory` is read from the step, then the job,
+  then the workflow `defaults` (including the one-line `{run: {working-directory: ...}}` form). A
+  step with no declaration runs at the repository root, which is GitHub's documented default. An
+  expression such as `${{ matrix.package }}` cannot be resolved from the file, so that row says the
+  directory is not established instead of showing a path as if it were evidence. Read the cited line
+  before running that command.
+
+To inspect the merge gates yourself, open the cited workflow files — a short list, a source label or
+an evidence line is not a pass. The same brief includes a **task map**: a 2D subgraph of the
 matched files, the modules containing them, their declared one-hop dependencies and the
 verify commands. It opens filtered to the task, supports a text filter and a list view, and
 shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as

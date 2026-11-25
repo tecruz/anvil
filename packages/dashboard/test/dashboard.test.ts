@@ -1422,6 +1422,7 @@ describe('the dashboard page', () => {
     const render = (checkSelection: {
       selected: number
       detectedCiChecks: number
+      referenceOnlyChecks?: number
       complete: boolean | null
     }): string => {
       const nodes = new Map<string, FakeElement>(
@@ -1476,7 +1477,7 @@ describe('the dashboard page', () => {
         startHere: [],
         map: { schemaVersion: 1, focus: 'Review CI', nodes: [], edges: [], hasUnknown: false },
         howToCheck: [],
-        checkSelection,
+        checkSelection: { referenceOnlyChecks: 0, ...checkSelection },
         blockers: [],
         gates: [],
         readiness: { ok: true, checked: true, status: 'ok' },
@@ -1497,7 +1498,7 @@ describe('the dashboard page', () => {
 
     // A truncated list names the numbers.
     const truncated = render({ selected: 8, detectedCiChecks: 12, complete: false })
-    assert.match(truncated, /Selected 8 check\(s\); the profile detected 12 workflow check\(s\)/)
+    assert.match(truncated, /Selected 8 check\(s\); the profile detected 12 workflow step\(s\)/)
 
     // A failed profile is unknown coverage, not "everything detected is shown".
     const unknown = render({ selected: 0, detectedCiChecks: 0, complete: null })

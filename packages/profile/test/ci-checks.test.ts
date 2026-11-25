@@ -279,4 +279,149 @@ describe('detectCiChecks', () => {
     assert.equal(checks[0]?.scope, 'device')
     assert.equal(checks[0]?.cmd, './gradlew connectedDebugAndroidTest')
   })
+
+  test('a deploy job and a release artifact are reference only, never checks', () => {
+    const workflow = `jobs:
+  deploy:
+    steps:
+      - run: node scripts/deploy.mjs
+  build-release:
+    steps:
+      - run: ./gradlew assembleRelease --no-daemon
+  tests:
+    steps:
+      - run: npm test
+  docs:
+    steps:
+      - run: python3 scripts/sync-docs-versions.py
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    const byCmd = (cmd: string) => checks.find((check) => check.cmd === cmd)
+    assert.equal(byCmd('node scripts/deploy.mjs')?.referenceOnly, true)
+    assert.equal(byCmd('./gradlew assembleRelease --no-daemon')?.referenceOnly, true)
+    assert.equal(byCmd('python3 scripts/sync-docs-versions.py')?.referenceOnly, true)
+    assert.notEqual(byCmd('npm test')?.referenceOnly, true)
+    // Runnable checks come first so a release row cannot displace one.
+    assert.equal(checks[0]?.cmd, 'npm test')
+  })
+
+  test('a release job name marks its ordinary-looking steps reference only', () => {
+    const workflow = `jobs:
+  publish:
+    steps:
+      - run: npm run build:dist
+  build:
+    steps:
+      - run: npm run build:dist
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.referenceOnly === true]),
+      [
+        ['npm run build:dist', false],
+        ['npm run build:dist', true],
+      ],
+    )
+  })
+
+  test('deploy is recognised whatever the separator, quoting or display name', () => {
+    const workflow = `jobs:
+  staging_deploy:
+    steps:
+      - run: node scripts/promote.mjs
+        working-directory: packages/tools
+  'deploy':
+    steps:
+      - run: node scripts/promote-two.mjs
+        working-directory: packages/tools
+  delivery:
+    name: Deploy staging
+    steps:
+      - run: node scripts/promote-three.mjs
+        working-directory: packages/tools
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.referenceOnly === true]),
+      [
+        ['node scripts/promote.mjs', true],
+        ['node scripts/promote-two.mjs', true],
+        ['node scripts/promote-three.mjs', true],
+      ],
+    )
+  })
+
+  test('a release-worded test and a release notes command are classified on the act', () => {
+    const workflow = `jobs:
+  tests:
+    steps:
+      - run: cargo test --release
+        working-directory: packages/engine
+  notes:
+    steps:
+      - run: gh release create v1.0.0
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    const byCmd = (cmd: string) => checks.find((check) => check.cmd === cmd)
+    // `--release` selects an optimised test profile; it is not a publish.
+    assert.notEqual(byCmd('cargo test --release')?.referenceOnly, true)
+    assert.equal(byCmd('gh release create v1.0.0')?.referenceOnly, true)
+  })
+
+  test('an inline job default overrides the workflow default directory', () => {
+    const workflow = `defaults:
+  run:
+    working-directory: packages/api
+jobs:
+  tests:
+    defaults: {run: {working-directory: packages/web}}
+    steps:
+      - run: npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir]),
+      [['npm test', 'packages/web']],
+    )
+  })
+
+  test('workflow and job defaults supply a working directory to the step', () => {
+    const workflow = `on: pull_request
+defaults:
+  run:
+    working-directory: packages/api
+jobs:
+  inherited:
+    steps:
+      - run: npm test
+  override:
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - run: npm run lint
+  explicit:
+    defaults:
+      run:
+        working-directory: packages/web
+    steps:
+      - run: npm run typecheck
+        working-directory: packages/core
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir ?? null]),
+      [
+        ['npm test', 'packages/api'],
+        ['npm run lint', 'packages/web'],
+        ['npm run typecheck', 'packages/core'],
+      ],
+    )
+  })
 })

@@ -207,6 +207,12 @@ export interface CiCheck {
    * `ci` for everything else CI runs. Neither is claimed to have passed.
    */
   scope: 'ci' | 'device'
+  /**
+   * A publish, release, deploy or source-mutating step. It is recorded so a reader can see the
+   * gate, but it is not a check to run: a brief must never offer `npm publish` or
+   * `assembleRelease` as "how to check". Never a claim that it passed.
+   */
+  referenceOnly?: boolean
 }
 
 export interface InstructionFile {

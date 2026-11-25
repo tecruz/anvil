@@ -654,6 +654,149 @@ function ciCheckCommand(raw: string): string | null {
 }
 
 /**
+ * Commands that publish, deploy, cut a release artifact or rewrite source.
+ *
+ * They are real workflow steps, but they are not checks: handing a reader `npm publish` or
+ * `assembleRelease` as "how to check" is worse than saying nothing. The row is kept and marked
+ * `referenceOnly` so a caller can show the gate without offering it as a command to run.
+ *
+ * Matching is on the publishing or deploying *act*, never on a word that merely appears in a
+ * flag: `cargo test --release` runs tests against an optimised profile and stays a check.
+ */
+const REFERENCE_ONLY_STEP = new RegExp(
+  [
+    String.raw`\b(?:npm|pnpm|yarn|cargo)\s+publish\b`,
+    String.raw`\bdocker\s+push\b`,
+    String.raw`\bgh\s+release\s+create\b`,
+    String.raw`\b(?:assembleRelease|bundleRelease|assembleStaging|spotlessApply|ktlintFormat)\b`,
+    String.raw`\bprettier\b[^\n]*\s--write\b`,
+    String.raw`\beslint\b[^\n]*\s--fix\b`,
+    String.raw`\bgofmt\b[^\n]*\s-w\b`,
+    String.raw`\b(?:firebase|serverless|vercel|netlify|heroku)\s+(?:deploy|--prod)\b`,
+    String.raw`(?:^|[\s"'/])(?:deploy|publish)\b[^\s]*\.(?:mjs|cjs|js|ts|sh|bash|ps1|py|rb)\b`,
+    String.raw`scripts/sync-docs-versions\.py(?!\s+--check)`,
+  ].join('|'),
+  'i',
+)
+
+/** Words that name a release, deploy or publish stage in a job id or job name. */
+const REFERENCE_ONLY_TOKENS = new Set(['release', 'publish', 'publisher', 'deploy', 'deployment'])
+
+/**
+ * Classify a job from its id and human name.
+ *
+ * The separator is not fixed: `staging_deploy`, `'deploy'`, `build-release` and a job named
+ * `Deploy staging` all name the same stage. Splitting on non-alphanumerics finds the word
+ * wherever it sits, and `_` — which `\b` does not break — no longer hides it.
+ */
+function referenceOnlyLabel(...labels: readonly string[]): boolean {
+  for (const label of labels) {
+    for (const token of label.toLowerCase().split(/[^a-z0-9]+/)) {
+      if (REFERENCE_ONLY_TOKENS.has(token)) return true
+    }
+  }
+  return false
+}
+
+/** One YAML scalar, unquoted and without a trailing comment. */
+function yamlScalar(value: string): string {
+  return value
+    .replace(/\s+#.*$/, '')
+    .trim()
+    .replace(/^['"]|['"]$/g, '')
+}
+
+/** `defaults.run.working-directory` within one YAML block, or undefined when it is not set. */
+function defaultsWorkingDirectory(lines: readonly string[], start: number, end: number): string | undefined {
+  // A flow-style default is one line: `defaults: {run: {working-directory: packages/web}}`.
+  // Ignoring it meant the workflow default silently won over the job's own declaration.
+  const flowRun = /\brun\s*:\s*\{([^}]*)\}/
+  const flowDir = /\bworking-directory\s*:\s*([^,}]+)/
+  let defaultsIndent = -1
+  let runIndent = -1
+  for (let i = start; i < end; i++) {
+    const line = lines[i] ?? ''
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    const indent = line.length - line.trimStart().length
+    if (/^\s*defaults\s*:/.test(line)) {
+      const run = flowRun.exec(line)
+      const dir = run === null ? null : flowDir.exec(run[1] as string)
+      if (dir !== null) return yamlScalar(dir[1] as string)
+    }
+    if (defaultsIndent >= 0 && indent <= defaultsIndent) {
+      defaultsIndent = -1
+      runIndent = -1
+    }
+    if (runIndent >= 0 && indent <= runIndent) runIndent = -1
+    if (defaultsIndent < 0) {
+      if (/^\s*defaults\s*:\s*(?:#.*)?$/.test(line)) defaultsIndent = indent
+      continue
+    }
+    if (runIndent < 0) {
+      if (/^\s*run\s*:\s*(?:#.*)?$/.test(line)) runIndent = indent
+      continue
+    }
+    const dir = /^\s*working-directory\s*:\s*(.+?)\s*$/.exec(line)
+    if (dir !== null) return yamlScalar(dir[1] as string)
+  }
+  return undefined
+}
+
+interface WorkflowJob {
+  id: string
+  start: number
+  end: number
+  /** `defaults.run.working-directory` declared for this job. */
+  dir?: string
+  /** The job id or human name names a release, publish or deploy stage. */
+  referenceOnly: boolean
+}
+
+/** A job key, quoted or bare: `deploy:`, `'deploy':`, `build-release:`. */
+const JOB_KEY = /^\s*(?:(['"])([^'"]+)\1|([A-Za-z0-9_-]+))\s*:\s*(?:#.*)?$/
+
+/** The job's own `name:` line, which can name a stage the id does not. */
+function jobName(lines: readonly string[], job: { start: number; end: number; keyIndent: number }): string | null {
+  for (let i = job.start + 1; i < job.end; i++) {
+    const line = lines[i] ?? ''
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    // A step starts with `-`; job metadata is a plain key at the job's child indentation.
+    if (line.length - line.trimStart().length !== job.keyIndent + 2) continue
+    const match = /^\s*name\s*:\s*(.+?)\s*$/.exec(line)
+    if (match !== null) return yamlScalar(match[1] as string)
+  }
+  return null
+}
+
+/** Job ids and their line ranges, so a step can be attributed to the job that runs it. */
+function workflowJobs(lines: readonly string[], jobsLine: number): WorkflowJob[] {
+  if (jobsLine < 0) return []
+  const jobs: WorkflowJob[] = []
+  let jobIndent = -1
+  for (let i = jobsLine + 1; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    const indent = line.length - line.trimStart().length
+    if (indent === 0) break
+    if (jobIndent < 0) jobIndent = indent
+    if (indent !== jobIndent) continue
+    const header = JOB_KEY.exec(line)
+    if (header === null) continue
+    const id = (header[2] ?? header[3]) as string
+    const previous = jobs[jobs.length - 1]
+    if (previous !== undefined) previous.end = i
+    jobs.push({ id, start: i, end: lines.length, referenceOnly: false })
+  }
+  for (const job of jobs) {
+    const dir = defaultsWorkingDirectory(lines, job.start + 1, job.end)
+    if (dir !== undefined) job.dir = dir
+    const name = jobName(lines, { start: job.start, end: job.end, keyIndent: jobIndent })
+    job.referenceOnly = referenceOnlyLabel(job.id, name ?? '')
+  }
+  return jobs
+}
+
+/**
  * Verification commands CI actually runs, read from workflow steps.
  *
  * A documented README command answers "what do I run locally"; CI can run a different,
@@ -673,6 +816,13 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
     const { text } = readText(join(root, ...rel.split('/')))
     if (text === null) continue
     const lines = text.split('\n')
+    const jobsLine = lines.findIndex((line) => /^jobs\s*:/.test(line))
+    const jobs = workflowJobs(lines, jobsLine)
+    // Workflow-level defaults apply to every job that does not override them.
+    const workflowDir = jobsLine < 0 ? undefined : defaultsWorkingDirectory(lines, 0, jobsLine)
+    let jobIndex = -1
+    let jobReferenceOnly = false
+    let jobDir = workflowDir
     let emulatorStep = false
     let withContext = false
     let stepDir: string | undefined
@@ -689,11 +839,16 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       for (const item of pending) {
         const cmd = ciCheckCommand(item.raw)
         if (cmd === null) continue
-        const key = `${item.scope} ${cmd}`
+        // Classification uses the job that owns the step, not only the command text: a deploy
+        // job can run a plain command, and that step is still not something to hand a reader.
+        const referenceOnly = jobReferenceOnly || REFERENCE_ONLY_STEP.test(cmd)
+        const dir = stepDir ?? jobDir
+        const key = `${item.scope} ${referenceOnly ? 'ref' : 'check'} ${cmd} ${dir ?? ''}`
         if (seen.has(key)) continue
         seen.add(key)
         const check: CiCheck = { cmd, evidence: evidence(rel, item.line), scope: item.scope }
-        if (stepDir !== undefined && stepDir !== '') check.dir = stepDir
+        if (dir !== undefined && dir !== '') check.dir = dir
+        if (referenceOnly) check.referenceOnly = true
         ;(item.scope === 'device' ? device : normal).push(check)
       }
       pending = []
@@ -705,6 +860,18 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
       // inside `cat <<'EOF'` is shell input, not a workflow step, even while a block is open.
       if (heredocEnd !== null) {
         if (line.trim() === heredocEnd) heredocEnd = null
+        continue
+      }
+      const nextJob = jobs[jobIndex + 1]
+      if (nextJob !== undefined && i === nextJob.start) {
+        flush()
+        jobIndex += 1
+        jobReferenceOnly = nextJob.referenceOnly
+        jobDir = nextJob.dir ?? workflowDir
+        emulatorStep = false
+        withContext = false
+        stepDir = undefined
+        blockIndent = -1
         continue
       }
       // Any new step ends the previous one's runner and working directory, including an
@@ -775,8 +942,11 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
   }
 
   // Device suites take the cap first. A long list of ordinary CI steps must not crowd out
-  // the one check a local JVM run cannot stand in for.
-  return [...device, ...normal].slice(0, MAX_CI_CHECKS)
+  // the one check a local JVM run cannot stand in for. Reference-only rows come last so a
+  // release step never displaces a check a reader could actually run.
+  const runnable = [...device, ...normal].filter((check) => check.referenceOnly !== true)
+  const reference = [...device, ...normal].filter((check) => check.referenceOnly === true)
+  return [...runnable, ...reference].slice(0, MAX_CI_CHECKS)
 }
 
 function looksLikeCommandLine(line: string, inFence = false): boolean {

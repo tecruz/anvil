@@ -30,7 +30,8 @@ earlier head makes a green result unusable, even when the later code differs by 
    review accepted; rebuilding after review invalidates it.
 
 A Task Brief is a navigation aid. It shows selected checks with sources, working directories and
-unknowns; it is not an exhaustive CI inventory and none of its rows is a pass claim.
+unknowns; it is not an exhaustive CI inventory and none of its rows is a pass claim. Release,
+deploy and source-mutating steps are gates to read, never commands a task brief offers to run.
 
 ## Publication boundary
 
