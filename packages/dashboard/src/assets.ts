@@ -441,11 +441,15 @@ function renderBrief(parent, brief) {
   card.appendChild(make('h3', '', 'How to check (selected)'));
   const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
   const selection = brief.checkSelection;
-  if (selection && selection.detectedCiChecks > 0) {
-    const boundary = selection.complete
-      ? 'Selected checks include every workflow check the profile detected.'
-      : 'Selected ' + selection.selected + ' check(s); the profile detected ' + selection.detectedCiChecks +
-        ' workflow check(s). This is not an exhaustive CI inventory.';
+  // Say the boundary in every state, including "unknown": a short list must never read as an
+  // exhaustive CI inventory just because the profile failed or its coverage count is missing.
+  if (selection) {
+    const boundary = selection.complete === null
+      ? 'Workflow check coverage is unknown because the profile source failed. This is not an exhaustive CI inventory.'
+      : selection.complete
+        ? 'Selected checks include every workflow check the profile detected; it is not an exhaustive CI inventory and not a pass claim.'
+        : 'Selected ' + selection.selected + ' check(s); the profile detected ' + selection.detectedCiChecks +
+          ' workflow check(s). This is not an exhaustive CI inventory.';
     card.appendChild(make('div', 'muted', boundary));
   }
   if (checks.length === 0) {

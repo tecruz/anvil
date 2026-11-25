@@ -127,12 +127,13 @@ export interface TaskBrief {
   /**
    * Honest boundary of `howToCheck`: it is a selection, not a complete CI inventory.
    * `detectedCiChecks` counts the workflow rows the profile actually found; it is never a
-   * claim that they passed. `complete` is true only when every detected row is shown.
+   * claim that they passed. `complete` is true only when every detected row is shown, and
+   * null when the profile source was unavailable, so coverage is unknown rather than empty.
    */
   checkSelection: {
     selected: number
     detectedCiChecks: number
-    complete: boolean
+    complete: boolean | null
   }
   /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
   verification: {
@@ -527,7 +528,9 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
     for (const entry of entries) {
       const cmd = asString(entry.cmd) ?? ''
       const scope = asString(entry.scope) === 'device' ? 'device' : 'ci'
-      add(scope, cmd, 'ci workflow', asString(entry.evidence), asString(entry.dir) ?? projectDir, scope)
+      // A workflow step that does not declare `working-directory` says nothing about where it
+      // runs. Never substitute the detected project directory for missing workflow evidence.
+      add(scope, cmd, 'ci workflow', asString(entry.evidence), asString(entry.dir) ?? '', scope)
     }
   }
 
@@ -1243,7 +1246,11 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     .map(asRecord)
     .filter((entry) => entry !== null)
     .filter((entry) => !shown.has(`${asString(entry.cmd) ?? ''}\u0000${asString(entry.evidence) ?? ''}`)).length
-  if (omittedCiChecks > 0) {
+  if (profile === null) {
+    unknowns.push(
+      'Workflow check coverage is unknown because the profile source failed; this short list is not an exhaustive CI inventory.',
+    )
+  } else if (omittedCiChecks > 0) {
     unknowns.push(
       `${omittedCiChecks} detected workflow check(s) are not in this short list; it is not an exhaustive CI inventory.`,
     )
@@ -1280,7 +1287,8 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     checkSelection: {
       selected: checks.length,
       detectedCiChecks,
-      complete: omittedCiChecks === 0,
+      // A failed profile source is an absence of evidence, not zero omitted checks.
+      complete: profile === null ? null : omittedCiChecks === 0,
     },
     verification: {
       status: snapshot.verification.status,

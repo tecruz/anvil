@@ -242,7 +242,22 @@ describe('buildTaskBrief', () => {
     const unknowns = brief.unknowns.join('\n')
     assert.match(unknowns, /TalkBack/)
     assert.match(unknowns, /were not run/)
-    assert.deepEqual(brief.checkSelection, { selected: 6, detectedCiChecks: 3, complete: true })
+  })
+
+  test('workflow commands without a declared directory do not borrow the project directory', () => {
+    const snapshot = makeSnapshot({
+      commands: [],
+      ciChecks: [
+        { cmd: 'npm run ci-only', evidence: '.github/workflows/ci.yml:10', scope: 'ci' },
+        { cmd: 'npm run e2e', evidence: '.github/workflows/ci.yml:20', scope: 'device', dir: 'android' },
+      ],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
+    const root = brief.howToCheck.find((check) => check.cmd === 'npm run ci-only')
+    const device = brief.howToCheck.find((check) => check.cmd === 'npm run e2e')
+    // The fixture's projectDir is `app`; an undeclared workflow directory must not inherit it.
+    assert.equal(root?.cwd, '.')
+    assert.equal(device?.cwd, 'android')
   })
 
   test('the selected list says when detected workflow checks are omitted', () => {
@@ -560,6 +575,9 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /profile source failed/)
     assert.match(unknowns, /No verification command/)
     assert.match(unknowns, /README\.md/)
+    // A failed profile is unknown coverage, not "every detected check is shown".
+    assert.deepEqual(brief.checkSelection, { selected: 0, detectedCiChecks: 0, complete: null })
+    assert.match(unknowns, /Workflow check coverage is unknown/)
     assert.equal(brief.readiness.checked, false)
   })
 
