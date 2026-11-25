@@ -48,12 +48,6 @@ export interface TaskCheck {
    * `device` needs an emulator or physical device. None is a claim that it passed.
    */
   scope: 'local' | 'ci' | 'device'
-  /**
-   * True when the workflow does not establish a runnable directory: no `working-directory` is
-   * declared, or it is an expression such as `${{ matrix.package }}`. `cwd` is then only a
-   * placeholder, and the UI must say the directory is unknown rather than implying the root.
-   */
-  cwdUnknown?: boolean
 }
 
 export interface TaskBlocker {
@@ -498,44 +492,33 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
     evidence: string | null,
     dir: string,
     scope: TaskCheck['scope'] = 'local',
-    cwdKnown = true,
   ): void => {
     if (cmd === '') return
-    // An unresolved directory is absent, not the repository root: an empty string cannot be
-    // mistaken for a concrete path by a consumer that ignores `cwdUnknown`.
-    const cwd = cwdKnown ? (dir === '' ? '.' : dir) : ''
+    const cwd = dir === '' ? '.' : dir
     // Identity includes the resolved directory: `npm test` in two packages is two checks, and
     // collapsing them by command alone hides one and makes coverage look complete.
-    const identity = `${cmd}\u0000${cwdKnown ? cwd : '?'}`
+    const identity = `${cmd}\u0000${cwd}`
     // A device row carries the emulator's own directory and evidence, so it replaces a local
     // or CI row for the same command rather than appearing twice.
     if (scope === 'device') {
       const index = checks.findIndex((check) => check.cmd === cmd)
       if (index >= 0) {
-        const replacement: TaskCheck = { kind: 'device', cmd, source, evidence, cwd, scope: 'device' }
-        if (!cwdKnown) replacement.cwdUnknown = true
-        checks[index] = replacement
+        checks[index] = { kind: 'device', cmd, source, evidence, cwd, scope: 'device' }
         return
       }
     } else if (seen.has(identity)) {
       return
-    } else if (!cwdKnown && checks.some((check) => check.cmd === cmd)) {
-      // A workflow row whose directory is not established adds no place a row does not already
-      // name. Keep the row that has a real directory instead of listing the command twice.
-      return
     }
     if (checks.length >= MAX_CHECK_ITEMS) return
     seen.add(identity)
-    const row: TaskCheck = {
+    checks.push({
       kind,
       cmd,
       source,
       evidence,
       cwd,
       scope: deviceCommands.has(cmd) ? 'device' : scope,
-    }
-    if (!cwdKnown) row.cwdUnknown = true
-    checks.push(row)
+    })
   }
 
   // CI commands are read from workflow files by the profile, never from the pasted task.
@@ -556,9 +539,10 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       const dir = asString(entry.dir) ?? ''
       // A step with no `working-directory` runs at the repository root — GitHub's documented
       // default — never at the detected project directory. An expression such as
-      // `${{ matrix.package }}` cannot be resolved from the file, so that is unknown.
-      const cwdKnown = !/\$\{\{/.test(dir)
-      add(scope, cmd, 'ci workflow', asString(entry.evidence), dir, scope, cwdKnown)
+      // `${{ matrix.package }}` cannot be resolved from the file, so it is not a runnable
+      // suggestion: the unknowns name the command and the line to read instead.
+      if (/\$\{\{/.test(dir)) continue
+      add(scope, cmd, 'ci workflow', asString(entry.evidence), dir, scope)
     }
   }
 
@@ -1115,10 +1099,7 @@ export function buildTaskMap(
       id: `check:${String(index)}`,
       label: `${check.kind}: ${check.cmd}`,
       kind: 'check',
-      reason:
-        check.cwdUnknown === true
-          ? `${check.source}; the workflow does not establish a working directory`
-          : `${check.source}${check.cwd === '' ? '' : ` from ${check.cwd}`}`,
+      reason: `${check.source}${check.cwd === '' ? '' : ` from ${check.cwd}`}`,
       evidence: check.evidence ?? `anvil ready --json: commands[${String(index)}]`,
     })
   }
@@ -1271,17 +1252,19 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   // Coverage is judged on the command *and* its resolved directory: `npm test` in two packages
   // is two checks, and showing the first one does not cover the second. A local row covers a
   // workflow row only when both name the same command in the same place.
-  const coverageKey = (cmd: string, cwd: string, unknown: boolean): string => `${cmd}\u0000${unknown ? '' : cwd}`
-  const shown = new Set(checks.map((check) => coverageKey(check.cmd, check.cwd, check.cwdUnknown === true)))
-  const omittedCiChecks = (profile === null ? [] : asArray(profile.ciChecks))
+  const coverageKey = (cmd: string, cwd: string): string => `${cmd}\u0000${cwd}`
+  const shown = new Set(checks.map((check) => coverageKey(check.cmd, check.cwd)))
+  const detectedRunnable = (profile === null ? [] : asArray(profile.ciChecks))
     .map(asRecord)
-    .filter((entry) => entry !== null)
-    .filter((entry) => entry.referenceOnly !== true)
+    .filter((entry): entry is Record<string, unknown> => entry !== null && entry.referenceOnly !== true)
+  // A workflow expression has no reproducible directory and is reported on its own below, so it
+  // must not also be counted as an omitted runnable check.
+  const omittedCiChecks = detectedRunnable
+    .filter((entry) => !/\$\{\{/.test(asString(entry.dir) ?? ''))
     .filter((entry) => {
       const rawDir = asString(entry.dir) ?? ''
-      // No declared directory means GitHub's repository-root default; an expression is unresolved.
-      const known = !/\$\{\{/.test(rawDir)
-      return !shown.has(coverageKey(asString(entry.cmd) ?? '', known && rawDir !== '' ? rawDir : '.', !known))
+      // No declared directory means GitHub's repository-root default.
+      return !shown.has(coverageKey(asString(entry.cmd) ?? '', rawDir === '' ? '.' : rawDir))
     }).length
   if (profile === null) {
     unknowns.push(
@@ -1292,20 +1275,33 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
       `${omittedCiChecks} detected workflow check(s) are not in this short list; it is not an exhaustive CI inventory.`,
     )
   }
+  // A step whose directory is a workflow expression has no reproducible place to run from, so it
+  // is never offered as a command. Name it with its cited line so the reader can open the file.
+  const unresolved = detectedRunnable
+    .filter((entry) => /\$\{\{/.test(asString(entry.dir) ?? ''))
+    .map((entry) => {
+      const cmd = asString(entry.cmd) ?? ''
+      const cite = asString(entry.evidence)
+      return cite === null ? cmd : `${cmd} (${cite})`
+    })
+    .filter((entry) => entry !== '')
+  if (unresolved.length > 0) {
+    unknowns.push(
+      `Workflow steps whose directory is a workflow expression are not offered as checks: ${unresolved.join(', ')}. Read the cited line to see what it runs and where.`,
+    )
+  }
   const referenceOnly = (profile === null ? [] : asArray(profile.ciChecks))
     .map(asRecord)
     .filter((entry): entry is Record<string, unknown> => entry !== null && entry.referenceOnly === true)
-    .map((entry) => asString(entry.cmd))
-    .filter((cmd): cmd is string => cmd !== null)
+    .map((entry) => {
+      const cmd = asString(entry.cmd) ?? ''
+      const cite = asString(entry.evidence)
+      return cite === null ? cmd : `${cmd} (${cite})`
+    })
+    .filter((entry) => entry !== '')
   if (referenceOnly.length > 0) {
     unknowns.push(
-      `Release, deploy or source-mutating workflow steps are not offered as checks: ${referenceOnly.join(', ')}. Inspect the cited workflow lines to see those gates.`,
-    )
-  }
-  const unknownDirs = checks.filter((check) => check.cwdUnknown === true)
-  if (unknownDirs.length > 0) {
-    unknowns.push(
-      `${unknownDirs.length} selected workflow check(s) do not declare a usable working directory; the directory shown is only a placeholder. Read the cited workflow line before running one.`,
+      `Release, deploy or source-mutating workflow steps are not offered as checks: ${referenceOnly.join(', ')}. Read the cited lines to see those gates.`,
     )
   }
 
@@ -1341,8 +1337,9 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
       selected: checks.length,
       detectedCiChecks,
       referenceOnlyChecks: referenceOnly.length,
-      // A failed profile source is an absence of evidence, not zero omitted checks.
-      complete: profile === null ? null : omittedCiChecks === 0,
+      // A failed profile source is an absence of evidence, not zero omitted checks. An
+      // unresolved step is detected but not runnable, so coverage is not complete either.
+      complete: profile === null ? null : omittedCiChecks === 0 && unresolved.length === 0,
     },
     verification: {
       status: snapshot.verification.status,

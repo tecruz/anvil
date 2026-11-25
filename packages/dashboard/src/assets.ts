@@ -463,10 +463,7 @@ function renderBrief(parent, brief) {
       const scope = check.scope === 'device' ? 'device · manual' : check.scope === 'ci' ? 'CI' : 'local';
       row.appendChild(make('strong', '', check.kind + ' · ' + scope));
       row.appendChild(make('code', 'path', check.cmd));
-      const detail = check.cwdUnknown
-        ? 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') +
-          ' · working directory not established by the workflow; read that line before running'
-        : 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
+      const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
       row.appendChild(make('div', 'muted', detail));
       card.appendChild(row);
     }

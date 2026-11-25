@@ -261,18 +261,17 @@ describe('buildTaskBrief', () => {
     const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
     const root = brief.howToCheck.find((check) => check.cmd === 'npm run ci-only')
     const device = brief.howToCheck.find((check) => check.cmd === 'npm run e2e')
-    const matrix = brief.howToCheck.find((check) => check.cmd === 'npm run matrix')
     // The fixture's projectDir is `app`. An undeclared step directory is GitHub's documented
     // repository-root default, never the detected project directory.
     assert.equal(root?.cwd, '.')
-    assert.equal(root?.cwdUnknown, undefined)
     assert.equal(device?.cwd, 'android')
-    assert.equal(device?.cwdUnknown, undefined)
-    // An expression is not a directory: say it is unknown instead of showing Go-template text.
-    assert.equal(matrix?.cwdUnknown, true)
-    assert.equal(matrix?.cwd, '')
-    assert.doesNotMatch(matrix?.cwd ?? '', /\$\{\{/)
-    assert.match(brief.unknowns.join('\n'), /do not declare a usable working directory/)
+    // An expression has no reproducible directory, so the command is not offered at all.
+    assert.ok(!brief.howToCheck.some((check) => check.cmd === 'npm run matrix'))
+    assert.match(
+      brief.unknowns.join('\n'),
+      /directory is a workflow expression are not offered as checks: npm run matrix \(\.github\/workflows\/ci\.yml:30\)/,
+    )
+    assert.equal(brief.checkSelection.complete, false)
   })
 
   test('the same command in two directories stays two checks and is not reported complete when one is dropped', () => {
@@ -345,6 +344,8 @@ describe('buildTaskBrief', () => {
     const unknowns = brief.unknowns.join('\n')
     assert.match(unknowns, /not offered as checks/)
     assert.match(unknowns, /assembleRelease/)
+    // Each excluded step carries its citation so the reader can open the gate.
+    assert.match(unknowns, /assembleRelease --no-daemon \(\.github\/workflows\/ci\.yml:40\)/)
     // A reference row is counted separately, never as an omitted runnable check.
     assert.deepEqual(brief.checkSelection, { selected: 1, detectedCiChecks: 3, referenceOnlyChecks: 2, complete: true })
   })

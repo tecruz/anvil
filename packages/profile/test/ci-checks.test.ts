@@ -390,6 +390,67 @@ jobs:
     )
   })
 
+  test('a block defaults: whose run: is flow style still overrides the workflow default', () => {
+    const workflow = `defaults:
+  run:
+    working-directory: packages/api
+jobs:
+  tests:
+    defaults:
+      run: {working-directory: packages/web}
+    steps:
+      - run: npm test
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir]),
+      [['npm test', 'packages/web']],
+    )
+  })
+
+  test('a working-directory inside env is data, not the step directory', () => {
+    const workflow = `jobs:
+  tests:
+    steps:
+      - run: npm test
+        env:
+          working-directory: packages/data
+      - run: npm run lint
+        env:
+          working-directory: packages/also-data
+        working-directory: packages/real
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.dir ?? null]),
+      [
+        ['npm test', null],
+        ['npm run lint', 'packages/real'],
+      ],
+    )
+  })
+
+  test('a job name is found at the indentation the file uses, not an assumed two spaces', () => {
+    const workflow = `jobs:
+    delivery:
+        strategy:
+            matrix:
+                os: [ubuntu-latest]
+        steps:
+            - run: node scripts/promote.mjs
+              working-directory: packages/tools
+        name: Deploy staging
+`
+    const dir = repo({ '.github/workflows/fixture.yml': workflow })
+    const checks = detectCiChecks(dir, new Set(['.github/workflows/fixture.yml']))
+    assert.deepEqual(
+      checks.map((check) => [check.cmd, check.referenceOnly === true]),
+      [['node scripts/promote.mjs', true]],
+    )
+  })
+
   test('workflow and job defaults supply a working directory to the step', () => {
     const workflow = `on: pull_request
 defaults:

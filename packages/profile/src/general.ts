@@ -708,10 +708,16 @@ function yamlScalar(value: string): string {
 
 /** `defaults.run.working-directory` within one YAML block, or undefined when it is not set. */
 function defaultsWorkingDirectory(lines: readonly string[], start: number, end: number): string | undefined {
-  // A flow-style default is one line: `defaults: {run: {working-directory: packages/web}}`.
-  // Ignoring it meant the workflow default silently won over the job's own declaration.
+  // Flow style can appear on either line: `defaults: {run: {working-directory: pkg}}` or a block
+  // `defaults:` whose `run:` carries the mapping. Only the first form used to be read, so a job
+  // that wrote the second silently inherited the workflow default.
   const flowRun = /\brun\s*:\s*\{([^}]*)\}/
   const flowDir = /\bworking-directory\s*:\s*([^,}]+)/
+  const flowDirectory = (value: string): string | undefined => {
+    const run = flowRun.exec(value)
+    const dir = run === null ? null : flowDir.exec(run[1] as string)
+    return dir === null ? undefined : yamlScalar(dir[1] as string)
+  }
   let defaultsIndent = -1
   let runIndent = -1
   for (let i = start; i < end; i++) {
@@ -719,9 +725,8 @@ function defaultsWorkingDirectory(lines: readonly string[], start: number, end: 
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue
     const indent = line.length - line.trimStart().length
     if (/^\s*defaults\s*:/.test(line)) {
-      const run = flowRun.exec(line)
-      const dir = run === null ? null : flowDir.exec(run[1] as string)
-      if (dir !== null) return yamlScalar(dir[1] as string)
+      const dir = flowDirectory(line)
+      if (dir !== undefined) return dir
     }
     if (defaultsIndent >= 0 && indent <= defaultsIndent) {
       defaultsIndent = -1
@@ -734,6 +739,10 @@ function defaultsWorkingDirectory(lines: readonly string[], start: number, end: 
     }
     if (runIndent < 0) {
       if (/^\s*run\s*:\s*(?:#.*)?$/.test(line)) runIndent = indent
+      else {
+        const dir = flowDirectory(line)
+        if (dir !== undefined) return dir
+      }
       continue
     }
     const dir = /^\s*working-directory\s*:\s*(.+?)\s*$/.exec(line)
@@ -757,11 +766,21 @@ const JOB_KEY = /^\s*(?:(['"])([^'"]+)\1|([A-Za-z0-9_-]+))\s*:\s*(?:#.*)?$/
 
 /** The job's own `name:` line, which can name a stage the id does not. */
 function jobName(lines: readonly string[], job: { start: number; end: number; keyIndent: number }): string | null {
+  // A file may indent jobs by four spaces instead of two, so the job's child indentation is
+  // measured from its own keys rather than assumed. A step (`- ...`) is always deeper.
+  let childIndent = -1
   for (let i = job.start + 1; i < job.end; i++) {
     const line = lines[i] ?? ''
     if (line.trim() === '' || line.trimStart().startsWith('#')) continue
-    // A step starts with `-`; job metadata is a plain key at the job's child indentation.
-    if (line.length - line.trimStart().length !== job.keyIndent + 2) continue
+    const indent = line.length - line.trimStart().length
+    if (indent <= job.keyIndent || /^\s*-/.test(line)) continue
+    if (childIndent < 0 || indent < childIndent) childIndent = indent
+  }
+  if (childIndent < 0) return null
+  for (let i = job.start + 1; i < job.end; i++) {
+    const line = lines[i] ?? ''
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    if (line.length - line.trimStart().length !== childIndent) continue
     const match = /^\s*name\s*:\s*(.+?)\s*$/.exec(line)
     if (match !== null) return yamlScalar(match[1] as string)
   }
@@ -825,6 +844,9 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
     let jobDir = workflowDir
     let emulatorStep = false
     let withContext = false
+    // Indent of the `env:` key currently open; its data keys are deeper. `undefined` means no
+    // `env:` mapping is open.
+    let envIndent: number | undefined
     let stepDir: string | undefined
     let blockIndent = -1
     let blockScope: CiCheck['scope'] = 'ci'
@@ -870,6 +892,7 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
         jobDir = nextJob.dir ?? workflowDir
         emulatorStep = false
         withContext = false
+        envIndent = undefined
         stepDir = undefined
         blockIndent = -1
         continue
@@ -881,15 +904,25 @@ export function detectCiChecks(root: string, files: ReadonlySet<string>): CiChec
         flush()
         emulatorStep = false
         withContext = false
+        envIndent = undefined
         stepDir = undefined
         blockIndent = -1
       }
       if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
       // A trailing YAML comment is still the same key. Missing it kept `with` active while an
       // `env:` mapping followed, so data under `env.script` was reported as an executed check.
-      if (/^\s+with\s*:\s*(?:#.*)?$/.test(line)) withContext = true
-      if (/^\s+env\s*:\s*(?:#.*)?$/.test(line)) withContext = false
-      const dirMatch = /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line)
+      if (/^\s+(?:-\s+)?with\s*:\s*(?:#.*)?$/.test(line)) withContext = true
+      // `env:` opens a data mapping. A `working-directory` key inside it is an environment
+      // variable, not the step's directory, so it must not be read as provenance.
+      const envKey = /^(\s+)(?:-\s+)?env\s*:\s*(?:#.*)?$/.exec(line)
+      if (envKey !== null) {
+        withContext = false
+        envIndent = (envKey[1] as string).length
+      } else if (envIndent !== undefined && line.trim() !== '' && line.length - line.trimStart().length <= envIndent) {
+        // The step's next key ends the `env:` mapping.
+        envIndent = undefined
+      }
+      const dirMatch = envIndent === undefined ? /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line) : null
       if (dirMatch !== null) {
         stepDir = (dirMatch[1] as string)
           .replace(/\s+#.*$/, '')

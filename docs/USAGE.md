@@ -734,13 +734,14 @@ Two kinds of step are deliberately kept out of the runnable list:
 
 - **Release, deploy and source-mutating steps.** `npm publish`, `assembleRelease`, a deploy job and
   a docs sync without `--check` are gates to read, not checks to run. They are listed once in the
-  unknowns so you can open the cited workflow line; they are never offered as a command.
-- **Steps with no usable directory.** `working-directory` is read from the step, then the job,
-  then the workflow `defaults` (including the one-line `{run: {working-directory: ...}}` form). A
-  step with no declaration runs at the repository root, which is GitHub's documented default. An
-  expression such as `${{ matrix.package }}` cannot be resolved from the file, so that row says the
-  directory is not established instead of showing a path as if it were evidence. Read the cited line
-  before running that command.
+  unknowns with their cited `file:line`, so you can open the gate; they are never offered as a
+  command.
+- **Steps whose directory is a workflow expression.** `working-directory` is read from the step,
+  then the job, then the workflow `defaults` (block or one-line `{run: {working-directory: ...}}`
+  form). A step with no declaration runs at the repository root, which is GitHub's documented
+  default. An expression such as `${{ matrix.package }}` cannot be resolved from the file, so the
+  command is not offered as a runnable suggestion at all; the unknowns name it with its cited line
+  so you can read where it runs.
 
 To inspect the merge gates yourself, open the cited workflow files — a short list, a source label or
 an evidence line is not a pass. The same brief includes a **task map**: a 2D subgraph of the
