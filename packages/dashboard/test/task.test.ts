@@ -164,6 +164,7 @@ describe('buildTaskBrief', () => {
       brief.howToCheck.map((check) => check.kind),
       ['testFast', 'test', 'lint', 'build'],
     )
+    assert.deepEqual(brief.checkSelection, { selected: 4, detectedCiChecks: 0, complete: true })
     assert.equal(brief.howToCheck[0]?.cmd, 'npm run test:changed')
     assert.equal(brief.howToCheck[0]?.cwd, 'app')
     assert.equal(brief.howToCheck[0]?.source, 'documented')
@@ -227,6 +228,7 @@ describe('buildTaskBrief', () => {
 
     assert.equal(check('./gradlew spotlessCheck --no-daemon')?.scope, 'ci')
     assert.equal(check('./gradlew jacocoCombinedReport --no-daemon')?.scope, 'device')
+    assert.deepEqual(brief.checkSelection, { selected: 6, detectedCiChecks: 3, complete: true })
 
     // The fast loop stays first. A device suite takes the first CI slot so it cannot be
     // crowded out by workflow steps that a local run could stand in for.
@@ -240,6 +242,26 @@ describe('buildTaskBrief', () => {
     const unknowns = brief.unknowns.join('\n')
     assert.match(unknowns, /TalkBack/)
     assert.match(unknowns, /were not run/)
+    assert.deepEqual(brief.checkSelection, { selected: 6, detectedCiChecks: 3, complete: true })
+  })
+
+  test('the selected list says when detected workflow checks are omitted', () => {
+    const snapshot = makeSnapshot({
+      commands: [],
+      ciChecks: Array.from({ length: 12 }, (_, index) => ({
+        cmd: `npm run ci${index}`,
+        evidence: `.github/workflows/ci.yml:${index + 1}`,
+        scope: 'ci',
+      })),
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Verify the change' })
+    assert.equal(brief.howToCheck.length, 8)
+    assert.deepEqual(brief.checkSelection, { selected: 8, detectedCiChecks: 12, complete: false })
+    // Eight selected rows, one local default command and three workflow rows do not fit.
+    assert.match(
+      brief.unknowns.join('\n'),
+      /5 detected workflow check\(s\) are not in this short list; it is not an exhaustive CI inventory/,
+    )
   })
 
   test('a locally declared device check keeps device scope and its own working directory', () => {

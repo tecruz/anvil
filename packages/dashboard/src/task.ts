@@ -124,6 +124,16 @@ export interface TaskBrief {
   /** The same task, as a reproducible 2D subgraph. */
   map: TaskMap
   howToCheck: TaskCheck[]
+  /**
+   * Honest boundary of `howToCheck`: it is a selection, not a complete CI inventory.
+   * `detectedCiChecks` counts the workflow rows the profile actually found; it is never a
+   * claim that they passed. `complete` is true only when every detected row is shown.
+   */
+  checkSelection: {
+    selected: number
+    detectedCiChecks: number
+    complete: boolean
+  }
   /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
   verification: {
     status: 'unavailable' | 'recorded'
@@ -1223,6 +1233,21 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
       'Device checks need an emulator or device and were not run. TalkBack, focus order and 200% font scaling need manual validation.',
     )
   }
+  const detectedCiChecks = profile === null ? 0 : asArray(profile.ciChecks).length
+  const shown = new Set(
+    checks
+      .filter((check) => check.scope === 'ci' || check.scope === 'device')
+      .map((check) => `${check.cmd}\u0000${check.evidence ?? ''}`),
+  )
+  const omittedCiChecks = (profile === null ? [] : asArray(profile.ciChecks))
+    .map(asRecord)
+    .filter((entry) => entry !== null)
+    .filter((entry) => !shown.has(`${asString(entry.cmd) ?? ''}\u0000${asString(entry.evidence) ?? ''}`)).length
+  if (omittedCiChecks > 0) {
+    unknowns.push(
+      `${omittedCiChecks} detected workflow check(s) are not in this short list; it is not an exhaustive CI inventory.`,
+    )
+  }
 
   const pasted = suggestion === null ? titleAndObjective(text) : null
   const suggested =
@@ -1252,6 +1277,11 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     startHere,
     map,
     howToCheck: checks,
+    checkSelection: {
+      selected: checks.length,
+      detectedCiChecks,
+      complete: omittedCiChecks === 0,
+    },
     verification: {
       status: snapshot.verification.status,
       reason: snapshot.verification.reason,

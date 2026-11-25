@@ -438,8 +438,16 @@ function renderBrief(parent, brief) {
     }
   }
 
-  card.appendChild(make('h3', '', 'How to check'));
+  card.appendChild(make('h3', '', 'How to check (selected)'));
   const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
+  const selection = brief.checkSelection;
+  if (selection && selection.detectedCiChecks > 0) {
+    const boundary = selection.complete
+      ? 'Selected checks include every workflow check the profile detected.'
+      : 'Selected ' + selection.selected + ' check(s); the profile detected ' + selection.detectedCiChecks +
+        ' workflow check(s). This is not an exhaustive CI inventory.';
+    card.appendChild(make('div', 'muted', boundary));
+  }
   if (checks.length === 0) {
     card.appendChild(make('div', 'muted', 'No verification command was detected or declared for this repository.'));
   } else {

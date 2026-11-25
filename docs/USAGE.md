@@ -717,13 +717,19 @@ shows the likely files to start from, the verification commands with the source 
 directory that established them, the required needs `anvil ready` reports as blocked, and
 what the page cannot know.
 
-**How to check** separates three kinds of command. `local` is the fast loop an agent can run
-now, from `anvil ready` or the detected commands. `ci` is what the repository's own workflow
-files run — a coverage task or formatter may be the merge gate even when the README names a
-smaller test. `device` is an emulator or attached-device suite; TalkBack, focus order, insets
-and 200% font scaling still need manual validation. Every row names the command, its source
-and `file:line` evidence, and its working directory. None of them has been run by the page,
-and none carries a pass claim. The same brief includes a **task map**: a 2D subgraph of the
+**How to check (selected)** separates three kinds of command. `local` is the fast loop an agent
+can run now, from `anvil ready` or the detected commands. `ci` is what the repository's own
+workflow files run — a coverage task or formatter may be the merge gate even when the README
+names a smaller test. `device` is an emulator or attached-device suite; TalkBack, focus order,
+insets and 200% font scaling still need manual validation. Every row names the command, its
+source and `file:line` evidence, and its working directory. None of them has been run by the
+page, and none carries a pass claim.
+
+The list is a **selection**, not an exhaustive CI inventory. The brief records how many workflow
+checks the profile detected and whether the short list includes all of them; when any are
+omitted, the unknowns say so explicitly. To inspect the merge gates yourself, open the cited
+workflow files — a short list, a source label or an evidence line is not a pass. The same brief
+includes a **task map**: a 2D subgraph of the
 matched files, the modules containing them, their declared one-hop dependencies and the
 verify commands. It opens filtered to the task, supports a text filter and a list view, and
 shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
