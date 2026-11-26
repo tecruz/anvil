@@ -13,6 +13,7 @@ import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
 import { createDashboardServer, type DashboardInvoke, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
 import { createCliInvoker, DASHBOARD_ACTION_TIMEOUT_MS } from '../mcp.ts'
+import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
 import type { Command } from './types.ts'
 
 function parsePort(value: unknown): number {
@@ -103,11 +104,16 @@ export function dashboardInvokers(
 
 export const dashboardCommand: Command = {
   name: 'dashboard',
-  summary: 'Start a local overview of readiness, context and parallel work, with optional gated actions.',
+  summary: 'Start a local overview with a task brief, readiness, context and work, with gated actions.',
   usage: 'anvil dashboard [--repo <dir>] [--port <n>]',
   details: [
     'Serves a small page over the same JSON contracts the CLI prints. It does not replace any',
     'command. Refresh re-reads the CLI output; the page is a snapshot, not a live agent view.',
+    '',
+    'The Task brief is the entry point: paste a ticket or task text, or pick a repository',
+    'suggestion. The brief names files to start from, checks, approval gates quoted from the',
+    'task, blockers and unknowns. It reads only the cached snapshot, stores nothing and never',
+    'starts a CLI process. Repository, Context and Work stay available as read-only views.',
     '',
     'The page is read-only by default. The Work view offers three explicit, confirm-gated',
     'actions: Claim <ticket>, Verify crew, and Ship <claim key> --probe. Each runs the same',
@@ -143,6 +149,18 @@ export const dashboardCommand: Command = {
       })
     }
 
+    // Resolve the bounded evidence store and sample the HEAD commit once with read-only Git
+    // flags. A page load or refresh never launches Git: a brief only reads the cached snapshot.
+    const store = evidenceStore(repoRoot)
+    // The revision is provenance, not a gate. A missing or broken Git (ToolMissing, a failed
+    // probe, a non-repository worktree) must not stop the read-only dashboard from listening:
+    // leave currentRevision null so the snapshot reports verification as explicitly unknown.
+    let currentRevision: string | null = null
+    try {
+      currentRevision = await headRevision(repoRoot)
+    } catch {
+      currentRevision = null
+    }
     const { invoke, invokeAction } = dashboardInvokers()
     const server = await createDashboardServer({
       cwd: repoRoot,
@@ -150,6 +168,8 @@ export const dashboardCommand: Command = {
       invoke,
       invokeAction,
       readStaged: () => stagedView(repoRoot),
+      currentRevision,
+      ...(store === null ? {} : { readVerification: () => readVerificationEvidence(store) }),
     })
 
     ctx.out(

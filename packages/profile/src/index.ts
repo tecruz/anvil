@@ -49,6 +49,7 @@ export {
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
   globToRegExp,
   makefileTargets,
   matchesAny,
@@ -100,6 +101,7 @@ export {
   toPosix,
   type Vcs,
   type VcsHost,
+  type WorkflowReference,
 } from './types.ts'
 export {
   type VerificationCommand,

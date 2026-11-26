@@ -85,7 +85,9 @@ the interesting part.
 **The [usage guide](docs/USAGE.md) is the manual**: what each command writes, how to
 configure it, the environment variables, and the exit codes to script against.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is for contributors: how the packages fit
-together and where the state lives.
+together and where the state lives. The
+[exact-candidate release evidence checklist](docs/RELEASE-EVIDENCE.md) defines what must exist
+before a first publication can be reviewed; it is not approval to publish.
 
 Inside opencode, the [plugin](packages/plugin-opencode/README.md) registers the same
 tools for the agent, and keeps the ticket context alive when the conversation is

@@ -16,6 +16,7 @@ import {
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
 } from './general.ts'
 import type { CommandKind } from './types.ts'
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
@@ -180,6 +181,10 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     })
   }
 
+  // A workflow is a source to read, not a list of commands this profile claims should be run:
+  // record the lines a reader can open beside the documented local commands.
+  const workflowReferences = detectWorkflowReferences(root, fileSet)
+
   // Fail closed: an unknown module must not retain edges from any detector.
   for (const module of draft.modules) {
     if (draft.depsUnknownReasons.has(module.id)) module.deps = []
@@ -198,6 +203,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     docs: detectDocs(root),
     files,
     projectDir,
+    workflowReferences,
     diagnostics: {
       truncated,
       fileLimit,
