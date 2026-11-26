@@ -6,10 +6,7 @@
   "model": "opencode/hy4-flash-free",
   "seed": "verified-patch-workflow-v1",
   "repetitions": 5,
-  "tasks": [
-    "verified-patch",
-    "node-tiny-slugify"
-  ],
+  "tasks": ["verified-patch", "node-tiny-slugify"],
   "results": [
     {
       "task": "verified-patch",
@@ -96,9 +93,7 @@
       "arm": "anvil",
       "repetition": 0,
       "grade": "task-failure",
-      "reasons": [
-        "the check ran against a different patch"
-      ],
+      "reasons": ["the check ran against a different patch"],
       "detail": null
     },
     {
@@ -106,9 +101,7 @@
       "arm": "plain",
       "repetition": 0,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -116,9 +109,7 @@
       "arm": "plain",
       "repetition": 1,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -126,9 +117,7 @@
       "arm": "anvil",
       "repetition": 1,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -136,9 +125,7 @@
       "arm": "anvil",
       "repetition": 2,
       "grade": "task-failure",
-      "reasons": [
-        "the check ran against a different patch"
-      ],
+      "reasons": ["the check ran against a different patch"],
       "detail": null
     },
     {
@@ -146,9 +133,7 @@
       "arm": "plain",
       "repetition": 2,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -156,9 +141,7 @@
       "arm": "plain",
       "repetition": 3,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -166,9 +149,7 @@
       "arm": "anvil",
       "repetition": 3,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     },
     {
@@ -176,9 +157,7 @@
       "arm": "anvil",
       "repetition": 4,
       "grade": "task-failure",
-      "reasons": [
-        "the check ran against a different patch"
-      ],
+      "reasons": ["the check ran against a different patch"],
       "detail": null
     },
     {
@@ -186,9 +165,7 @@
       "arm": "plain",
       "repetition": 4,
       "grade": "task-failure",
-      "reasons": [
-        "the harness-controlled check failed"
-      ],
+      "reasons": ["the harness-controlled check failed"],
       "detail": null
     }
   ]

@@ -6,8 +6,6 @@
   "arm": "plain",
   "repetition": 0,
   "grade": "task-failure",
-  "reasons": [
-    "the harness-controlled check failed"
-  ],
+  "reasons": ["the harness-controlled check failed"],
   "detail": null
 }

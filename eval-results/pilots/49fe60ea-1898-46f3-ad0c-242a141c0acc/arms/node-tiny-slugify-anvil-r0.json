@@ -6,8 +6,6 @@
   "arm": "anvil",
   "repetition": 0,
   "grade": "task-failure",
-  "reasons": [
-    "the check ran against a different patch"
-  ],
+  "reasons": ["the check ran against a different patch"],
   "detail": null
 }
