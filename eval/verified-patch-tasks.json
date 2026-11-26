@@ -16,6 +16,22 @@
       "hiddenAcceptance": "eval/hidden/verified-patch-acceptance.test.js",
       "referenceFix": "eval/solutions/verified-patch-slug.js",
       "fixTarget": "src/slug.js"
+    },
+    {
+      "id": "node-tiny-slugify",
+      "repo": "eval/repos/node-tiny",
+      "task": "Implement slugify in src/slug.js following the rules in README.md: lowercase the title, replace runs of spaces with a single dash, and trim dashes at both ends. Add a case to test/text.test.js covering the behaviour you implemented. Run the repository check from the repository root before finishing. Do not edit package.json or README.md.",
+      "verifyCommand": "npm test",
+      "acceptedCommands": ["npm test"],
+      "verifyScript": "package.json",
+      "declared": { "command": "npm test", "bin": "npm", "argv": ["test"] },
+      "captureDir": "",
+      "inScope": ["src/slug.js", "test/text.test.js"],
+      "excluded": ["AGENTS.md", ".opencode", ".agents", ".anvil", "anvil.config.json"],
+      "protected": ["package.json", "README.md"],
+      "hiddenAcceptance": "eval/hidden/node-tiny-slugify.test.js",
+      "referenceFix": "eval/solutions/tiny-code-change.js",
+      "fixTarget": "src/slug.js"
     }
   ]
 }

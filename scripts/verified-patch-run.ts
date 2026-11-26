@@ -269,8 +269,13 @@ async function runAgent(options: {
   task: VerifiedPatchTask
   config: RunConfig
   brokerEnv: NodeJS.ProcessEnv
+  workflowHint?: boolean
 }): Promise<{ timedOut: boolean; detail: string | null }> {
-  writeFileSync(join(options.workdir, TASK_FILE), `${options.task.task}\n`, 'utf8')
+  const hint =
+    options.workflowHint === true
+      ? '\nWork this as a ticket: read .anvil/ticket.md first, then follow AGENTS.md for verification.\n'
+      : ''
+  writeFileSync(join(options.workdir, TASK_FILE), `${options.task.task}\n${hint}`, 'utf8')
   const env = isolatedEnv(options.brokerEnv, options.config.config)
   const args = [
     'run',
@@ -326,7 +331,7 @@ export async function runStudy(repoRoot: string, manifest: Manifest, config: Run
         const workdir = mkdtempSync(join(tmpdir(), `verified-patch-${task.id}-${arm}-`))
         cpSync(join(repoRoot, task.repo), workdir, { recursive: true })
         if (arm === 'anvil') {
-          const staged = stageAnvilContext({ cli: config.cli, workdir })
+          const staged = stageAnvilContext({ cli: config.cli, workdir, taskText: task.task })
           if (!staged.ok) throw new Error(`anvil staging failed for ${task.id}: ${staged.error}`)
         }
         const handle = await openArm({
@@ -338,7 +343,13 @@ export async function runStudy(repoRoot: string, manifest: Manifest, config: Run
         let timedOut = false
         let agentDetail: string | null = null
         try {
-          const outcome = await runAgent({ workdir, task, config, brokerEnv: handle.broker.env })
+          const outcome = await runAgent({
+            workdir,
+            task,
+            config,
+            brokerEnv: handle.broker.env,
+            ...(arm === 'anvil' ? { workflowHint: true } : {}),
+          })
           timedOut = outcome.timedOut
           agentDetail = outcome.detail
         } finally {

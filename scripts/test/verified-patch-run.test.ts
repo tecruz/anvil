@@ -13,17 +13,17 @@ import { graderDigests, isolatedEnv, loadManifest, preflightTask, runSpecHash } 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 const runner = join(repoRoot, 'scripts/verified-patch-run.ts')
 
-test('the manifest loads and its single task passes preflight without a model', () => {
+test('the manifest loads and every enrolled task passes preflight without a model', () => {
   const manifest = loadManifest(repoRoot)
   assert.equal(manifest.schemaVersion, 1)
-  assert.equal(manifest.tasks.length, 1)
-  const task = manifest.tasks[0]
-  assert.ok(task, 'the manifest must declare a task')
-  const result = preflightTask(repoRoot, task)
-  assert.equal(result.id, 'verified-patch')
-  assert.equal(result.hiddenFailsOnBase, true)
-  assert.equal(result.hiddenPassesWithFix, true)
-  assert.equal(result.ok, true)
+  assert.equal(manifest.tasks.length, 2)
+  for (const task of manifest.tasks) {
+    const result = preflightTask(repoRoot, task)
+    assert.equal(result.id, task.id)
+    assert.equal(result.hiddenFailsOnBase, true, `${task.id}: hidden acceptance must fail on the base`)
+    assert.equal(result.hiddenPassesWithFix, true, `${task.id}: hidden acceptance must pass with the fix`)
+    assert.equal(result.ok, true)
+  }
 })
 
 test('preflight writes a bounded report and never creates a run record', () => {

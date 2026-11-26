@@ -6,6 +6,12 @@
       "hiddenFailsOnBase": true,
       "hiddenPassesWithFix": true,
       "ok": true
+    },
+    {
+      "id": "node-tiny-slugify",
+      "hiddenFailsOnBase": true,
+      "hiddenPassesWithFix": true,
+      "ok": true
     }
   ]
 }
