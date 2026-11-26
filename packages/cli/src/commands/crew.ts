@@ -434,9 +434,10 @@ export function createEvidenceRunner(options: {
 /**
  * Build one version 2 record per worktree whose checks all ran against the same tree.
  *
- * A dirty tree, a revision that moved while the check ran, or commands from different
- * directories cannot prove a single immutable patch was checked, so no current record is
- * emitted. Legacy rows are still written alongside it for readers that expect the old format.
+ * A dirty tree or a revision that moved while the check ran cannot prove a single immutable
+ * patch was checked, so no current record is emitted. Commands may live in different
+ * directories; each one is bound to its own directory instead of forcing a shared cwd. Legacy
+ * rows are still written alongside it for readers that expect the old format.
  */
 export function currentRecordFor(
   worktree: CrewVerifyResult['results'][number],

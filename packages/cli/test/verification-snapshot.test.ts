@@ -31,6 +31,11 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' })
 }
 
+/** Git checks CRLF out on Windows; the test fixture writes LF. Compare content, not newline style. */
+function text(path: string): string {
+  return readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+}
+
 function cleanRepo(): string {
   const repo = temp('anvil-snapshot-repo-')
   git(repo, 'init', '--initial-branch=main')
@@ -49,12 +54,12 @@ describe('isolated verification snapshots', () => {
     const snapshot = await prepareVerificationSnapshot(repo)
     assert.ok(snapshot !== null)
     assert.equal(snapshot.commit, commit)
-    assert.equal(readFileSync(join(snapshot.root, 'a.txt'), 'utf8'), 'committed\n')
+    assert.equal(text(join(snapshot.root, 'a.txt')), 'committed\n')
 
     // Writes in the snapshot cannot touch the claimed worktree.
     writeFileSync(join(snapshot.root, 'a.txt'), 'mutated in snapshot\n', 'utf8')
     writeFileSync(join(snapshot.root, 'extra.txt'), 'transient\n', 'utf8')
-    assert.equal(readFileSync(join(repo, 'a.txt'), 'utf8'), 'committed\n')
+    assert.equal(text(join(repo, 'a.txt')), 'committed\n')
     assert.equal(existsSync(join(repo, 'extra.txt')), false)
 
     const path = snapshot.root
@@ -85,7 +90,7 @@ describe('isolated verification snapshots', () => {
     const snapshot = await prepareVerificationSnapshot(linked)
     assert.ok(snapshot !== null, 'claims are linked worktrees, not plain clones')
     assert.equal(snapshot.commit, commit)
-    assert.equal(readFileSync(join(snapshot.root, 'a.txt'), 'utf8'), 'committed\n')
+    assert.equal(text(join(snapshot.root, 'a.txt')), 'committed\n')
     snapshot.dispose()
   })
 
