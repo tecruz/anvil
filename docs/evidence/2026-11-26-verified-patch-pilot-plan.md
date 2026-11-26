@@ -9,7 +9,7 @@ It compares an Anvil-assisted workflow bundle against plain OpenCode on the same
 
 | Field | Value |
 | --- | --- |
-| Source commit | `1d5f7bcbfb1e8fcd3b2631a76f552c43585219eb` |
+| Source commit | `a591d22146522f24c0e903e1eb5e3e49ed8aa68d` |
 | CLI and grader | Built from that commit; bytes bound by the run spec hash |
 | Tasks | `verified-patch` and `node-tiny-slugify`, from `eval/verified-patch-tasks.json` |
 | Model | `opencode/hy4-flash-free` (free tier, catalog cost 0) |
@@ -55,6 +55,14 @@ task is descriptive and does not change a verdict.
 Run once with these parameters. Do not rerun failures, add tasks, change the model or seed,
 or design a follow-up from observed numbers. If the threshold is not met, report insufficient
 evidence and stop; a new decision would be required for another run.
+
+## Pre-data harness correction
+
+A first launch attempt failed before any agent ran: on Windows the runner spawned `opencode`
+directly, which cannot resolve the npm `.cmd` shim. The runner now uses the project's
+shim-aware `spawnArgv`. This changed the runner bytes and therefore the run spec hash; the
+approval was regenerated for the corrected source above. No task result, checkpoint or
+measurement existed before this correction, so no outcome influenced the change.
 
 ## Authorization
 

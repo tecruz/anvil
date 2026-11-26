@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "specHash": "33718885eba9af206599aa720213d8af82c55ac564f89c46876db90b992dfbcc",
+  "specHash": "8ca343116a909e7523fc2da2c88283148a0efc6e2ef812b64d7171cddfcbb615",
   "approvedBy": "Tiago — session approval 2026-11-26, plan docs/evidence/2026-11-26-verified-patch-pilot-plan.md",
-  "sourceCommit": "1d5f7bcbfb1e8fcd3b2631a76f552c43585219eb",
+  "sourceCommit": "a591d22146522f24c0e903e1eb5e3e49ed8aa68d",
   "spendCapUsd": 0
 }
