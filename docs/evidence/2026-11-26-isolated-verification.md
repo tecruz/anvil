@@ -34,7 +34,7 @@ Offline controls in `packages/cli/test/verification-snapshot.test.ts` use real t
 repositories and prove:
 
 - a clean worktree yields a snapshot of its exact commit; writes in the snapshot do not change
-  the worktree; disposal removes it;
+  the worktree; disposal removes it; a **linked claim worktree** can be snapshotted too;
 - a dirty worktree never falls back to the mutable checkout (`exitObserved: false`, zero runs);
 - the policy runner executes in the snapshot, records `logicalCwd`, and samples the same commit;
 - a commit created while the policy check runs makes `revisionAfter` differ from `revision`,
