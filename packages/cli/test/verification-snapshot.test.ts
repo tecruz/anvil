@@ -76,6 +76,19 @@ describe('isolated verification snapshots', () => {
     assert.equal(worktreeRootFor(join(repo, 'packages', 'api')), repo)
   })
 
+  test('a linked claim worktree can be snapshotted', async () => {
+    const main = cleanRepo()
+    const commit = git(main, 'rev-parse', 'HEAD').trim()
+    const linked = temp('anvil-linked-worktree-')
+    git(main, 'worktree', 'add', '--detach', linked, 'HEAD')
+
+    const snapshot = await prepareVerificationSnapshot(linked)
+    assert.ok(snapshot !== null, 'claims are linked worktrees, not plain clones')
+    assert.equal(snapshot.commit, commit)
+    assert.equal(readFileSync(join(snapshot.root, 'a.txt'), 'utf8'), 'committed\n')
+    snapshot.dispose()
+  })
+
   test('a branch that moved after the snapshot is no longer the checked tree', async () => {
     const repo = cleanRepo()
     const snapshot = await prepareVerificationSnapshot(repo)
