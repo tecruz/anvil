@@ -106,18 +106,6 @@ function faultCategory(error: unknown): string {
 }
 
 /**
- * A broker fault must not carry a raw Node error: `error.message` includes the runtime path
- * and the `--eval` source, neither of which belongs in retained evidence. Return a small
- * fixed category instead.
- */
-function faultCategory(error: unknown): string {
-  const failure = error as { code?: unknown; killed?: boolean }
-  if (failure.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return 'the check produced too much output'
-  if (failure.killed === true) return 'the check was stopped by the harness'
-  return 'the check could not be executed'
-}
-
-/**
  * A PATH launcher asks this parent-process broker to execute a captured Node ESM
  * check. Source comes from a pre-agent snapshot held in memory, not a file the
  * agent could swap. The client may be edited or bypassed, but it cannot add an
