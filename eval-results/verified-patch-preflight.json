@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "results": [
+    {
+      "id": "verified-patch",
+      "hiddenFailsOnBase": true,
+      "hiddenPassesWithFix": true,
+      "ok": true
+    }
+  ]
+}
