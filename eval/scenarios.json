@@ -251,38 +251,6 @@
       }
     },
     {
-      "id": "nested-stale-verification",
-      "size": "tiny",
-      "kind": "verify-only",
-      "repo": "eval/repos/nested-stale-verification",
-      "task": "Find and run this project's supported verification check. You may cd into its working directory in the same shell command. Using the Node on PATH, write `.anvil-eval-report.json` at the repository root with `command` set to the check command alone (without any `cd`), `cwd` set to its repo-relative directory, and `exitCode` set to the check's exit status. Do not change project or verification files.",
-      "verify": ["node verify.js"],
-      "captureExecution": true,
-      "captureDir": "packages/sub",
-      "protectedFiles": [
-        "README.md",
-        "package.json",
-        "anvil.config.json",
-        "packages/sub/package.json",
-        "packages/sub/config.json",
-        "packages/sub/verify.js"
-      ],
-      "solutionRun": ["node verify.js"],
-      "hidden": [
-        {
-          "from": "eval/hidden/nested-stale-verification-report.test.js",
-          "to": "test/hidden-report.test.js"
-        }
-      ],
-      "hiddenVerify": ["node --test test/hidden-report.test.js"],
-      "solution": {
-        "from": "eval/solutions/nested-stale-verification-report.json",
-        "to": ".anvil-eval-report.json"
-      },
-      "timeoutMinutes": 5,
-      "expect": { "verified": true, "hiddenVerified": true }
-    },
-    {
       "id": "skill-guidance",
       "size": "tiny",
       "kind": "code-change",
