@@ -374,7 +374,10 @@ What each step does:
 - **`crew verify`** runs each worktree's verify commands. The concurrency is chosen from
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
-  run concurrently. The decision is always printed. `--record` writes bounded evidence
+  run concurrently. The decision is always printed. The command list is the shared
+  verification plan: an owner-declared command from `anvil.config.json` wins over the detected
+  one, runs in its declared directory, and any conflict with a detected command is printed
+  rather than hidden. `--record` writes bounded evidence
   under `.anvil/` in the main worktree: each version 2 row names the claim, the commit, the
   repo-relative directory and exact commands, a digest of that check plan, and the observed
   exits. The commit is sampled before and after every command, so a check that spanned a tree

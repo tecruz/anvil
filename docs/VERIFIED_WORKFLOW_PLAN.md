@@ -19,9 +19,11 @@ await explicit approval**, 2026-11-26.
   `main` with the evaluation work on `pr/nested-verification-pilot`. Merging the corresponding
   PRs on GitHub and re-running the eight required checks on the final head is still a
   maintainer action.
-- **Phase 3 — partially present.** The brief already carries each command's provenance,
-  `file:line` evidence and working directory, and `init --with-mirrors` defers to the generated
-  `AGENTS.md`. Deeper nesting and task-specific prerequisites remain open.
+- **Phase 3 — done.** A single `verificationPlan` in `@anvil/profile` now feeds the brief and
+  generated instructions plus `crew verify` and `ship`: declared commands win, keep their own
+  directory, and conflicting detected commands stay visible. Tests cover nested directories on
+  both runners. `init --with-mirrors` defers to the generated `AGENTS.md`; nested instructions
+  and on-demand skills follow the repository's existing conventions.
 - **Phase 4 — executed, insufficient evidence.** The predeclared 20-invocation pilot ran on
   2026-11-26 under a free model with no spend. The `verified-patch` task was solved by both
   arms in all five pairs; `node-tiny-slugify` was solved by neither arm in five pairs. Neither

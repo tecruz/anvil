@@ -102,6 +102,12 @@ export {
   type VcsHost,
 } from './types.ts'
 export {
+  type VerificationCommand,
+  type VerificationPlan,
+  type VerificationSource,
+  verificationPlan,
+} from './verify-plan.ts'
+export {
   DEFAULT_MAX_FILES,
   extensionOf,
   firstExisting,

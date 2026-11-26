@@ -86,6 +86,12 @@ export interface ShipOptions {
   requireCurrentVerification?: boolean
   /** The CLI's answer to the policy above, including the reason when it is not satisfied. */
   currentVerification?: { ok: boolean; detail: string }
+  /**
+   * The shared verification plan from the CLI. Each entry carries its own repo-relative
+   * directory, so an owner-declared command in a nested directory is run there. When absent,
+   * detected commands are used at the profile's project directory.
+   */
+  verificationPlan?: ReadonlyArray<{ cmd: string; dir: string; source?: string }>
   /** Do not touch the ticket after opening the PR. */
   updateTicket: boolean
   /** Ticket adapter, so `ship` can comment and transition. */
@@ -148,8 +154,7 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
   // A project can live in a subdirectory of the repository (a monorepo, a Gradle module,
   // `services/api`). Verify commands are written relative to that directory, so they run
   // from it, not from the worktree root.
-  const verifyCwd =
-    options.profile.projectDir === '' ? options.worktreePath : join(options.worktreePath, options.profile.projectDir)
+  const cwdFor = (dir: string): string => (dir === '' ? options.worktreePath : join(options.worktreePath, dir))
   const verification: PrBodyInput['verification'] = []
   if (options.skipVerify) {
     stages.push({
@@ -158,7 +163,13 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
       detail: 'skipped (--skip-verify)',
     })
   } else if (options.probe) {
-    const entries = verifyCommandEntries(options.profile)
+    const entries =
+      options.verificationPlan ??
+      verifyCommandEntries(options.profile).map((entry) => ({
+        cmd: entry.cmd,
+        dir: options.profile.projectDir,
+        source: entry.source,
+      }))
     if (entries.length === 0) {
       stages.push({
         name: 'verify',
@@ -175,7 +186,7 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
     }
     for (const entry of entries) {
       commandsRun.push(entry.cmd)
-      const result = await options.run(entry.cmd, verifyCwd)
+      const result = await options.run(entry.cmd, cwdFor(entry.dir))
       verification.push({
         command: entry.cmd,
         ok: result.ok,
@@ -184,11 +195,17 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
     }
     const failed = verification.filter((v) => !v.ok)
     const inferred = entries.filter((e) => e.source === 'inferred').map((e) => e.cmd)
+    const declared = entries.filter((e) => e.source === 'declared').map((e) => e.cmd)
     const passed = failed.length === 0
     // An inferred command is a guess from ecosystem convention, and a green result from
     // one is much weaker evidence than a green result from a documented command. Saying so
     // is the difference between a check that ran and a check that means something.
-    const caveat = passed && inferred.length > 0 ? ` (inferred, not documented: ${inferred.join(', ')})` : ''
+    const caveat =
+      passed && inferred.length > 0
+        ? ` (inferred, not documented: ${inferred.join(', ')})`
+        : passed && declared.length > 0
+          ? ` (declared by owner, not observed: ${declared.join(', ')})`
+          : ''
     stages.push({
       name: 'verify',
       ok: passed,
@@ -293,7 +310,9 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
     ticket: options.ticket,
     risk,
     reviewers,
-    verifyCommands: verifyCommands(options.profile).map((c) => c),
+    verifyCommands: (options.verificationPlan?.map((entry) => entry.cmd) ?? verifyCommands(options.profile)).map(
+      (c) => c,
+    ),
     ...(verification === undefined ? {} : { verification }),
     isUpdate: existing !== null,
   })

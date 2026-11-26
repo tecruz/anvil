@@ -30,6 +30,7 @@ import {
   tokenizeCommand,
 } from '@anvil/core'
 import { gitDirFromMetadata, readOnlyGitEnv } from '@anvil/git'
+import { buildProfile, verificationPlan } from '@anvil/profile'
 import { requireCapability } from '@anvil/providers'
 import type { Ticket, TicketRef } from '@anvil/tickets'
 import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anvil/worktrees'
@@ -468,20 +469,29 @@ async function crewVerifyFlow(
     return { ...outcome, revision, revisionAfter, startedAt, completedAt: new Date().toISOString() }
   }
 
+  // The same plan the brief and AGENTS.md describe: owner declarations win, detected commands
+  // stay visible as conflicts, and each command carries its own working directory.
+  const { config } = loadConfig({ repoRoot })
+  const planFor = (profile: Parameters<typeof verificationPlan>[0]) =>
+    verificationPlan(profile, config.project.commands)
+  const rootProfile = buildProfile(repoRoot, { root: repoRoot, host: null, remote: null, defaultBranch: null }).profile
+  const conflicts = planFor(rootProfile).conflicts
+
   const result: CrewVerifyResult = await crewVerify({
     repoRoot,
     ...(keys === undefined ? {} : { keys }),
     jobs,
     forceParallel: args.values['force-parallel'] === true,
     run: runWithRevision,
+    verification: (profile) => planFor(profile).commands.map(({ cmd, dir }) => ({ cmd, dir })),
   })
-
   const data = {
     schemaVersion: 1,
     ok: result.ok,
     concurrency: result.concurrency,
     results: result.results,
     skipped: result.skipped,
+    verificationConflicts: conflicts,
   }
   if (args.values.record === true) {
     const store = evidenceStore(repoRoot)
@@ -505,17 +515,21 @@ async function crewVerifyFlow(
       const out = [
         `\n${ctx.style.red('error')} ${err.message}\n${err.hint === undefined ? '' : `hint  ${err.hint}\n`}\n`,
       ]
-      out.push(renderVerify(ctx, result))
+      out.push(renderVerify(ctx, result, conflicts))
       return out.join('\n')
     })
     return ExitCode.Threshold
   }
 
-  ctx.out(data, () => renderVerify(ctx, result))
+  ctx.out(data, () => renderVerify(ctx, result, conflicts))
   return undefined
 }
 
-function renderVerify(ctx: CommandContext, result: CrewVerifyResult): string {
+function renderVerify(
+  ctx: CommandContext,
+  result: CrewVerifyResult,
+  conflicts: readonly { kind: string; declared: string; detected: string }[] = [],
+): string {
   const s = ctx.style
   const out: string[] = []
   out.push(
@@ -546,6 +560,9 @@ function renderVerify(ctx: CommandContext, result: CrewVerifyResult): string {
     out.push('')
     out.push(s.yellow(`Skipped (${result.skipped.length})`))
     for (const sk of result.skipped) out.push(`  ${sk.key}: ${sk.reason}`)
+  }
+  for (const conflict of conflicts) {
+    out.push(s.yellow(`  ${conflict.kind}: declared ${conflict.declared} overrides detected ${conflict.detected}`))
   }
   return out.join('\n')
 }

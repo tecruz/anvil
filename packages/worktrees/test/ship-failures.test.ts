@@ -148,6 +148,35 @@ async function claimAndCommit(repo: string): Promise<{ worktreePath: string; bra
   return { worktreePath: claim.worktreePath, branch: claim.branch }
 }
 
+describe('ship: shared verification plan', () => {
+  test('declared commands run from their own directories and are labelled as declared', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    const calls: Array<{ command: string; cwd: string }> = []
+    options.run = async (command, cwd) => {
+      calls.push({ command, cwd })
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+    options.verificationPlan = [
+      { cmd: 'npm run verify:ci', dir: 'ci', source: 'declared' },
+      { cmd: 'npm run verify', dir: '' },
+    ]
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(
+      calls.map((call) => call.command),
+      ['npm run verify:ci', 'npm run verify'],
+    )
+    assert.ok(calls[0]?.cwd.replace(/\\/g, '/').endsWith('/ci'), `declared directory wins: ${calls[0]?.cwd}`)
+    assert.ok(!calls[1]?.cwd.replace(/\\/g, '/').endsWith('/ci'))
+    assert.match(result.stages.find((stage) => stage.name === 'verify')?.detail ?? '', /declared by owner/)
+  })
+})
+
 describe('ship: required current verification', () => {
   test('missing evidence refuses before the push, even with --skip-verify', async () => {
     const { repo } = makeRepoWithOrigin()

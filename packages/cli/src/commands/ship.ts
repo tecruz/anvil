@@ -10,11 +10,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
-import { buildProfile, type ProjectProfile } from '@anvil/profile'
+import { buildProfile, type ProjectProfile, verificationPlan } from '@anvil/profile'
 import { GhForgeTransport, GitHubProvider, hostFromRemote, requireCapability } from '@anvil/providers'
 import { parseRef, type Ticket } from '@anvil/tickets'
 import { readClaims } from '@anvil/worktrees'
-import { type ShipResult, ship, verifyCommands } from '@anvil/worktrees/ship'
+import { type ShipResult, ship } from '@anvil/worktrees/ship'
 import { ticketProviderFor } from '../tickets.ts'
 import { isCurrentEvidenceRecord, planDigestFor, verdictFor } from '../verification-evidence.ts'
 import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
@@ -156,9 +156,10 @@ export const shipCommand: Command = {
     // The opt-in policy is resolved here, where the CLI owns the evidence format. The pipeline
     // receives only a verdict: it cannot waive the policy with --skip-verify or guess a record.
     const { config } = loadConfig({ repoRoot })
+    const plan = verificationPlan(profile, config.project.commands)
     const requireCurrentVerification = config.features.requireCurrentVerification
     const currentVerification = requireCurrentVerification
-      ? await currentVerificationFor(repoRoot, key, claim.worktreePath, profile)
+      ? await currentVerificationFor(repoRoot, key, claim.worktreePath, profile, plan)
       : undefined
 
     const result: ShipResult = await ship({
@@ -178,6 +179,7 @@ export const shipCommand: Command = {
       skipVerify: args.values['skip-verify'] === true,
       ...(requireCurrentVerification ? { requireCurrentVerification } : {}),
       ...(currentVerification === undefined ? {} : { currentVerification }),
+      verificationPlan: plan.commands,
       updateTicket: args.values['no-ticket-update'] !== true,
       ticketOps: {
         comment: (ref, body) => ticketProvider.provider.comment(ref, body),
@@ -300,13 +302,17 @@ async function currentVerificationFor(
   claimKey: string,
   worktreePath: string,
   profile: ProjectProfile,
+  plan: ReturnType<typeof verificationPlan>,
 ): Promise<{ ok: boolean; detail: string }> {
   const store = evidenceStore(repoRoot)
   if (store === null) return { ok: false, detail: 'Cannot resolve the verification evidence store.' }
   const commit = await headRevision(worktreePath)
   if (commit === null) return { ok: false, detail: 'Cannot sample the worktree commit before shipping.' }
-  const expectedCwd = profile.projectDir.replaceAll('\\', '/')
-  const expectedDigest = planDigestFor(expectedCwd, verifyCommands(profile))
+  const expectedCwd = (plan.commands[0]?.dir ?? profile.projectDir).replaceAll('\\', '/')
+  const expectedDigest = planDigestFor(
+    expectedCwd,
+    plan.commands.map((entry) => entry.cmd),
+  )
   const relevant = readVerificationEvidence(store)
     .filter(isCurrentEvidenceRecord)
     .filter((record) => record.claim === claimKey && record.repository === store.key)
