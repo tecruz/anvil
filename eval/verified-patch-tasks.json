@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "tasks": [
+    {
+      "id": "verified-patch",
+      "repo": "eval/repos/verified-patch",
+      "task": "Implement slugify in src/slug.js: lowercase the title and replace runs of spaces with a single dash. Add a test in test/visible.test.js. Run the repository check from the repository root before finishing. Do not edit verify.js or the test files.",
+      "verifyCommand": "node verify.js",
+      "acceptedCommands": ["node verify.js", "npm run test"],
+      "verifyScript": "verify.js",
+      "declared": { "command": "npm run test", "bin": "npm", "argv": ["run", "test"] },
+      "captureDir": "",
+      "inScope": ["src/slug.js", "test/visible.test.js"],
+      "excluded": ["AGENTS.md", ".opencode", ".agents", ".anvil", "anvil.config.json"],
+      "protected": ["verify.js", "package.json", "README.md"],
+      "hiddenAcceptance": "eval/hidden/verified-patch-acceptance.test.js",
+      "referenceFix": "eval/solutions/verified-patch-slug.js",
+      "fixTarget": "src/slug.js"
+    }
+  ]
+}
