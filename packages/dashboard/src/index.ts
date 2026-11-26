@@ -43,4 +43,5 @@ export {
   type TaskMapEdge,
   type TaskMapNode,
   type TaskStartItem,
+  type TaskWorkflowReference,
 } from './task.ts'

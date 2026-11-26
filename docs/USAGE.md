@@ -702,7 +702,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
-| `anvil dashboard` | Loopback-only read-only overview of readiness, context and work. `--repo <dir>`, `--port <n>`. |
+| `anvil dashboard` | Loopback-only overview of a task brief, readiness, context and work. `--repo <dir>`, `--port <n>`. |
 | `anvil version` | The anvil version and the JSON schema version. |
 
 ### The local dashboard
@@ -711,15 +711,76 @@ accepts. This table is the summary; the help text is the contract.
 one-time URL it prints; the session token is then held in an HttpOnly cookie. The server
 binds to `127.0.0.1`, never to a network interface, and is stopped with Ctrl+C.
 
-The page has three views: **Repository** (readiness findings, blockers and ranked next
-steps), **Context** (verified brief gaps and a read-only view of the staged diff), and
-**Work** (claims, worktrees, uncommitted and unpushed changes, and agent liveness). Each
-value names the CLI command behind it, and every refresh re-reads those commands in offline
-mode. A failed command appears as an error beside the other views; it never renders as an
-empty result.
+The page has four views. **Task brief** is the entry point: paste a ticket or task
+description, or choose one of the repository suggestions from `anvil plan`. Either way it
+shows the likely files to start from, the verification commands with the source and working
+directory that established them, the required needs `anvil ready` reports as blocked, and
+what the page cannot know.
 
-Verification is deliberately shown as *unavailable*: anvil does not persist verification
-results, and the dashboard does not run `crew verify` on page load. The page is read-only by
+**How to check** is deliberately local: the fast loop an agent can run now, from `anvil ready` or
+owner-declared configuration (`testFast`, `test`, `lint`, `typecheck`, `build`). Each row names the
+command, its source and `file:line` evidence, and the working directory that established it. None
+has been run by the page, and none carries a pass claim.
+
+**Workflow sources to review** lists `file:line` citations for `run:` and `script:` keys in the
+repository's workflows. These are read-only pointers, not commands to copy: the profile does not
+decide which step executes, in which directory, or whether it passed. Open the cited lines when
+you need to inspect the merge gates, including release, deploy and emulator steps. The list is not
+exhaustive, and its presence is never a pass.
+
+Device and accessibility validation remains outside the page. TalkBack, focus order, insets and
+200% font scaling need a device and manual checking; the brief says this explicitly.
+
+To inspect the merge gates yourself, open the cited workflow files — a short list, a source label or
+an evidence line is not a pass. The same brief includes a **task map**: a 2D subgraph of the
+matched files, the modules containing them, their declared one-hop dependencies and the
+verify commands. It opens filtered to the task, supports a text filter and a list view, and
+shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
+a dashed *unknown* node, not as "no dependency". No edge is inferred from import statements,
+and the map adds no fact that the brief could not cite.
+
+When `anvil ready` reports a blocked capability, the brief also offers a **copyable blocker
+handoff**. It lists only measured blockers with their status and reason, carries a contact
+only when `anvil ready` explicitly declared one, says the owner is unknown rather than guessing
+one, and cites a CODEOWNERS path as review routing to open when the profile declares one. A
+failed or unprobed readiness source produces an explicit "not available yet" handoff, not a
+clean one. The commands are printed, never run.
+
+**Repository** covers readiness findings, blockers and ranked next steps; **Context** covers
+verified brief gaps and a read-only view of the staged diff; **Work** covers claims, worktrees,
+uncommitted and unpushed changes, and agent liveness. Each value names the CLI command behind
+it, and every refresh re-reads those commands in offline mode. A failed command appears as an
+error beside the other views; it never renders as an empty result.
+
+When the pasted text states an approval gate — "the audit and proposal are approved before
+implementation" — the brief quotes that sentence and separates *start now* from *wait for
+approval*. It never infers a gate from repository files (an issue body or PR template can say
+one). If the ticket states no gate, the brief says so instead of guessing, and a repository
+suggestion says that it carries no gate or owner at all. An explicit waiver such as "no
+approval required" is quoted as *approval is not required*, never applied as a gate; wording
+that merely mentions approval is quoted as *mentioned but not stated as a requirement*.
+
+The brief is honest about what it could not measure: a failed `anvil ready` is shown as
+*blockers unknown*, not as a clean report, and an unprobed environment is shown as *not
+checked* rather than *nothing missing*. An exact path in the task outranks a file that only
+shares its ending, and both are labelled for what they are. Paths follow the order the ticket
+names them.
+
+Pasted task text stays on the loopback page: it is limited to 4,000 characters, sent to the
+local server only, and not stored. The suggestions are engineering improvements derived from
+this repository's own findings, not a team's priorities. Building a brief does not create a
+tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
+reads the snapshot the page loads when it opens, so the first brief works without a reload. The
+request carries the server-issued generation of that snapshot; if another tab refreshes the
+shared cache first, the older tab is
+told to refresh rather than shown a brief built from a snapshot it is not displaying.
+
+Verification has no green-by-absence state. A page load or a brief never runs a verify command or
+a write action; a refresh re-reads the CLI's existing read-only JSON contracts (`doctor`, `ready`, `plan`,
+`brief`, `crew status`). With `anvil crew verify --record`, the CLI writes a bounded evidence file;
+the dashboard displays those records as historical facts, labelled with the commit sampled at
+startup and any incomplete or stale records. The dashboard cannot prove the records' origin and
+never presents them as a current verdict — run `anvil crew verify` for that. The page is read-only by
 default: it does not stage, apply, set up or update a tracker. The Work view does offer three
 **optional, confirm-gated** actions — Claim, Verify crew and Ship. Each posts only an action
 name (and one bounded ticket reference for Claim); the server maps it to the exact CLI argv

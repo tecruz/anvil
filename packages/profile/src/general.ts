@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { addCommand, addRisk, addTool, COMMIT_HOOK_FILES, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
-import type { CommandKind, Docs, InstructionFile } from './types.ts'
+import type { CommandKind, Docs, InstructionFile, WorkflowReference } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
 
 /**
@@ -623,6 +623,33 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
   return out
 }
 
+/**
+ * Workflow lines a reader should open, not commands a brief should offer to run.
+ *
+ * A YAML reader that decides which step runs, in which directory, would keep producing wrong
+ * runnable suggestions for valid workflow syntax. The profile therefore records only citations:
+ * a `file:line` for each `run:` or `script:` key. A brief labels them read-only sources and makes
+ * no claim that the list is exhaustive or that any step passed.
+ */
+const MAX_WORKFLOW_REFERENCES = 50
+
+/** `file:line` pointers into the repository's CI workflows. */
+export function detectWorkflowReferences(root: string, files: ReadonlySet<string>): WorkflowReference[] {
+  const references: WorkflowReference[] = []
+  for (const rel of [...files].sort()) {
+    if (!rel.startsWith('.github/workflows/') || !/\.ya?ml$/.test(rel)) continue
+    const { text } = readText(join(root, ...rel.split('/')))
+    if (text === null) continue
+    for (const [index, line] of text.split('\n').entries()) {
+      // A key line is a citation, not a command: the text beside it may be a script, a matrix
+      // expression or data. The reader opens the file and decides what it actually runs.
+      if (/^\s*(?:-\s*)?(?:run|script)\s*:/.test(line)) references.push({ file: rel, line: index + 1 })
+      if (references.length >= MAX_WORKFLOW_REFERENCES) return references
+    }
+  }
+  return references
+}
+
 function looksLikeCommandLine(line: string, inFence = false): boolean {
   // One runner list (`COMMAND_RUNNERS`) is used here and by the AGENTS_COMMANDS rule, so an
   // ecosystem added in one place is visible in both. The fenced-block half exists because
@@ -647,15 +674,18 @@ function extractCommand(line: string): string | null {
   const inline = /`([^`]{3,140})`/.exec(line)
   if (inline !== null) {
     const candidate = firstCommand((inline[1] as string).trim())
-    if (RUNNABLE_START.test(candidate)) return candidate
+    if (!COMPOUND_SHELL.test(candidate) && RUNNABLE_START.test(candidate)) return candidate
   }
   const plain = /^\s{0,4}(?:\$\s*)?((?:\.{1,2}\/)?[a-z][\w./-]*(?:\s+[^\n`$|;#<>]{0,100})?)/.exec(line)
   if (plain !== null) {
     const candidate = firstCommand((plain[1] as string).trim())
-    if (candidate.includes(' ')) return candidate
+    if (!COMPOUND_SHELL.test(candidate) && candidate.includes(' ')) return candidate
   }
   return null
 }
+
+/** Operators that may publish, delete or chain after the command the reader wanted. */
+const COMPOUND_SHELL = /&&|\|\||[&|;]/
 
 /**
  * The first command of a compound line.

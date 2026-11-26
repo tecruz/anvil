@@ -41,9 +41,11 @@ interface SnapshotOptions {
   truncated?: boolean
   failedDetectors?: number
   commands?: unknown[]
+  workflowReferences?: unknown[]
   suggestions?: unknown[]
   modules?: unknown[]
   unanalysedDeps?: unknown[]
+  files?: string[]
 }
 
 function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
@@ -51,8 +53,9 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
   const profile = {
     root: '/repo',
     projectDir: 'app',
-    files: FILES,
+    files: options.files ?? FILES,
     modules: options.modules ?? [],
+    workflowReferences: options.workflowReferences ?? [],
     commands: { test: [{ cmd: 'npm test', source: 'documented', evidence: 'README.md:3' }] },
     diagnostics: {
       unanalysedDeps: options.unanalysedDeps ?? [],
@@ -175,6 +178,54 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /Verification history/)
   })
 
+  test('workflow sources are read-only citations, never runnable checks', () => {
+    const snapshot = makeSnapshot({
+      commands: [],
+      workflowReferences: [
+        { file: '.github/workflows/ci.yml', line: 45 },
+        { file: '.github/workflows/ci.yml', line: 233 },
+        { file: '.github/workflows/ci.yml', line: 274 },
+      ],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Localize the map accessibility descriptions' })
+    assert.deepEqual(brief.howToCheck, [])
+    assert.deepEqual(brief.workflowReferences, [
+      { file: '.github/workflows/ci.yml', line: 45 },
+      { file: '.github/workflows/ci.yml', line: 233 },
+      { file: '.github/workflows/ci.yml', line: 274 },
+    ])
+    const unknowns = brief.unknowns.join('\n')
+    assert.match(unknowns, /read-only sources, not checks/)
+    assert.match(unknowns, /TalkBack/)
+    assert.doesNotMatch(unknowns, /complete/i)
+  })
+
+  test('a profile without workflow references says CI coverage is unknown, not empty', () => {
+    const brief = buildTaskBrief(makeSnapshot({ commands: [] }), { text: 'Verify the change' })
+    assert.deepEqual(brief.workflowReferences, [])
+    assert.match(brief.unknowns.join('\n'), /CI coverage is unknown, not empty/)
+  })
+
+  test('a declared check in a nested directory outranks a stale root README command', () => {
+    // Acceptance case: the nested-project fixture. The root README points at a retired
+    // command; the owner-declared check lives in packages/sub. The brief must follow the
+    // declaration and carry its working directory, not the stale prose.
+    const snapshot = makeSnapshot({
+      commands: [
+        { kind: 'test', cmd: 'node verify.js', source: 'declared', evidence: 'anvil.config.json', dir: 'packages/sub' },
+        { kind: 'test', cmd: 'npm run test:old', source: 'documented', evidence: 'README.md:8', dir: '' },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { text: 'Find and run the supported verification check' })
+    assert.equal(brief.howToCheck[0]?.cmd, 'node verify.js')
+    assert.equal(brief.howToCheck[0]?.scope, 'local')
+    assert.equal(brief.howToCheck[0]?.source, 'declared')
+    assert.equal(brief.howToCheck[0]?.evidence, 'anvil.config.json')
+    assert.equal(brief.howToCheck[0]?.cwd, 'packages/sub')
+    assert.ok(!brief.howToCheck.some((check) => check.cmd === 'npm run test:old'))
+  })
+
   test('the approval gate a ticket states is quoted, with what may start first', () => {
     // The acceptance wording from CountryTracker #132, which allows the audit first.
     const brief = buildTaskBrief(makeSnapshot(), {
@@ -238,6 +289,55 @@ describe('buildTaskBrief', () => {
       )
       assert.doesNotMatch(brief.unknowns.join('\n'), /No approval gate was found/, text)
     }
+  })
+
+  test('a clause-local waiver does not suppress an explicit gate in another clause', () => {
+    const text = 'No approval is required to audit, but implementation requires approval.'
+    const brief = buildTaskBrief(makeSnapshot(), { text })
+    assert.equal(brief.gates.length, 1, text)
+    assert.equal(brief.gates[0]?.kind, 'approval')
+    assert.match(brief.gates[0]?.evidence ?? '', /implementation requires approval/)
+
+    const waiverNote = brief.unknowns.find((note) => /says approval is not required/.test(note))
+    assert.ok(waiverNote, 'the waiver is still quoted as a note')
+    assert.match(waiverNote ?? '', /No approval is required to audit/)
+    assert.doesNotMatch(
+      waiverNote ?? '',
+      /implementation requires approval/,
+      'the waiver must not label the whole sentence',
+    )
+  })
+
+  test('waivers joined without a comma still leave a later explicit gate in place', () => {
+    for (const text of [
+      'No approval is required to audit but implementation requires approval.',
+      'No approval is required to audit, whereas implementation requires approval.',
+      'No approval is required to audit, and implementation requires approval.',
+      'No approval is required to audit and implementation requires approval.',
+      'Implementation requires approval and no approval is required to audit.',
+      'No approval is required to audit and approval is required before implementation.',
+      'Implementation requires approval and approval is optional for the audit.',
+      'No approval is required to audit and do not implement without approval.',
+      'Implementation requires approval; no approval is required to audit.',
+    ]) {
+      const brief = buildTaskBrief(makeSnapshot(), { text })
+      assert.equal(brief.gates.length, 1, text)
+      assert.equal(brief.gates[0]?.kind, 'approval', text)
+      const waiverNote = brief.unknowns.find((note) => /says approval is not required/.test(note))
+      assert.ok(waiverNote, `the waiver is still quoted as a note: ${text}`)
+      assert.doesNotMatch(waiverNote ?? '', /implementation requires approval/i, text)
+    }
+  })
+
+  test('a pure waiver and a single explicit gate keep their existing readings', () => {
+    const waived = buildTaskBrief(makeSnapshot(), { text: 'No approval is required for the audit.' })
+    assert.deepEqual(waived.gates, [])
+    assert.match(waived.unknowns.join('\n'), /says approval is not required/)
+
+    const gated = buildTaskBrief(makeSnapshot(), { text: 'Implementation requires approval before merge.' })
+    assert.equal(gated.gates.length, 1)
+    assert.equal(gated.gates[0]?.waitFor, 'merge')
+    assert.match(gated.gates[0]?.evidence ?? '', /requires approval before merge/)
   })
 
   test('uncertain approval wording is shown without assigning a gate', () => {
@@ -346,6 +446,9 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /profile source failed/)
     assert.match(unknowns, /No verification command/)
     assert.match(unknowns, /README\.md/)
+    // A failed profile is unknown coverage, not "every detected check is shown".
+    assert.deepEqual(brief.workflowReferences, [])
+    assert.match(unknowns, /Workflow sources are unknown/)
     assert.equal(brief.readiness.checked, false)
   })
 
@@ -394,6 +497,9 @@ describe('buildTaskBrief', () => {
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x', suggestionId: 'fix:TEST_FAST' }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { suggestionId: 'fix:NOT_THERE' }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x'.repeat(MAX_TASK_TEXT + 1) }), TaskInputError)
+    // The cap is on the raw text: padding with 4,001 spaces then a real character must not trim
+    // down to a one-character task that slips past the documented 4,000-character limit.
+    assert.throws(() => buildTaskBrief(makeSnapshot(), { text: `${' '.repeat(MAX_TASK_TEXT + 1)}x` }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { suggestionId: '../etc' }), TaskInputError)
   })
 
@@ -433,6 +539,31 @@ describe('the task-centred 2D map', () => {
     )
     assert.ok(
       map.edges.some((edge) => edge.from === 'module:app' && edge.to === 'module:core' && edge.evidence !== null),
+      JSON.stringify(map.edges),
+    )
+  })
+
+  test('the root module at path "." contains a nested task file', () => {
+    // A single-module repo reports its module at path '.'. A nested file such as
+    // src/server.ts is inside it, so the map must carry the module node and a containment edge.
+    const snapshot = makeSnapshot({
+      files: ['src/server.ts', 'README.md'],
+      modules: [{ id: 'acme-api', path: '.', kind: 'package', deps: [] }],
+    })
+    const brief = buildTaskBrief(snapshot, { text: 'Update src/server.ts' })
+    assert.ok(
+      brief.startHere.some((item) => item.path === 'src/server.ts'),
+      'the nested file must be matched',
+    )
+    const map = buildTaskMap(snapshot, brief)
+    assert.ok(
+      map.nodes.some((node) => node.id === 'module:acme-api' && node.kind === 'module'),
+      JSON.stringify(map.nodes),
+    )
+    assert.ok(
+      map.edges.some(
+        (edge) => edge.from === 'file:src/server.ts' && edge.to === 'module:acme-api' && edge.label === 'located in',
+      ),
       JSON.stringify(map.edges),
     )
   })

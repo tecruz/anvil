@@ -16,13 +16,19 @@ import type { DashboardSnapshot, VerificationEvidence } from './snapshot.ts'
 export const MAX_TASK_TEXT = 4000
 const MAX_START_ITEMS = 5
 const MAX_TEST_ITEMS = 3
-const MAX_CHECK_ITEMS = 4
+const MAX_CHECK_ITEMS = 8
 
 export interface TaskBriefInput {
   /** Pasted task or ticket text. Untrusted. Exactly one of `text` and `suggestionId`. */
   text?: string
   /** A `plan` suggestion id, when the user starts from a repository finding. */
   suggestionId?: string
+  /**
+   * The server-issued generation id of the snapshot the page is showing. Required at the HTTP
+   * boundary: a second tab must not be able to render a brief from a newer cached snapshot
+   * under an older page.
+   */
+  snapshotId?: string
 }
 
 export interface TaskStartItem {
@@ -37,6 +43,18 @@ export interface TaskCheck {
   source: string
   evidence: string | null
   cwd: string
+  /**
+   * `local` is a fast check an agent can run now; `ci` is what the merge gate runs;
+   * `device` needs an emulator or physical device. None is a claim that it passed.
+   */
+  scope: 'local' | 'ci' | 'device'
+}
+
+export interface TaskWorkflowReference {
+  /** Repo-relative path to a workflow file. */
+  file: string
+  /** One-based line number of a `run:` or `script:` key. */
+  line: number
 }
 
 export interface TaskBlocker {
@@ -113,6 +131,11 @@ export interface TaskBrief {
   /** The same task, as a reproducible 2D subgraph. */
   map: TaskMap
   howToCheck: TaskCheck[]
+  /**
+   * Workflow lines worth reading, recorded as `file:line` citations only. The brief does not
+   * turn them into commands, directories, scopes or a claim that the list is exhaustive.
+   */
+  workflowReferences: TaskWorkflowReference[]
   /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
   verification: {
     status: 'unavailable' | 'recorded'
@@ -444,7 +467,7 @@ function suggestionFor(snapshot: DashboardSnapshot, suggestionId: string): Recor
   throw new TaskInputError('That suggestion is not in the current plan. Refresh the dashboard and try again.')
 }
 
-/** One verification command per purpose. `dir` comes from the CLI, never from the text. */
+/** One local verification command per purpose. `dir` comes from the CLI, never from the text. */
 function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
   const ready = asRecord(snapshot.repository.ready.data)
   const profile = asRecord(snapshot.repository.profile.data)
@@ -453,7 +476,8 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
   const seen = new Set<string>()
 
   const add = (kind: string, cmd: string, source: string, evidence: string | null, dir: string): void => {
-    if (checks.length >= MAX_CHECK_ITEMS || cmd === '' || seen.has(cmd)) return
+    if (cmd === '' || seen.has(cmd)) return
+    if (checks.length >= MAX_CHECK_ITEMS) return
     seen.add(cmd)
     checks.push({
       kind,
@@ -461,6 +485,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       source,
       evidence,
       cwd: dir === '' ? '.' : dir,
+      scope: 'local',
     })
   }
 
@@ -494,16 +519,18 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
         }
       }
     }
-    if (checks.length > 0) return checks
+    return checks
   }
 
-  if (profile === null) return checks
-  const commands = asRecord(profile.commands)
-  if (commands === null) return checks
-  for (const kind of ['testFast', 'test', 'lint', 'typecheck', 'build']) {
-    const entry = asRecord(asArray(commands[kind])[0])
-    if (entry === null) continue
-    add(kind, asString(entry.cmd) ?? '', asString(entry.source) ?? 'unknown', asString(entry.evidence), projectDir)
+  if (profile !== null) {
+    const commands = asRecord(profile.commands)
+    if (commands !== null) {
+      for (const kind of ['testFast', 'test', 'lint', 'typecheck', 'build']) {
+        const entry = asRecord(asArray(commands[kind])[0])
+        if (entry === null) continue
+        add(kind, asString(entry.cmd) ?? '', asString(entry.source) ?? 'unknown', asString(entry.evidence), projectDir)
+      }
+    }
   }
   return checks
 }
@@ -652,6 +679,12 @@ export function buildTaskHandoff(
 const APPROVAL_MENTION = /\bapprov\w*\b|\bsign-?off\b/i
 const UNCERTAIN_WORDING = /\b(?:if|whether|unless|may|might|could|maybe|possibly|perhaps|potentially)\b/i
 
+/**
+ * Clause boundaries inside one sentence. A waiver in the first clause must not swallow a
+ * requirement in the second, so every common adversative or conjunctive join is a boundary.
+ */
+const CLAUSE_BOUNDARY = /;\s*|,\s*(?:but|and|whereas|while|though|however)\b|\s+(?:but|whereas|while|though)\b/i
+
 /** One of these must be present before any sentence is treated as a requirement. */
 const GATE_PATTERNS: RegExp[] = [
   /\b(?:must|has to|needs? to|should)\s+be\s+approved\b/i,
@@ -740,29 +773,71 @@ interface ApprovalReading {
  * notes, and "approval may be needed" becomes a note too. A wrong gate would send someone
  * to wait for permission the ticket says they do not need.
  */
+/**
+ * Pull waiver clauses out of a sentence before looking for requirements. Splitting on every
+ * conjunction is not safe: "the audit and proposal are approved" is one noun phrase. Removing
+ * the waiver instead leaves the requirement intact no matter how the two were joined, and the
+ * removed clause is still returned for the quoted note.
+ */
+function stripWaivers(sentence: string): { text: string; waivers: string[] } {
+  const waivers: string[] = []
+  let text = sentence
+  const joins = /[;,]|\s+(?:but|and|whereas|while|though|however)\s+/gi
+  for (const pattern of NO_APPROVAL_PATTERNS) {
+    const boundary = new RegExp(
+      `[^;]{0,80}?${pattern.source}[^;]{0,120}?(?=$|[;,]|\\s+(?:but|and|whereas|while|though|however)\\s+)`,
+      'gi',
+    )
+    text = text.replace(boundary, (whole) => {
+      // Keep only the text after the last join: a waiver can follow a gate in the same
+      // sentence, and the gate must survive when this clause is removed.
+      let last = -1
+      const scan = new RegExp(joins.source, joins.flags)
+      for (let found = scan.exec(whole); found !== null; found = scan.exec(whole)) {
+        last = found.index + found[0].length
+      }
+      const clean = whole
+        .slice(last === -1 ? 0 : last)
+        .trim()
+        .replace(/^[;,]+|[;,]+$/g, '')
+      if (clean !== '') waivers.push(clean)
+      // Keep the text before the last join, so a gate stated earlier in the sentence survives.
+      return `${last === -1 ? '' : whole.slice(0, last)} `
+    })
+  }
+  return { text, waivers }
+}
+
 function readApproval(text: string): ApprovalReading {
   const gates: TaskGate[] = []
   const notes: string[] = []
+  const note = (value: string): void => {
+    if (notes.length < 3) notes.push(value)
+  }
   for (const raw of sentences(text)) {
     const sentence = cleanSentence(raw)
     if (sentence.length > 300 || !APPROVAL_MENTION.test(sentence)) continue
 
-    // Classify each clause independently; a waiver of one step doesn't waive another.
-    for (const part of sentence.split(';')) {
-      const clause = part.trim()
+    const uncertain = sentence.endsWith('?')
+    const { text: remainder, waivers } = stripWaivers(sentence)
+    for (const waiver of waivers) {
+      note(`The task says approval is not required: “${waiver}” Confirm with the owner if that is current.`)
+    }
+
+    for (const part of remainder.split(CLAUSE_BOUNDARY)) {
+      // Removing a waiver can leave a leading conjunction. An anchored pattern such as "do
+      // not X without approval" must still be read from the start of its clause.
+      const clause = part.trim().replace(/^(?:and|but|whereas|while|though|however)\s+/i, '')
       if (!APPROVAL_MENTION.test(clause)) continue
-      const uncertain = sentence.endsWith('?') || UNCERTAIN_WORDING.test(clause)
-      if (!uncertain && NO_APPROVAL_PATTERNS.some((pattern) => pattern.test(clause))) {
-        if (notes.length < 3) {
-          notes.push(`The task says approval is not required: “${clause}” Confirm with the owner if that is current.`)
-        }
+      if (uncertain || UNCERTAIN_WORDING.test(clause)) {
+        note(`Approval is mentioned but not stated as a requirement: “${clause}”`)
         continue
       }
 
       const order = START_NOW.exec(clause)?.groups
       const blocked = NOT_WITHOUT.exec(clause)?.groups ?? WAIT_FOR.exec(clause)?.groups
-      if (uncertain || (!order && !blocked && !GATE_PATTERNS.some((pattern) => pattern.test(clause)))) {
-        if (notes.length < 3) notes.push(`Approval is mentioned but not stated as a requirement: “${clause}”`)
+      if (!order && !blocked && !GATE_PATTERNS.some((pattern) => pattern.test(clause))) {
+        note(`Approval is mentioned but not stated as a requirement: “${clause}”`)
         continue
       }
 
@@ -841,13 +916,20 @@ export function buildTaskMap(
 
   const moduleId = (value: Record<string, unknown>): string => asString(value.id) ?? asString(value.path) ?? 'unknown'
   const modulePath = (value: Record<string, unknown>): string => asString(value.path) ?? 'unknown'
+  /**
+   * Whether a module's path contains a task file. A module at `.` is the repository root, so it
+   * contains every repo-relative task file — including nested ones such as `src/server.ts`.
+   * Treating nested paths as outside the root dropped the only module node and its containment
+   * edge in single-module repositories whose module path is `.`.
+   */
+  const containsTaskFile = (path: string, itemPath: string): boolean =>
+    path === '.' || itemPath === path || itemPath.startsWith(`${path}/`)
   const relevance = (value: Record<string, unknown>): string | null => {
     const path = modulePath(value)
     for (const item of brief.startHere) {
-      if (path !== '.' && (item.path === path || item.path.startsWith(`${path}/`))) {
-        return `path matches task file ${item.path}`
+      if (containsTaskFile(path, item.path)) {
+        return path === '.' ? `root module contains task file ${item.path}` : `path matches task file ${item.path}`
       }
-      if (path === '.' && !item.path.includes('/')) return `root module contains task file ${item.path}`
     }
     return null
   }
@@ -883,8 +965,7 @@ export function buildTaskMap(
       evidence: `anvil profile --json: modules[${id}]`,
     })
     for (const item of brief.startHere) {
-      const path = modulePath(module)
-      if (path === '.' ? item.path.includes('/') : !(item.path === path || item.path.startsWith(`${path}/`))) continue
+      if (!containsTaskFile(modulePath(module), item.path)) continue
       edges.push({
         from: `file:${item.path}`,
         to: `module:${id}`,
@@ -977,16 +1058,19 @@ export function buildTaskMap(
  * into a fact.
  */
 export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInput): TaskBrief {
-  const text = (input.text ?? '').trim()
+  const rawText = input.text ?? ''
   const suggestionId = (input.suggestionId ?? '').trim()
+  // Enforce the documented 4,000-character cap on the raw text, before trimming: trimming
+  // first would let 4,001 spaces plus a real character through as a one-character task.
+  if (rawText.length > MAX_TASK_TEXT) {
+    throw new TaskInputError(`Task text is limited to ${String(MAX_TASK_TEXT)} characters.`)
+  }
+  const text = rawText.trim()
   if (text === '' && suggestionId === '') {
     throw new TaskInputError('Pick a suggestion or paste a task first.')
   }
   if (text !== '' && suggestionId !== '') {
     throw new TaskInputError('Choose one entry point: a suggestion or pasted task text.')
-  }
-  if (text.length > MAX_TASK_TEXT) {
-    throw new TaskInputError(`Task text is limited to ${String(MAX_TASK_TEXT)} characters.`)
   }
   if (suggestionId !== '' && !/^[A-Za-z0-9:_-]{1,200}$/.test(suggestionId)) {
     throw new TaskInputError('That suggestion id is not valid.')
@@ -1096,7 +1180,31 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     unknowns.push('No file in the profile matched the task text.')
   }
   if (checks.length === 0) {
-    unknowns.push('No verification command was detected or declared for this repository.')
+    unknowns.push('No verification command was declared for this repository.')
+  }
+  // Device and UI validation is outside a read-only page regardless of workflow syntax.
+  unknowns.push(
+    'Device checks need an emulator or device and were not run. TalkBack, focus order and 200% font scaling need manual validation.',
+  )
+  const workflowReferences: TaskWorkflowReference[] = (profile === null ? [] : asArray(profile.workflowReferences))
+    .map(asRecord)
+    .filter((entry) => entry !== null)
+    .map((entry) => {
+      const file = asString(entry.file)
+      const line = entry.line
+      if (file === null || typeof line !== 'number' || !Number.isInteger(line) || line < 1) return null
+      return { file, line }
+    })
+    .filter((reference): reference is TaskWorkflowReference => reference !== null)
+    .slice(0, 50)
+  if (snapshot.repository.profile.ok === false) {
+    unknowns.push('Workflow sources are unknown because the profile source failed.')
+  } else if (workflowReferences.length === 0) {
+    unknowns.push('No workflow command lines were found to cite; CI coverage is unknown, not empty.')
+  } else {
+    unknowns.push(
+      `Workflow lines are read-only sources, not checks: open the cited ${String(workflowReferences.length)} line(s) to see what CI runs. This list is not exhaustive, and nothing here was run.`,
+    )
   }
 
   const pasted = suggestion === null ? titleAndObjective(text) : null
@@ -1127,6 +1235,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     startHere,
     map,
     howToCheck: checks,
+    workflowReferences,
     verification: {
       status: snapshot.verification.status,
       reason: snapshot.verification.reason,
