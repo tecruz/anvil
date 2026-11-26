@@ -28,10 +28,10 @@ await explicit approval**, 2026-11-26.
   task met the one-sided-win rule, so no effectiveness claim follows. See
   [the predeclared plan](evidence/2026-11-26-verified-patch-pilot-plan.md) and
   [the results](evidence/2026-11-26-verified-patch-results.md).
-- **Release — prepared.** The maintainer added a valid `NPM_TOKEN` repository secret. The
-  manifests were bumped to `0.2.0`, the install docs now describe both channels, and the
-  release candidate is the tested bytes from `impl/integrated`. Publication still requires a
-  passing no-publish rehearsal and the `v0.2.0` tag.
+- **Release — done.** `@anvil-workflows/cli@0.2.0` was published from tag `v0.2.0` with npm
+  provenance after a passing no-publish rehearsal. The registry bytes were independently
+  downloaded and matched the tested SHA-256. See
+  [the publication record](evidence/2026-11-26-release-publication.md).
 
 ## Goal
 
