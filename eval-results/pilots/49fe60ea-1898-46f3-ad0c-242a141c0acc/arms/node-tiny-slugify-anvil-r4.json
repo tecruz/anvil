@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "runId": "49fe60ea-1898-46f3-ad0c-242a141c0acc",
+  "specHash": "8ca343116a909e7523fc2da2c88283148a0efc6e2ef812b64d7171cddfcbb615",
+  "task": "node-tiny-slugify",
+  "arm": "anvil",
+  "repetition": 4,
+  "grade": "task-failure",
+  "reasons": [
+    "the check ran against a different patch"
+  ],
+  "detail": null
+}

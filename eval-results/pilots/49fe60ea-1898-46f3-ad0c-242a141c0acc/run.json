@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "runId": "49fe60ea-1898-46f3-ad0c-242a141c0acc",
+  "specHash": "8ca343116a909e7523fc2da2c88283148a0efc6e2ef812b64d7171cddfcbb615",
+  "approvedBy": "Tiago — session approval 2026-11-26, plan docs/evidence/2026-11-26-verified-patch-pilot-plan.md",
+  "model": "opencode/hy4-flash-free",
+  "seed": "verified-patch-workflow-v1",
+  "repetitions": 5,
+  "tasks": [
+    "verified-patch",
+    "node-tiny-slugify"
+  ],
+  "results": [
+    {
+      "task": "verified-patch",
+      "arm": "plain",
+      "repetition": 0,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "anvil",
+      "repetition": 0,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "anvil",
+      "repetition": 1,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "plain",
+      "repetition": 1,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "plain",
+      "repetition": 2,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "anvil",
+      "repetition": 2,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "anvil",
+      "repetition": 3,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "plain",
+      "repetition": 3,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "plain",
+      "repetition": 4,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "verified-patch",
+      "arm": "anvil",
+      "repetition": 4,
+      "grade": "success",
+      "reasons": [],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "anvil",
+      "repetition": 0,
+      "grade": "task-failure",
+      "reasons": [
+        "the check ran against a different patch"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "plain",
+      "repetition": 0,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "plain",
+      "repetition": 1,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "anvil",
+      "repetition": 1,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "anvil",
+      "repetition": 2,
+      "grade": "task-failure",
+      "reasons": [
+        "the check ran against a different patch"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "plain",
+      "repetition": 2,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "plain",
+      "repetition": 3,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "anvil",
+      "repetition": 3,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "anvil",
+      "repetition": 4,
+      "grade": "task-failure",
+      "reasons": [
+        "the check ran against a different patch"
+      ],
+      "detail": null
+    },
+    {
+      "task": "node-tiny-slugify",
+      "arm": "plain",
+      "repetition": 4,
+      "grade": "task-failure",
+      "reasons": [
+        "the harness-controlled check failed"
+      ],
+      "detail": null
+    }
+  ]
+}

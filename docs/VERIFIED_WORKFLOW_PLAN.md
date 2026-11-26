@@ -22,9 +22,15 @@ await explicit approval**, 2026-11-26.
 - **Phase 3 — partially present.** The brief already carries each command's provenance,
   `file:line` evidence and working directory, and `init --with-mirrors` defers to the generated
   `AGENTS.md`. Deeper nesting and task-specific prerequisites remain open.
-- **Phase 4 and Release — blocked.** Both need explicit maintainer approval, a frozen run
-  specification and, for release, a chosen unpublished version. No model spend or publication
-  was performed by this plan.
+- **Phase 4 — executed, insufficient evidence.** The predeclared 20-invocation pilot ran on
+  2026-11-26 under a free model with no spend. The `verified-patch` task was solved by both
+  arms in all five pairs; `node-tiny-slugify` was solved by neither arm in five pairs. Neither
+  task met the one-sided-win rule, so no effectiveness claim follows. See
+  [the predeclared plan](evidence/2026-11-26-verified-patch-pilot-plan.md) and
+  [the results](evidence/2026-11-26-verified-patch-results.md).
+- **Release — blocked on a credential.** `@anvil-workflows/cli` is unpublished. The repository
+  has no `NPM_TOKEN`, and the local npm token is expired (`npm whoami` returns 401), so a tag
+  push would fail at `npm publish`. Publication needs a valid token or npm trusted publishing.
 
 ## Goal
 
