@@ -126,6 +126,7 @@ export const claimCommand: Command = {
     const result = await claimTicket({
       repoRoot,
       ticket,
+      declared: config.project.commands,
       recommend: (worktreePath) => recommendForWorktree(worktreePath, ticket),
       ...(typeof args.values.prefix === 'string' ? { prefix: args.values.prefix } : {}),
       ...(typeof args.values.base === 'string' ? { base: args.values.base } : {}),
@@ -620,10 +621,14 @@ export const issueCommand: Command = {
       defaultBranch: null,
     }).profile
     const branch = await currentBranch(target)
+    // Read the owner's declarations from this checkout too, so a refresh cannot replace a
+    // declared plan in the bundle with the detected commands the runners will not use.
+    const { config } = loadConfig({ repoRoot: target })
     const context = renderContextBundle({
       ticket,
       profile,
       branch: branch ?? 'HEAD',
+      declared: config.project.commands,
       resources: recommendForProfile(profile, ticket),
     })
     const overlay = renderAgentsOverlay({ ticket, profile })

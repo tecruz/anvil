@@ -711,6 +711,42 @@ describe('crew verify', () => {
     )
   })
 
+  test('a supplied verification plan runs declared commands in their own directories', async () => {
+    const dir = makeRepo({ go: true })
+    const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v-plan-'))
+    temps.push(wtRoot)
+    await crew(dir, 1, wtRoot)
+
+    const ran: Array<{ command: string; cwd: string }> = []
+    const result = await crewVerify({
+      repoRoot: dir,
+      verification: () => [
+        { cmd: 'npm run verify:ci', dir: 'ci' },
+        { cmd: 'npm run verify', dir: '' },
+      ],
+      run: async (command, cwd) => {
+        ran.push({ command, cwd })
+        return { ok: true, code: 0, stdout: '', stderr: '' }
+      },
+    })
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(
+      ran.map((entry) => entry.command),
+      ['npm run verify:ci', 'npm run verify'],
+    )
+    assert.ok(ran[0]?.cwd.replace(/\\/g, '/').endsWith('/ci'), `declared directory wins: ${ran[0]?.cwd}`)
+    assert.ok(
+      !ran[1]?.cwd.replace(/\\/g, '/').endsWith('/ci'),
+      `repo-root command stays at the worktree root: ${ran[1]?.cwd}`,
+    )
+    assert.deepEqual(
+      result.results[0]?.commands.map((entry) => [entry.command, entry.cwd]),
+      ran.map((entry) => [entry.command, entry.cwd]),
+      'the evidence records the directories that actually ran',
+    )
+  })
+
   test('one failing worktree fails the whole crew', async () => {
     const dir = makeRepo({ go: true })
     const wtRoot = mkdtempSync(join(tmpdir(), 'anvil-m5v2-'))

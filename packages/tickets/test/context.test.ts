@@ -186,3 +186,44 @@ describe('ticket context: recommended resources', () => {
     assert.doesNotMatch(bundle.content, /^## Heading$/m)
   })
 })
+
+describe('ticket context: effective verification plan', () => {
+  const profileWith = (projectDir: string): ReturnType<typeof buildProfile>['profile'] => ({
+    ...profileFixture(),
+    projectDir,
+    commands: {
+      test: [{ cmd: 'npm test', source: 'documented', evidence: 'package.json:7' }],
+      lint: [{ cmd: 'npm run lint', source: 'inferred' }],
+    },
+  })
+
+  test('a detected command in a nested project names the directory and its citation', () => {
+    const bundle = renderContextBundle({
+      ticket: ticket(),
+      profile: profileWith('packages/sub'),
+      branch: 'feat/local-1',
+    })
+
+    assert.match(bundle.content, /- \*\*Tests:\*\* `npm test` in `packages\/sub`/)
+    assert.match(bundle.content, /from `package\.json:7`/)
+    assert.match(bundle.content, /inferred -- verify before relying on it/)
+  })
+
+  test('a declared command wins and the conflicting detected command stays visible', () => {
+    const bundle = renderContextBundle({
+      ticket: ticket(),
+      profile: profileWith('packages/sub'),
+      branch: 'feat/local-1',
+      declared: [
+        { kind: 'test', cmd: 'npm run verify:ci', dir: 'ci' },
+        { kind: 'typecheck', cmd: 'npm run types' },
+      ],
+    })
+
+    assert.match(bundle.content, /- \*\*Tests:\*\* `npm run verify:ci` in `ci`/)
+    assert.match(bundle.content, /declared by owner in `anvil\.config\.json`/)
+    assert.match(bundle.content, /\*\*Conflict:\*\* `npm run verify:ci` was declared over detected `npm test` for test/)
+    assert.match(bundle.content, /- \*\*Typecheck:\*\* `npm run types`/)
+    assert.doesNotMatch(bundle.content, /- \*\*Tests:\*\* `npm test`/)
+  })
+})

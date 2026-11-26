@@ -15,7 +15,8 @@
  */
 
 import { join } from 'node:path'
-import type { ProjectProfile } from '@anvil/profile'
+import type { DeclaredCommand } from '@anvil/core'
+import { type ProjectProfile, verificationPlan } from '@anvil/profile'
 import type { Ticket } from './index.ts'
 
 /**
@@ -169,6 +170,12 @@ export function renderContextBundle(options: {
    * no section at all.
    */
   resources?: readonly RecommendedResource[]
+  /**
+   * Owner-declared commands from `anvil.config.json`. The same declarations feed the shared
+   * verification plan used by `brief`, `crew verify` and `ship`, so the bundle cannot name a
+   * command the runner will not run.
+   */
+  declared?: readonly DeclaredCommand[]
 }): TicketContextBundle {
   const { ticket, profile, branch } = options
   const out: string[] = []
@@ -221,7 +228,7 @@ export function renderContextBundle(options: {
   }
   out.push('<!-- END UNTRUSTED TICKET CONTENT -->')
 
-  const verify = verificationCommands(profile)
+  const verify = verificationCommands(profile, options.declared)
   if (verify.length > 0) {
     out.push('')
     out.push('## Verify your work')
@@ -307,21 +314,44 @@ function sanitizeInline(value: string, max: number): string {
   return compact.length <= max ? compact : `${compact.slice(0, max - 3)}...`
 }
 
-/** The verify commands, with the source label so an inferred command is visibly a guess. */
-function verificationCommands(profile: ProjectProfile): string[] {
-  const order: Array<[string, keyof ProjectProfile['commands']]> = [
-    ['Changed-files tests', 'testFast'],
-    ['Tests', 'test'],
-    ['Typecheck', 'typecheck'],
-    ['Lint', 'lint'],
-    ['Build', 'build'],
-  ]
+const VERIFY_LABELS: Readonly<Record<string, string>> = {
+  testFast: 'Changed-files tests',
+  test: 'Tests',
+  typecheck: 'Typecheck',
+  lint: 'Lint',
+  build: 'Build',
+}
+
+/**
+ * The effective verification plan, not a second opinion.
+ *
+ * This is the same `@anvil/profile` plan `crew verify` and `ship` execute. Rendering it here
+ * keeps the bundle an agent reads in a claimed worktree in step with the commands anvil will
+ * actually check: declared commands win, each command carries its own directory and provenance,
+ * and a conflicting detected command stays visible instead of being silently dropped.
+ */
+function verificationCommands(profile: ProjectProfile, declared: readonly DeclaredCommand[] = []): string[] {
+  const plan = verificationPlan(profile, declared)
   const out: string[] = []
-  for (const [label, kind] of order) {
-    const entry = profile.commands[kind]?.[0]
-    if (entry === undefined) continue
-    const note = entry.source === 'documented' ? '' : ` _(${entry.source} -- verify before relying on it)_`
-    out.push(`- **${label}:** \`${entry.cmd}\`${note}`)
+  for (const entry of plan.commands) {
+    const label = VERIFY_LABELS[entry.kind] ?? entry.kind
+    const where = entry.dir === '' ? '' : ` in \`${sanitizeInline(entry.dir, 120)}\``
+    const note =
+      entry.source === 'declared'
+        ? ' _(declared by owner in `anvil.config.json`)_'
+        : entry.source === 'documented'
+          ? ''
+          : ` _(${entry.source} -- verify before relying on it)_`
+    const evidence =
+      entry.source === 'declared' || entry.evidence === null
+        ? ''
+        : ` _(from \`${sanitizeInline(entry.evidence, 120)}\`)_`
+    out.push(`- **${label}:** \`${sanitizeInline(entry.cmd, 200)}\`${where}${note}${evidence}`)
+  }
+  for (const conflict of plan.conflicts) {
+    out.push(
+      `- **Conflict:** \`${sanitizeInline(conflict.declared, 200)}\` was declared over detected \`${sanitizeInline(conflict.detected, 200)}\` for ${sanitizeInline(conflict.kind, 40)}. Run the declared command.`,
+    )
   }
   return out
 }

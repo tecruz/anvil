@@ -72,7 +72,7 @@ function recordingTransport(opts: {
   const calls: string[] = []
   const transport: ForgeTransport = {
     async pushBranch(options) {
-      calls.push(`push:${options.branch}`)
+      calls.push(`push:${options.branch}${options.commit === undefined ? '' : `@${options.commit}`}`)
       return { ok: opts.pushOk ?? true, detail: opts.pushDetail ?? 'pushed' }
     },
     async upsertPullRequest(options) {
@@ -147,6 +147,114 @@ async function claimAndCommit(repo: string): Promise<{ worktreePath: string; bra
   git(claim.worktreePath, 'commit', '-m', 'claim work')
   return { worktreePath: claim.worktreePath, branch: claim.branch }
 }
+
+describe('ship: shared verification plan', () => {
+  test('declared commands run from their own directories and are labelled as declared', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    const calls: Array<{ command: string; cwd: string }> = []
+    options.run = async (command, cwd) => {
+      calls.push({ command, cwd })
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+    options.verificationPlan = [
+      { cmd: 'npm run verify:ci', dir: 'ci', source: 'declared' },
+      { cmd: 'npm run verify', dir: '' },
+    ]
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(
+      calls.map((call) => call.command),
+      ['npm run verify:ci', 'npm run verify'],
+    )
+    assert.ok(calls[0]?.cwd.replace(/\\/g, '/').endsWith('/ci'), `declared directory wins: ${calls[0]?.cwd}`)
+    assert.ok(!calls[1]?.cwd.replace(/\\/g, '/').endsWith('/ci'))
+    assert.match(result.stages.find((stage) => stage.name === 'verify')?.detail ?? '', /declared by owner/)
+  })
+})
+
+describe('ship: required current verification', () => {
+  test('missing evidence refuses before the push, even with --skip-verify', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    options.skipVerify = true
+    options.requireCurrentVerification = true
+    options.currentVerification = { ok: false, detail: 'no version 2 record for this claim' }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    assert.equal(result.stages[0]?.name, 'refuse')
+    assert.equal(result.stages[0]?.ok, false)
+    assert.match(result.stages[0]?.detail ?? '', /no version 2 record/)
+    assert.equal(transport.calls.filter((call) => call.startsWith('push')).length, 0)
+  })
+
+  test('current evidence allows the ship to proceed with the verified commit pinned', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const commit = git(worktreePath, 'rev-parse', 'HEAD').trim()
+    const options = shipOptions(repo, worktreePath, transport)
+    options.requireCurrentVerification = true
+    options.currentVerification = { ok: true, detail: 'current verification for local-1', commit }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.equal(result.stages[0]?.ok, true)
+    assert.equal(result.verifiedCommit, commit)
+    const pushes = transport.calls.filter((call) => call.startsWith('push'))
+    assert.equal(pushes.length, 1)
+    assert.equal(pushes[0], `push:feat/local-1-slug@${commit}`, 'the push pins the verified commit')
+  })
+
+  test('evidence that does not name a commit refuses before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    options.requireCurrentVerification = true
+    // A boolean verdict without an immutable commit cannot pin what gets pushed.
+    options.currentVerification = { ok: true, detail: 'current verification for local-1' }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    assert.match(result.stages[0]?.detail ?? '', /does not name a commit/)
+    assert.equal(transport.calls.filter((call) => call.startsWith('push')).length, 0)
+  })
+
+  test('a commit created after verification refuses before the push', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const verified = git(worktreePath, 'rev-parse', 'HEAD').trim()
+    const options = shipOptions(repo, worktreePath, transport)
+    options.requireCurrentVerification = true
+    options.currentVerification = { ok: true, detail: 'current verification for local-1', commit: verified }
+    options.run = async () => {
+      // The branch moves while the verify stage is running. The evidence still names `verified`.
+      writeFileSync(join(worktreePath, 'during-verify.txt'), 'late work\n', 'utf8')
+      git(worktreePath, 'add', 'during-verify.txt')
+      git(worktreePath, 'commit', '-m', 'commit during verification')
+      return { ok: true, code: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    assert.equal(result.stages.find((s) => s.name === 'pin')?.ok, false)
+    assert.match(result.stages.find((s) => s.name === 'pin')?.detail ?? '', /branch moved/)
+    assert.equal(transport.calls.filter((call) => call.startsWith('push')).length, 0)
+  })
+})
 
 describe('ship: failure at each mutation boundary', () => {
   test('verify failure stops before push — nothing reaches the transport', async () => {

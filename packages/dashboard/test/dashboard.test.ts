@@ -703,10 +703,21 @@ describe('the snapshot reader', () => {
       ],
     })
     assert.equal(snapshot.verification.status, 'recorded')
+    // Legacy rows are still readable as history, but the snapshot marks them explicitly so
+    // a v1 `-dirty` row can never be presented as current verification.
+    const legacy = (over: Record<string, unknown>) => ({
+      cwd: null,
+      format: 1,
+      planDigest: null,
+      claim: null,
+      clean: null,
+      verdict: 'legacy',
+      ...over,
+    })
     assert.deepEqual(snapshot.verification.evidence, [
-      { ...record, matchesCurrent: null },
-      { ...record, revision: 'a'.repeat(40), matchesCurrent: null },
-      { ...record, exitCode: 3010, matchesCurrent: null },
+      legacy({ ...record, matchesCurrent: null }),
+      legacy({ ...record, revision: 'a'.repeat(40), matchesCurrent: null }),
+      legacy({ ...record, exitCode: 3010, matchesCurrent: null }),
     ])
     assert.equal(snapshot.verification.currentRevision, null)
     assert.ok(snapshot.verification.incompleteCount > 0)
@@ -734,7 +745,8 @@ describe('the snapshot reader', () => {
       snapshot.verification.evidence.map((item) => item.matchesCurrent),
       [false, true],
     )
-    assert.match(snapshot.verification.reason, /different revision/)
+    assert.equal(snapshot.verification.verdict, 'legacy')
+    assert.match(snapshot.verification.reason, /Only legacy verification rows exist/)
   })
 
   test('verification compares commit ids case-insensitively', async () => {
@@ -786,6 +798,79 @@ describe('the snapshot reader', () => {
     assert.equal(snapshot.work.crew.ok, false)
     assert.match(snapshot.work.crew.error ?? '', /spawn failed/)
     assert.equal(snapshot.repository.doctor.ok, true)
+  })
+
+  const COMMIT = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+  const current = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    schemaVersion: 2,
+    claim: 'local-1',
+    repository: '0123456789abcdef',
+    commit: COMMIT,
+    clean: true,
+    cwd: 'packages/sub',
+    commands: [{ command: 'npm test', exitCode: 0, exitObserved: true }],
+    planDigest: 'a'.repeat(64),
+    startedAt: '2026-11-26T10:00:00.000Z',
+    completedAt: '2026-11-26T10:00:05.000Z',
+    outcome: 'passed',
+    ...overrides,
+  })
+
+  async function verification(records: unknown[], revision: string | null = COMMIT) {
+    const { invoke } = fakeInvoke()
+    return loadSnapshot({
+      cwd: '/repo',
+      invoke,
+      readStaged: () => staged,
+      readVerification: () => records,
+      currentRevision: revision,
+    }).then((snapshot) => snapshot.verification)
+  }
+
+  test('a clean, current, observed check is reported as current', async () => {
+    const result = await verification([current()])
+    assert.equal(result.status, 'recorded')
+    assert.equal(result.verdict, 'current')
+    assert.equal(result.evidence[0]?.format, 2)
+    assert.equal(result.evidence[0]?.matchesCurrent, true)
+    assert.match(result.reason, /clean check passed against the current commit/)
+  })
+
+  test('a different commit or a dirty tree is stale, never current', async () => {
+    const different = await verification([current()], 'ffffffffffffffffffffffffffffffffffffffff')
+    assert.equal(different.verdict, 'stale')
+    const dirty = await verification([current({ commit: null, clean: false })])
+    assert.equal(dirty.verdict, 'stale')
+    assert.equal(dirty.evidence[0]?.matchesCurrent, null)
+  })
+
+  test('an unobserved exit is incomplete and a failed exit is failed', async () => {
+    const incomplete = await verification([
+      current({ commands: [{ command: 'npm test', exitCode: null, exitObserved: false }] }),
+    ])
+    assert.equal(incomplete.verdict, 'incomplete')
+    assert.equal(incomplete.evidence[0]?.exitCode, null)
+    const failed = await verification([
+      current({ outcome: 'failed', commands: [{ command: 'npm test', exitCode: 1, exitObserved: true }] }),
+    ])
+    assert.equal(failed.verdict, 'failed')
+  })
+
+  test('legacy rows remain visible but are never current', async () => {
+    const result = await verification([
+      { command: 'npm test', revision: `${COMMIT}-dirty`, exitCode: 0, timestamp: '2026-11-26T10:00:05.000Z' },
+    ])
+    assert.equal(result.status, 'recorded')
+    assert.equal(result.verdict, 'legacy')
+    assert.equal(result.evidence[0]?.format, 1)
+    assert.match(result.reason, /Only legacy verification rows exist/)
+  })
+
+  test('a malformed record is counted as incomplete, not displayed as a fact', async () => {
+    const result = await verification([{ command: 'npm test', revision: 'not-a-sha' }])
+    assert.equal(result.status, 'unavailable')
+    assert.equal(result.incompleteCount, 1)
+    assert.equal(result.evidence.length, 0)
   })
 })
 
@@ -1308,6 +1393,7 @@ describe('the dashboard page', () => {
       },
       verification: {
         status: 'unavailable',
+        verdict: 'none',
         reason: 'not persisted',
         currentRevision: null,
         incompleteCount: 0,

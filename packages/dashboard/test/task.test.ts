@@ -129,6 +129,7 @@ function makeSnapshot(options: SnapshotOptions = {}): DashboardSnapshot {
     work: { crew: source({ crew: [] }) },
     verification: {
       status: 'unavailable',
+      verdict: 'none',
       reason: 'not persisted',
       currentRevision: null,
       incompleteCount: 0,
@@ -456,6 +457,7 @@ describe('buildTaskBrief', () => {
     const snapshot = makeSnapshot({ checked: true })
     snapshot.verification = {
       status: 'recorded',
+      verdict: 'legacy',
       reason: 'Recorded by an explicit, bounded verification run.',
       currentRevision: null,
       incompleteCount: 0,
@@ -466,6 +468,12 @@ describe('buildTaskBrief', () => {
           exitCode: 0,
           timestamp: '2026-11-20T10:00:00.000Z',
           matchesCurrent: false,
+          format: 1,
+          verdict: 'legacy',
+          cwd: null,
+          planDigest: null,
+          claim: null,
+          clean: null,
         },
       ],
     }

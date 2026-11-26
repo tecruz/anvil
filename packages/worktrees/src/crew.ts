@@ -501,6 +501,10 @@ export interface VerifyResult {
     exitObserved: boolean
     /** Revision sampled immediately before this command, when supplied by the runner. */
     revision: string | null
+    /** Revision sampled immediately after the command; a difference means it did not check one tree. */
+    revisionAfter: string | null
+    /** When the runner observed the command start, for evidence bounds. */
+    startedAt: string | null
     /** When the runner observed the command finish, for completion-order evidence retention. */
     completedAt: string | null
     detail: string
@@ -529,10 +533,20 @@ export interface CrewVerifyOptions {
     exitObserved?: boolean
     /** Revision sampled immediately before this command, when available. */
     revision?: string | null
+    /** Revision sampled immediately after the command, when available. */
+    revisionAfter?: string | null
+    /** When the runner observed the command start, for evidence bounds. */
+    startedAt?: string | null
     /** When the runner observed the command finish, for completion-order evidence retention. */
     completedAt?: string | null
   }>
   read?: (rel: string) => string | null
+  /**
+   * Optional shared verification plan from the CLI, which also owns the owner declarations.
+   * Each entry names the command and its repo-relative directory. Without it, detected
+   * commands from the profile are used at the profile's project directory.
+   */
+  verification?: (profile: ProjectProfile) => Array<{ cmd: string; dir: string }>
 }
 
 export interface CrewVerifyResult {
@@ -589,9 +603,9 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
       : concurrencyFor(combined, options.jobs ?? null)
 
   const results = await mapWithConcurrency(profiled, decision.jobs, async ({ claim, profile }) => {
-    const verifyCwd = profile.projectDir === '' ? claim.worktreePath : join(claim.worktreePath, profile.projectDir)
-    const commands = verifyCommandsFor(profile)
-    if (commands.length === 0) {
+    const plan =
+      options.verification?.(profile) ?? verifyCommandsFor(profile).map((cmd) => ({ cmd, dir: profile.projectDir }))
+    if (plan.length === 0) {
       return {
         key: claim.key,
         worktree: claim.worktreePath,
@@ -601,15 +615,18 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
       }
     }
     const perCommand: VerifyResult['commands'] = []
-    for (const command of commands) {
-      const outcome = await options.run(command, verifyCwd)
+    for (const entry of plan) {
+      const verifyCwd = entry.dir === '' ? claim.worktreePath : join(claim.worktreePath, entry.dir)
+      const outcome = await options.run(entry.cmd, verifyCwd)
       perCommand.push({
-        command,
+        command: entry.cmd,
         cwd: verifyCwd,
         ok: outcome.ok,
         code: outcome.code,
         exitObserved: outcome.exitObserved ?? true,
         revision: outcome.revision ?? null,
+        revisionAfter: outcome.revisionAfter ?? null,
+        startedAt: outcome.startedAt ?? null,
         completedAt: outcome.completedAt ?? null,
         detail: outcome.ok ? '' : (outcome.stderr || outcome.stdout).slice(0, 300),
       })
