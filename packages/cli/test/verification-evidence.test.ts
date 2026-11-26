@@ -3,10 +3,13 @@ import { describe, test } from 'node:test'
 
 import {
   type CurrentEvidenceRecord,
+  evidenceMatchesPlan,
+  evidencePlanMatches,
   isCurrentEvidenceRecord,
   isLegacyEvidenceRecord,
   type LegacyEvidenceRecord,
   planDigestFor,
+  planDigestForEntries,
   selectVerificationRecords,
   VERIFICATION_EVIDENCE_MAX_BYTES,
   verdictFor,
@@ -102,5 +105,49 @@ describe('verification evidence contract', () => {
     })
     const bounded = selectVerificationRecords([huge, ...rows])
     assert.ok(Buffer.byteLength(`${JSON.stringify(bounded, null, 2)}\n`) <= VERIFICATION_EVIDENCE_MAX_BYTES)
+  })
+})
+
+describe('plan matching for mixed directories', () => {
+  const plan = [
+    { cmd: 'npm run verify:ci', dir: 'ci' },
+    { cmd: 'npm test', dir: 'packages/api' },
+  ]
+  const mixed = (): CurrentEvidenceRecord =>
+    record({
+      cwd: 'ci',
+      planDigest: planDigestForEntries(plan),
+      commands: plan.map((entry) => ({ command: entry.cmd, exitCode: 0, exitObserved: true, dir: entry.dir })),
+    })
+
+  test('a mixed-directory plan matches only when every directory matches', () => {
+    assert.equal(evidencePlanMatches(mixed(), plan), true)
+    assert.equal(evidenceMatchesPlan(mixed(), plan, COMMIT), true)
+    assert.equal(
+      evidencePlanMatches(mixed(), [
+        { cmd: 'npm run verify:ci', dir: '' },
+        { cmd: 'npm test', dir: 'packages/api' },
+      ]),
+      false,
+    )
+    assert.equal(
+      evidencePlanMatches(mixed(), [
+        { cmd: 'npm run verify:ci', dir: 'ci' },
+        { cmd: 'npm test', dir: 'other' },
+      ]),
+      false,
+    )
+  })
+
+  test('a stale commit never satisfies the plan', () => {
+    assert.equal(evidencePlanMatches(mixed(), plan), true, 'the plan still matches')
+    assert.equal(evidenceMatchesPlan(mixed(), plan, 'f'.repeat(40)), false, 'but the verdict is stale')
+    assert.equal(evidenceMatchesPlan(mixed(), plan, null), false, 'an unknown commit is stale too')
+  })
+
+  test('pre-mixed evidence written with a single cwd stays readable', () => {
+    const old = record({ cwd: 'packages/sub', planDigest: planDigestFor('packages/sub', ['npm test']) })
+    assert.equal(evidencePlanMatches(old, [{ cmd: 'npm test', dir: 'packages/sub' }]), true)
+    assert.equal(evidenceMatchesPlan(old, [{ cmd: 'npm test', dir: 'packages/sub' }], COMMIT), true)
   })
 })

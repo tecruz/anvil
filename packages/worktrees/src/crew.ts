@@ -503,6 +503,11 @@ export interface VerifyResult {
     revision: string | null
     /** Revision sampled immediately after the command; a difference means it did not check one tree. */
     revisionAfter: string | null
+    /**
+     * Repo-relative directory this command was logically run for. Set when the physical cwd
+     * is an isolated snapshot outside the worktree, so evidence can still name the plan dir.
+     */
+    logicalCwd?: string
     /** When the runner observed the command start, for evidence bounds. */
     startedAt: string | null
     /** When the runner observed the command finish, for completion-order evidence retention. */
@@ -535,6 +540,8 @@ export interface CrewVerifyOptions {
     revision?: string | null
     /** Revision sampled immediately after the command, when available. */
     revisionAfter?: string | null
+    /** Repo-relative plan directory, when the runner relocated the command to a snapshot. */
+    logicalCwd?: string
     /** When the runner observed the command start, for evidence bounds. */
     startedAt?: string | null
     /** When the runner observed the command finish, for completion-order evidence retention. */
@@ -626,6 +633,7 @@ export async function crewVerify(options: CrewVerifyOptions): Promise<CrewVerify
         exitObserved: outcome.exitObserved ?? true,
         revision: outcome.revision ?? null,
         revisionAfter: outcome.revisionAfter ?? null,
+        ...(outcome.logicalCwd === undefined ? {} : { logicalCwd: outcome.logicalCwd }),
         startedAt: outcome.startedAt ?? null,
         completedAt: outcome.completedAt ?? null,
         detail: outcome.ok ? '' : (outcome.stderr || outcome.stdout).slice(0, 300),

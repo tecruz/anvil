@@ -10,13 +10,18 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnvilError, ErrorCode, loadConfig, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
-import { buildProfile, type ProjectProfile, verificationPlan } from '@anvil/profile'
+import { buildProfile, verificationPlan } from '@anvil/profile'
 import { GhForgeTransport, GitHubProvider, hostFromRemote, requireCapability } from '@anvil/providers'
 import { parseRef, type Ticket } from '@anvil/tickets'
 import { readClaims } from '@anvil/worktrees'
 import { type ShipResult, ship } from '@anvil/worktrees/ship'
 import { ticketProviderFor } from '../tickets.ts'
-import { isCurrentEvidenceRecord, planDigestFor, verdictFor } from '../verification-evidence.ts'
+import {
+  evidenceMatchesPlan,
+  evidencePlanMatches,
+  isCurrentEvidenceRecord,
+  verdictFor,
+} from '../verification-evidence.ts'
 import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -159,7 +164,7 @@ export const shipCommand: Command = {
     const plan = verificationPlan(profile, config.project.commands)
     const requireCurrentVerification = config.features.requireCurrentVerification
     const currentVerification = requireCurrentVerification
-      ? await currentVerificationFor(repoRoot, key, claim.worktreePath, profile, plan)
+      ? await currentVerificationFor(repoRoot, key, claim.worktreePath, plan)
       : undefined
 
     const result: ShipResult = await ship({
@@ -307,27 +312,20 @@ async function currentVerificationFor(
   repoRoot: string,
   claimKey: string,
   worktreePath: string,
-  profile: ProjectProfile,
   plan: ReturnType<typeof verificationPlan>,
 ): Promise<{ ok: boolean; detail: string; commit?: string }> {
   const store = evidenceStore(repoRoot)
   if (store === null) return { ok: false, detail: 'Cannot resolve the verification evidence store.' }
   const commit = await headRevision(worktreePath)
   if (commit === null) return { ok: false, detail: 'Cannot sample the worktree commit before shipping.' }
-  const expectedCwd = (plan.commands[0]?.dir ?? profile.projectDir).replaceAll('\\', '/')
-  const expectedDigest = planDigestFor(
-    expectedCwd,
-    plan.commands.map((entry) => entry.cmd),
-  )
+  const entries = plan.commands.map((entry) => ({ cmd: entry.cmd, dir: entry.dir }))
   const relevant = readVerificationEvidence(store)
     .filter(isCurrentEvidenceRecord)
     .filter((record) => record.claim === claimKey && record.repository === store.key)
   if (relevant.length === 0) {
     return { ok: false, detail: `No version 2 verification record for claim ${claimKey}.` }
   }
-  const matching = relevant.find(
-    (record) => record.planDigest === expectedDigest && verdictFor(record, commit) === 'current',
-  )
+  const matching = relevant.find((record) => evidenceMatchesPlan(record, entries, commit))
   if (matching !== undefined) {
     // Surface the commit the evidence names. The pipeline pins this exact commit for the
     // diff, the risk analysis and the push, so a branch that moves after verification cannot
@@ -338,7 +336,7 @@ async function currentVerificationFor(
       ...(matching.commit === null ? {} : { commit: matching.commit }),
     }
   }
-  const planMatch = relevant.some((record) => record.planDigest === expectedDigest)
+  const planMatch = relevant.some((record) => evidencePlanMatches(record, entries))
   const verdicts = [...new Set(relevant.map((record) => verdictFor(record, commit)))].join(', ')
   return {
     ok: false,

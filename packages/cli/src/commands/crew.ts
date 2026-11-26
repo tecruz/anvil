@@ -41,10 +41,12 @@ import {
   type CurrentEvidenceRecord,
   type EvidenceRecord,
   isCurrentEvidenceRecord,
-  planDigestFor,
+  planDigestForEntries,
   selectVerificationRecords,
   VERIFICATION_EVIDENCE_MAX_BYTES,
+  validCwd,
 } from '../verification-evidence.ts'
+import { prepareVerificationSnapshot, type VerificationSnapshot, worktreeRootFor } from '../verification-snapshot.ts'
 import { recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -354,6 +356,81 @@ export async function headRevision(worktree: string): Promise<string | null> {
   return head.exitCode === 0 ? head.stdout.trim() : null
 }
 
+export type EvidenceRun = Parameters<typeof crewVerify>[0]['run']
+
+/**
+ * The runner used by `crew verify --record`.
+ *
+ * With `useSnapshot`, each command runs in an isolated clone of the worktree's clean HEAD and
+ * the outcome names the logical repository-relative directory, so evidence can still be matched
+ * to the plan. Without it, ordinary mutable-checkout sampling is preserved.
+ */
+export function createEvidenceRunner(options: {
+  record: boolean
+  useSnapshot: boolean
+  snapshots: Map<string, VerificationSnapshot>
+  run: EvidenceRun
+}): EvidenceRun {
+  return async (command, cwd) => {
+    if (!options.record) return options.run(command, cwd)
+    const startedAt = new Date().toISOString()
+    const completedAt = (): string => new Date().toISOString()
+    const fail = (detail: string) => ({
+      ok: false,
+      code: 1,
+      stdout: '',
+      stderr: detail,
+      exitObserved: false,
+      revision: null,
+      revisionAfter: null,
+      startedAt,
+      completedAt: completedAt(),
+    })
+
+    let executionCwd = cwd
+    let revision: string | null
+    let sampleFrom = cwd
+    let logicalCwd: string | undefined
+
+    if (options.useSnapshot) {
+      const root = worktreeRootFor(cwd)
+      if (root === null) return fail('Cannot resolve the worktree this check belongs to.')
+      const cached = options.snapshots.get(root)
+      let snapshot: VerificationSnapshot
+      if (cached !== undefined) {
+        snapshot = cached
+      } else {
+        const prepared = await prepareVerificationSnapshot(root)
+        if (prepared === null) {
+          return fail('Cannot snapshot a clean commit: commit your work before recording verification.')
+        }
+        options.snapshots.set(root, prepared)
+        snapshot = prepared
+      }
+      logicalCwd = relative(root, cwd).replaceAll('\\', '/')
+      executionCwd = logicalCwd === '' ? snapshot.root : join(snapshot.root, logicalCwd)
+      revision = snapshot.commit
+      sampleFrom = root
+    } else {
+      // Sample before and after: a check that spanned a tree change cannot bind to either tree.
+      revision = await worktreeRevision(cwd)
+    }
+
+    const outcome = await options.run(command, executionCwd)
+    // When the check ran in a snapshot, a branch that moved while it ran makes the record stale:
+    // the sampled HEAD no longer equals the tree that was checked.
+    const revisionAfter = options.useSnapshot ? await headRevision(sampleFrom) : await worktreeRevision(sampleFrom)
+    return {
+      ...outcome,
+      ...(logicalCwd === undefined ? {} : { logicalCwd }),
+      revision,
+      revisionAfter,
+      startedAt,
+      completedAt: completedAt(),
+    }
+  }
+}
+
 /**
  * Build one version 2 record per worktree whose checks all ran against the same tree.
  *
@@ -366,11 +443,15 @@ export function currentRecordFor(
   store: EvidenceStore,
 ): CurrentEvidenceRecord | null {
   if (worktree.commands.length === 0) return null
-  const absoluteCwd = worktree.commands[0]?.cwd ?? ''
   // Worktrees live outside the repository, so the meaningful directory is relative to the
-  // worktree root, not to the main checkout that owns the evidence store.
-  const cwd = relative(worktree.worktree, absoluteCwd).replaceAll('\\', '/')
-  if (!worktree.commands.every((command) => command.cwd === absoluteCwd)) return null
+  // worktree root, not to the main checkout that owns the evidence store. A runner that used
+  // an isolated snapshot supplies the logical directory explicitly. Commands may live in
+  // different directories; each one is bound individually instead of forcing a single cwd.
+  const dirs = worktree.commands.map((command) =>
+    (command.logicalCwd ?? relative(worktree.worktree, command.cwd)).replaceAll('\\', '/'),
+  )
+  if (dirs.some((dir) => !validCwd(dir))) return null
+  const cwd = dirs[0] ?? ''
   const before = worktree.commands.map((command) => command.revision)
   const after = worktree.commands.map((command) => command.revisionAfter)
   const revision = before[0]
@@ -383,10 +464,11 @@ export function currentRecordFor(
     return null
   }
   const clean = !revision.endsWith('-dirty')
-  const commands = worktree.commands.map((command) => ({
+  const commands = worktree.commands.map((command, index) => ({
     command: command.command,
     exitCode: command.exitObserved ? command.code : null,
     exitObserved: command.exitObserved,
+    dir: dirs[index] ?? '',
   }))
   const startedAt = worktree.commands[0]?.startedAt ?? new Date().toISOString()
   const completedAt = worktree.commands.at(-1)?.completedAt ?? new Date().toISOString()
@@ -398,9 +480,8 @@ export function currentRecordFor(
     clean,
     cwd,
     commands,
-    planDigest: planDigestFor(
-      cwd,
-      commands.map((command) => command.command),
+    planDigest: planDigestForEntries(
+      worktree.commands.map((command, index) => ({ cmd: command.command, dir: dirs[index] ?? '' })),
     ),
     startedAt,
     completedAt,
@@ -457,34 +538,41 @@ async function crewVerifyFlow(
   }
 
   const keys = Array.isArray(args.values.key) ? (args.values.key as string[]) : undefined
+  const { config } = loadConfig({ repoRoot })
+  // With the owner's policy on, checks run in a throwaway clone of the clean commit instead of
+  // the mutable checkout. Without it, ordinary dirty-worktree checks stay cheap and useful.
+  const requireSnapshot = config.features.requireCurrentVerification && args.values.record === true
+  const snapshots = new Map<string, VerificationSnapshot>()
+
   // Revision binding is only needed for evidence recording. A plain `crew verify` must not spawn
   // two extra git processes per command: the read-only verification path stays process-free.
-  const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
-    if (args.values.record !== true) return runCommand(command, cwd)
-    // Sample before and after: a check that spanned a tree change cannot bind to either tree.
-    const revision = await worktreeRevision(cwd)
-    const startedAt = new Date().toISOString()
-    const outcome = await runCommand(command, cwd)
-    const revisionAfter = await worktreeRevision(cwd)
-    return { ...outcome, revision, revisionAfter, startedAt, completedAt: new Date().toISOString() }
-  }
+  const runWithRevision = createEvidenceRunner({
+    record: args.values.record === true,
+    useSnapshot: requireSnapshot,
+    snapshots,
+    run: (command, cwd) => runCommand(command, cwd),
+  })
 
   // The same plan the brief and AGENTS.md describe: owner declarations win, detected commands
   // stay visible as conflicts, and each command carries its own working directory.
-  const { config } = loadConfig({ repoRoot })
   const planFor = (profile: Parameters<typeof verificationPlan>[0]) =>
     verificationPlan(profile, config.project.commands)
   const rootProfile = buildProfile(repoRoot, { root: repoRoot, host: null, remote: null, defaultBranch: null }).profile
   const conflicts = planFor(rootProfile).conflicts
 
-  const result: CrewVerifyResult = await crewVerify({
-    repoRoot,
-    ...(keys === undefined ? {} : { keys }),
-    jobs,
-    forceParallel: args.values['force-parallel'] === true,
-    run: runWithRevision,
-    verification: (profile) => planFor(profile).commands.map(({ cmd, dir }) => ({ cmd, dir })),
-  })
+  let result: CrewVerifyResult
+  try {
+    result = await crewVerify({
+      repoRoot,
+      ...(keys === undefined ? {} : { keys }),
+      jobs,
+      forceParallel: args.values['force-parallel'] === true,
+      run: runWithRevision,
+      verification: (profile) => planFor(profile).commands.map(({ cmd, dir }) => ({ cmd, dir })),
+    })
+  } finally {
+    for (const snapshot of snapshots.values()) snapshot.dispose()
+  }
   const data = {
     schemaVersion: 1,
     ok: result.ok,

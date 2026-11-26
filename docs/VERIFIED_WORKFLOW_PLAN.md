@@ -12,16 +12,22 @@ evidence and its grader audited**, 2026-11-26. The pinned-commit and guidance wo
   `features.requireCurrentVerification` policy refuses a ship before the push when current
   evidence is missing. The evidence's commit is now pinned: the diff, risk analysis and the
   push all use that exact commit, HEAD is re-sampled immediately before the push, and the CLI
-  result and PR body name the same commit. See `packages/cli/src/verification-evidence.ts`,
+  result and PR body name the same commit. With the policy on, `crew verify --record` now runs
+  each check in a throwaway clone of the worktree's clean HEAD instead of the mutable checkout;
+  a dirty worktree fails closed, and a branch that moves during the check cannot produce current
+  evidence. Mixed-directory plans bind each command's directory separately. See
+  `packages/cli/src/verification-evidence.ts`, `packages/cli/src/verification-snapshot.ts`,
   `packages/worktrees/src/ship.ts` and `packages/providers/src/github.ts`.
 - **Phase 2 — done.** The broker fingerprints the patch before and after a check and refuses
   mid-check edits; the runner uses an allowlisted environment, kills the agent process tree at
   the timeout, binds approval to grader/CLI bytes, and checkpoints each arm with redacted
   failure reasons. See `docs/VERIFIED_PATCH_STUDY.md`.
-- **Phase 0 — integration in progress.** #103 was merged into `main`; the integrated branch
-  was reconciled onto that head and now contains #104 and the released product work. Eight
-  required checks and the installed Task Brief smoke test still have to be run on the final
-  integration head.
+- **Phase 0 — done.** #103 was merged into `main`, then #105 reconciled it with #104 and the
+  released product work. All eight required checks passed on head `6a55e9a`
+  ([CI run 45890772345](https://github.com/tecruz/anvil/actions/runs/45890772345)); #105 merged
+  at `4ff4d6d`, which also closed #104. The built CLI's `version` and offline `brief` were
+  smoke-tested. See
+  [the integration record](evidence/2026-11-26-integration.md).
 - **Phase 3 — done.** A single `verificationPlan` in `@anvil/profile` now feeds the brief and
   generated instructions plus `crew verify` and `ship`: declared commands win, keep their own
   directory, and conflicting detected commands stay visible. Tests cover nested directories on

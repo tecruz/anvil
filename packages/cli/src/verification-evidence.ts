@@ -30,6 +30,8 @@ export type EvidenceCommand = {
   /** Null is an honest "no exit was observed", never a zero. */
   exitCode: number | null
   exitObserved: boolean
+  /** Repo-relative directory this command ran in. Present on records that bind a mixed plan. */
+  dir?: string
 }
 
 export type CurrentEvidenceRecord = {
@@ -77,7 +79,7 @@ function validBoundedText(value: unknown, max: number): value is string {
 }
 
 /** Repo-relative, contained directories only; an absolute path or `..` cannot be a plan cwd. */
-function validCwd(value: unknown): value is string {
+export function validCwd(value: unknown): value is string {
   if (typeof value !== 'string' || value.length > 240) return false
   if (value === '') return true
   if (/^[/\\]|^[A-Za-z]:/.test(value)) return false
@@ -92,7 +94,12 @@ function validCommand(value: unknown): value is EvidenceCommand {
       : Number.isSafeInteger(value.exitCode) &&
         (value.exitCode as number) >= 0 &&
         (value.exitCode as number) <= 0x7fffffff
-  return validBoundedText(value.command, 200) && exitValid && typeof value.exitObserved === 'boolean'
+  return (
+    validBoundedText(value.command, 200) &&
+    exitValid &&
+    typeof value.exitObserved === 'boolean' &&
+    (value.dir === undefined || validCwd(value.dir))
+  )
 }
 
 export function isCurrentEvidenceRecord(value: unknown): value is CurrentEvidenceRecord {
@@ -130,6 +137,55 @@ export function isLegacyEvidenceRecord(value: unknown): value is LegacyEvidenceR
 /** A digest over the exact commands and directory, so a changed plan is a different plan. */
 export function planDigestFor(cwd: string, commands: readonly string[]): string {
   return createHash('sha256').update(JSON.stringify({ cwd, commands })).digest('hex')
+}
+
+/**
+ * Digest for a plan whose commands can live in different directories.
+ *
+ * The single-`cwd` digest above cannot distinguish `npm test` in `ci` from the same command in
+ * `packages/api`, so a mixed-directory plan needs the directory bound per command. The record
+ * still carries a top-level `cwd` for older readers, but this digest is the identity the CLI
+ * checks before shipping.
+ */
+export function planDigestForEntries(entries: readonly { cmd: string; dir: string }[]): string {
+  return createHash('sha256')
+    .update(JSON.stringify({ commands: entries.map((entry) => ({ cmd: entry.cmd, dir: entry.dir })) }))
+    .digest('hex')
+}
+
+/**
+ * Whether a record describes the given plan, ignoring the commit.
+ *
+ * Both the original single-directory digest and the per-directory digest are accepted, so
+ * evidence written before mixed-directory plans were supported stays readable. A record that
+ * names per-command directories must match every one of them, not just the first.
+ */
+export function evidencePlanMatches(record: EvidenceRecord, plan: readonly { cmd: string; dir: string }[]): boolean {
+  if (!isCurrentEvidenceRecord(record)) return false
+  const entries = plan.map((entry) => ({ cmd: entry.cmd, dir: entry.dir.replaceAll('\\', '/') }))
+  const expectedCwd = entries[0]?.dir ?? ''
+  const digests = new Set([
+    planDigestForEntries(entries),
+    planDigestFor(
+      expectedCwd,
+      entries.map((entry) => entry.cmd),
+    ),
+  ])
+  if (!digests.has(record.planDigest)) return false
+  if (!record.commands.some((command) => command.dir !== undefined)) return true
+  return (
+    record.commands.length === entries.length &&
+    record.commands.every((command, index) => (command.dir ?? '') === entries[index]?.dir)
+  )
+}
+
+/** A record satisfies the plan *and* is current for the independently sampled commit. */
+export function evidenceMatchesPlan(
+  record: EvidenceRecord,
+  plan: readonly { cmd: string; dir: string }[],
+  currentCommit: string | null,
+): boolean {
+  return evidencePlanMatches(record, plan) && verdictFor(record, currentCommit) === 'current'
 }
 
 /**
