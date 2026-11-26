@@ -2,7 +2,7 @@
 
 Status: **predeclared before any task was run**. No result is claimed by this document.
 
-This is the first run of the [verified-workflow plan](../VERIFIED_WORKFLOW_PLAN.md#phase-4--measure-verified-patches-on-real-tasks).
+This is the first run of the [verified-workflow plan](../VERIFIED_WORKFLOW_PLAN.md), Phase 4.
 It compares an Anvil-assisted workflow bundle against plain OpenCode on the same pinned tasks.
 
 ## Frozen specification
