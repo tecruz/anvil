@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { addCommand, addRisk, addTool, COMMIT_HOOK_FILES, type ProfileDraft } from './detector.ts'
 import { evidence } from './manifest.ts'
-import type { CiCheck, CommandKind, Docs, InstructionFile } from './types.ts'
+import type { CommandKind, Docs, InstructionFile, WorkflowReference } from './types.ts'
 import { firstExisting, readText } from './walk.ts'
 
 /**
@@ -623,363 +623,31 @@ export function detectDocumentedCommands(root: string, files: ReadonlySet<string
   return out
 }
 
-const MAX_CI_CHECKS = 12
-const MAX_CI_COMMAND = 160
-const MAX_BLOCK_LINES = 5
-
 /**
- * Setup, cleanup, release and provenance steps are not checks an agent should be told to run.
- * A workflow may legitimately contain them; presenting `rm -rf` or `npm publish` as "how to
- * check" is worse than leaving the check unknown.
- */
-const CI_NON_CHECKS =
-  /^(?:rm|rmdir|del|erase|chmod|sudo|cd|echo|mkdir|cp|mv|git\s+(?:push|commit|tag|release)|npm\s+(?:ci|install|pack|publish)|pnpm\s+(?:install|pack|publish)|yarn\s+(?:install|publish)|sha256sum|docker\s+push)\b/i
-
-/** Only recognise a familiar test/build runner from a block scalar; other lines are a script. */
-const CI_BLOCK_RUNNER =
-  /^(?:npm|pnpm|yarn|node|nodejs|python3?|pytest|go|cargo|make|gradlew|\.{1,2}\/gradlew|dotnet|mvn|\.{1,2}\/mvnw|jest|vitest|ruff|eslint|tsc)\s/
-
-function ciCheckCommand(raw: string): string | null {
-  let cmd = raw.trim().replace(/^['"]|['"]$/g, '')
-  if (cmd === '') return null
-  // A compound step can publish or delete while it tests. Refuse the whole step rather than
-  // recommending the first half of a command whose side effects the reader did not ask for.
-  if (cmd.includes('<<') || /&&|\|\||[&|;]/.test(cmd)) return null
-  if (/\s(?:--version|--help|-v)\b/i.test(cmd) || /\brun\s+clean\b/i.test(cmd) || CI_NON_CHECKS.test(cmd)) {
-    return null
-  }
-  cmd = firstCommand(cmd)
-  if (cmd.length > MAX_CI_COMMAND) cmd = cmd.slice(0, MAX_CI_COMMAND)
-  return RUNNABLE_START.test(cmd) ? cmd : null
-}
-
-/**
- * Commands that publish, deploy, cut a release artifact or rewrite source.
+ * Workflow lines a reader should open, not commands a brief should offer to run.
  *
- * They are real workflow steps, but they are not checks: handing a reader `npm publish` or
- * `assembleRelease` as "how to check" is worse than saying nothing. The row is kept and marked
- * `referenceOnly` so a caller can show the gate without offering it as a command to run.
- *
- * Matching is on the publishing or deploying *act*, never on a word that merely appears in a
- * flag: `cargo test --release` runs tests against an optimised profile and stays a check.
+ * A YAML reader that decides which step runs, in which directory, would keep producing wrong
+ * runnable suggestions for valid workflow syntax. The profile therefore records only citations:
+ * a `file:line` for each `run:` or `script:` key. A brief labels them read-only sources and makes
+ * no claim that the list is exhaustive or that any step passed.
  */
-const REFERENCE_ONLY_STEP = new RegExp(
-  [
-    String.raw`\b(?:npm|pnpm|yarn|cargo)\s+publish\b`,
-    String.raw`\bdocker\s+push\b`,
-    String.raw`\bgh\s+release\s+create\b`,
-    String.raw`\b(?:assembleRelease|bundleRelease|assembleStaging|spotlessApply|ktlintFormat)\b`,
-    String.raw`\bprettier\b[^\n]*\s--write\b`,
-    String.raw`\beslint\b[^\n]*\s--fix\b`,
-    String.raw`\bgofmt\b[^\n]*\s-w\b`,
-    String.raw`\b(?:firebase|serverless|vercel|netlify|heroku)\s+(?:deploy|--prod)\b`,
-    String.raw`(?:^|[\s"'/])(?:deploy|publish)\b[^\s]*\.(?:mjs|cjs|js|ts|sh|bash|ps1|py|rb)\b`,
-    String.raw`scripts/sync-docs-versions\.py(?!\s+--check)`,
-  ].join('|'),
-  'i',
-)
+const MAX_WORKFLOW_REFERENCES = 50
 
-/** Words that name a release, deploy or publish stage in a job id or job name. */
-const REFERENCE_ONLY_TOKENS = new Set(['release', 'publish', 'publisher', 'deploy', 'deployment'])
-
-/**
- * Classify a job from its id and human name.
- *
- * The separator is not fixed: `staging_deploy`, `'deploy'`, `build-release` and a job named
- * `Deploy staging` all name the same stage. Splitting on non-alphanumerics finds the word
- * wherever it sits, and `_` — which `\b` does not break — no longer hides it.
- */
-function referenceOnlyLabel(...labels: readonly string[]): boolean {
-  for (const label of labels) {
-    for (const token of label.toLowerCase().split(/[^a-z0-9]+/)) {
-      if (REFERENCE_ONLY_TOKENS.has(token)) return true
-    }
-  }
-  return false
-}
-
-/** One YAML scalar, unquoted and without a trailing comment. */
-function yamlScalar(value: string): string {
-  return value
-    .replace(/\s+#.*$/, '')
-    .trim()
-    .replace(/^['"]|['"]$/g, '')
-}
-
-/** `defaults.run.working-directory` within one YAML block, or undefined when it is not set. */
-function defaultsWorkingDirectory(lines: readonly string[], start: number, end: number): string | undefined {
-  // Flow style can appear on either line: `defaults: {run: {working-directory: pkg}}` or a block
-  // `defaults:` whose `run:` carries the mapping. Only the first form used to be read, so a job
-  // that wrote the second silently inherited the workflow default.
-  const flowRun = /\brun\s*:\s*\{([^}]*)\}/
-  const flowDir = /\bworking-directory\s*:\s*([^,}]+)/
-  const flowDirectory = (value: string): string | undefined => {
-    const run = flowRun.exec(value)
-    const dir = run === null ? null : flowDir.exec(run[1] as string)
-    return dir === null ? undefined : yamlScalar(dir[1] as string)
-  }
-  let defaultsIndent = -1
-  let runIndent = -1
-  for (let i = start; i < end; i++) {
-    const line = lines[i] ?? ''
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
-    const indent = line.length - line.trimStart().length
-    if (/^\s*defaults\s*:/.test(line)) {
-      const dir = flowDirectory(line)
-      if (dir !== undefined) return dir
-    }
-    if (defaultsIndent >= 0 && indent <= defaultsIndent) {
-      defaultsIndent = -1
-      runIndent = -1
-    }
-    if (runIndent >= 0 && indent <= runIndent) runIndent = -1
-    if (defaultsIndent < 0) {
-      if (/^\s*defaults\s*:\s*(?:#.*)?$/.test(line)) defaultsIndent = indent
-      continue
-    }
-    if (runIndent < 0) {
-      if (/^\s*run\s*:\s*(?:#.*)?$/.test(line)) runIndent = indent
-      else {
-        const dir = flowDirectory(line)
-        if (dir !== undefined) return dir
-      }
-      continue
-    }
-    const dir = /^\s*working-directory\s*:\s*(.+?)\s*$/.exec(line)
-    if (dir !== null) return yamlScalar(dir[1] as string)
-  }
-  return undefined
-}
-
-interface WorkflowJob {
-  id: string
-  start: number
-  end: number
-  /** `defaults.run.working-directory` declared for this job. */
-  dir?: string
-  /** The job id or human name names a release, publish or deploy stage. */
-  referenceOnly: boolean
-}
-
-/** A job key, quoted or bare: `deploy:`, `'deploy':`, `build-release:`. */
-const JOB_KEY = /^\s*(?:(['"])([^'"]+)\1|([A-Za-z0-9_-]+))\s*:\s*(?:#.*)?$/
-
-/** The job's own `name:` line, which can name a stage the id does not. */
-function jobName(lines: readonly string[], job: { start: number; end: number; keyIndent: number }): string | null {
-  // A file may indent jobs by four spaces instead of two, so the job's child indentation is
-  // measured from its own keys rather than assumed. A step (`- ...`) is always deeper.
-  let childIndent = -1
-  for (let i = job.start + 1; i < job.end; i++) {
-    const line = lines[i] ?? ''
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
-    const indent = line.length - line.trimStart().length
-    if (indent <= job.keyIndent || /^\s*-/.test(line)) continue
-    if (childIndent < 0 || indent < childIndent) childIndent = indent
-  }
-  if (childIndent < 0) return null
-  for (let i = job.start + 1; i < job.end; i++) {
-    const line = lines[i] ?? ''
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
-    if (line.length - line.trimStart().length !== childIndent) continue
-    const match = /^\s*name\s*:\s*(.+?)\s*$/.exec(line)
-    if (match !== null) return yamlScalar(match[1] as string)
-  }
-  return null
-}
-
-/** Job ids and their line ranges, so a step can be attributed to the job that runs it. */
-function workflowJobs(lines: readonly string[], jobsLine: number): WorkflowJob[] {
-  if (jobsLine < 0) return []
-  const jobs: WorkflowJob[] = []
-  let jobIndent = -1
-  for (let i = jobsLine + 1; i < lines.length; i++) {
-    const line = lines[i] ?? ''
-    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
-    const indent = line.length - line.trimStart().length
-    if (indent === 0) break
-    if (jobIndent < 0) jobIndent = indent
-    if (indent !== jobIndent) continue
-    const header = JOB_KEY.exec(line)
-    if (header === null) continue
-    const id = (header[2] ?? header[3]) as string
-    const previous = jobs[jobs.length - 1]
-    if (previous !== undefined) previous.end = i
-    jobs.push({ id, start: i, end: lines.length, referenceOnly: false })
-  }
-  for (const job of jobs) {
-    const dir = defaultsWorkingDirectory(lines, job.start + 1, job.end)
-    if (dir !== undefined) job.dir = dir
-    const name = jobName(lines, { start: job.start, end: job.end, keyIndent: jobIndent })
-    job.referenceOnly = referenceOnlyLabel(job.id, name ?? '')
-  }
-  return jobs
-}
-
-/**
- * Verification commands CI actually runs, read from workflow steps.
- *
- * A documented README command answers "what do I run locally"; CI can run a different,
- * broader set. Recording both with file:line evidence lets a brief distinguish the fast
- * loop from the coverage, formatting and device suites that gate a merge, without running
- * any of them. This is detection, not verification: a listed command has no pass/fail
- * attached, and a workflow with no check steps yields none, never a green claim. Steps whose
- * shape is not understood (other block scalars, matrix expressions) are skipped, not guessed.
- */
-export function detectCiChecks(root: string, files: ReadonlySet<string>): CiCheck[] {
-  const device: CiCheck[] = []
-  const normal: CiCheck[] = []
-  const seen = new Set<string>()
-
+/** `file:line` pointers into the repository's CI workflows. */
+export function detectWorkflowReferences(root: string, files: ReadonlySet<string>): WorkflowReference[] {
+  const references: WorkflowReference[] = []
   for (const rel of [...files].sort()) {
     if (!rel.startsWith('.github/workflows/') || !/\.ya?ml$/.test(rel)) continue
     const { text } = readText(join(root, ...rel.split('/')))
     if (text === null) continue
-    const lines = text.split('\n')
-    const jobsLine = lines.findIndex((line) => /^jobs\s*:/.test(line))
-    const jobs = workflowJobs(lines, jobsLine)
-    // Workflow-level defaults apply to every job that does not override them.
-    const workflowDir = jobsLine < 0 ? undefined : defaultsWorkingDirectory(lines, 0, jobsLine)
-    let jobIndex = -1
-    let jobReferenceOnly = false
-    let jobDir = workflowDir
-    let emulatorStep = false
-    let withContext = false
-    // Indent of the `env:` key currently open; its data keys are deeper. `undefined` means no
-    // `env:` mapping is open.
-    let envIndent: number | undefined
-    let stepDir: string | undefined
-    let blockIndent = -1
-    let blockScope: CiCheck['scope'] = 'ci'
-    let blockLines = 0
-    let heredocEnd: string | null = null
-    type Pending = { raw: string; scope: CiCheck['scope']; line: number }
-    let pending: Pending[] = []
-
-    // A step's `working-directory` may be written after its `run:`. Flush at the step boundary
-    // so the directory is known before the command is recorded.
-    const flush = (): void => {
-      for (const item of pending) {
-        const cmd = ciCheckCommand(item.raw)
-        if (cmd === null) continue
-        // Classification uses the job that owns the step, not only the command text: a deploy
-        // job can run a plain command, and that step is still not something to hand a reader.
-        const referenceOnly = jobReferenceOnly || REFERENCE_ONLY_STEP.test(cmd)
-        const dir = stepDir ?? jobDir
-        const key = `${item.scope} ${referenceOnly ? 'ref' : 'check'} ${cmd} ${dir ?? ''}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        const check: CiCheck = { cmd, evidence: evidence(rel, item.line), scope: item.scope }
-        if (dir !== undefined && dir !== '') check.dir = dir
-        if (referenceOnly) check.referenceOnly = true
-        ;(item.scope === 'device' ? device : normal).push(check)
-      }
-      pending = []
+    for (const [index, line] of text.split('\n').entries()) {
+      // A key line is a citation, not a command: the text beside it may be a script, a matrix
+      // expression or data. The reader opens the file and decides what it actually runs.
+      if (/^\s*(?:-\s*)?(?:run|script)\s*:/.test(line)) references.push({ file: rel, line: index + 1 })
+      if (references.length >= MAX_WORKFLOW_REFERENCES) return references
     }
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? ''
-      // Heredoc text must be skipped before any step parsing. A line such as `- run: npm test`
-      // inside `cat <<'EOF'` is shell input, not a workflow step, even while a block is open.
-      if (heredocEnd !== null) {
-        if (line.trim() === heredocEnd) heredocEnd = null
-        continue
-      }
-      const nextJob = jobs[jobIndex + 1]
-      if (nextJob !== undefined && i === nextJob.start) {
-        flush()
-        jobIndex += 1
-        jobReferenceOnly = nextJob.referenceOnly
-        jobDir = nextJob.dir ?? workflowDir
-        emulatorStep = false
-        withContext = false
-        envIndent = undefined
-        stepDir = undefined
-        blockIndent = -1
-        continue
-      }
-      // Any new step ends the previous one's runner and working directory, including an
-      // unnamed `- uses:` or `- id:` step. Without this, a host step after an emulator step
-      // would inherit `device` and a later step would inherit the earlier directory.
-      if (/^\s*-\s+[a-z][\w-]*\s*:/i.test(line)) {
-        flush()
-        emulatorStep = false
-        withContext = false
-        envIndent = undefined
-        stepDir = undefined
-        blockIndent = -1
-      }
-      if (/^\s*(?:-\s*)?uses\s*:\s*\S*android-emulator-runner/i.test(line)) emulatorStep = true
-      // A trailing YAML comment is still the same key. Missing it kept `with` active while an
-      // `env:` mapping followed, so data under `env.script` was reported as an executed check.
-      if (/^\s+(?:-\s+)?with\s*:\s*(?:#.*)?$/.test(line)) withContext = true
-      // `env:` opens a data mapping. A `working-directory` key inside it is an environment
-      // variable, not the step's directory, so it must not be read as provenance.
-      const envKey = /^(\s+)(?:-\s+)?env\s*:\s*(?:#.*)?$/.exec(line)
-      if (envKey !== null) {
-        withContext = false
-        envIndent = (envKey[1] as string).length
-      } else if (envIndent !== undefined && line.trim() !== '' && line.length - line.trimStart().length <= envIndent) {
-        // The step's next key ends the `env:` mapping.
-        envIndent = undefined
-      }
-      const dirMatch = envIndent === undefined ? /^\s+working-directory\s*:\s*(.+?)\s*$/.exec(line) : null
-      if (dirMatch !== null) {
-        stepDir = (dirMatch[1] as string)
-          .replace(/\s+#.*$/, '')
-          .trim()
-          .replace(/^['"]|['"]$/g, '')
-      }
-
-      const block = /^\s*(?:-\s*)?run\s*:\s*[|>][-+]?(?:\s|$)/.exec(line)
-      if (block !== null) {
-        blockIndent = line.length - line.trimStart().length
-        blockScope = emulatorStep ? 'device' : 'ci'
-        blockLines = 0
-        heredocEnd = null
-        continue
-      }
-      if (blockIndent >= 0) {
-        if (line.trim() === '') continue
-        const here = /<<\s*['"]?([\w-]+)['"]?/.exec(line)
-        if (here !== null) {
-          heredocEnd = here[1] as string
-          continue
-        }
-        const indent = line.length - line.trimStart().length
-        if (indent > blockIndent) {
-          // Stay inside the block until it dedents. A heredoc body can contain lines that look
-          // like YAML keys; interpreting those as steps is how `run: npm test` became a check.
-          if (blockLines < MAX_BLOCK_LINES) {
-            blockLines++
-            if (CI_BLOCK_RUNNER.test(line.trim())) pending.push({ raw: line.trim(), scope: blockScope, line: i + 1 })
-          }
-          continue
-        }
-        blockIndent = -1
-        if (!/^\s*-\s+[a-z]/i.test(line)) continue
-      }
-
-      const run = /^\s*(?:-\s*)?run\s*:\s*(.+?)\s*$/.exec(line)
-      if (run !== null) {
-        pending.push({ raw: run[1] as string, scope: emulatorStep ? 'device' : 'ci', line: i + 1 })
-        continue
-      }
-      // `script:` is the command an emulator runner executes in `with:`. The same key under
-      // `env:` is data, not an executed check.
-      const script = /^\s*script\s*:\s*(.+?)\s*$/.exec(line)
-      if (script !== null && emulatorStep && withContext) {
-        pending.push({ raw: script[1] as string, scope: 'device', line: i + 1 })
-      }
-    }
-    flush()
   }
-
-  // Device suites take the cap first. A long list of ordinary CI steps must not crowd out
-  // the one check a local JVM run cannot stand in for. Reference-only rows come last so a
-  // release step never displaces a check a reader could actually run.
-  const runnable = [...device, ...normal].filter((check) => check.referenceOnly !== true)
-  const reference = [...device, ...normal].filter((check) => check.referenceOnly === true)
-  return [...runnable, ...reference].slice(0, MAX_CI_CHECKS)
+  return references
 }
 
 function looksLikeCommandLine(line: string, inFence = false): boolean {

@@ -717,31 +717,19 @@ shows the likely files to start from, the verification commands with the source 
 directory that established them, the required needs `anvil ready` reports as blocked, and
 what the page cannot know.
 
-**How to check (selected)** separates three kinds of command. `local` is the fast loop an agent
-can run now, from `anvil ready` or the detected commands. `ci` is what the repository's own
-workflow files run — a coverage task or formatter may be the merge gate even when the README
-names a smaller test. `device` is an emulator or attached-device suite; TalkBack, focus order,
-insets and 200% font scaling still need manual validation. Every row names the command, its
-source and `file:line` evidence, and the working directory that established it. None of them has
-been run by the page, and none carries a pass claim.
+**How to check** is deliberately local: the fast loop an agent can run now, from `anvil ready` or
+owner-declared configuration (`testFast`, `test`, `lint`, `typecheck`, `build`). Each row names the
+command, its source and `file:line` evidence, and the working directory that established it. None
+has been run by the page, and none carries a pass claim.
 
-The list is a **selection**, not an exhaustive CI inventory. The brief records how many workflow
-steps the profile detected, whether the profile source was available, and whether the short list
-includes every runnable one; when coverage is unknown or any are omitted, the unknowns say so
-explicitly.
+**Workflow sources to review** lists `file:line` citations for `run:` and `script:` keys in the
+repository's workflows. These are read-only pointers, not commands to copy: the profile does not
+decide which step executes, in which directory, or whether it passed. Open the cited lines when
+you need to inspect the merge gates, including release, deploy and emulator steps. The list is not
+exhaustive, and its presence is never a pass.
 
-Two kinds of step are deliberately kept out of the runnable list:
-
-- **Release, deploy and source-mutating steps.** `npm publish`, `assembleRelease`, a deploy job and
-  a docs sync without `--check` are gates to read, not checks to run. They are listed once in the
-  unknowns with their cited `file:line`, so you can open the gate; they are never offered as a
-  command.
-- **Steps whose directory is a workflow expression.** `working-directory` is read from the step,
-  then the job, then the workflow `defaults` (block or one-line `{run: {working-directory: ...}}`
-  form). A step with no declaration runs at the repository root, which is GitHub's documented
-  default. An expression such as `${{ matrix.package }}` cannot be resolved from the file, so the
-  command is not offered as a runnable suggestion at all; the unknowns name it with its cited line
-  so you can read where it runs.
+Device and accessibility validation remains outside the page. TalkBack, focus order, insets and
+200% font scaling need a device and manual checking; the brief says this explicitly.
 
 To inspect the merge gates yourself, open the cited workflow files — a short list, a source label or
 an evidence line is not a pass. The same brief includes a **task map**: a 2D subgraph of the

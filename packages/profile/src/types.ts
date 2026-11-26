@@ -182,37 +182,23 @@ export interface ProjectProfile {
    */
   projectDir: string
   /**
-   * Checks the repository's own CI workflows run, with the workflow line that says so.
+   * `file:line` pointers into CI workflows that a reader can open.
    *
-   * These are kept separate from `commands`: a documented `testDebugUnitTest` is the fast
-   * local loop, while CI may run a coverage task, a formatter and an emulator suite. A brief
-   * that showed only the local command would let a green local run stand in for CI. Additive
-   * in schema version 1: an older profile without the field carries no CI checks, never an
-   * empty claim that CI runs nothing.
+   * These are references, not commands to run: the profile does not decide which step executes,
+   * in which directory, or whether it passed. Additive in schema version 1 — an older profile
+   * without the field carries no pointers, never a claim that CI runs nothing.
    */
-  ciChecks: CiCheck[]
+  workflowReferences: WorkflowReference[]
   /** How complete the walk and detector run were. Additive in schema version 1. */
   diagnostics: ProfileDiagnostics
 }
 
-/** A verification command read from a CI workflow, never run during detection. */
-export interface CiCheck {
-  cmd: string
-  /** `file:line` in the workflow that contains the command. */
-  evidence: string
-  /** A step's own `working-directory`, when the workflow declares one. */
-  dir?: string
-  /**
-   * `device` for emulator/attached-device suites, which a JVM-only run cannot replace;
-   * `ci` for everything else CI runs. Neither is claimed to have passed.
-   */
-  scope: 'ci' | 'device'
-  /**
-   * A publish, release, deploy or source-mutating step. It is recorded so a reader can see the
-   * gate, but it is not a check to run: a brief must never offer `npm publish` or
-   * `assembleRelease` as "how to check". Never a claim that it passed.
-   */
-  referenceOnly?: boolean
+/** A workflow line worth reading, recorded as a citation only. */
+export interface WorkflowReference {
+  /** Repo-relative POSIX path to a `.github/workflows/*.yml` file. */
+  file: string
+  /** One-based line number of a `run:` or `script:` key. */
+  line: number
 }
 
 export interface InstructionFile {
@@ -259,7 +245,7 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     instructions: [],
     files: [],
     projectDir: '',
-    ciChecks: [],
+    workflowReferences: [],
     diagnostics: {
       truncated: false,
       fileLimit: 0,

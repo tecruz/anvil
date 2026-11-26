@@ -50,6 +50,13 @@ export interface TaskCheck {
   scope: 'local' | 'ci' | 'device'
 }
 
+export interface TaskWorkflowReference {
+  /** Repo-relative path to a workflow file. */
+  file: string
+  /** One-based line number of a `run:` or `script:` key. */
+  line: number
+}
+
 export interface TaskBlocker {
   label: string
   status: string
@@ -125,18 +132,10 @@ export interface TaskBrief {
   map: TaskMap
   howToCheck: TaskCheck[]
   /**
-   * Honest boundary of `howToCheck`: it is a selection, not a complete CI inventory.
-   * `detectedCiChecks` counts the workflow rows the profile actually found; it is never a
-   * claim that they passed. `complete` is true only when every detected row is shown, and
-   * null when the profile source was unavailable, so coverage is unknown rather than empty.
+   * Workflow lines worth reading, recorded as `file:line` citations only. The brief does not
+   * turn them into commands, directories, scopes or a claim that the list is exhaustive.
    */
-  checkSelection: {
-    selected: number
-    detectedCiChecks: number
-    /** Detected release/deploy/source-mutating rows, which are never offered as checks. */
-    referenceOnlyChecks: number
-    complete: boolean | null
-  }
+  workflowReferences: TaskWorkflowReference[]
   /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
   verification: {
     status: 'unavailable' | 'recorded'
@@ -468,82 +467,26 @@ function suggestionFor(snapshot: DashboardSnapshot, suggestionId: string): Recor
   throw new TaskInputError('That suggestion is not in the current plan. Refresh the dashboard and try again.')
 }
 
-/** One verification command per purpose. `dir` comes from the CLI, never from the text. */
+/** One local verification command per purpose. `dir` comes from the CLI, never from the text. */
 function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
   const ready = asRecord(snapshot.repository.ready.data)
   const profile = asRecord(snapshot.repository.profile.data)
   const projectDir = asString(ready?.projectDir) ?? asString(profile?.projectDir) ?? ''
   const checks: TaskCheck[] = []
   const seen = new Set<string>()
-  // A device command declared locally is still a device command. Keep that provenance so the
-  // brief says it needs an emulator, even though no CI row survives the deduplication below.
-  const deviceCommands = new Set(
-    (profile === null ? [] : asArray(profile.ciChecks))
-      .map(asRecord)
-      .filter((entry) => entry !== null && asString(entry.scope) === 'device')
-      .map((entry) => asString((entry as Record<string, unknown>).cmd))
-      .filter((cmd): cmd is string => cmd !== null),
-  )
 
-  const add = (
-    kind: string,
-    cmd: string,
-    source: string,
-    evidence: string | null,
-    dir: string,
-    scope: TaskCheck['scope'] = 'local',
-  ): void => {
-    if (cmd === '') return
-    const cwd = dir === '' ? '.' : dir
-    // Identity includes the resolved directory: `npm test` in two packages is two checks, and
-    // collapsing them by command alone hides one and makes coverage look complete.
-    const identity = `${cmd}\u0000${cwd}`
-    // A device row carries the emulator's own directory and evidence, so it replaces a local
-    // or CI row for the same command rather than appearing twice.
-    if (scope === 'device') {
-      const index = checks.findIndex((check) => check.cmd === cmd)
-      if (index >= 0) {
-        checks[index] = { kind: 'device', cmd, source, evidence, cwd, scope: 'device' }
-        return
-      }
-    } else if (seen.has(identity)) {
-      return
-    }
+  const add = (kind: string, cmd: string, source: string, evidence: string | null, dir: string): void => {
+    if (cmd === '' || seen.has(cmd)) return
     if (checks.length >= MAX_CHECK_ITEMS) return
-    seen.add(identity)
+    seen.add(cmd)
     checks.push({
       kind,
       cmd,
       source,
       evidence,
-      cwd,
-      scope: deviceCommands.has(cmd) ? 'device' : scope,
+      cwd: dir === '' ? '.' : dir,
+      scope: 'local',
     })
-  }
-
-  // CI commands are read from workflow files by the profile, never from the pasted task.
-  // They fill the slots after the local loop, so a duplicate local command stays local.
-  const addCiChecks = (): void => {
-    if (profile === null) return
-    // Device suites are the easiest check to lose to the item cap and the hardest to replace
-    // with a local run, so they take the first CI slots regardless of workflow file order.
-    const entries = asArray(profile.ciChecks)
-      .map(asRecord)
-      .filter((entry): entry is Record<string, unknown> => entry !== null)
-      .sort((a, b) => Number(asString(b.scope) === 'device') - Number(asString(a.scope) === 'device'))
-    for (const entry of entries) {
-      // A publish, release or deploy step is a gate to read, never a command to run.
-      if (entry.referenceOnly === true) continue
-      const cmd = asString(entry.cmd) ?? ''
-      const scope = asString(entry.scope) === 'device' ? 'device' : 'ci'
-      const dir = asString(entry.dir) ?? ''
-      // A step with no `working-directory` runs at the repository root — GitHub's documented
-      // default — never at the detected project directory. An expression such as
-      // `${{ matrix.package }}` cannot be resolved from the file, so it is not a runnable
-      // suggestion: the unknowns name the command and the line to read instead.
-      if (/\$\{\{/.test(dir)) continue
-      add(scope, cmd, 'ci workflow', asString(entry.evidence), dir, scope)
-    }
   }
 
   if (ready !== null) {
@@ -576,10 +519,7 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
         }
       }
     }
-    if (checks.length > 0) {
-      addCiChecks()
-      return checks
-    }
+    return checks
   }
 
   if (profile !== null) {
@@ -592,7 +532,6 @@ function commandChecks(snapshot: DashboardSnapshot): TaskCheck[] {
       }
     }
   }
-  addCiChecks()
   return checks
 }
 
@@ -1241,67 +1180,30 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     unknowns.push('No file in the profile matched the task text.')
   }
   if (checks.length === 0) {
-    unknowns.push('No verification command was detected or declared for this repository.')
+    unknowns.push('No verification command was declared for this repository.')
   }
-  if (checks.some((check) => check.scope === 'device')) {
-    unknowns.push(
-      'Device checks need an emulator or device and were not run. TalkBack, focus order and 200% font scaling need manual validation.',
-    )
-  }
-  const detectedCiChecks = profile === null ? 0 : asArray(profile.ciChecks).length
-  // Coverage is judged on the command *and* its resolved directory: `npm test` in two packages
-  // is two checks, and showing the first one does not cover the second. A local row covers a
-  // workflow row only when both name the same command in the same place.
-  const coverageKey = (cmd: string, cwd: string): string => `${cmd}\u0000${cwd}`
-  const shown = new Set(checks.map((check) => coverageKey(check.cmd, check.cwd)))
-  const detectedRunnable = (profile === null ? [] : asArray(profile.ciChecks))
+  // Device and UI validation is outside a read-only page regardless of workflow syntax.
+  unknowns.push(
+    'Device checks need an emulator or device and were not run. TalkBack, focus order and 200% font scaling need manual validation.',
+  )
+  const workflowReferences: TaskWorkflowReference[] = (profile === null ? [] : asArray(profile.workflowReferences))
     .map(asRecord)
-    .filter((entry): entry is Record<string, unknown> => entry !== null && entry.referenceOnly !== true)
-  // A workflow expression has no reproducible directory and is reported on its own below, so it
-  // must not also be counted as an omitted runnable check.
-  const omittedCiChecks = detectedRunnable
-    .filter((entry) => !/\$\{\{/.test(asString(entry.dir) ?? ''))
-    .filter((entry) => {
-      const rawDir = asString(entry.dir) ?? ''
-      // No declared directory means GitHub's repository-root default.
-      return !shown.has(coverageKey(asString(entry.cmd) ?? '', rawDir === '' ? '.' : rawDir))
-    }).length
-  if (profile === null) {
-    unknowns.push(
-      'Workflow check coverage is unknown because the profile source failed; this short list is not an exhaustive CI inventory.',
-    )
-  } else if (omittedCiChecks > 0) {
-    unknowns.push(
-      `${omittedCiChecks} detected workflow check(s) are not in this short list; it is not an exhaustive CI inventory.`,
-    )
-  }
-  // A step whose directory is a workflow expression has no reproducible place to run from, so it
-  // is never offered as a command. Name it with its cited line so the reader can open the file.
-  const unresolved = detectedRunnable
-    .filter((entry) => /\$\{\{/.test(asString(entry.dir) ?? ''))
+    .filter((entry) => entry !== null)
     .map((entry) => {
-      const cmd = asString(entry.cmd) ?? ''
-      const cite = asString(entry.evidence)
-      return cite === null ? cmd : `${cmd} (${cite})`
+      const file = asString(entry.file)
+      const line = entry.line
+      if (file === null || typeof line !== 'number' || !Number.isInteger(line) || line < 1) return null
+      return { file, line }
     })
-    .filter((entry) => entry !== '')
-  if (unresolved.length > 0) {
+    .filter((reference): reference is TaskWorkflowReference => reference !== null)
+    .slice(0, 50)
+  if (snapshot.repository.profile.ok === false) {
+    unknowns.push('Workflow sources are unknown because the profile source failed.')
+  } else if (workflowReferences.length === 0) {
+    unknowns.push('No workflow command lines were found to cite; CI coverage is unknown, not empty.')
+  } else {
     unknowns.push(
-      `Workflow steps whose directory is a workflow expression are not offered as checks: ${unresolved.join(', ')}. Read the cited line to see what it runs and where.`,
-    )
-  }
-  const referenceOnly = (profile === null ? [] : asArray(profile.ciChecks))
-    .map(asRecord)
-    .filter((entry): entry is Record<string, unknown> => entry !== null && entry.referenceOnly === true)
-    .map((entry) => {
-      const cmd = asString(entry.cmd) ?? ''
-      const cite = asString(entry.evidence)
-      return cite === null ? cmd : `${cmd} (${cite})`
-    })
-    .filter((entry) => entry !== '')
-  if (referenceOnly.length > 0) {
-    unknowns.push(
-      `Release, deploy or source-mutating workflow steps are not offered as checks: ${referenceOnly.join(', ')}. Read the cited lines to see those gates.`,
+      `Workflow lines are read-only sources, not checks: open the cited ${String(workflowReferences.length)} line(s) to see what CI runs. This list is not exhaustive, and nothing here was run.`,
     )
   }
 
@@ -1333,14 +1235,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     startHere,
     map,
     howToCheck: checks,
-    checkSelection: {
-      selected: checks.length,
-      detectedCiChecks,
-      referenceOnlyChecks: referenceOnly.length,
-      // A failed profile source is an absence of evidence, not zero omitted checks. An
-      // unresolved step is detected but not runnable, so coverage is not complete either.
-      complete: profile === null ? null : omittedCiChecks === 0 && unresolved.length === 0,
-    },
+    workflowReferences,
     verification: {
       status: snapshot.verification.status,
       reason: snapshot.verification.reason,

@@ -1418,92 +1418,80 @@ describe('the dashboard page', () => {
     assert.doesNotMatch(work, /active/)
   })
 
-  test('the selected-list boundary is stated for complete, truncated and unknown coverage', () => {
-    const render = (checkSelection: {
-      selected: number
-      detectedCiChecks: number
-      referenceOnlyChecks?: number
-      complete: boolean | null
-    }): string => {
-      const nodes = new Map<string, FakeElement>(
-        [
-          'task',
-          'task-text',
-          'task-submit',
-          'task-error',
-          'task-suggestions',
-          'task-brief',
-          'task-map',
-          'snapshot-error',
-          'refresh',
-          'refresh-error',
-          'scope',
-          'stamp',
-          'notes',
-        ].map((id) => [`#${id}`, new FakeElement('section')]),
-      )
-      const document = {
-        createElement: (tag: string) => new FakeElement(tag),
-        querySelector: (id: string) => nodes.get(id),
-        querySelectorAll: () => [],
-      }
-      const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
-      const snapshot = {
-        schemaVersion: 1 as const,
-        fetchedAt: 'now',
-        repository: {
-          doctor: source({}),
-          ready: source({ projectDir: '', commands: [] }),
-          plan: source({ suggestions: [] }),
-          profile: source({ files: [], commands: {} }),
-        },
-        context: { brief: source({}), staged: source({}) },
-        work: { crew: source({ crew: [] }) },
-        verification: {
-          status: 'unavailable' as const,
-          reason: 'unavailable',
-          currentRevision: null,
-          incompleteCount: 0,
-          evidence: [],
-        },
-        notes: [],
-      }
-      const brief = {
-        schemaVersion: 1,
-        generatedAt: 'now',
-        source: { suggestionId: null, text: 'Review CI' },
-        title: 'Review CI',
-        objective: '',
-        startHere: [],
-        map: { schemaVersion: 1, focus: 'Review CI', nodes: [], edges: [], hasUnknown: false },
-        howToCheck: [],
-        checkSelection: { referenceOnlyChecks: 0, ...checkSelection },
-        blockers: [],
-        gates: [],
-        readiness: { ok: true, checked: true, status: 'ok' },
-        unknowns: [],
-      }
-      const context = createContext({ document, console })
-      runInContext(JS.replace('load(false);', ''), context)
-      ;(context as Record<string, unknown>).__snapshot = snapshot
-      ;(context as Record<string, unknown>).__brief = brief
-      runInContext('state.brief = __brief; renderTask(document, __snapshot);', context)
-      return nodes.get('#task-brief')?.text() ?? ''
+  test('workflow sources render as read-only citations, not checks', () => {
+    const nodes = new Map<string, FakeElement>(
+      [
+        'task',
+        'task-text',
+        'task-submit',
+        'task-error',
+        'task-suggestions',
+        'task-brief',
+        'task-map',
+        'snapshot-error',
+        'refresh',
+        'refresh-error',
+        'scope',
+        'stamp',
+        'notes',
+      ].map((id) => [`#${id}`, new FakeElement('section')]),
+    )
+    const document = {
+      createElement: (tag: string) => new FakeElement(tag),
+      querySelector: (id: string) => nodes.get(id),
+      querySelectorAll: () => [],
     }
-
-    // Complete coverage still says "not a pass claim", never "verified".
-    const complete = render({ selected: 3, detectedCiChecks: 2, complete: true })
-    assert.match(complete, /How to check \(selected\)/)
-    assert.match(complete, /not an exhaustive CI inventory and not a pass claim/)
-
-    // A truncated list names the numbers.
-    const truncated = render({ selected: 8, detectedCiChecks: 12, complete: false })
-    assert.match(truncated, /Selected 8 check\(s\); the profile detected 12 workflow step\(s\)/)
-
-    // A failed profile is unknown coverage, not "everything detected is shown".
-    const unknown = render({ selected: 0, detectedCiChecks: 0, complete: null })
-    assert.match(unknown, /coverage is unknown because the profile source failed/)
-    assert.doesNotMatch(unknown, /include every workflow check/)
+    const source = <T>(data: T) => ({ ok: true, data, error: null, fetchedAt: 'now', command: 'anvil fake' })
+    const snapshot = {
+      schemaVersion: 1 as const,
+      fetchedAt: 'now',
+      repository: {
+        doctor: source({}),
+        ready: source({ projectDir: '', commands: [] }),
+        plan: source({ suggestions: [] }),
+        profile: source({ files: [], commands: {} }),
+      },
+      context: { brief: source({}), staged: source({}) },
+      work: { crew: source({ crew: [] }) },
+      verification: {
+        status: 'unavailable' as const,
+        reason: 'unavailable',
+        currentRevision: null,
+        incompleteCount: 0,
+        evidence: [],
+      },
+      notes: [],
+    }
+    const brief = {
+      schemaVersion: 1,
+      generatedAt: 'now',
+      source: { suggestionId: null, text: 'Review CI' },
+      title: 'Review CI',
+      objective: '',
+      startHere: [],
+      map: { schemaVersion: 1, focus: 'Review CI', nodes: [], edges: [], hasUnknown: false },
+      howToCheck: [
+        { kind: 'test', cmd: 'npm test', source: 'documented', evidence: 'README.md:3', cwd: '.', scope: 'local' },
+      ],
+      workflowReferences: [{ file: '.github/workflows/ci.yml', line: 45 }],
+      blockers: [],
+      gates: [],
+      readiness: { ok: true, checked: true, status: 'ok' },
+      unknowns: [],
+    }
+    const context = createContext({ document, console })
+    runInContext(JS.replace('load(false);', ''), context)
+    ;(context as Record<string, unknown>).__snapshot = snapshot
+    ;(context as Record<string, unknown>).__brief = brief
+    runInContext('state.brief = __brief; renderTask(document, __snapshot);', context)
+    const text = nodes.get('#task-brief')?.text() ?? ''
+    assert.match(text, /How to check/)
+    assert.match(text, /npm test/)
+    assert.match(text, /local commands from anvil ready/)
+    assert.match(text, /Workflow sources to review/)
+    assert.match(text, /\.github\/workflows\/ci\.yml:45/)
+    assert.match(text, /Read-only citations/)
+    assert.doesNotMatch(text, /not an exhaustive CI inventory and not a pass claim/)
   })
 
   test('an action result stays visible across a re-render', () => {

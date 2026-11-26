@@ -29,9 +29,9 @@ earlier head makes a green result unusable, even when the later code differs by 
    approval even if every other step is green. The shipped bytes must be the same tarball this
    review accepted; rebuilding after review invalidates it.
 
-A Task Brief is a navigation aid. It shows selected checks with sources, working directories and
-unknowns; it is not an exhaustive CI inventory and none of its rows is a pass claim. Release,
-deploy and source-mutating steps are gates to read, never commands a task brief offers to run.
+A Task Brief is a navigation aid. Its `howToCheck` list contains only local commands with sources
+and working directories; workflow steps appear as read-only `file:line` references, not commands to
+run, and no row claims a pass or exhaustive CI coverage.
 
 ## Publication boundary
 

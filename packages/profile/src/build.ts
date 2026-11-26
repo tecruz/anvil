@@ -12,11 +12,11 @@ import { ecosystemDetectors } from './detectors/ecosystems.ts'
 import { additionalDetectors } from './detectors/more.ts'
 import {
   addRiskHeuristics,
-  detectCiChecks,
   detectDocs,
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
 } from './general.ts'
 import type { CommandKind } from './types.ts'
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
@@ -181,9 +181,9 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     })
   }
 
-  // What CI runs is a separate answer from what the README tells an agent to run locally.
-  // Both are recorded so a brief can show the fast loop beside the merge gate.
-  const ciChecks = detectCiChecks(root, fileSet)
+  // A workflow is a source to read, not a list of commands this profile claims should be run:
+  // record the lines a reader can open beside the documented local commands.
+  const workflowReferences = detectWorkflowReferences(root, fileSet)
 
   // Fail closed: an unknown module must not retain edges from any detector.
   for (const module of draft.modules) {
@@ -203,7 +203,7 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     docs: detectDocs(root),
     files,
     projectDir,
-    ciChecks,
+    workflowReferences,
     diagnostics: {
       truncated,
       fileLimit,

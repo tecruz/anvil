@@ -45,11 +45,11 @@ export {
   addRiskHeuristics,
   COMMAND_RUNNERS,
   type DocumentedCommand,
-  detectCiChecks,
   detectDocs,
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
   globToRegExp,
   makefileTargets,
   matchesAny,
@@ -79,7 +79,6 @@ export {
   type TrackerState,
 } from './trackers.ts'
 export {
-  type CiCheck,
   type CommandEntry,
   type CommandKind,
   type CommandSource,
@@ -102,6 +101,7 @@ export {
   toPosix,
   type Vcs,
   type VcsHost,
+  type WorkflowReference,
 } from './types.ts'
 export {
   DEFAULT_MAX_FILES,

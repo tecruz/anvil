@@ -438,37 +438,34 @@ function renderBrief(parent, brief) {
     }
   }
 
-  card.appendChild(make('h3', '', 'How to check (selected)'));
+  card.appendChild(make('h3', '', 'How to check'));
   const checks = Array.isArray(brief.howToCheck) ? brief.howToCheck : [];
-  const selection = brief.checkSelection;
-  // Say the boundary in every state, including "unknown": a short list must never read as an
-  // exhaustive CI inventory just because the profile failed or its coverage count is missing.
-  if (selection) {
-    const boundary = selection.complete === null
-      ? 'Workflow check coverage is unknown because the profile source failed. This is not an exhaustive CI inventory.'
-      : selection.complete
-        ? 'Selected checks include every runnable workflow check the profile detected; it is not an exhaustive CI inventory and not a pass claim.' +
-          (selection.referenceOnlyChecks > 0
-            ? ' ' + selection.referenceOnlyChecks + ' release, deploy or source-mutating step(s) are listed as unknowns, not as checks.'
-            : '')
-        : 'Selected ' + selection.selected + ' check(s); the profile detected ' + selection.detectedCiChecks +
-          ' workflow step(s). This is not an exhaustive CI inventory.';
-    card.appendChild(make('div', 'muted', boundary));
-  }
   if (checks.length === 0) {
-    card.appendChild(make('div', 'muted', 'No verification command was detected or declared for this repository.'));
+    card.appendChild(make('div', 'muted', 'No verification command was declared for this repository.'));
   } else {
     for (const check of checks) {
       const row = make('div', 'check');
-      const scope = check.scope === 'device' ? 'device · manual' : check.scope === 'ci' ? 'CI' : 'local';
-      row.appendChild(make('strong', '', check.kind + ' · ' + scope));
+      row.appendChild(make('strong', '', check.kind + ' · local'));
       row.appendChild(make('code', 'path', check.cmd));
       const detail = 'from ' + check.source + (check.evidence ? ' (' + check.evidence + ')' : '') + ' · run from ' + check.cwd;
       row.appendChild(make('div', 'muted', detail));
       card.appendChild(row);
     }
   }
-  card.appendChild(make('div', 'muted', 'Not run: this page cannot execute commands. Run one in a worktree to produce evidence.'));
+  card.appendChild(make('div', 'muted', 'These are local commands from anvil ready or owner-declared configuration, not CI results. Not run: this page cannot execute commands. Run one in a worktree to produce evidence.'));
+
+  card.appendChild(make('h3', '', 'Workflow sources to review'));
+  const references = Array.isArray(brief.workflowReferences) ? brief.workflowReferences : [];
+  if (references.length === 0) {
+    card.appendChild(make('div', 'muted', 'No workflow command lines were found to cite. This is unknown CI coverage, not a pass.'));
+  } else {
+    for (const reference of references) {
+      const row = make('div', 'check');
+      row.appendChild(make('code', 'path', reference.file + ':' + reference.line));
+      card.appendChild(row);
+    }
+    card.appendChild(make('div', 'muted', 'Read-only citations. Open the cited lines to see what CI runs; this page does not run them, resolve their directories, or claim they are exhaustive.'));
+  }
 
   const verification = brief.verification || { status: 'unavailable', reason: '', evidence: [] };
   card.appendChild(make('h3', '', 'Recorded verification'));
