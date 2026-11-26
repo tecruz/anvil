@@ -1,6 +1,30 @@
 # Implementation plan: verified AI-assisted work
 
-Status: **proposed for later implementation**, 2026-11-26.
+Status: **Phase 1 and Phase 2 implemented; Phase 0 integration prepared; Phase 4 and publication
+await explicit approval**, 2026-11-26.
+
+## Progress
+
+- **Phase 1 — done.** `crew verify --record` writes version 2 records bound to a clean commit,
+  a claim, a repo-relative directory and a digest of the exact check plan. The dashboard and
+  task brief distinguish `current`, `stale`, `failed`, `incomplete` and `legacy`. The opt-in
+  `features.requireCurrentVerification` policy refuses a ship before the push when current
+  evidence is missing. See `packages/cli/src/verification-evidence.ts` and
+  `packages/cli/test/crew-evidence.test.ts`.
+- **Phase 2 — done.** The broker fingerprints the patch before and after a check and refuses
+  mid-check edits; the runner uses an allowlisted environment, kills the agent process tree at
+  the timeout, binds approval to grader/CLI bytes, and checkpoints each arm with redacted
+  failure reasons. See `docs/VERIFIED_PATCH_STUDY.md`.
+- **Phase 0 — partially done.** This branch is the local reconciliation of the product work on
+  `main` with the evaluation work on `pr/nested-verification-pilot`. Merging the corresponding
+  PRs on GitHub and re-running the eight required checks on the final head is still a
+  maintainer action.
+- **Phase 3 — partially present.** The brief already carries each command's provenance,
+  `file:line` evidence and working directory, and `init --with-mirrors` defers to the generated
+  `AGENTS.md`. Deeper nesting and task-specific prerequisites remain open.
+- **Phase 4 and Release — blocked.** Both need explicit maintainer approval, a frozen run
+  specification and, for release, a chosen unpublished version. No model spend or publication
+  was performed by this plan.
 
 ## Goal
 
