@@ -199,6 +199,11 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           verified: boolean
           hiddenVerified: boolean | null
           error?: string
+          verificationAttempts?: Array<{
+            command: string
+            exitCode: number | null
+            matched: boolean
+          }>
         }>
       }
       assert.equal(record.results.length, 2)
@@ -231,6 +236,40 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
         // does not prove the check ran, even if its reported exit status is 1.
         for (const result of record.results) {
           assert.match(result.error ?? '', /as a command on its own/)
+        }
+      }
+
+      // A failed attestation now says what the agent actually tried. This is bounded
+      // observation, not a second grading signal: the verdict above stays unchanged.
+      for (const result of record.results) {
+        const attempts = result.verificationAttempts ?? []
+        if (mode === 'report-only') {
+          assert.deepEqual(attempts, [], `${mode}: no shell event means no attempt to describe`)
+          continue
+        }
+        assert.ok(
+          attempts.some((attempt) => attempt.command.includes('run-check.js')),
+          `${mode}: ${result.variant} must retain the near-miss command`,
+        )
+        assert.ok(
+          attempts.every((attempt) => typeof attempt.exitCode === 'number' || attempt.exitCode === null),
+          `${mode}: every retained attempt must say whether it reported a status`,
+        )
+      }
+      if (mode.startsWith('honest')) {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.matched === true),
+            `${mode}: the declared command must be marked as matched`,
+          )
+        }
+      }
+      if (mode === 'chained-command') {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.every((attempt) => attempt.matched === false),
+            `${mode}: a compound command must not be recorded as a match`,
+          )
         }
       }
 

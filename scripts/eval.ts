@@ -78,6 +78,7 @@ import {
   type EvalSkillAccess,
   type EvalSkillAccessReason,
   type EvalSkillSpec,
+  type EvalVerificationAttempt,
   FAKE_AGENT_MODEL,
   hashImplementation,
   hashScenario,
@@ -200,6 +201,16 @@ function sanitizeAttestation(attestation: EvalExecutionAttestation): EvalExecuti
   }
 }
 
+/** Bound and redact verification attempts at the same persistence boundary as every other field. */
+function sanitizeVerificationAttempts(attempts: readonly EvalVerificationAttempt[]): EvalVerificationAttempt[] {
+  return attempts.slice(0, 20).map((attempt) => ({
+    command: limitReason(redactTranscript(attempt.command)),
+    ...(attempt.cwdHint === undefined ? {} : { cwdHint: limitReason(redactTranscript(attempt.cwdHint)) }),
+    exitCode: attempt.exitCode,
+    matched: attempt.matched,
+  }))
+}
+
 /**
  * Fingerprint the paths a scenario says must not change.
  *
@@ -256,6 +267,9 @@ export function sanitizeResult(result: ScenarioResult): ScenarioResult {
     ...(result.executionAttestation === undefined
       ? {}
       : { executionAttestation: sanitizeAttestation(result.executionAttestation) }),
+    ...(result.verificationAttempts === undefined
+      ? {}
+      : { verificationAttempts: sanitizeVerificationAttempts(result.verificationAttempts) }),
   }
 }
 
@@ -332,6 +346,13 @@ export interface AgentExecution {
    * evidence.
    */
   exitCode: number | null
+  /**
+   * A working directory the tool event itself reported, when it reports one.
+   *
+   * OpenCode 2 does not always include it. Absence is not an empty directory: a reader must
+   * be able to tell "the agent named no cwd" from "the agent named the worktree root".
+   */
+  cwd?: string
 }
 
 interface RunResult {
@@ -354,6 +375,8 @@ export interface ScenarioResult extends EvalResultSummary {
   transcript: string
   /** What the verifier said, so a failure can be read rather than guessed at. */
   verifyOutput?: string
+  /** Bounded near-miss verification commands from an execution-capture scenario. */
+  verificationAttempts?: EvalVerificationAttempt[]
   error?: string
 }
 
@@ -1150,6 +1173,9 @@ async function runScenario(
       const observedRuns = checkCommands.map((expected) =>
         agentExecutions.filter((execution) => isCheckCommand(expected, execution.command, captureDir)),
       )
+      // Retain near misses even when the attestation is `not-observed`: a typo or a wrong
+      // directory is a different product question from an agent that never tried at all.
+      result.verificationAttempts = observeVerificationAttempts(checkCommands, agentExecutions, workdir, captureDir)
       const commandLabel = checkCommands.join(', ')
       let attestation: EvalExecutionAttestation = {
         status: 'not-observed',
@@ -1326,9 +1352,15 @@ export function parseOpenCodeRunEvents(output: string): {
     const input = record.part.state.input
     if (input === null || typeof input !== 'object') continue
     if (SHELL_TOOL_NAMES.has(tool)) {
-      const command = (input as { command?: unknown }).command
+      const fields = input as { command?: unknown; cwd?: unknown; workdir?: unknown }
+      const command = fields.command
       if (typeof command === 'string') {
-        executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+        const reportedCwd = typeof fields.cwd === 'string' ? fields.cwd : fields.workdir
+        executions.push({
+          command,
+          exitCode: readExitStatus(record.part.state.metadata),
+          ...(typeof reportedCwd === 'string' && reportedCwd !== '' ? { cwd: reportedCwd } : {}),
+        })
       }
       continue
     }
@@ -1385,6 +1417,107 @@ export function isCheckCommand(expected: string, actual: string, captureDir = ''
   const changeDir = parseEvidenceCommand(parts[0] ?? '')
   const command = parseEvidenceCommand(parts[1] ?? '')
   return changeDir?.length === 2 && changeDir[0] === 'cd' && changeDir[1] === captureDir && sameCommand(command)
+}
+
+/** Keep a path useful to a reviewer without publishing an absolute host directory. */
+function relativeCwdHint(path: string, workdir: string): string {
+  if (path === '' || path === '.') return '.'
+  const resolved = isAbsolute(path) ? path : resolve(workdir, path)
+  const rel = relative(workdir, resolved).replace(/\\/g, '/')
+  if (rel === '' || rel === '..' || rel.startsWith('../')) return '<outside-worktree>'
+  return rel
+}
+
+/** Levenshtein distance, capped so a long shell word cannot make this expensive. */
+function boundedEditDistance(a: string, b: string): number {
+  if (a.length > 128 || b.length > 128) return Number.MAX_SAFE_INTEGER
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index)
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i]
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = Math.min(
+        (current[j - 1] as number) + 1,
+        (previous[j] as number) + 1,
+        (previous[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1),
+      )
+    }
+    previous = current
+  }
+  return previous[b.length] as number
+}
+
+/** Script names a declared check points at, including the `cd ... && node verify.js` form. */
+function checkScriptNames(commands: readonly string[]): string[] {
+  const names = new Set<string>()
+  for (const command of commands) {
+    for (const match of command.matchAll(/[A-Za-z0-9_.-]+\.(?:c|m)?js\b/g)) {
+      names.add((match[0] ?? '').split(/[/\\]/).at(-1) ?? '')
+    }
+  }
+  return [...names].filter((name) => name !== '')
+}
+
+/** Whether a reported shell word names (or nearly names) one of those scripts. */
+function mentionsCheckScript(command: string, names: readonly string[]): boolean {
+  const words = command.split(/[^A-Za-z0-9_.-]+/).filter((word) => word !== '')
+  return words.some((word) => {
+    const candidate = word.split(/[/\\]/).at(-1) ?? word
+    if (candidate.length > 128) return false
+    return names.some((name) => {
+      const stem = name.replace(/\.(?:c|m)?js$/, '')
+      const candidateStem = candidate.replace(/\.(?:c|m)?js$/, '')
+      return candidate === name || candidate === stem || boundedEditDistance(candidateStem, stem) <= 2
+    })
+  })
+}
+
+/** Cap a reported command before it reaches a committed run record. */
+function boundedCommand(command: string, workdir: string): string {
+  const redacted = redactTranscript(command).replaceAll(workdir, '<worktree>').replaceAll(repoRoot, '<repo>')
+  return redacted.length <= 512 ? redacted : `${redacted.slice(0, 512)}…[command truncated]`
+}
+
+/**
+ * Near-miss commands that look like attempts to run the declared check.
+ *
+ * This is an observation, never evidence: a shell event can be forged by the agent and
+ * matched only against its own words. Its job is to answer the question an attestation alone
+ * leaves open — did the agent try the check in the wrong place, with a typo, or with no exit
+ * status? — without keeping a transcript. Only commands naming a declared check script are
+ * retained, so an unrelated `npm install` cannot fill the record.
+ */
+export function observeVerificationAttempts(
+  commands: readonly string[],
+  executions: readonly AgentExecution[],
+  workdir: string,
+  captureDir = '',
+): EvalVerificationAttempt[] {
+  const scriptNames = checkScriptNames(commands)
+  if (scriptNames.length === 0) return []
+
+  const attempts: EvalVerificationAttempt[] = []
+  for (const execution of executions) {
+    const matched = commands.some((command) => isCheckCommand(command, execution.command, captureDir))
+    if (!matched && !mentionsCheckScript(execution.command, scriptNames)) continue
+
+    const cdPrefix = /^\s*cd\s+("[^"]+"|\S+)\s*&&/.exec(execution.command)
+    const namedDir = cdPrefix?.[1]?.replace(/^"|"$/g, '')
+    const cwdHint =
+      execution.cwd !== undefined
+        ? relativeCwdHint(execution.cwd, workdir)
+        : namedDir !== undefined
+          ? relativeCwdHint(namedDir, workdir)
+          : undefined
+
+    attempts.push({
+      command: boundedCommand(execution.command, workdir),
+      ...(cwdHint === undefined ? {} : { cwdHint }),
+      exitCode: execution.exitCode,
+      matched,
+    })
+    if (attempts.length >= 20) break
+  }
+  return attempts
 }
 
 /**
@@ -2150,6 +2283,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
+    ...(result.verificationAttempts === undefined ? {} : { verificationAttempts: result.verificationAttempts }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
@@ -2301,6 +2435,7 @@ export function scoredResultsFromRecord(
         ...(error === undefined ? {} : { error }),
         ...(prior.taskFailureReason === undefined ? {} : { taskFailureReason: prior.taskFailureReason }),
         ...(prior.executionAttestation === undefined ? {} : { executionAttestation: prior.executionAttestation }),
+        ...(prior.verificationAttempts === undefined ? {} : { verificationAttempts: prior.verificationAttempts }),
         ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
         ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
         ...(prior.skillAccessReason === undefined ? {} : { skillAccessReason: prior.skillAccessReason }),
@@ -2338,6 +2473,7 @@ function recordResultFrom(
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
+    ...(result.verificationAttempts === undefined ? {} : { verificationAttempts: result.verificationAttempts }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),

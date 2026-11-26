@@ -206,6 +206,26 @@ export interface EvalExecutionAttestation {
   at?: string | null
 }
 
+/**
+ * A bounded shell command that looked like an attempt to run the scenario's check.
+ *
+ * An attestation only says whether the one required command was observed. When it was not,
+ * the useful question is whether the agent tried a near miss — a wrong directory, a typo in
+ * the script name, a command that reported no exit status — because that separates a context
+ * problem from a detection problem without keeping a transcript. This is a *reported* command
+ * from an OpenCode tool event; it is never treated as proof that the check ran.
+ */
+export interface EvalVerificationAttempt {
+  /** The reported command, redacted and size-limited before persistence. */
+  command: string
+  /** A directory the command or tool event named, relative to the worktree when possible. */
+  cwdHint?: string
+  /** The exit status the tool event reported; null when the event carried none. */
+  exitCode: number | null
+  /** Whether this command matched the scenario's declared check. */
+  matched: boolean
+}
+
 export interface EvalResultSummary {
   scenario: string
   size: EvalScenarioSize
@@ -231,6 +251,8 @@ export interface EvalResultSummary {
   taskFailureReason?: string
   /** Harness-controlled execution evidence retained with the result. */
   executionAttestation?: EvalExecutionAttestation
+  /** Bounded near-miss verification commands, retained only for execution-capture scenarios. */
+  verificationAttempts?: EvalVerificationAttempt[]
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -311,6 +333,8 @@ export interface EvalRunRecordResult {
   taskFailureReason?: string
   /** Harness-controlled execution evidence retained with the result. */
   executionAttestation?: EvalExecutionAttestation
+  /** Bounded near-miss verification commands, retained only for execution-capture scenarios. */
+  verificationAttempts?: EvalVerificationAttempt[]
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -797,6 +821,36 @@ function parseExecutionAttestation(value: unknown): EvalExecutionAttestation | '
   }
 }
 
+/**
+ * Parse bounded verification attempts, or explain why the value is not a list of them.
+ *
+ * The list is capped because it comes from a run record that may be edited by hand before it
+ * is checked, and a reviewer's report must not become an unbounded allocation vector.
+ */
+function parseVerificationAttempts(value: unknown): EvalVerificationAttempt[] | 'invalid' | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 20) return 'invalid'
+  const attempts: EvalVerificationAttempt[] = []
+  for (const item of value) {
+    if (!isObject(item)) return 'invalid'
+    if (typeof item.command !== 'string' || item.command.length > 1024) return 'invalid'
+    if (item.cwdHint !== undefined && (typeof item.cwdHint !== 'string' || item.cwdHint.length > 256)) {
+      return 'invalid'
+    }
+    if (item.exitCode !== null && (typeof item.exitCode !== 'number' || !Number.isInteger(item.exitCode))) {
+      return 'invalid'
+    }
+    if (typeof item.matched !== 'boolean') return 'invalid'
+    attempts.push({
+      command: item.command,
+      ...(typeof item.cwdHint === 'string' ? { cwdHint: item.cwdHint } : {}),
+      exitCode: item.exitCode as number | null,
+      matched: item.matched,
+    })
+  }
+  return attempts
+}
+
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
@@ -854,6 +908,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
     }
     const executionAttestation = parseExecutionAttestation(raw.executionAttestation)
     if (executionAttestation === 'invalid') return `${raw.scenario}: latest executionAttestation is invalid`
+    const verificationAttempts = parseVerificationAttempts(raw.verificationAttempts)
+    if (verificationAttempts === 'invalid') return `${raw.scenario}: latest verificationAttempts are invalid`
     const skillInstall = parseSkillState<EvalSkillInstall>(raw.skillInstall, SKILL_INSTALL_VALUES)
     if (skillInstall === 'invalid') return `${raw.scenario}: latest skillInstall is invalid`
     const skillAccess = parseSkillState<EvalSkillAccess>(raw.skillAccess, SKILL_ACCESS_VALUES)
@@ -879,6 +935,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
       ...(typeof raw.taskFailureReason === 'string' ? { taskFailureReason: raw.taskFailureReason } : {}),
       ...(executionAttestation === undefined ? {} : { executionAttestation }),
+      ...(verificationAttempts === undefined ? {} : { verificationAttempts }),
       ...(skillInstall === undefined ? {} : { skillInstall }),
       ...(skillAccess === undefined ? {} : { skillAccess }),
       ...(skillAccessReason === undefined ? {} : { skillAccessReason }),
@@ -964,6 +1021,8 @@ export function parseRunRecordResult(
   }
   const executionAttestation = parseExecutionAttestation(value.executionAttestation)
   if (executionAttestation === 'invalid') return `run record result ${key} executionAttestation is invalid`
+  const verificationAttempts = parseVerificationAttempts(value.verificationAttempts)
+  if (verificationAttempts === 'invalid') return `run record result ${key} verificationAttempts are invalid`
   const skillInstall = parseSkillState<EvalSkillInstall>(value.skillInstall, SKILL_INSTALL_VALUES)
   if (skillInstall === 'invalid') return `run record result ${key} skillInstall is invalid`
   const skillAccess = parseSkillState<EvalSkillAccess>(value.skillAccess, SKILL_ACCESS_VALUES)
@@ -991,6 +1050,7 @@ export function parseRunRecordResult(
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
     ...(typeof value.taskFailureReason === 'string' ? { taskFailureReason: value.taskFailureReason } : {}),
     ...(executionAttestation === undefined ? {} : { executionAttestation }),
+    ...(verificationAttempts === undefined ? {} : { verificationAttempts }),
     ...(skillInstall === undefined ? {} : { skillInstall }),
     ...(skillAccess === undefined ? {} : { skillAccess }),
     ...(skillAccessReason === undefined ? {} : { skillAccessReason }),

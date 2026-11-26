@@ -61,6 +61,23 @@ Three things worth knowing:
 - **The binary is one file with zero runtime dependencies**, so once installed it runs in a
   locked-down network with no further installs.
 
+## What a finding looks like
+
+Start with `anvil doctor` on a repository you know. Here is one real finding from this
+repository, condensed from the full report:
+
+| From the real report | What it means |
+| --- | --- |
+| `TEST_FAST` | The rule passed, with both claims found. |
+| `npm run test:changed` | The command it reports, labelled `documented` and `detected`. |
+| `README.md:72` | The line in this document that names the command. |
+| `package.json:51` | The line that defines the script. |
+
+Anvil reports both because a documented command that no longer runs is a defect and an
+executable command nobody documented is invisible to an agent. When a finding is `fail` or `na`,
+that same line is where you start: fix the document or the script, then run `npm run check`, which
+is the command this repository declares as its verification and CI runs on every pull request.
+
 ## Use
 
 ```bash
