@@ -8,14 +8,16 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { AnvilError, ErrorCode, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
+import { AnvilError, ErrorCode, loadConfig, parseCliArgs, renderTable, runProcess, tokenizeCommand } from '@anvil/core'
 import { currentBranch, git, mainWorktreeRoot } from '@anvil/git'
-import { buildProfile } from '@anvil/profile'
+import { buildProfile, type ProjectProfile } from '@anvil/profile'
 import { GhForgeTransport, GitHubProvider, hostFromRemote, requireCapability } from '@anvil/providers'
 import { parseRef, type Ticket } from '@anvil/tickets'
 import { readClaims } from '@anvil/worktrees'
-import { type ShipResult, ship } from '@anvil/worktrees/ship'
+import { type ShipResult, ship, verifyCommands } from '@anvil/worktrees/ship'
 import { ticketProviderFor } from '../tickets.ts'
+import { isCurrentEvidenceRecord, planDigestFor, verdictFor } from '../verification-evidence.ts'
+import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
 import type { Command, CommandContext } from './types.ts'
 
 const GLOBAL_ONLY = {
@@ -151,6 +153,14 @@ export const shipCommand: Command = {
     requireCapability(ticketProvider.provider, 'comment', 'comment on a ticket')
     requireCapability(ticketProvider.provider, 'transition', 'move a ticket between states')
 
+    // The opt-in policy is resolved here, where the CLI owns the evidence format. The pipeline
+    // receives only a verdict: it cannot waive the policy with --skip-verify or guess a record.
+    const { config } = loadConfig({ repoRoot })
+    const requireCurrentVerification = config.features.requireCurrentVerification
+    const currentVerification = requireCurrentVerification
+      ? await currentVerificationFor(repoRoot, key, claim.worktreePath, profile)
+      : undefined
+
     const result: ShipResult = await ship({
       repoRoot,
       worktreePath: claim.worktreePath,
@@ -166,6 +176,8 @@ export const shipCommand: Command = {
       extraReviewers: splitList(args.values.reviewers),
       probe: args.values.probe === true,
       skipVerify: args.values['skip-verify'] === true,
+      ...(requireCurrentVerification ? { requireCurrentVerification } : {}),
+      ...(currentVerification === undefined ? {} : { currentVerification }),
       updateTicket: args.values['no-ticket-update'] !== true,
       ticketOps: {
         comment: (ref, body) => ticketProvider.provider.comment(ref, body),
@@ -276,6 +288,45 @@ async function mainRootFor(ctx: CommandContext): Promise<string> {
     })
   }
   return (await mainWorktreeRoot(cwd)) ?? cwd
+}
+
+/**
+ * Resolve the owner's evidence policy against this claim, this commit and the current check
+ * plan. A record written for a different claim, repository, plan or commit cannot satisfy it.
+ * An absent or unreadable store is a refusal, never a pass by silence.
+ */
+async function currentVerificationFor(
+  repoRoot: string,
+  claimKey: string,
+  worktreePath: string,
+  profile: ProjectProfile,
+): Promise<{ ok: boolean; detail: string }> {
+  const store = evidenceStore(repoRoot)
+  if (store === null) return { ok: false, detail: 'Cannot resolve the verification evidence store.' }
+  const commit = await headRevision(worktreePath)
+  if (commit === null) return { ok: false, detail: 'Cannot sample the worktree commit before shipping.' }
+  const expectedCwd = profile.projectDir.replaceAll('\\', '/')
+  const expectedDigest = planDigestFor(expectedCwd, verifyCommands(profile))
+  const relevant = readVerificationEvidence(store)
+    .filter(isCurrentEvidenceRecord)
+    .filter((record) => record.claim === claimKey && record.repository === store.key)
+  if (relevant.length === 0) {
+    return { ok: false, detail: `No version 2 verification record for claim ${claimKey}.` }
+  }
+  const matching = relevant.find(
+    (record) => record.planDigest === expectedDigest && verdictFor(record, commit) === 'current',
+  )
+  if (matching !== undefined) {
+    return { ok: true, detail: `current verification for ${claimKey} at ${commit.slice(0, 7)}` }
+  }
+  const planMatch = relevant.some((record) => record.planDigest === expectedDigest)
+  const verdicts = [...new Set(relevant.map((record) => verdictFor(record, commit)))].join(', ')
+  return {
+    ok: false,
+    detail: planMatch
+      ? `Verification for ${claimKey} is ${verdicts}, not current.`
+      : `Verification for ${claimKey} was recorded for a different check plan (${verdicts}).`,
+  }
 }
 
 async function loadTicketFor(

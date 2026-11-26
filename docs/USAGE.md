@@ -374,14 +374,24 @@ What each step does:
 - **`crew verify`** runs each worktree's verify commands. The concurrency is chosen from
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
-  run concurrently. The decision is always printed.
+  run concurrently. The decision is always printed. `--record` writes bounded evidence
+  under `.anvil/` in the main worktree: each version 2 row names the claim, the commit, the
+  repo-relative directory and exact commands, a digest of that check plan, and the observed
+  exits. The commit is sampled before and after every command, so a check that spanned a tree
+  change records no current commit. Older rows stay readable as history, but they describe a
+  worktree rather than an immutable tree and are never presented as current.
 - **`ship`** runs the pipeline in a deliberate order: refuse, verify, diff, push, pull
   request, ticket. The stages that could lose work or leave debris on the remote run
   last, so a failed verification means nothing reached the remote at all. It refuses
   before pushing when the worktree has uncommitted changes or the branch has no commits
   beyond its base. `ship` needs `gh` and a GitHub remote for the pull request; the ticket
   update goes back to the provider the claim came from, so a local ticket is advanced
-  locally instead of being looked for on GitHub.
+  locally instead of being looked for on GitHub. When
+  `features.requireCurrentVerification` is enabled, `ship` also refuses before the push
+  unless a `crew verify --record` row is current for this claim, this commit and the current
+  check plan. `--skip-verify` does not waive that policy, and a stale or legacy row does not
+  satisfy it. The refusal happens before the transport is called, so nothing reaches the
+  remote.
 - **`release`** removes the worktree, and refuses to remove one holding uncommitted
   changes or unpushed commits unless `--force` is passed — and says which of the two it
   found.
@@ -775,7 +785,7 @@ Two layers, repo-local wins:
     "jira": { "site": null, "project": null, "issueType": "Task" }
   },
   "output": { "color": "auto" },
-  "features": { "probeCommands": false },
+  "features": { "probeCommands": false, "requireCurrentVerification": false },
   "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
 }
 ```
@@ -801,6 +811,10 @@ Two layers, repo-local wins:
   `JIRA_API_TOKEN`, so they never end up in a committed file, a claim, an error or a log.
 - `output.color` — `auto`, `always` or `never`.
 - `features.probeCommands` — run the project's verify commands during `ship`.
+- `features.requireCurrentVerification` — refuse to push unless a current verification
+  record exists for the claim, the checked commit and the current check plan. Record one with
+  `anvil crew verify --record` in a clean worktree. Stale, legacy and unobserved evidence do
+  not satisfy it, and `--skip-verify` does not waive it. Off by default.
 - `project.commands` — commands the owner declares for a project anvil cannot detect on
   its own. Each entry is `{ "kind": "build" | "test" | ..., "cmd": "...", "dir": "..." }`;
   `dir` is the repo-relative working directory and defaults to the repository root. A

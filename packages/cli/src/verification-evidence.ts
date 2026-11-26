@@ -119,7 +119,7 @@ export function isLegacyEvidenceRecord(value: unknown): value is LegacyEvidenceR
   return (
     validBoundedText(value.command, 200) &&
     (value.revision === null ||
-      validHex(value.revision.replace(/-dirty$/i, ''), 7, 64)) &&
+      (typeof value.revision === 'string' && validHex(value.revision.replace(/-dirty$/i, ''), 7, 64))) &&
     Number.isSafeInteger(value.exitCode) &&
     (value.exitCode as number) >= 0 &&
     (value.exitCode as number) <= 0x7fffffff &&

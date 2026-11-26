@@ -278,6 +278,11 @@ export interface AnvilConfig {
   features: {
     /** Run external verify commands during `ship`. */
     probeCommands: boolean
+    /**
+     * Refuse to push unless a current, clean, claim-and-commit-bound verification record
+     * exists. Opt-in: a repository that has not declared this keeps its existing behavior.
+     */
+    requireCurrentVerification: boolean
   }
   /** Owner-declared project capabilities, for what detection cannot see. */
   project: ProjectConfig
@@ -306,7 +311,7 @@ export function defaultConfig(): AnvilConfig {
       jira: { site: null, project: null, issueType: 'Task' },
     },
     output: { color: 'auto' },
-    features: { probeCommands: false },
+    features: { probeCommands: false, requireCurrentVerification: false },
     project: {
       commands: [],
       tools: [],
@@ -1083,7 +1088,7 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
   if (layer.features !== undefined) {
     const features = expectObject(layer.features, 'features', issues)
     for (const key of Object.keys(features)) {
-      if (key !== 'probeCommands')
+      if (key !== 'probeCommands' && key !== 'requireCurrentVerification')
         issues.push({
           path: `features.${key}`,
           message: 'unknown configuration key',
@@ -1092,6 +1097,10 @@ export function mergeConfig(base: AnvilConfig, layer: Record<string, unknown>, s
     if (features.probeCommands !== undefined) {
       const probe = expectBoolean(features.probeCommands, 'features.probeCommands', issues)
       if (probe !== undefined) next.features.probeCommands = probe
+    }
+    if (features.requireCurrentVerification !== undefined) {
+      const required = expectBoolean(features.requireCurrentVerification, 'features.requireCurrentVerification', issues)
+      if (required !== undefined) next.features.requireCurrentVerification = required
     }
   }
 
@@ -1267,7 +1276,7 @@ export function starterConfigJson(): string {
       jira: { site: null, project: null, issueType: 'Task' },
     },
     output: { color: 'auto' },
-    features: { probeCommands: false },
+    features: { probeCommands: false, requireCurrentVerification: false },
     // The escape hatch for a project anvil cannot detect on its own. Left empty here and
     // documented in docs/USAGE.md rather than guessed at: a declaration the owner did not
     // write is a claim anvil would be inventing.

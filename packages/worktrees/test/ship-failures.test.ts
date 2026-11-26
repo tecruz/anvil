@@ -148,6 +148,41 @@ async function claimAndCommit(repo: string): Promise<{ worktreePath: string; bra
   return { worktreePath: claim.worktreePath, branch: claim.branch }
 }
 
+describe('ship: required current verification', () => {
+  test('missing evidence refuses before the push, even with --skip-verify', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    options.skipVerify = true
+    options.requireCurrentVerification = true
+    options.currentVerification = { ok: false, detail: 'no version 2 record for this claim' }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, false)
+    assert.equal(result.stages[0]?.name, 'refuse')
+    assert.equal(result.stages[0]?.ok, false)
+    assert.match(result.stages[0]?.detail ?? '', /no version 2 record/)
+    assert.equal(transport.calls.filter((call) => call.startsWith('push')).length, 0)
+  })
+
+  test('current evidence allows the ship to proceed', async () => {
+    const { repo } = makeRepoWithOrigin()
+    const transport = recordingTransport({})
+    const { worktreePath } = await claimAndCommit(repo)
+    const options = shipOptions(repo, worktreePath, transport)
+    options.requireCurrentVerification = true
+    options.currentVerification = { ok: true, detail: 'current verification for local-1' }
+
+    const result = await ship(options)
+
+    assert.equal(result.ok, true)
+    assert.equal(result.stages[0]?.ok, true)
+    assert.equal(transport.calls.filter((call) => call.startsWith('push')).length, 1)
+  })
+})
+
 describe('ship: failure at each mutation boundary', () => {
   test('verify failure stops before push — nothing reaches the transport', async () => {
     const { repo } = makeRepoWithOrigin()

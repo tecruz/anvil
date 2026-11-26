@@ -78,6 +78,14 @@ export interface ShipOptions {
   probe: boolean
   /** Skip verify entirely. */
   skipVerify: boolean
+  /**
+   * Owner policy: refuse before the push unless the CLI found a current, clean,
+   * claim-and-commit-bound verification record. The pipeline does not read that store; the
+   * caller supplies the verdict so the evidence format stays a CLI concern.
+   */
+  requireCurrentVerification?: boolean
+  /** The CLI's answer to the policy above, including the reason when it is not satisfied. */
+  currentVerification?: { ok: boolean; detail: string }
   /** Do not touch the ticket after opening the PR. */
   updateTicket: boolean
   /** Ticket adapter, so `ship` can comment and transition. */
@@ -402,6 +410,19 @@ interface Refusal {
  * specific thing to fix rather than a half-finished PR.
  */
 async function checkRefusals(options: ShipOptions): Promise<Refusal> {
+  // The policy is checked before anything else, and before the push. A `--skip-verify` flag or
+  // an inferred command cannot waive an owner-declared requirement: only current evidence can.
+  if (options.requireCurrentVerification === true) {
+    const evidence = options.currentVerification
+    if (evidence?.ok !== true) {
+      return {
+        ok: false,
+        detail: evidence?.detail ?? 'No current verification evidence was supplied.',
+        hint: 'Run `anvil crew verify --record` in a clean worktree for this claim, then ship the checked commit.',
+      }
+    }
+  }
+
   if (options.profile.commands.test === undefined && !options.skipVerify && !options.probe) {
     // Not a refusal, but worth knowing: the branch will open with no verification.
   }

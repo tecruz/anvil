@@ -18,7 +18,7 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import {
   AnvilError,
   ErrorCode,
@@ -360,13 +360,16 @@ export async function headRevision(worktree: string): Promise<string | null> {
  * directories cannot prove a single immutable patch was checked, so no current record is
  * emitted. Legacy rows are still written alongside it for readers that expect the old format.
  */
-function currentRecordFor(
+export function currentRecordFor(
   worktree: CrewVerifyResult['results'][number],
   store: EvidenceStore,
 ): CurrentEvidenceRecord | null {
   if (worktree.commands.length === 0) return null
-  const cwd = worktree.commands[0]?.cwd ?? ''
-  if (!worktree.commands.every((command) => command.cwd === cwd)) return null
+  const absoluteCwd = worktree.commands[0]?.cwd ?? ''
+  // Worktrees live outside the repository, so the meaningful directory is relative to the
+  // worktree root, not to the main checkout that owns the evidence store.
+  const cwd = relative(worktree.worktree, absoluteCwd).replaceAll('\\', '/')
+  if (!worktree.commands.every((command) => command.cwd === absoluteCwd)) return null
   const before = worktree.commands.map((command) => command.revision)
   const after = worktree.commands.map((command) => command.revisionAfter)
   const revision = before[0]
