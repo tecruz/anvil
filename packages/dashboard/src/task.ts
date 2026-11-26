@@ -11,7 +11,7 @@
  * that the command was not run.
  */
 
-import type { DashboardSnapshot, VerificationEvidence } from './snapshot.ts'
+import type { DashboardSnapshot, VerificationEvidence, VerificationVerdict } from './snapshot.ts'
 
 export const MAX_TASK_TEXT = 4000
 const MAX_START_ITEMS = 5
@@ -116,6 +116,7 @@ export interface TaskBrief {
   /** Post-change facts from an explicitly run, bounded verification; never a claim of success. */
   verification: {
     status: 'unavailable' | 'recorded'
+    verdict: VerificationVerdict | 'none'
     reason: string
     currentRevision: string | null
     incompleteCount: number
@@ -1058,9 +1059,11 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   if (snapshot.verification.status !== 'recorded') {
     unknowns.push(`Verification history is unavailable: ${snapshot.verification.reason}`)
   } else {
-    unknowns.push(
-      'Verification rows were found in the CLI-owned evidence file. The dashboard cannot independently prove their origin, and they are not a claim that the current worktree passes.',
-    )
+    const prefix =
+      snapshot.verification.verdict === 'current'
+        ? 'A clean check against the current commit was recorded in the CLI-owned evidence file. The dashboard cannot independently prove its origin, and this is not a claim about work done after that check.'
+        : 'Verification rows were found in the CLI-owned evidence file. The dashboard cannot independently prove their origin, and they are not a claim that the current worktree passes.'
+    unknowns.push(prefix)
     if (snapshot.verification.evidence.some((item) => item.matchesCurrent === false)) {
       unknowns.push(
         'At least one verification record names a different commit than the one sampled when this dashboard started.',
@@ -1129,6 +1132,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
     howToCheck: checks,
     verification: {
       status: snapshot.verification.status,
+      verdict: snapshot.verification.verdict,
       reason: snapshot.verification.reason,
       currentRevision: snapshot.verification.currentRevision,
       incompleteCount: snapshot.verification.incompleteCount,

@@ -36,6 +36,14 @@ import { claimAgentPid, claimStatuses, readAgentSession, readClaims } from '@anv
 import { type CrewVerifyResult, crewUp, crewVerify, isProcessAlive, mapWithConcurrency } from '@anvil/worktrees/crew'
 import { formatCost, lookupSessionCosts } from '../cost.ts'
 import { ticketProviderFor } from '../tickets.ts'
+import {
+  type CurrentEvidenceRecord,
+  type EvidenceRecord,
+  isCurrentEvidenceRecord,
+  planDigestFor,
+  selectVerificationRecords,
+  VERIFICATION_EVIDENCE_MAX_BYTES,
+} from '../verification-evidence.ts'
 import { recommendForWorktree } from './recommend.ts'
 import type { Command, CommandContext } from './types.ts'
 
@@ -235,7 +243,6 @@ async function crewUpFlow(
 
 /** Bounded, revision-bound verification facts produced only by an explicit `crew verify --record`. */
 const VERIFICATION_EVIDENCE_PREFIX = '.anvil/verification-evidence-'
-const VERIFICATION_EVIDENCE_MAX_BYTES = 64 * 1024
 
 export interface EvidenceStore {
   /** The worktree root that owns the `.anvil` directory. */
@@ -346,50 +353,55 @@ export async function headRevision(worktree: string): Promise<string | null> {
   return head.exitCode === 0 ? head.stdout.trim() : null
 }
 
-export type EvidenceRecord = {
-  command: string
-  revision: string | null
-  exitCode: number | null
-  timestamp: string
-}
-
 /**
- * Keep the bounded set of evidence rows to write. Completion order (timestamp) wins over claim
- * order; displayable facts win over rejected rows; incomplete rows are retained so the dashboard
- * can report them as incomplete rather than as "no evidence".
+ * Build one version 2 record per worktree whose checks all ran against the same tree.
+ *
+ * A dirty tree, a revision that moved while the check ran, or commands from different
+ * directories cannot prove a single immutable patch was checked, so no current record is
+ * emitted. Legacy rows are still written alongside it for readers that expect the old format.
  */
-export function selectVerificationRecords(all: EvidenceRecord[]): EvidenceRecord[] {
-  const displayable = (record: EvidenceRecord): boolean =>
-    record.command.trim() !== '' &&
-    record.command.length <= 200 &&
-    typeof record.revision === 'string' &&
-    /^[0-9a-f]{7,64}(?:-dirty)?$/i.test(record.revision) &&
-    Number.isSafeInteger(record.exitCode) &&
-    (record.exitCode as number) >= 0 &&
-    (record.exitCode as number) <= 0x7fffffff
-  // A same-millisecond tie must not drop the failure: failures sort before successes at the same
-  // timestamp, so the capped tail keeps the interesting outcome.
-  const ordered = [...all].sort((left, right) => {
-    if (left.timestamp !== right.timestamp) return left.timestamp < right.timestamp ? -1 : 1
-    const leftFailed = displayable(left) && (left.exitCode as number) !== 0 ? 1 : 0
-    const rightFailed = displayable(right) && (right.exitCode as number) !== 0 ? 1 : 0
-    return rightFailed - leftFailed
-  })
-  const valid = ordered.filter(displayable)
-  const incomplete = ordered.filter((record) => !displayable(record))
-  const validKept = valid.slice(-20)
-  const quota = 20 - validKept.length
-  const incompleteKept = quota > 0 ? incomplete.slice(-quota) : []
-  let records = [...validKept, ...incompleteKept].sort((left, right) =>
-    left.timestamp < right.timestamp ? -1 : left.timestamp > right.timestamp ? 1 : 0,
-  )
-  // Under the byte cap, discard rejected rows first; only drop real facts as a last resort.
-  const fits = (rows: EvidenceRecord[]): boolean => Buffer.byteLength(`${JSON.stringify(rows, null, 2)}\n`) <= 64 * 1024
-  while (!fits(records) && records.length > 0) {
-    const rejectedIndex = records.findIndex((record) => !displayable(record))
-    records = rejectedIndex >= 0 ? records.filter((_, index) => index !== rejectedIndex) : records.slice(1)
+function currentRecordFor(
+  worktree: CrewVerifyResult['results'][number],
+  store: EvidenceStore,
+): CurrentEvidenceRecord | null {
+  if (worktree.commands.length === 0) return null
+  const cwd = worktree.commands[0]?.cwd ?? ''
+  if (!worktree.commands.every((command) => command.cwd === cwd)) return null
+  const before = worktree.commands.map((command) => command.revision)
+  const after = worktree.commands.map((command) => command.revisionAfter)
+  const revision = before[0]
+  if (
+    revision === null ||
+    revision === undefined ||
+    !before.every((value) => value === revision) ||
+    !after.every((value) => value === revision)
+  ) {
+    return null
   }
-  return records
+  const clean = !revision.endsWith('-dirty')
+  const commands = worktree.commands.map((command) => ({
+    command: command.command,
+    exitCode: command.exitObserved ? command.code : null,
+    exitObserved: command.exitObserved,
+  }))
+  const startedAt = worktree.commands[0]?.startedAt ?? new Date().toISOString()
+  const completedAt = worktree.commands.at(-1)?.completedAt ?? new Date().toISOString()
+  return {
+    schemaVersion: 2,
+    claim: worktree.key,
+    repository: store.key,
+    commit: clean ? revision.replace(/-dirty$/i, '') : null,
+    clean,
+    cwd,
+    commands,
+    planDigest: planDigestFor(
+      cwd,
+      commands.map((command) => command.command),
+    ),
+    startedAt,
+    completedAt,
+    outcome: worktree.ok ? 'passed' : 'failed',
+  }
 }
 
 function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceStore): void {
@@ -404,6 +416,8 @@ function recordVerificationEvidence(result: CrewVerifyResult, store: EvidenceSto
         timestamp: command.completedAt ?? fallbackTimestamp,
       })
     }
+    const current = currentRecordFor(worktree, store)
+    if (current !== null && isCurrentEvidenceRecord(current)) all.push(current)
   }
   const anvilDir = join(store.root, '.anvil')
   assertWritableDirectory(anvilDir)
@@ -443,9 +457,12 @@ async function crewVerifyFlow(
   // two extra git processes per command: the read-only verification path stays process-free.
   const runWithRevision: Parameters<typeof crewVerify>[0]['run'] = async (command, cwd) => {
     if (args.values.record !== true) return runCommand(command, cwd)
+    // Sample before and after: a check that spanned a tree change cannot bind to either tree.
     const revision = await worktreeRevision(cwd)
+    const startedAt = new Date().toISOString()
     const outcome = await runCommand(command, cwd)
-    return { ...outcome, revision, completedAt: new Date().toISOString() }
+    const revisionAfter = await worktreeRevision(cwd)
+    return { ...outcome, revision, revisionAfter, startedAt, completedAt: new Date().toISOString() }
   }
 
   const result: CrewVerifyResult = await crewVerify({
