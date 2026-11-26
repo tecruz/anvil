@@ -1,8 +1,10 @@
 # Implementation plan: verified AI-assisted work
 
-Status: **Phases 0–3 integrated and 0.2.1 published; Phase 4 executed with insufficient
-evidence and its grader audited**, 2026-11-26. The pinned-commit and guidance work below is on
-`impl/integrated`, pending the final integration head.
+Status: **Phases 0–3 integrated into `main`; 0.2.1 published; Phase 4 executed with
+insufficient evidence and its grader audited**, 2026-11-26. The pinned-commit, guidance and
+isolated-snapshot work landed in #105 and #106; see
+[the integration record](evidence/2026-11-26-integration.md) and
+[the isolated-verification record](evidence/2026-11-26-isolated-verification.md).
 
 ## Progress
 

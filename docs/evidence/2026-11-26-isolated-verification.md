@@ -1,6 +1,19 @@
 # 2026-11-26 — isolated verification for the opt-in ship policy
 
-Status: **implemented and covered by offline controls.**
+Status: **merged to `main` with all eight CI checks green.**
+
+| Field | Value |
+| --- | --- |
+| Final PR head | `3cc1a1e7ccc7b98af439f8c93ae7fc9055f17120` |
+| CI run | [45902163502](https://github.com/tecruz/anvil/actions/runs/45902163502) — all eight jobs SUCCESS |
+| Merge commit | `fb140a0fa2cafad0b546029d9688ba5b1360af56` |
+| PR | [#106](https://github.com/tecruz/anvil/pull/106) |
+
+An earlier run (`45898942967`) failed on Windows because the new tests compared LF fixtures to
+CRLF checkouts; the assertions now normalize newlines. A second run (`45900639798`) failed the
+eval gate because a source comment changed the implementation hash after the hermetic evidence
+was generated; regenerating the evidence fixed it. Both failures were in test/harness wiring,
+not in the verification behavior, and are covered by the passing final run.
 
 ## Problem
 
