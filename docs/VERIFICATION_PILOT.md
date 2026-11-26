@@ -108,8 +108,11 @@ wall-clock stop including harness overhead. If either limit cuts the run short, 
 report the partial result. Do not rerun failed or timed-out keys or add pairs to reach
 a favorable result.
 
-Propose **$0 model spend only**, using `opencode/deepseek-v4.1-flash-free`, the current
-`small` model in [eval/models.json](../eval/models.json). Before seeking approval, pin
+Propose **$0 model spend only**, using `opencode/hy4-flash-free`, the current
+`small` model in [eval/models.json](../eval/models.json). The originally proposed
+`opencode/deepseek-v4.1-flash-free` returned `provider.free-limit` (HTTP 429, about 5.8 hours
+before reset) at the 2026-11-25 availability probe; `hy4-flash-free` answered `cost: 0` in the
+same isolated configuration, and the maintainer approved the re-scoped run. Before seeking approval, pin
 the clean source commit and runtime versions. Before execution, recheck availability and zero catalog
 pricing in an isolated, free-only agent configuration with no paid fallback or provider
 keys. If that cannot be established, stop. The free tier or a zero-spend approval is not

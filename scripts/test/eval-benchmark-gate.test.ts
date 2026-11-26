@@ -26,6 +26,17 @@ const HARNESS = 'harness-1'
 const COMMIT = 'commit-1'
 const MODEL = { id: 'model-a', role: 'small' }
 
+/** The small model is a role, not a fixed id: keep the fixture in step with the manifest. */
+function smallModelId(): string {
+  const source = fileURLToPath(new URL('../../', import.meta.url))
+  const manifest = JSON.parse(readFileSync(join(source, 'eval', 'models.json'), 'utf8')) as {
+    models: Array<{ id: string; role: string }>
+  }
+  const model = manifest.models.find((entry) => entry.role === 'small')
+  assert.ok(model, 'eval/models.json must declare a small model')
+  return model.id
+}
+
 /**
  * A scenario as the baseline describes it. Hashes are opaque strings: the benchmark gate only
  * compares them, so a readable value proves the comparison ran without pretending to hash a fixture.
@@ -463,7 +474,7 @@ function invokeCheck(root: string, ...args: string[]): { status: number | null; 
 describe('benchmark gate CLI', () => {
   test('validates the named real-agent run without creating or reading latest.json', () => {
     const root = copyHarness('anvil-benchmark-cli-')
-    writeRealRun(root, 'opencode/deepseek-v4.1-flash-free')
+    writeRealRun(root, smallModelId())
 
     const result = invokeCheck(root, '--check-run', 'run-1', '--models', 'small')
     assert.equal(result.status, 0, result.output)
@@ -487,7 +498,7 @@ describe('benchmark gate CLI', () => {
 
   test('refuses a run id it has no record for and writes no summary', () => {
     const root = copyHarness('anvil-benchmark-other-')
-    writeRealRun(root, 'opencode/deepseek-v4.1-flash-free', 'run-1')
+    writeRealRun(root, smallModelId(), 'run-1')
 
     const result = invokeCheck(root, '--check-run', 'run-2', '--models', 'small')
     assert.equal(result.status, 1)
@@ -497,7 +508,7 @@ describe('benchmark gate CLI', () => {
 
   test('refuses a run produced by a different implementation and writes no summary', () => {
     const root = copyHarness('anvil-benchmark-impl-')
-    const record = writeRealRun(root, 'opencode/deepseek-v4.1-flash-free')
+    const record = writeRealRun(root, smallModelId())
     record.implementation = 'a-different-implementation'
     writeFileSync(join(root, 'eval-results', 'run.json'), JSON.stringify(record, null, 2))
 
@@ -509,7 +520,7 @@ describe('benchmark gate CLI', () => {
 
   test('refuses --check-run without a run id instead of exiting or starting a run', () => {
     const root = copyHarness('anvil-benchmark-no-id-')
-    writeRealRun(root, 'opencode/deepseek-v4.1-flash-free')
+    writeRealRun(root, smallModelId())
     for (const enabled of [false, true]) {
       const env: NodeJS.ProcessEnv = { ...process.env }
       if (enabled) env.ANVIL_EVAL = '1'

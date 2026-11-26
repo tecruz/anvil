@@ -153,6 +153,22 @@ Architectural decisions are recorded in [docs/adr](docs/adr), the module map is 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md) has
 the conventions.
 
+## What can be claimed
+
+Anvil derives verified, evidence-linked agent context from a repository without calling a
+model. Against four ground-truth cards fixed in advance, its offline output named the
+correct verify command with a file-and-line citation in three of four cases; on the fourth,
+a genuinely blocked repository, it reported `blocked` instead of inventing a command. Applied
+to its own repository it scores 100 (A). The installed binary is a single dependency-free
+file, and CI runs the same check on Windows, macOS and Linux. The scope, method and limits
+are recorded in [the launch claim](docs/evidence/2026-11-25-launch-claim.md).
+
+What is **not** claimed: that an agent using anvil completes tasks faster or more reliably.
+Two predeclared paired pilots did not meet their threshold, and their results were not pooled
+into a verdict — see [the nested pilot](docs/evidence/2026-11-25-nested-verification-pilot.md)
+and [the powered pilot](docs/evidence/2026-11-25-powered-pilot-results.md). Anvil does not
+yet diagnose arbitrary real blockers; that needs a declared `anvil.config.json`.
+
 ## Status
 
 Pre-1.0, and honest about it. The command surface may change; the install instructions above

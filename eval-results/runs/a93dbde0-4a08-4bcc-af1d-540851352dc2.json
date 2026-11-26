@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 3,
+  "runId": "a93dbde0-4a08-4bcc-af1d-540851352dc2",
+  "startedAt": "2026-11-25T18:35:06.580Z",
+  "completedAt": "2026-11-25T18:53:06.662Z",
+  "completionState": "partial",
+  "commitSha": "459130d9d0b1ca3ef68fa833008cde481d8ea908",
+  "implementation": "6c7b4b7c413c9e7de0dec0723ef226cd99874db047956a20f15c002caef9a1b1",
+  "bundleDigest": "e0933dd464e3a542f3d52631221aa1bd3c5632931575ca1cb2980ac46e24f40d",
+  "harnessDigest": "1a167b4ef67b269dd3cd45217eb5faa039b0813c254b0aa4a6fec59325e76edd",
+  "models": [
+    {
+      "id": "opencode/hy4-flash-free",
+      "role": "small"
+    }
+  ],
+  "opencodeVersion": null,
+  "nodeVersion": "v24.13.0",
+  "publishTranscripts": false,
+  "subset": true,
+  "repetitions": 5,
+  "seed": "nested-stale-verification-v1",
+  "order": "alternate",
+  "scenarioHashes": {
+    "nested-stale-verification": {
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d"
+    }
+  },
+  "runKeys": [
+    "nested-stale-verification/bare/opencode/hy4-flash-free/0",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/0",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/1",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/1",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/2",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/2",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/3",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/3",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/4",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/4"
+  ],
+  "executionOrder": [
+    "nested-stale-verification/bare/opencode/hy4-flash-free/0",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/0",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/1",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/1",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/2",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/2",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/3",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/3",
+    "nested-stale-verification/bare/opencode/hy4-flash-free/4",
+    "nested-stale-verification/anvil/opencode/hy4-flash-free/4"
+  ],
+  "results": [
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:35:06.949Z",
+          "completedAt": "2026-11-25T18:37:09.371Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": false,
+      "verifyExitCodes": [1, 1],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 122398,
+      "transcript": "",
+      "taskFailureReason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence",
+      "executionAttestation": {
+        "status": "not-observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "reason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:37:09.376Z",
+          "completedAt": "2026-11-25T18:39:51.226Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 0,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 161827,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:38:31.402Z"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:39:51.232Z",
+          "completedAt": "2026-11-25T18:41:23.601Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 92346,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:40:59.433Z"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:41:23.606Z",
+          "completedAt": "2026-11-25T18:42:31.459Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 1,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 67832,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:42:06.498Z"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:42:31.465Z",
+          "completedAt": "2026-11-25T18:43:20.791Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": false,
+      "verifyExitCodes": [1, 1],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 49297,
+      "transcript": "",
+      "taskFailureReason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence",
+      "executionAttestation": {
+        "status": "not-observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "reason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:43:20.796Z",
+          "completedAt": "2026-11-25T18:44:37.200Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 2,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 76384,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:44:04.916Z"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:44:37.205Z",
+          "completedAt": "2026-11-25T18:47:06.808Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": false,
+      "verifyExitCodes": [1, 1],
+      "repetition": 3,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 149580,
+      "transcript": "",
+      "taskFailureReason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence",
+      "executionAttestation": {
+        "status": "not-observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "reason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:47:06.815Z",
+          "completedAt": "2026-11-25T18:49:39.977Z",
+          "state": "completed"
+        }
+      ],
+      "verified": false,
+      "hiddenVerified": false,
+      "verifyExitCodes": [1, 1],
+      "repetition": 3,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 153142,
+      "transcript": "",
+      "taskFailureReason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence",
+      "executionAttestation": {
+        "status": "not-observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "reason": "the agent did not run \"node verify.js\" as a command on its own; a report without execution evidence is not evidence"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "bare",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:49:39.982Z",
+          "completedAt": "2026-11-25T18:51:17.249Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 4,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 97240,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:50:49.336Z"
+      },
+      "skillInstall": "not-requested"
+    },
+    {
+      "scenario": "nested-stale-verification",
+      "variant": "anvil",
+      "model": "opencode/hy4-flash-free",
+      "modelRole": "small",
+      "scenarioHash": "94d0ce2e080f8f3b7539d8b0e106cb7325f1428a296d569c50e8aa7f39c72b46",
+      "sourceHash": "272d720daee732958fef0768e107eb57daf77b6d2eb4b15ec7dbf69b08933a6d",
+      "verifyCount": 1,
+      "hiddenVerifyCount": 1,
+      "attempts": [
+        {
+          "startedAt": "2026-11-25T18:51:17.257Z",
+          "completedAt": "2026-11-25T18:53:05.419Z",
+          "state": "completed"
+        }
+      ],
+      "verified": true,
+      "hiddenVerified": true,
+      "verifyExitCodes": [0, 0],
+      "repetition": 4,
+      "costUsd": null,
+      "tokens": null,
+      "durationMs": 108137,
+      "transcript": "",
+      "executionAttestation": {
+        "status": "observed",
+        "command": "node verify.js",
+        "cwd": "packages/sub",
+        "exitCode": 0,
+        "sourceHash": "fc690e91bc82061f2a590157647c9c45505f05cef6bf6bb7a012f9f566d49c83",
+        "at": "2026-11-25T18:52:36.232Z"
+      },
+      "skillInstall": "not-requested"
+    }
+  ]
+}

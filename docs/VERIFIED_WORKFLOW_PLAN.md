@@ -8,9 +8,8 @@ Anvil should tell an agent how to verify a task and give the reviewer evidence t
 check passed against the exact patch under review. Once that workflow is reliable, measure
 whether it helps agents deliver reviewable, verified patches on real repositories.
 
-This plan builds on the [reliability and distribution plan](IMPROVEMENT_PLAN.md) and the
-[AI enablement plan](AI_ENABLEMENT_PLAN.md). The verified-patch study groundwork lives on
-the `pr/nested-verification-pilot` branch and is described in Phase 2 below.
+This plan builds on the [reliability and distribution plan](IMPROVEMENT_PLAN.md), the
+[AI enablement plan](AI_ENABLEMENT_PLAN.md), and the [verified-patch study](VERIFIED_PATCH_STUDY.md).
 Keep the product CLI model-free, keep repository profiling non-executing, and keep run
 evidence local or scoped to controlled benchmark artifacts. No hosted telemetry or new agent
 integration is required.
@@ -25,11 +24,11 @@ integration is required.
 - `main` can record revision-bound results through `anvil crew verify --record`. The
   dashboard matches evidence by commit ID, so it cannot distinguish two dirty versions of
   that commit. `anvil ship` can push without having run local verification.
-- The launch evidence on the evaluation branch has two exact command matches, one partial
-  match (documented check found, CI check missed), and one blocked result without the actual
-  blocker. Its five-pair and ten-pair pilots both fell short of their predeclared threshold.
-  No effectiveness claim follows from them. The exact records are in that branch's
-  `docs/evidence/` directory.
+- The [launch evidence](evidence/2026-11-25-launch-claim.md) has two exact command matches,
+  one partial match (documented check found, CI check missed), and one blocked result
+  without the actual blocker. The [five-pair](evidence/2026-11-25-nested-verification-pilot.md)
+  and [ten-pair](evidence/2026-11-25-powered-pilot-results.md) pilots both fell short of their
+  predeclared threshold. No effectiveness claim follows from them.
 - GitHub source install is supported. The existing `v0.1.0` Git tag predates current
   functionality; first scoped npm publication remains [on hold in #38](https://github.com/tecruz/anvil/issues/38).
 

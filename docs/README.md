@@ -11,6 +11,7 @@
 | [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) | maintainers | the design, the milestones, and the defects each one found |
 | [IMPROVEMENT_PLAN.md](IMPROVEMENT_PLAN.md) | maintainers | the proposed next cycle: merge gates, benchmark evidence, failure recovery, and prebuilt releases |
 | [AI_ENABLEMENT_PLAN.md](AI_ENABLEMENT_PLAN.md) | maintainers | broadening AI enablement: declared capabilities, environment readiness, approved setup actions, and company context |
+| [VERIFIED_WORKFLOW_PLAN.md](VERIFIED_WORKFLOW_PLAN.md) | maintainers | exact-patch verification, task-scoped agent guidance, real-task evaluation, and release readiness |
 | [the opencode plugin](../packages/plugin-opencode/README.md) | plugin users | the same tools, registered inside the agent |
 
 **Start here:** [USAGE.md](USAGE.md). The [README](../README.md) is the argument for why
