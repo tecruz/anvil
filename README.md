@@ -15,13 +15,13 @@ Two channels are supported. Both install the same `anvil` binary, with no runtim
 ### Prebuilt from npm
 
 ```bash
-npm install -g @anvil-workflows/cli@0.2.0
+npm install -g @anvil-workflows/cli@0.2.1
 ```
 
 or without installing, for one run:
 
 ```bash
-npx @anvil-workflows/cli@0.2.0 doctor
+npx @anvil-workflows/cli@0.2.1 doctor
 ```
 
 The registry package is the prebuilt
@@ -47,7 +47,7 @@ so a breaking change reaches you on someone else's schedule — the same reason 
 exists:
 
 ```bash
-npm install -g github:tecruz/anvil#v0.2.0
+npm install -g github:tecruz/anvil#v0.2.1
 ```
 
 Three things worth knowing:

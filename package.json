@@ -1,6 +1,6 @@
 {
   "name": "anvil",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "AI-ready dev harness: audit repos, derive agent context, work tickets in parallel worktrees.",
   "license": "MIT",
