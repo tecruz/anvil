@@ -3,7 +3,7 @@ import { describe, test } from 'node:test'
 
 import type { CrewVerifyResult } from '@anvil/worktrees/crew'
 import { currentRecordFor, type EvidenceStore } from '../src/commands/crew.ts'
-import { isCurrentEvidenceRecord, planDigestFor, verdictFor } from '../src/verification-evidence.ts'
+import { isCurrentEvidenceRecord, planDigestForEntries, verdictFor } from '../src/verification-evidence.ts'
 
 const COMMIT = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
 const store: EvidenceStore = { root: '/repo', key: '0123456789abcdef' }
@@ -32,6 +32,48 @@ function result(overrides: Partial<CrewVerifyResult['results'][number]> = {}): C
 }
 
 describe('crew verification recording', () => {
+  test('commands in different directories keep their own directory in the evidence', () => {
+    const base = result().commands[0]!
+    const mixed = result({
+      commands: [
+        { ...base, command: 'npm run verify:ci', logicalCwd: 'ci' },
+        { ...base, command: 'npm test', logicalCwd: 'packages/api' },
+      ],
+    })
+
+    const record = currentRecordFor(mixed, store)
+    assert.ok(record !== null)
+    assert.equal(record.cwd, 'ci', 'the top-level cwd stays readable for older readers')
+    assert.deepEqual(
+      record.commands.map((command) => command.dir),
+      ['ci', 'packages/api'],
+    )
+    assert.equal(
+      record.planDigest,
+      planDigestForEntries([
+        { cmd: 'npm run verify:ci', dir: 'ci' },
+        { cmd: 'npm test', dir: 'packages/api' },
+      ]),
+    )
+    assert.notEqual(
+      record.planDigest,
+      planDigestForEntries([
+        { cmd: 'npm run verify:ci', dir: '' },
+        { cmd: 'npm test', dir: 'packages/api' },
+      ]),
+      'a changed directory is a different plan',
+    )
+    assert.equal(verdictFor(record, COMMIT), 'current')
+  })
+
+  test('a branch that moved during the check cannot yield a current record', () => {
+    const base = result().commands[0]!
+    const moved = result({
+      commands: [{ ...base, logicalCwd: 'packages/api', revisionAfter: 'f'.repeat(40) }],
+    })
+    assert.equal(currentRecordFor(moved, store), null)
+  })
+
   test('a clean, stable worktree produces a current record bound to its own directory', () => {
     const record = currentRecordFor(result(), store)
     assert.ok(record !== null)
@@ -39,7 +81,7 @@ describe('crew verification recording', () => {
     assert.equal(record.cwd, '')
     assert.equal(record.commit, COMMIT)
     assert.equal(record.clean, true)
-    assert.equal(record.planDigest, planDigestFor('', ['npm test']))
+    assert.equal(record.planDigest, planDigestForEntries([{ cmd: 'npm test', dir: '' }]))
     assert.equal(verdictFor(record, COMMIT), 'current')
   })
 
