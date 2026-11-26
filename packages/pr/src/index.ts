@@ -202,6 +202,11 @@ export interface PrBodyInput {
   verifyCommands: string[]
   /** Test results, when `ship` actually ran them. */
   verification?: { command: string; ok: boolean; detail?: string }[]
+  /**
+   * Commit the owner's verification policy pinned, when one exists. The PR body, the CLI
+   * result and the dashboard all name this same commit rather than a branch tip.
+   */
+  verificationCommit?: string
   /** True when this PR replaces an existing one. */
   isUpdate?: boolean
 }
@@ -233,9 +238,14 @@ export function renderPrBody(input: PrBodyInput): string {
     out.push('')
   }
 
+  const pinned = input.verificationCommit
   if (verification !== undefined && verification.length > 0) {
     out.push('### Verification')
     out.push('')
+    if (pinned !== undefined) {
+      out.push(`Evidence-bound commit: \`${pinned}\`.`)
+      out.push('')
+    }
     out.push('| Command | Result |')
     out.push('| --- | --- |')
     for (const v of verification) {
@@ -245,6 +255,10 @@ export function renderPrBody(input: PrBodyInput): string {
   } else if (input.verifyCommands.length > 0) {
     out.push('### Verification')
     out.push('')
+    if (pinned !== undefined) {
+      out.push(`Evidence-bound commit: \`${pinned}\`.`)
+      out.push('')
+    }
     out.push("Not run by anvil. These are the project's own commands:")
     out.push('')
     for (const cmd of input.verifyCommands) out.push(`- \`${cmd}\``)

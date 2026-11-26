@@ -31,8 +31,11 @@ import type { NormalizedState, Ticket, TicketRef } from '@anvil/tickets'
 
 /** What the pipeline needs from a forge. The `gh` transport implements this. */
 export interface ForgeTransport {
-  /** Push a branch, creating it upstream if needed. */
-  pushBranch(options: { cwd: string; branch: string }): Promise<{ ok: boolean; detail: string }>
+  /**
+   * Push a branch, creating it upstream if needed. When `commit` is supplied the transport
+   * pushes that exact commit to the branch ref, so the ref cannot move under the push.
+   */
+  pushBranch(options: { cwd: string; branch: string; commit?: string }): Promise<{ ok: boolean; detail: string }>
   /** Open a PR, or update the existing one for the branch. */
   upsertPullRequest(options: {
     cwd: string
@@ -84,8 +87,12 @@ export interface ShipOptions {
    * caller supplies the verdict so the evidence format stays a CLI concern.
    */
   requireCurrentVerification?: boolean
-  /** The CLI's answer to the policy above, including the reason when it is not satisfied. */
-  currentVerification?: { ok: boolean; detail: string }
+  /**
+   * The CLI's answer to the policy above, including the reason when it is not satisfied and,
+   * when it is satisfied, the exact commit the evidence names. That commit is pinned for the
+   * diff, the risk analysis and the push; a branch that moved after verification is refused.
+   */
+  currentVerification?: { ok: boolean; detail: string; commit?: string }
   /**
    * The shared verification plan from the CLI. Each entry carries its own repo-relative
    * directory, so an owner-declared command in a nested directory is run there. When absent,
@@ -102,7 +109,7 @@ export interface ShipOptions {
 }
 
 export interface ShipStage {
-  name: 'refuse' | 'verify' | 'diff' | 'push' | 'pr' | 'ticket'
+  name: 'refuse' | 'verify' | 'diff' | 'pin' | 'push' | 'pr' | 'ticket'
   ok: boolean
   detail: string
   /** Actionable recovery guidance, when this stage has a specific remedy. */
@@ -116,8 +123,20 @@ export interface ShipResult {
   reviewers: string[]
   pr?: { number: number; url: string; created: boolean }
   verification?: PrBodyInput['verification']
+  /** The commit evidence was recorded against, when the policy pinned one. */
+  verifiedCommit?: string
   /** Commands that were run, for the plan/cost record. */
   commandsRun: string[]
+}
+
+/**
+ * The commit the owner's policy pins. Absent when the policy is off, incomplete, or not
+ * satisfied — in which case `checkRefusals` already refuses the ship.
+ */
+function pinnedCommit(options: ShipOptions): string | undefined {
+  return options.requireCurrentVerification === true && options.currentVerification?.ok === true
+    ? options.currentVerification.commit
+    : undefined
 }
 
 export async function ship(input: ShipOptions): Promise<ShipResult> {
@@ -240,7 +259,11 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
   // check in checkRefusals only proves the diff can be computed at all.
   let changed: string[]
   try {
-    changed = await changedPaths(options)
+    const pinned = pinnedCommit(options)
+    changed = await changedPaths({
+      ...options,
+      ...(pinned === undefined ? {} : { verifiedCommit: pinned }),
+    })
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     const hint = err instanceof AnvilError ? err.hint : undefined
@@ -268,11 +291,34 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
   // ---- 4. Push -------------------------------------------------------------
   // The transport is the network boundary. A thrown error is a failed push, not a crash:
   // the caller needs the stage record to know that nothing reached the remote.
+  const commit = pinnedCommit(options)
+  if (commit !== undefined) {
+    // Verification and risk analysis take time. Re-sample immediately before the network
+    // boundary so a commit created in that window is never pushed under stale evidence.
+    const head = await git(['rev-parse', 'HEAD'], { cwd: options.worktreePath })
+    if (head.exitCode !== 0 || head.stdout.trim().toLowerCase() !== commit.toLowerCase()) {
+      stages.push({
+        name: 'pin',
+        ok: false,
+        detail: `The branch moved from verified commit ${commit.slice(0, 7)} before the push.`,
+        hint: 'Nothing was pushed. Re-run `anvil crew verify --record` on the new HEAD before shipping.',
+      })
+      return {
+        ok: false,
+        stages,
+        risk,
+        reviewers,
+        ...(verification === undefined ? {} : { verification }),
+        commandsRun,
+      }
+    }
+  }
   let pushed: { ok: boolean; detail: string }
   try {
     pushed = await options.transport.pushBranch({
       cwd: options.worktreePath,
       branch: options.branch,
+      ...(commit === undefined ? {} : { commit }),
     })
   } catch (err) {
     pushed = { ok: false, detail: err instanceof Error ? err.message : String(err) }
@@ -314,6 +360,7 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
       (c) => c,
     ),
     ...(verification === undefined ? {} : { verification }),
+    ...(commit === undefined ? {} : { verificationCommit: commit }),
     isUpdate: existing !== null,
   })
 
@@ -376,6 +423,7 @@ export async function ship(input: ShipOptions): Promise<ShipResult> {
     reviewers,
     ...(pr === undefined ? {} : { pr }),
     ...(verification === undefined ? {} : { verification }),
+    ...(commit === undefined ? {} : { verifiedCommit: commit }),
     commandsRun,
   }
 }
@@ -440,6 +488,22 @@ async function checkRefusals(options: ShipOptions): Promise<Refusal> {
         hint: 'Run `anvil crew verify --record` in a clean worktree for this claim, then ship the checked commit.',
       }
     }
+    const commit = evidence.commit
+    if (commit === undefined || !/^[0-9a-f]{7,64}$/i.test(commit)) {
+      return {
+        ok: false,
+        detail: 'The current verification record does not name a commit to ship.',
+        hint: 'Run `anvil crew verify --record` again, then ship the checked commit.',
+      }
+    }
+    const head = await git(['rev-parse', 'HEAD'], { cwd: options.worktreePath })
+    if (head.exitCode !== 0 || head.stdout.trim().toLowerCase() !== commit.toLowerCase()) {
+      return {
+        ok: false,
+        detail: `The worktree HEAD no longer matches the verified commit ${commit.slice(0, 7)}.`,
+        hint: 'Ship the verified commit; do not add commits between `crew verify --record` and `ship`.',
+      }
+    }
   }
 
   if (options.profile.commands.test === undefined && !options.skipVerify && !options.probe) {
@@ -501,9 +565,12 @@ export async function changedPaths(options: {
   worktreePath: string
   baseBranch: string
   baseRef?: string
+  /** Diff against this commit instead of HEAD, so risk and reviewers describe evidence. */
+  verifiedCommit?: string
 }): Promise<string[]> {
   const baseRef = options.baseRef ?? options.baseBranch
-  const res = await git(['diff', '--name-only', `${baseRef}...HEAD`], {
+  const endpoint = options.verifiedCommit ?? 'HEAD'
+  const res = await git(['diff', '--name-only', `${baseRef}...${endpoint}`], {
     cwd: options.worktreePath,
   })
   if (res.exitCode !== 0) {

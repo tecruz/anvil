@@ -282,6 +282,24 @@ describe('PR body', () => {
     assert.match(body, /Not run by anvil/)
   })
 
+  test('names the evidence-bound commit in the verification section', () => {
+    const pinned = 'abcdef1234567890'
+    const withResults = renderPrBody({
+      ...base,
+      ticket: ticket(),
+      verification: [{ command: 'npm test', ok: true }],
+      verificationCommit: pinned,
+    })
+    assert.match(withResults, new RegExp(`Evidence-bound commit: \\\`${pinned}\\\``))
+
+    const withoutResults = renderPrBody({ ...base, ticket: ticket(), verificationCommit: pinned })
+    assert.match(withoutResults, new RegExp(`Evidence-bound commit: \\\`${pinned}\\\``))
+    assert.match(withoutResults, /Not run by anvil/)
+
+    const unpinned = renderPrBody({ ...base, ticket: ticket() })
+    assert.doesNotMatch(unpinned, /Evidence-bound commit/)
+  })
+
   test('names CODEOWNERS reviewers', () => {
     const body = renderPrBody({
       ...base,

@@ -6,15 +6,14 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { actionArgv } from '@anvil/dashboard'
-import {
-  type EvidenceRecord,
-  evidenceStore,
-  readVerificationEvidence,
-  selectVerificationRecords,
-  verificationEvidencePath,
-} from '../src/commands/crew.ts'
+import { evidenceStore, readVerificationEvidence, verificationEvidencePath } from '../src/commands/crew.ts'
 import { dashboardInvokers, stagedView } from '../src/commands/dashboard.ts'
 import { DASHBOARD_ACTION_TIMEOUT_MS } from '../src/mcp.ts'
+import {
+  isLegacyEvidenceRecord,
+  type LegacyEvidenceRecord,
+  selectVerificationRecords,
+} from '../src/verification-evidence.ts'
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -101,7 +100,7 @@ describe('the dashboard staging view', () => {
   })
 
   test('evidence retention keeps the newest result by completion time', () => {
-    const at = (seconds: number, exitCode: number | null, command = 'npm test'): EvidenceRecord => ({
+    const at = (seconds: number, exitCode: number | null, command = 'npm test'): LegacyEvidenceRecord => ({
       command,
       revision: exitCode === null ? null : 'abcdef1234',
       exitCode,
@@ -109,13 +108,13 @@ describe('the dashboard staging view', () => {
     })
     const failures = Array.from({ length: 20 }, (_, index) => at(index, 0))
     const lastFailure = { ...at(30, 1), command: 'npm run lint' }
-    const selected = selectVerificationRecords([lastFailure, ...failures])
+    const selected = selectVerificationRecords([lastFailure, ...failures]).filter(isLegacyEvidenceRecord)
     assert.ok(selected.some((record) => record.command === 'npm run lint' && record.exitCode === 1))
     assert.equal(selected.length, 20)
   })
 
   test('evidence retention keeps incomplete rows so they are distinguishable from no run', () => {
-    const row: EvidenceRecord = {
+    const row: LegacyEvidenceRecord = {
       command: 'npm test',
       revision: null,
       exitCode: null,
@@ -131,13 +130,13 @@ describe('the dashboard staging view', () => {
       exitCode: null,
       timestamp: `2026-11-21T00:01:${String(index).padStart(2, '0')}.000Z`,
     }))
-    const failure: EvidenceRecord = {
+    const failure: LegacyEvidenceRecord = {
       command: 'npm test',
       revision: 'abcdef1234',
       exitCode: 1,
       timestamp: '2026-11-21T00:00:00.000Z',
     }
-    const selected = selectVerificationRecords([...rejected, failure])
+    const selected = selectVerificationRecords([...rejected, failure]).filter(isLegacyEvidenceRecord)
     assert.ok(selected.some((record) => record.exitCode === 1))
     assert.ok(selected.length <= 20)
   })
@@ -156,7 +155,7 @@ describe('the dashboard staging view', () => {
       exitCode: null,
       timestamp: stamp,
     }
-    const selected = selectVerificationRecords([...facts, rejected])
+    const selected = selectVerificationRecords([...facts, rejected]).filter(isLegacyEvidenceRecord)
     assert.equal(selected.length, 20)
     assert.deepEqual(
       selected.filter((record) => record.command === ''),

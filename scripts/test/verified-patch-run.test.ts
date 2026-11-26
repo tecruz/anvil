@@ -8,7 +8,14 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { graderDigests, isolatedEnv, loadManifest, preflightTask, runSpecHash } from '../verified-patch-run.ts'
+import {
+  graderDigests,
+  isolatedEnv,
+  loadManifest,
+  preflightTask,
+  runSpecHash,
+  verifyScriptExecutable,
+} from '../verified-patch-run.ts'
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 const runner = join(repoRoot, 'scripts/verified-patch-run.ts')
@@ -22,8 +29,18 @@ test('the manifest loads and every enrolled task passes preflight without a mode
     assert.equal(result.id, task.id)
     assert.equal(result.hiddenFailsOnBase, true, `${task.id}: hidden acceptance must fail on the base`)
     assert.equal(result.hiddenPassesWithFix, true, `${task.id}: hidden acceptance must pass with the fix`)
+    assert.equal(result.verifyScriptExecutable, true, `${task.id}: the captured check must be executable JS`)
     assert.equal(result.ok, true)
   }
+})
+
+test('preflight refuses a captured check that is a data file, not a script', () => {
+  const task = loadManifest(repoRoot).tasks.find((entry) => entry.id === 'node-tiny-slugify')
+  assert.ok(task)
+  const broken = { ...task, verifyScript: 'package.json' }
+
+  assert.equal(verifyScriptExecutable(repoRoot, broken), false)
+  assert.equal(preflightTask(repoRoot, broken).ok, false)
 })
 
 test('preflight writes a bounded report and never creates a run record', () => {

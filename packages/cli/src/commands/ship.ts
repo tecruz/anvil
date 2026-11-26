@@ -197,6 +197,7 @@ export const shipCommand: Command = {
       reviewers: result.reviewers,
       pr: result.pr ?? null,
       verification: result.verification ?? null,
+      verifiedCommit: result.verifiedCommit ?? null,
       commandsRun: result.commandsRun,
     }
 
@@ -235,6 +236,9 @@ export const shipCommand: Command = {
         out.push('')
         out.push(`  pull request  ${result.pr.url} ${s.dim(result.pr.created ? '(new)' : '(updated)')}`)
       }
+      if (result.verifiedCommit !== undefined) {
+        out.push(`  verified      ${result.verifiedCommit.slice(0, 7)} ${s.dim('(evidence-bound commit)')}`)
+      }
       if (result.risk.level !== null) {
         out.push(
           `  risk          ${result.risk.level === 'high' ? s.red('HIGH') : s.yellow('medium')} ${s.dim(`${result.risk.highPaths.length} high, ${result.risk.mediumPaths.length} medium`)}`,
@@ -255,6 +259,8 @@ function hintForStage(stage: string | undefined): string | undefined {
       return 'Fix the failing command, or re-run with --skip-verify if it is not a real signal.'
     case 'diff':
       return 'Fetch the missing history, or choose a base that shares history with the branch.'
+    case 'pin':
+      return 'Re-run `anvil crew verify --record` on the current HEAD, then ship that commit.'
     case 'push':
       return 'Check the remote and your credentials: git push -u origin <branch>.'
     case 'pr':
@@ -303,7 +309,7 @@ async function currentVerificationFor(
   worktreePath: string,
   profile: ProjectProfile,
   plan: ReturnType<typeof verificationPlan>,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<{ ok: boolean; detail: string; commit?: string }> {
   const store = evidenceStore(repoRoot)
   if (store === null) return { ok: false, detail: 'Cannot resolve the verification evidence store.' }
   const commit = await headRevision(worktreePath)
@@ -323,7 +329,14 @@ async function currentVerificationFor(
     (record) => record.planDigest === expectedDigest && verdictFor(record, commit) === 'current',
   )
   if (matching !== undefined) {
-    return { ok: true, detail: `current verification for ${claimKey} at ${commit.slice(0, 7)}` }
+    // Surface the commit the evidence names. The pipeline pins this exact commit for the
+    // diff, the risk analysis and the push, so a branch that moves after verification cannot
+    // ship an unchecked tree.
+    return {
+      ok: true,
+      detail: `current verification for ${claimKey} at ${commit.slice(0, 7)}`,
+      ...(matching.commit === null ? {} : { commit: matching.commit }),
+    }
   }
   const planMatch = relevant.some((record) => record.planDigest === expectedDigest)
   const verdicts = [...new Set(relevant.map((record) => verdictFor(record, commit)))].join(', ')

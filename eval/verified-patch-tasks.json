@@ -23,7 +23,7 @@
       "task": "Implement slugify in src/slug.js following the rules in README.md: lowercase the title, replace runs of spaces with a single dash, and trim dashes at both ends. Add a case to test/text.test.js covering the behaviour you implemented. Run the repository check from the repository root before finishing. Do not edit package.json or README.md.",
       "verifyCommand": "npm test",
       "acceptedCommands": ["npm test"],
-      "verifyScript": "package.json",
+      "verifyScript": "verify.js",
       "declared": { "command": "npm test", "bin": "npm", "argv": ["test"] },
       "captureDir": "",
       "inScope": ["src/slug.js", "test/text.test.js"],

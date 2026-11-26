@@ -70,7 +70,28 @@ export interface PreflightResult {
   id: string
   hiddenFailsOnBase: boolean
   hiddenPassesWithFix: boolean
+  /** The captured check is a real script Node can execute, not a data file. */
+  verifyScriptExecutable: boolean
   ok: boolean
+}
+
+/**
+ * The broker runs the captured `verifyScript` as an ES module. A JSON manifest such as
+ * `package.json` is not a program: it raises a syntax error, so no patch can satisfy the
+ * attestation condition and both arms fail for a harness reason. Check that the script parses
+ * before enrolling a task, not only that hidden acceptance discriminates.
+ */
+export function verifyScriptExecutable(repoRoot: string, task: VerifiedPatchTask): boolean {
+  if (!/\.m?js$/.test(task.verifyScript)) return false
+  const source = readFileSync(join(repoRoot, task.repo, task.verifyScript), 'utf8')
+  const tempDir = mkdtempSync(join(tmpdir(), 'verified-patch-script-'))
+  try {
+    const path = join(tempDir, 'check.mjs')
+    writeFileSync(path, source, 'utf8')
+    return spawnSync(process.execPath, ['--check', path], { stdio: 'pipe' }).status === 0
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true })
+  }
 }
 
 /** No model, no network: copy the pinned task repo and prove the acceptance test discriminates. */
@@ -81,11 +102,13 @@ export function preflightTask(repoRoot: string, task: VerifiedPatchTask): Prefli
     const hiddenFailsOnBase = !hiddenAcceptancePassed(task, repoRoot, workspace)
     writeFileSync(join(workspace, task.fixTarget), readFileSync(join(repoRoot, task.referenceFix)))
     const hiddenPassesWithFix = hiddenAcceptancePassed(task, repoRoot, workspace)
+    const executable = verifyScriptExecutable(repoRoot, task)
     return {
       id: task.id,
       hiddenFailsOnBase,
       hiddenPassesWithFix,
-      ok: hiddenFailsOnBase && hiddenPassesWithFix,
+      verifyScriptExecutable: executable,
+      ok: hiddenFailsOnBase && hiddenPassesWithFix && executable,
     }
   } finally {
     rmSync(workspace, { recursive: true, force: true })
@@ -426,7 +449,7 @@ export async function main(args: readonly string[]): Promise<number> {
     )
     for (const result of results) {
       console.log(
-        `${result.id}: base=${result.hiddenFailsOnBase} fix=${result.hiddenPassesWithFix} ${result.ok ? 'ok' : 'FAILED'}`,
+        `${result.id}: base=${result.hiddenFailsOnBase} fix=${result.hiddenPassesWithFix} script=${result.verifyScriptExecutable} ${result.ok ? 'ok' : 'FAILED'}`,
       )
     }
     return results.every((result) => result.ok) ? 0 : 1

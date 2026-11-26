@@ -703,10 +703,21 @@ describe('the snapshot reader', () => {
       ],
     })
     assert.equal(snapshot.verification.status, 'recorded')
+    // Legacy rows are still readable as history, but the snapshot marks them explicitly so
+    // a v1 `-dirty` row can never be presented as current verification.
+    const legacy = (over: Record<string, unknown>) => ({
+      cwd: null,
+      format: 1,
+      planDigest: null,
+      claim: null,
+      clean: null,
+      verdict: 'legacy',
+      ...over,
+    })
     assert.deepEqual(snapshot.verification.evidence, [
-      { ...record, matchesCurrent: null },
-      { ...record, revision: 'a'.repeat(40), matchesCurrent: null },
-      { ...record, exitCode: 3010, matchesCurrent: null },
+      legacy({ ...record, matchesCurrent: null }),
+      legacy({ ...record, revision: 'a'.repeat(40), matchesCurrent: null }),
+      legacy({ ...record, exitCode: 3010, matchesCurrent: null }),
     ])
     assert.equal(snapshot.verification.currentRevision, null)
     assert.ok(snapshot.verification.incompleteCount > 0)
@@ -734,7 +745,8 @@ describe('the snapshot reader', () => {
       snapshot.verification.evidence.map((item) => item.matchesCurrent),
       [false, true],
     )
-    assert.match(snapshot.verification.reason, /different revision/)
+    assert.equal(snapshot.verification.verdict, 'legacy')
+    assert.match(snapshot.verification.reason, /Only legacy verification rows exist/)
   })
 
   test('verification compares commit ids case-insensitively', async () => {

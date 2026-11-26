@@ -1,7 +1,8 @@
 # Implementation plan: verified AI-assisted work
 
-Status: **Phase 1 and Phase 2 implemented; Phase 0 integration prepared; Phase 4 and publication
-await explicit approval**, 2026-11-26.
+Status: **Phases 0–3 integrated and 0.2.1 published; Phase 4 executed with insufficient
+evidence and its grader audited**, 2026-11-26. The pinned-commit and guidance work below is on
+`impl/integrated`, pending the final integration head.
 
 ## Progress
 
@@ -9,31 +10,41 @@ await explicit approval**, 2026-11-26.
   a claim, a repo-relative directory and a digest of the exact check plan. The dashboard and
   task brief distinguish `current`, `stale`, `failed`, `incomplete` and `legacy`. The opt-in
   `features.requireCurrentVerification` policy refuses a ship before the push when current
-  evidence is missing. See `packages/cli/src/verification-evidence.ts` and
-  `packages/cli/test/crew-evidence.test.ts`.
+  evidence is missing. The evidence's commit is now pinned: the diff, risk analysis and the
+  push all use that exact commit, HEAD is re-sampled immediately before the push, and the CLI
+  result and PR body name the same commit. See `packages/cli/src/verification-evidence.ts`,
+  `packages/worktrees/src/ship.ts` and `packages/providers/src/github.ts`.
 - **Phase 2 — done.** The broker fingerprints the patch before and after a check and refuses
   mid-check edits; the runner uses an allowlisted environment, kills the agent process tree at
   the timeout, binds approval to grader/CLI bytes, and checkpoints each arm with redacted
   failure reasons. See `docs/VERIFIED_PATCH_STUDY.md`.
-- **Phase 0 — partially done.** This branch is the local reconciliation of the product work on
-  `main` with the evaluation work on `pr/nested-verification-pilot`. Merging the corresponding
-  PRs on GitHub and re-running the eight required checks on the final head is still a
-  maintainer action.
+- **Phase 0 — integration in progress.** #103 was merged into `main`; the integrated branch
+  was reconciled onto that head and now contains #104 and the released product work. Eight
+  required checks and the installed Task Brief smoke test still have to be run on the final
+  integration head.
 - **Phase 3 — done.** A single `verificationPlan` in `@anvil/profile` now feeds the brief and
   generated instructions plus `crew verify` and `ship`: declared commands win, keep their own
   directory, and conflicting detected commands stay visible. Tests cover nested directories on
   both runners. `init --with-mirrors` defers to the generated `AGENTS.md`; nested instructions
-  and on-demand skills follow the repository's existing conventions.
+  and on-demand skills follow the repository's existing conventions. The ticket bundle now
+  renders the shared plan too, so a claimed worktree names the declared command, its directory
+  and any conflict. A cross-artifact test checks that brief, generated instructions, `ready`
+  and the plan agree on a nested declared command.
 - **Phase 4 — executed, insufficient evidence.** The predeclared 20-invocation pilot ran on
   2026-11-26 under a free model with no spend. The `verified-patch` task was solved by both
   arms in all five pairs; `node-tiny-slugify` was solved by neither arm in five pairs. Neither
   task met the one-sided-win rule, so no effectiveness claim follows. See
   [the predeclared plan](evidence/2026-11-26-verified-patch-pilot-plan.md) and
-  [the results](evidence/2026-11-26-verified-patch-results.md).
-- **Release — done.** `@anvil-workflows/cli@0.2.0` was published from tag `v0.2.0` with npm
-  provenance after a passing no-publish rehearsal. The registry bytes were independently
-  downloaded and matched the tested SHA-256. See
-  [the publication record](evidence/2026-11-26-release-publication.md).
+  [the results](evidence/2026-11-26-verified-patch-results.md). A later
+  [grader audit](evidence/2026-11-26-verified-patch-grader-audit.md) found that the second
+  task's captured check was `package.json`, which Node cannot execute, so those five failures
+  were harness failures rather than agent failures. The fixture was repaired and preflight now
+  refuses unexecutable checks; no rerun was authorized.
+- **Release — done.** `@anvil-workflows/cli@0.2.1` is the published version; `0.2.0` preceded
+  it. Both were published from tags with npm provenance after passing no-publish rehearsals,
+  and the registry bytes matched the tested SHA-256. See
+  [the publication record](evidence/2026-11-26-release-publication.md). The integration and
+  pinned-commit work here is newer than `0.2.1` and is not yet released.
 
 ## Goal
 
