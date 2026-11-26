@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { spawnArgv } from '../packages/core/src/exec.ts'
 import {
   type GradeKind,
   gradeVerifiedPatch,
@@ -289,10 +290,16 @@ async function runAgent(options: {
   ]
   let timedOut = false
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('opencode', args, {
+    // The npm-installed opencode is a .cmd shim on Windows: a raw spawn('opencode') fails
+    // with ENOENT. Use the project's shim-aware resolver so a launch failure is a run error
+    // with a clear reason, not a crash before the first arm is graded.
+    const command = spawnArgv('opencode', args, { env })
+    const child = spawn(command.file, command.args, {
       cwd: options.workdir,
       env,
       detached: process.platform !== 'win32',
+      stdio: 'ignore',
+      ...(command.resolved.isShim ? { windowsVerbatimArguments: true } : {}),
     })
     const timer = setTimeout(() => {
       timedOut = true
