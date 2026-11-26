@@ -24,6 +24,8 @@ generated artifact, and it is separate from the hermetic benchmark and `eval-res
 | Task manifest and preflight | `eval/verified-patch-tasks.json`, `scripts/verified-patch-run.ts` |
 | Opt-in runner and approval gate | `scripts/verified-patch-run.ts` |
 | Runner controls | `scripts/test/verified-patch-run.test.ts` |
+| Mid-check edit control | `scripts/test/eval-check-broker.test.ts` |
+| Isolated agent environment | `isolatedEnv` in `scripts/verified-patch-run.ts` |
 
 `node --test scripts/test/verified-patch.test.ts` passes **9 tests, 0 failures**. The controls
 cover: hidden acceptance failing on the base and passing with the reference fix; a correct
@@ -46,8 +48,10 @@ A task counts as a success only when all three hold:
 2. **Hidden acceptance.** A test the agent never saw is copied in after the run and passes on
    the final tree.
 3. **Attested verification.** The repository check ran under harness control, from the declared
-   directory, exited 0, and carries a fingerprint of the in-scope files **at execution time**
-   equal to the final patch fingerprint. A green check followed by an edit is stale and fails.
+   directory, exited 0, and carries a fingerprint of the in-scope files **before execution**
+   equal to the final patch fingerprint. The broker samples the patch again when the check
+   exits: if it moved during the run, no execution is attested. A green check followed by an
+   edit is stale and fails; so is an edit made while the check was running.
 
 A grader-side green run is not evidence about the agent's workflow. A written report is not
 evidence of execution. Broker faults are run errors, not task failures.
@@ -67,6 +71,20 @@ The broker now shims the manifest-declared command as well as the standalone scr
 fixture, `npm run test` and `node verify.js` both map to the pre-snapshotted `verify.js`, and
 both record the command the agent actually invoked. The grader accepts either form. A control
 drives `npm run test` through the shim and requires a successful grade.
+
+## Run isolation and retention
+
+Each arm runs in a fresh directory with an allowlisted environment: PATH, the broker's
+declared-command variables, a small set of platform variables, and provider variables for the
+selected model. Unrelated host secrets are not inherited, and `NODE_OPTIONS`, `NODE_PATH` and
+`NODE_TEST_CONTEXT` are removed. The agent process is killed with its whole process tree when
+the declared timeout expires; a timeout is a run error, not a scored task failure.
+
+Approval binds the task card to the exact grader, broker, runner and CLI bytes as well as the
+model, seed, limits and source commit. Every arm is checkpointed as soon as it settles, under
+`eval-results/pilots/<runId>/arms/`, so an interrupted run keeps its measured work. Retained
+failure reasons are bounded and redact host paths and `NAME=value` secrets; unmeasured cost
+and timing stay `null`.
 
 ## What remains before any real run
 

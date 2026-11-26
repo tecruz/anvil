@@ -98,6 +98,31 @@ test('the launcher returns actual output and a source-bound parent-process recor
   await broker.close()
 })
 
+test('a patch changed during the check cannot earn a green attestation', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'anvil-check-broker-hash-test-'))
+  const trusted = join(root, 'fixture')
+  const workdir = join(root, 'workdir')
+  mkdirSync(trusted)
+  mkdirSync(workdir)
+  const source = 'process.exit(0)\n'
+  writeFileSync(join(trusted, 'run-check.js'), source)
+  writeFileSync(join(workdir, 'run-check.js'), source)
+  const check = captureCheck('node run-check.js', 'run-check.js', trusted)
+  // Simulates an edit landing between the start and the end of the check. The broker must
+  // use the snapshot it took before execution, not one sampled afterwards.
+  let calls = 0
+  const broker = await startCheckBroker([check], workdir, '', () => `hash-${++calls}`)
+  t.after(async () => {
+    await broker.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
+  const result = await launch(broker, workdir, ['run-check.js'])
+  assert.notEqual(result.code, 0, 'the broker must refuse the check after a mid-run edit')
+  assert.equal(broker.executions.length, 0, 'no execution may be attested after a mid-check edit')
+  assert.match(broker.integrityError ?? '', /patch changed while the check was running/)
+  assert.equal(calls, 2, 'the fingerprint must be sampled on both sides of execution')
+})
+
 test('same-exit script replacement is rejected and the integrity error survives restoration', async (t) => {
   const { workdir, broker } = await fixture(t)
   writeFileSync(join(workdir, 'run-check.js'), "console.error('forged'); process.exit(1)\n")

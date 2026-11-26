@@ -195,6 +195,9 @@ export async function startCheckBroker(
         reply(response, 409, { error: integrityError })
         return
       }
+      // Snapshot the in-scope patch before the check starts. A fingerprint taken only after
+      // the process exits can attribute a green run to edits made while it was executing.
+      const patchHashBefore = fingerprint?.() ?? null
       // Never accept source, environment, argv or an exit status from the client.
       // The absolute runtime and captured source prevent executable/file swaps and
       // a race between the integrity check above and Node reading the main script.
@@ -221,6 +224,12 @@ export async function startCheckBroker(
         stdout = result.stdout ?? ''
         stderr = result.stderr ?? ''
       }
+      const patchHashAfter = fingerprint?.() ?? null
+      if (patchHashBefore !== null && patchHashAfter !== patchHashBefore) {
+        integrityError = 'the patch changed while the check was running; execution evidence is invalid'
+        reply(response, 409, { error: integrityError })
+        return
+      }
       const execution = {
         command: check.command,
         exitCode,
@@ -229,7 +238,7 @@ export async function startCheckBroker(
         stderr,
         at: new Date().toISOString(),
         cwd: recordedCwd,
-        ...(fingerprint === undefined ? {} : { patchHash: fingerprint() }),
+        ...(patchHashBefore === null ? {} : { patchHash: patchHashBefore }),
       }
       executions.push(execution)
       reply(response, 200, execution)

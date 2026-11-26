@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { loadManifest, preflightTask, runSpecHash } from '../verified-patch-run.ts'
+import { graderDigests, isolatedEnv, loadManifest, preflightTask, runSpecHash } from '../verified-patch-run.ts'
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url))
 const runner = join(repoRoot, 'scripts/verified-patch-run.ts')
@@ -57,6 +57,40 @@ test('the run spec hash is deterministic over the task card and config', () => {
     runSpecHash(repoRoot, manifest, config),
     runSpecHash(repoRoot, manifest, { ...config, seed: 'other' }),
   )
+})
+
+test('the run spec binds the grader and CLI bytes, not just the task card', () => {
+  const digests = graderDigests(repoRoot, join(repoRoot, 'packages/cli/dist/cli.js'))
+  assert.match(digests.grader ?? '', /^[0-9a-f]{64}$/)
+  assert.match(digests.broker ?? '', /^[0-9a-f]{64}$/)
+  assert.match(digests.cli ?? '', /^[0-9a-f]{64}$/)
+  const manifest = loadManifest(repoRoot)
+  const config = {
+    model: 'opencode/hy4-flash-free',
+    repetitions: 1,
+    timeoutMinutes: 5,
+    seed: 'verified-patch-v1',
+    config: null,
+    cli: join(repoRoot, 'packages/cli/dist/cli.js'),
+  }
+  const before = runSpecHash(repoRoot, manifest, config)
+  assert.equal(before, runSpecHash(repoRoot, manifest, config))
+  assert.notEqual(before, runSpecHash(repoRoot, manifest, { ...config, seed: 'other' }))
+})
+
+test('the agent environment is allowlisted and never inherits unrelated secrets', () => {
+  const previous = process.env.ANVIL_TEST_UNRELATED_SECRET
+  process.env.ANVIL_TEST_UNRELATED_SECRET = 'should-not-leak'
+  try {
+    const env = isolatedEnv({ PATH: '/shim', ANVIL_DECLARED_BIN: 'npm' }, null)
+    assert.equal(env.PATH, '/shim')
+    assert.equal(env.ANVIL_DECLARED_BIN, 'npm')
+    assert.equal(env.ANVIL_TEST_UNRELATED_SECRET, undefined)
+    assert.equal(env.NODE_OPTIONS, undefined)
+  } finally {
+    if (previous === undefined) delete process.env.ANVIL_TEST_UNRELATED_SECRET
+    else process.env.ANVIL_TEST_UNRELATED_SECRET = previous
+  }
 })
 
 test('the runner refuses to run when the opt-in is absent', () => {

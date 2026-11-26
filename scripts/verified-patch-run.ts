@@ -6,9 +6,9 @@
  * spec (task list, model, seed, repetitions, timeout, config and Anvil commit). There is no
  * path from a preflight or a dry run to a model call without that approval.
  */
-import { spawn } from 'node:child_process'
+import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -95,6 +95,25 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex')
 }
 
+/** Hash a file's bytes when it exists; a missing file is reported as null, never as empty. */
+function fileDigest(path: string): string | null {
+  if (!existsSync(path)) return null
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+/**
+ * Grader and CLI bytes are part of the run spec: a "verified patch" result produced by a
+ * different grader is a different measurement and must not inherit an earlier approval.
+ */
+export function graderDigests(repoRoot: string, cli: string): Record<string, string | null> {
+  return {
+    runner: fileDigest(join(repoRoot, 'scripts/verified-patch-run.ts')),
+    grader: fileDigest(join(repoRoot, 'scripts/verified-patch.ts')),
+    broker: fileDigest(join(repoRoot, 'scripts/eval-check-broker.ts')),
+    cli: fileDigest(cli),
+  }
+}
+
 export function runSpecHash(repoRoot: string, manifest: Manifest, config: RunConfig): string {
   const taskDigests = manifest.tasks.map((task) =>
     sha256(
@@ -121,6 +140,7 @@ export function runSpecHash(repoRoot: string, manifest: Manifest, config: RunCon
       timeoutMinutes: config.timeoutMinutes,
       seed: config.seed,
       configHash: config.config === null ? null : sha256(readFileSync(config.config, 'utf8')),
+      graderDigests: graderDigests(repoRoot, config.cli),
       taskDigests,
     }),
   )
@@ -151,30 +171,107 @@ interface ArmResult {
   repetition: number
   grade: GradeKind
   reasons: string[]
-  workdir: string
+  /** Bounded failure reasons with host paths and KEY=value secrets removed. */
+  detail: string | null
 }
 
-async function runAgent(options: {
-  cli: string
-  workdir: string
-  task: VerifiedPatchTask
-  config: RunConfig
-  brokerEnv: NodeJS.ProcessEnv
-}): Promise<void> {
-  writeFileSync(join(options.workdir, TASK_FILE), `${options.task.task}\n`, 'utf8')
-  const env: NodeJS.ProcessEnv = { ...process.env }
-  for (const key of Object.keys(env)) {
-    if (key.toLowerCase() === 'path') delete env[key]
+/** Keep failure reasons useful without publishing host paths or environment values. */
+function redact(value: string): string {
+  let out = value.split(repoRootPath()).join('<repo>')
+  out = out.replace(/[A-Za-z]:\\Users\\[^\\\s]+/g, '<home>')
+  out = out.replace(/\b([A-Z][A-Z0-9_]{2,}=)[^\s]+/g, '$1<redacted>')
+  return out.slice(0, 400)
+}
+
+function repoRootPath(): string {
+  return fileURLToPath(new URL('../', import.meta.url))
+}
+
+function writeCheckpoint(dest: string, name: string, value: unknown): void {
+  const path = join(dest, name)
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`)
+  renameSync(temp, path)
+}
+
+/**
+ * Give the agent only what it needs. Inheriting the whole parent environment lets a task
+ * read unrelated credentials from the host; an allowlist keeps provider access while removing
+ * shell exports, proxies and CI secrets that the study must not depend on.
+ */
+export function isolatedEnv(brokerEnv: NodeJS.ProcessEnv, configPath: string | null): NodeJS.ProcessEnv {
+  const allowed = new Set([
+    'PATH',
+    'HOME',
+    'USERPROFILE',
+    'TEMP',
+    'TMP',
+    'TMPDIR',
+    'SYSTEMROOT',
+    'WINDIR',
+    'LANG',
+    'LC_ALL',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'NODE_EXTRA_CA_CERTS',
+    'ANVIL_EVAL',
+    'ANVIL_DECLARED_BIN',
+  ])
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue
+    const upper = key.toUpperCase()
+    if (
+      allowed.has(upper) ||
+      upper.startsWith('XDG_') ||
+      upper.startsWith('OPENCODE_') ||
+      upper.startsWith('OPENROUTER_')
+    ) {
+      env[key] = value
+    }
   }
-  env.PATH = options.brokerEnv.Path ?? options.brokerEnv.PATH ?? ''
-  if (options.config.config !== null) {
-    env.OPENCODE_CONFIG = options.config.config
-    const base = join(options.config.config, '..')
+  // The broker's PATH carries the shim that captures repository checks. Its own variables
+  // must survive even when they are outside the general allowlist.
+  Object.assign(env, brokerEnv)
+  for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'NODE_TEST_CONTEXT']) delete env[name]
+  if (configPath !== null) {
+    env.OPENCODE_CONFIG = configPath
+    const base = join(configPath, '..')
     env.XDG_CONFIG_HOME = join(base, 'config')
     env.XDG_DATA_HOME = join(base, 'data')
     env.XDG_CACHE_HOME = join(base, 'cache')
     env.XDG_STATE_HOME = join(base, 'state')
   }
+  return env
+}
+
+/** Kill the agent and anything it spawned; a timed-out child must not keep running the task. */
+function killTree(child: ChildProcess): void {
+  const pid = child.pid
+  if (pid === undefined) {
+    child.kill('SIGKILL')
+    return
+  }
+  if (process.platform === 'win32') {
+    const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+    if (result.status !== 0) child.kill('SIGKILL')
+    return
+  }
+  try {
+    process.kill(-pid, 'SIGKILL')
+  } catch {
+    child.kill('SIGKILL')
+  }
+}
+
+async function runAgent(options: {
+  workdir: string
+  task: VerifiedPatchTask
+  config: RunConfig
+  brokerEnv: NodeJS.ProcessEnv
+}): Promise<{ timedOut: boolean; detail: string | null }> {
+  writeFileSync(join(options.workdir, TASK_FILE), `${options.task.task}\n`, 'utf8')
+  const env = isolatedEnv(options.brokerEnv, options.config.config)
   const args = [
     'run',
     '--standalone',
@@ -185,16 +282,30 @@ async function runAgent(options: {
     options.config.model,
     `Read ${TASK_FILE} and follow every instruction in it exactly.`,
   ]
+  let timedOut = false
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('opencode', args, { cwd: options.workdir, env })
-    let stderr = ''
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8')
+    const child = spawn('opencode', args, {
+      cwd: options.workdir,
+      env,
+      detached: process.platform !== 'win32',
     })
-    child.on('error', reject)
-    child.on('close', () => resolve())
-    void stderr
+    const timer = setTimeout(() => {
+      timedOut = true
+      killTree(child)
+    }, Math.max(1, options.config.timeoutMinutes) * 60_000)
+    child.on('error', (error: Error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.on('close', () => {
+      clearTimeout(timer)
+      resolve()
+    })
   })
+  return {
+    timedOut,
+    detail: timedOut ? `agent exceeded ${options.config.timeoutMinutes} minute(s)` : null,
+  }
 }
 
 export async function runStudy(repoRoot: string, manifest: Manifest, config: RunConfig): Promise<string> {
@@ -204,6 +315,9 @@ export async function runStudy(repoRoot: string, manifest: Manifest, config: Run
   const specHash = runSpecHash(repoRoot, manifest, config)
   const approvedBy = requireApproval(repoRoot, specHash)
   const runId = randomUUID()
+  const dest = join(repoRoot, 'eval-results', 'pilots', runId)
+  const armsDir = join(dest, 'arms')
+  mkdirSync(armsDir, { recursive: true })
   const results: ArmResult[] = []
   for (const [index, task] of manifest.tasks.entries()) {
     for (let repetition = 0; repetition < config.repetitions; repetition++) {
@@ -221,27 +335,40 @@ export async function runStudy(repoRoot: string, manifest: Manifest, config: Run
           baseRoot: join(repoRoot, task.repo),
           workdir,
         })
+        let timedOut = false
+        let agentDetail: string | null = null
         try {
-          await runAgent({ cli: config.cli, workdir, task, config, brokerEnv: handle.broker.env })
+          const outcome = await runAgent({ workdir, task, config, brokerEnv: handle.broker.env })
+          timedOut = outcome.timedOut
+          agentDetail = outcome.detail
         } finally {
           await handle.broker.close()
         }
+        const fault = timedOut ? 'agent timeout' : handle.broker.fault
         const grade = gradeVerifiedPatch({
           task,
           repoRoot,
           baseRoot: join(repoRoot, task.repo),
           armRoot: workdir,
           executions: handle.broker.executions,
-          fault: handle.broker.fault,
+          fault,
           started: true,
         })
-        results.push({
+        const result: ArmResult = {
           task: task.id,
           arm,
           repetition,
           grade: grade.kind,
-          reasons: grade.reasons,
-          workdir,
+          reasons: grade.reasons.map(redact),
+          detail: agentDetail === null ? null : redact(agentDetail),
+        }
+        results.push(result)
+        // Each arm is written as it settles, so an interrupted run keeps its measured work.
+        writeCheckpoint(armsDir, `${task.id}-${arm}-r${repetition}.json`, {
+          schemaVersion: 1,
+          runId,
+          specHash,
+          ...result,
         })
       }
     }
@@ -257,9 +384,7 @@ export async function runStudy(repoRoot: string, manifest: Manifest, config: Run
     tasks: manifest.tasks.map((task) => task.id),
     results,
   }
-  const dest = join(repoRoot, 'eval-results', 'pilots', runId)
-  mkdirSync(dest, { recursive: true })
-  writeFileSync(join(dest, 'run.json'), `${JSON.stringify(record, null, 2)}\n`)
+  writeCheckpoint(dest, 'run.json', record)
   if (config.config !== null) {
     writeFileSync(join(dest, 'opencode-config.json'), readFileSync(config.config))
   }

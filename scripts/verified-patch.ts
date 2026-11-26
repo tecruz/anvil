@@ -55,9 +55,10 @@ export const VERIFIED_PATCH_TASK: VerifiedPatchTask = {
   id: 'verified-patch',
   repo: 'eval/repos/verified-patch',
   task:
-    'Implement slugify in src/slug.js: lowercase the title and replace runs of spaces with a ' +
-    'single dash. Add a test in test/visible.test.js. Run the repository check from the ' +
-    'repository root before finishing. Do not edit verify.js or the test files.',
+    'Implement slugify in src/slug.js: lowercase the title, trim leading and trailing whitespace, ' +
+    'and replace each run of internal whitespace with a single dash. Add a case to ' +
+    'test/visible.test.js covering the behaviour you implemented. Run the repository check ' +
+    'from the repository root before finishing. Do not edit verify.js, package.json or README.md.',
   verifyCommand: 'node verify.js',
   acceptedCommands: ['node verify.js', 'npm run test'],
   verifyScript: 'verify.js',
