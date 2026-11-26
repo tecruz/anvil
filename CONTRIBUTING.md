@@ -80,12 +80,14 @@ It also refuses to run when `node_modules` is missing, and says so, rather than 
 
 ## What ships, and where from
 
-There is no npm release. The distribution is the repository itself
-(`npm install -g github:tecruz/anvil`), and that decides the manifest layout: **npm packs the
-repository root for a git dependency**, and there is no subdirectory install — the fragment
-after `#` is parsed as a git ref, not a path. So the root `package.json` is the package, with
-`bin` pointing down into `packages/cli/dist/cli.js`. [ADR-0007](docs/adr/0007-distribution-git-install.md)
-records the reasoning and supersedes the publish target in ADR-0006.
+Two channels ship: the prebuilt `@anvil-workflows/cli` package on npm, and the repository
+itself (`npm install -g github:tecruz/anvil`). The git channel decides the manifest layout:
+**npm packs the repository root for a git dependency**, and there is no subdirectory install —
+the fragment after `#` is parsed as a git ref, not a path. So the root `package.json` is the
+package, with `bin` pointing down into `packages/cli/dist/cli.js`.
+[ADR-0007](docs/adr/0007-distribution-git-install.md) records the reasoning and supersedes the
+publish target in ADR-0006; [ADR-0012](docs/adr/0012-versioned-prebuilt-distribution.md) covers
+the registry channel.
 
 Two consequences for you as a contributor:
 

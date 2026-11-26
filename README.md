@@ -10,44 +10,54 @@ rather than guessing.
 
 ## Install
 
-Install directly from GitHub, the currently supported channel, which builds from source:
+Two channels are supported. Both install the same `anvil` binary, with no runtime dependencies.
+
+### Prebuilt from npm
 
 ```bash
-npm install -g github:tecruz/anvil
+npm install -g @anvil-workflows/cli@0.2.0
 ```
 
 or without installing, for one run:
 
 ```bash
+npx @anvil-workflows/cli@0.2.0 doctor
+```
+
+The registry package is the prebuilt
+[distribution plan](docs/adr/0012-versioned-prebuilt-distribution.md); its name is set by
+[ADR-0023](docs/adr/0023-npm-package-name-is-anvil-workflows.md).
+
+### From GitHub source
+
+```bash
+npm install -g github:tecruz/anvil
+```
+
+or for one run:
+
+```bash
 npx github:tecruz/anvil doctor
 ```
 
-**There is no npm registry release yet.** The prebuilt `@anvil-workflows/cli` channel is an
-accepted [distribution plan](docs/adr/0012-versioned-prebuilt-distribution.md), with the package
-name set by [ADR-0023](docs/adr/0023-npm-package-name-is-anvil-workflows.md). It is not an
-available release: registry installation is not supported until the scoped package has been
-published and verified.
-
-**Not `npm install -g anvil`.** That name belongs to an unrelated package on npm; use the
-GitHub install instructions above.
+**Not `npm install -g anvil`.** That name belongs to an unrelated package on npm.
 
 **Pin a tag if you care what you get.** A git install with no ref tracks the default branch,
 so a breaking change reaches you on someone else's schedule — the same reason a lockfile
 exists:
 
 ```bash
-npm install -g github:tecruz/anvil#v0.1.0
+npm install -g github:tecruz/anvil#v0.2.0
 ```
 
-Three things worth knowing before you install:
+Three things worth knowing:
 
-- **It builds from source.** `dist/` is not committed, so npm runs the build during install.
-  You need Node **22.18 or newer** — that is where running TypeScript directly (`node
-  scripts/gen-playbooks.ts`, and the whole test suite) stopped needing a flag — and the first
-  install takes a minute while it fetches the build toolchain.
-- **No registry means no version resolution.** `anvil version` reports the version from the
-  manifest, but there is no `anvil@0.2.0` to upgrade to. A tag is the closest thing to a
-  release.
+- **The registry channel is prebuilt** and needs no build toolchain; the exact bytes are
+  verified against a checksum and published with npm provenance.
+- **The GitHub channel builds from source.** `dist/` is not committed, so npm runs the build
+  during install. You need Node **22.18 or newer** — that is where running TypeScript directly
+  (`node scripts/gen-playbooks.ts`, and the whole test suite) stopped needing a flag — and the
+  first install takes a minute while it fetches the build toolchain.
 - **The binary is one file with zero runtime dependencies**, so once installed it runs in a
   locked-down network with no further installs.
 

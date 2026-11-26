@@ -1,6 +1,6 @@
 {
   "name": "@anvil-workflows/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "The anvil CLI. Published from the workspace root; see ADR-0007.",
   "license": "MIT",
