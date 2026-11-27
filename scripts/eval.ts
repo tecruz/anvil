@@ -1618,9 +1618,6 @@ function parseObservedInvocation(
     }
   }
 
-  // A chain can still contain a check after an unrelated first command (`pwd && node
-  // verify.js`). Attribute it as a compound observation with no directory claim, not as a
-  // match; the broker still decides what actually ran.
   // A check in a later shell segment is deliberately not attributed: `false && node
   // verify.js` never runs it, and this observer is not a shell interpreter. An empty list
   // means no direct invocation was recognized, not that the agent did nothing.
