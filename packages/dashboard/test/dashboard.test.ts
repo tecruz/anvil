@@ -412,6 +412,22 @@ describe('the dashboard server', () => {
           detail: 'Read the workflow syntax reference -- CI advice for this stack.',
           evidence: ['README.md:3'],
         },
+        {
+          // A real official-playbook id whose URL ends with `/`.
+          id: 'official:python:https://docs.python.org/3/',
+          tier: 'official',
+          title: 'Python docs',
+          detail: 'Read the Python documentation -- language guidance for this stack.',
+          evidence: ['README.md:3'],
+        },
+        {
+          // A real risk-glob id: `**` is a glob, not a path traversal.
+          id: 'risk:android:**/AndroidManifest.xml',
+          tier: 'official',
+          title: 'Android manifest',
+          detail: 'Review the manifest -- risk glob advice for this stack.',
+          evidence: ['README.md:3'],
+        },
       ],
     })
     await withServer(
@@ -436,6 +452,18 @@ describe('the dashboard server', () => {
         assert.equal(official.status, 200, 'a real plan id with / and . must reach the plan lookup')
         const officialBrief = (await official.json()) as { source: { suggestionId: string | null } }
         assert.equal(officialBrief.source.suggestionId, officialId)
+
+        const trailingSlashId = 'official:python:https://docs.python.org/3/'
+        const trailingSlash = await authedPost(server, '/api/brief', { suggestionId: trailingSlashId })
+        assert.equal(trailingSlash.status, 200, 'a real plan id ending with / must reach the plan lookup')
+        const trailingSlashBrief = (await trailingSlash.json()) as { source: { suggestionId: string | null } }
+        assert.equal(trailingSlashBrief.source.suggestionId, trailingSlashId)
+
+        const riskGlobId = 'risk:android:**/AndroidManifest.xml'
+        const riskGlob = await authedPost(server, '/api/brief', { suggestionId: riskGlobId })
+        assert.equal(riskGlob.status, 200, 'a real risk glob id must reach the plan lookup')
+        const riskGlobBrief = (await riskGlob.json()) as { source: { suggestionId: string | null } }
+        assert.equal(riskGlobBrief.source.suggestionId, riskGlobId)
       },
       { plan },
     )

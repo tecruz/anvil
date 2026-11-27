@@ -523,6 +523,29 @@ describe('buildTaskBrief', () => {
     ])
   })
 
+  test('a plan suggestion id may end with a slash or contain a risk glob', () => {
+    const ids = ['official:python:https://docs.python.org/3/', 'risk:android:**/AndroidManifest.xml']
+    const snapshot = makeSnapshot({
+      suggestions: ids.map((id) => ({
+        id,
+        tier: 'official',
+        title: id,
+        detail: `${id} -- a real generated plan id.`,
+        evidence: ['README.md:3'],
+      })),
+    })
+
+    for (const id of ids) {
+      const brief = buildTaskBrief(snapshot, { suggestionId: id })
+
+      assert.equal(brief.source.suggestionId, id)
+      assert.equal(brief.source.text, null)
+      assert.deepEqual(brief.startHere, [
+        { path: 'README.md', reason: 'evidence named by the suggestion', kind: 'evidence' },
+      ])
+    }
+  })
+
   test('it refuses ambiguous, empty and unknown input', () => {
     assert.throws(() => buildTaskBrief(makeSnapshot(), {}), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x', suggestionId: 'fix:TEST_FAST' }), TaskInputError)
@@ -539,7 +562,6 @@ describe('buildTaskBrief', () => {
       '../etc',
       'foo/../bar',
       '/absolute',
-      'trailing/',
       '\\leading',
       'trailing\\',
       'foo\\bar',
