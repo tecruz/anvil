@@ -79,6 +79,24 @@ test('a near-miss invocation is retained without its raw command or extra argume
   }
 })
 
+test('a mid-path tilde is a literal path character, not a shell expansion', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-tilde-'))
+  try {
+    // A real workdir with an 8.3-style short name, independent of how the host spells tmpdir.
+    const target = join(workdir, 'Users', 'RUNNER~1', 'packages', 'sub')
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [{ command: `cd "${target}" && node verfy.js`, exitCode: 127 }],
+      workdir,
+    )
+    assert.equal(attempts.length, 1)
+    assert.equal(attempts[0]?.script, 'verfy.js')
+    assert.equal(attempts[0]?.cwdHint, 'Users/RUNNER~1/packages/sub')
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
 test('reading a script is not an attempt to invoke it', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-read-'))
   try {

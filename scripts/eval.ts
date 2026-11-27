@@ -1503,8 +1503,10 @@ function stripChangeDirectory(command: string): { cd: string | undefined; cwdUnk
   const quoted = /^(["'])(.*)\1$/.exec(raw)
   const dir = quoted?.[2] ?? raw
   // Quotes make a space literal; unquoted spaces already ended the cd argument. `cd -` and
-  // `cd ~` are shell-dependent destinations, not directory names we can resolve.
-  const chars = quoted === null ? /^[A-Za-z0-9_./\\:-]+$/ : /^[A-Za-z0-9_./\\: -]+$/
+  // `cd ~` are shell-dependent destinations, not directory names we can resolve. A `~` in the
+  // middle of a token is a literal path character (Windows 8.3 short names like RUNNER~1),
+  // not an expansion; expansions only start with `~`.
+  const chars = quoted === null ? /^[A-Za-z0-9_./\\:~-]+$/ : /^[A-Za-z0-9_./\\: ~-]+$/
   const literal = dir !== '' && dir !== '-' && !dir.startsWith('~') && chars.test(dir)
   return { cd: literal ? dir : undefined, cwdUnknown: !literal, rest: command.slice(match[0].length) }
 }
