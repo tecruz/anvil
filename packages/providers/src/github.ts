@@ -594,19 +594,33 @@ export class GhForgeTransport implements ForgeTransport {
    * `gh pr create` cannot see it. This is git, not gh, so it runs git directly -- through
    * the shared runner, with an argument array and never a shell.
    */
-  async pushBranch({ cwd, branch }: { cwd: string; branch: string }): Promise<{ ok: boolean; detail: string }> {
+  async pushBranch({
+    cwd,
+    branch,
+    commit,
+  }: {
+    cwd: string
+    branch: string
+    commit?: string
+  }): Promise<{ ok: boolean; detail: string }> {
+    if (commit !== undefined && !/^[0-9a-f]{7,64}$/i.test(commit)) {
+      return { ok: false, detail: `Refusing to push: ${commit} is not a commit id.` }
+    }
+    // A pinned commit goes as an explicit refspec, so the remote branch can only be
+    // updated to that exact object even if the local branch moves during the push.
+    const refspec = commit === undefined ? branch : `${commit}:refs/heads/${branch}`
     // The claimed worktree installs a pre-push hook that refuses every push. This marker
     // is the one thing that opens it, and it lives only in this process: no file is left
     // behind for a later agent to reuse.
     const runGit = this.options.runGit ?? ((args, options) => runProcess('git', args, options))
-    const res = await runGit(['push', '-u', 'origin', branch], {
+    const res = await runGit(['push', '-u', 'origin', refspec], {
       cwd,
       env: { ...process.env, [SHIP_GUARD_ENV]: '1' },
     })
     if (res.exitCode === 0) {
       return {
         ok: true,
-        detail: `pushed ${branch}${res.stderr.trim() === '' ? '' : ` (${res.stderr.trim()})`}`,
+        detail: `pushed ${branch}${commit === undefined ? '' : ` at ${commit.slice(0, 7)}`}${res.stderr.trim() === '' ? '' : ` (${res.stderr.trim()})`}`,
       }
     }
     const detail = (res.stderr || res.stdout || `exit ${res.exitCode}`).trim()

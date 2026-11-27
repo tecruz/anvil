@@ -137,6 +137,14 @@ export interface ProfileDiagnostics {
   fileLimit: number
   /** Detectors that threw, with the reason. */
   failedDetectors: Array<{ id: string; error: string }>
+  /**
+   * Modules whose internal dependencies were not resolved by any detector.
+   *
+   * Additive in schema version 1: an older profile without this field is treated as "unknown
+   * which modules were analysed", never as "all dependencies resolved". A module in this list
+   * has `deps: []` because no resolver ran for its ecosystem, not because it has no edges.
+   */
+  unanalysedDeps?: Array<{ id: string; path: string; reason: string }>
 }
 
 export interface ProjectProfile {
@@ -173,8 +181,24 @@ export interface ProjectProfile {
    * directory from an evidence path, and would then be the one guessing.
    */
   projectDir: string
+  /**
+   * `file:line` pointers into CI workflows that a reader can open.
+   *
+   * These are references, not commands to run: the profile does not decide which step executes,
+   * in which directory, or whether it passed. Additive in schema version 1 — an older profile
+   * without the field carries no pointers, never a claim that CI runs nothing.
+   */
+  workflowReferences: WorkflowReference[]
   /** How complete the walk and detector run were. Additive in schema version 1. */
   diagnostics: ProfileDiagnostics
+}
+
+/** A workflow line worth reading, recorded as a citation only. */
+export interface WorkflowReference {
+  /** Repo-relative POSIX path to a `.github/workflows/*.yml` file. */
+  file: string
+  /** One-based line number of a `run:` or `script:` key. */
+  line: number
 }
 
 export interface InstructionFile {
@@ -221,6 +245,7 @@ export function emptyProfile(root: string, vcs: Vcs): ProjectProfile {
     instructions: [],
     files: [],
     projectDir: '',
+    workflowReferences: [],
     diagnostics: {
       truncated: false,
       fileLimit: 0,

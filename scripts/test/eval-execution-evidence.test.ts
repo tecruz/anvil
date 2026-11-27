@@ -199,6 +199,14 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           verified: boolean
           hiddenVerified: boolean | null
           error?: string
+          verificationAttempts?: Array<{
+            runner?: string
+            script?: string
+            shape: string
+            cwdHint?: string
+            exitCode: number | null
+            matched: boolean
+          }>
         }>
       }
       assert.equal(record.results.length, 2)
@@ -231,6 +239,60 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
         // does not prove the check ran, even if its reported exit status is 1.
         for (const result of record.results) {
           assert.match(result.error ?? '', /as a command on its own/)
+        }
+      }
+
+      // A failed attestation now says what the agent actually tried. This is bounded
+      // observation, not a second grading signal: the verdict above stays unchanged.
+      for (const result of record.results) {
+        const attempts = result.verificationAttempts ?? []
+        if (mode === 'report-only' || mode === 'newline-command') {
+          assert.deepEqual(attempts, [], `${mode}: no parseable invocation means no attempt to describe`)
+          continue
+        }
+        assert.ok(
+          attempts.some((attempt) => attempt.script === 'run-check.js'),
+          `${mode}: ${result.variant} must retain the near-miss script operand`,
+        )
+        assert.ok(
+          attempts.every((attempt) => !JSON.stringify(attempt).includes('LASTEXITCODE')),
+          `${mode}: a shell chain must not be copied into the record`,
+        )
+        assert.ok(
+          attempts.every((attempt) => typeof attempt.exitCode === 'number' || attempt.exitCode === null),
+          `${mode}: every retained attempt must say whether it reported a status`,
+        )
+      }
+      if (mode.startsWith('honest')) {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.matched === true),
+            `${mode}: the declared command must be marked as matched`,
+          )
+        }
+      }
+      if (mode === 'chained-command') {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.every((attempt) => attempt.matched === false),
+            `${mode}: a compound command must not be recorded as a match`,
+          )
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.shape === 'compound'),
+            `${mode}: the shell chain must be classified, not copied`,
+          )
+          assert.ok(
+            result.verificationAttempts?.every((attempt) => attempt.exitCode === null),
+            `${mode}: the chain status must not be attributed to the check`,
+          )
+        }
+      }
+      if (mode.startsWith('honest')) {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.shape === 'simple'),
+            `${mode}: a plain invocation must be classified as simple`,
+          )
         }
       }
 

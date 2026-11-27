@@ -16,6 +16,7 @@ import {
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
 } from './general.ts'
 import type { CommandKind } from './types.ts'
 import { emptyProfile, type ProjectProfile, type Vcs } from './types.ts'
@@ -142,6 +143,8 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     risk: [],
     commands: {},
     files: fileSet,
+    depsAnalysed: new Set<string>(),
+    depsUnknownReasons: new Map<string, string>(),
   }
 
   const detectors = [...ecosystemDetectors, ...additionalDetectors, ...(options.extraDetectors ?? [])]
@@ -178,6 +181,15 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     })
   }
 
+  // A workflow is a source to read, not a list of commands this profile claims should be run:
+  // record the lines a reader can open beside the documented local commands.
+  const workflowReferences = detectWorkflowReferences(root, fileSet)
+
+  // Fail closed: an unknown module must not retain edges from any detector.
+  for (const module of draft.modules) {
+    if (draft.depsUnknownReasons.has(module.id)) module.deps = []
+  }
+
   const profile: ProjectProfile = {
     ...emptyProfile(root, vcs),
     monorepo: draft.monorepo,
@@ -191,10 +203,18 @@ export function buildProfile(root: string, vcs: Vcs, options: BuildProfileOption
     docs: detectDocs(root),
     files,
     projectDir,
+    workflowReferences,
     diagnostics: {
       truncated,
       fileLimit,
       failedDetectors: failedDetectors.map((d) => ({ ...d })),
+      unanalysedDeps: draft.modules
+        .filter((m) => !draft.depsAnalysed.has(m.id) || draft.depsUnknownReasons.has(m.id))
+        .map((m) => ({
+          id: m.id,
+          path: m.path,
+          reason: draft.depsUnknownReasons.get(m.id) ?? 'no dependency resolver for this ecosystem',
+        })),
     },
   }
 

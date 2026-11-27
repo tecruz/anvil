@@ -175,16 +175,34 @@ function readCwd(input: Record<string, unknown>, context: ToolContext): string {
   return resolve(context.defaultCwd, cwd)
 }
 
-export function createCliInvoker(): McpInvoke {
+/** Snapshot reads and MCP tools are fast; they keep the short process limit. */
+const SNAPSHOT_TIMEOUT_MS = 120_000
+
+/**
+ * The CLI allows ten minutes per verify command (crew.ts, ship.ts) and ship may run several.
+ * Dashboard actions get a runner that will not cut a passing check off before the CLI would.
+ */
+export const DASHBOARD_ACTION_TIMEOUT_MS = 15 * 60_000
+
+export interface CliInvokerOptions {
+  /** Entry point script. Defaults to this process's entry (the anvil CLI). */
+  entry?: string
+  /** Process timeout in milliseconds. Defaults to the short snapshot limit. */
+  timeoutMs?: number
+}
+
+export function createCliInvoker(options: CliInvokerOptions = {}): McpInvoke {
+  const timeoutMs = options.timeoutMs ?? SNAPSHOT_TIMEOUT_MS
+  const entry = options.entry
   return async (args, cwd) => {
-    const entry = process.argv[1]
-    if (entry === undefined) {
+    const target = entry ?? process.argv[1]
+    if (target === undefined) {
       throw new Error('cannot locate the anvil entry point')
     }
-    const result = await runProcess(process.execPath, [entry, ...args], {
+    const result = await runProcess(process.execPath, [target, ...args], {
       cwd,
       maxBuffer: 32 * 1024 * 1024,
-      timeoutMs: 120_000,
+      timeoutMs,
     })
     return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr }
   }

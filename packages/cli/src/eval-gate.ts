@@ -206,6 +206,45 @@ export interface EvalExecutionAttestation {
   at?: string | null
 }
 
+/** Writer and reader share these caps, so a valid record can never fail its own parser. */
+export const MAX_VERIFICATION_ATTEMPT_RUNNER = 64
+export const MAX_VERIFICATION_ATTEMPT_SCRIPT = 128
+export const MAX_VERIFICATION_ATTEMPT_CWD_HINT = 256
+
+/**
+ * How much of a reported shell command could be interpreted.
+ *
+ * `simple` is a runner and a script operand with nothing else. `extra-arguments` keeps only
+ * those two fields because anything after them may be a secret or a host path. `compound`
+ * names a shell chain, and `unparsed` names syntax the observer refused to interpret. No shape
+ * retains the raw command text.
+ */
+export type EvalVerificationAttemptShape = 'simple' | 'extra-arguments' | 'compound' | 'unparsed'
+
+/**
+ * A bounded observation of an invocation that looked like the scenario's check.
+ *
+ * An attestation only says whether the one required command was observed. When it was not,
+ * the useful question is whether the agent tried a near miss — a wrong directory, a typo in
+ * the script name, a command that reported no exit status — because that separates a context
+ * problem from a detection problem without keeping a transcript. This is a *reported* tool
+ * event; it is never treated as proof that the check ran.
+ */
+export interface EvalVerificationAttempt {
+  /** The executable the agent invoked, when it could be read. */
+  runner?: string
+  /** The script operand, basename only, when it could be read. */
+  script?: string
+  /** How much of the invocation the observer understood. */
+  shape: EvalVerificationAttemptShape
+  /** The effective directory, relative to the worktree when possible; absent when unknown. */
+  cwdHint?: string
+  /** The exit status the tool event reported; null when the event carried none. */
+  exitCode: number | null
+  /** Whether the command text matched the declaration; never proof of the effective directory. */
+  matched: boolean
+}
+
 export interface EvalResultSummary {
   scenario: string
   size: EvalScenarioSize
@@ -231,6 +270,8 @@ export interface EvalResultSummary {
   taskFailureReason?: string
   /** Harness-controlled execution evidence retained with the result. */
   executionAttestation?: EvalExecutionAttestation
+  /** Bounded near-miss verification commands, retained only for execution-capture scenarios. */
+  verificationAttempts?: EvalVerificationAttempt[]
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -311,6 +352,8 @@ export interface EvalRunRecordResult {
   taskFailureReason?: string
   /** Harness-controlled execution evidence retained with the result. */
   executionAttestation?: EvalExecutionAttestation
+  /** Bounded near-miss verification commands, retained only for execution-capture scenarios. */
+  verificationAttempts?: EvalVerificationAttempt[]
   /** Whether the scenario's skill was installed and independently verified. */
   skillInstall?: EvalSkillInstall
   /** Whether the agent was seen touching the installed skill; never proof of use. */
@@ -417,11 +460,19 @@ function hashFile(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 
-/** Every file under `dir`, sorted so the hash is stable across platforms. */
+/**
+ * Every file under `dir`, sorted so the hash is stable across platforms.
+ *
+ * `.git` is excluded: a source hash must identify the source tree, not the state of a local
+ * clone (config, reflogs and packed objects change with unrelated git housekeeping). Tests
+ * that build their own expected hashes already skip `.git`; doing it here keeps the two in
+ * agreement for the pinned pilot clones as well.
+ */
 function filesUnder(root: string): string[] {
   const out: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name === '.git') continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
       else if (entry.isFile()) out.push(path)
@@ -789,6 +840,54 @@ function parseExecutionAttestation(value: unknown): EvalExecutionAttestation | '
   }
 }
 
+/**
+ * Parse bounded verification attempts, or explain why the value is not a list of them.
+ *
+ * The list is capped because it comes from a run record that may be edited by hand before it
+ * is checked, and a reviewer's report must not become an unbounded allocation vector.
+ */
+function parseVerificationAttempts(value: unknown): EvalVerificationAttempt[] | 'invalid' | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 20) return 'invalid'
+  const shapes: ReadonlySet<string> = new Set(['simple', 'extra-arguments', 'compound', 'unparsed'])
+  const attempts: EvalVerificationAttempt[] = []
+  for (const item of value) {
+    if (!isObject(item)) return 'invalid'
+    if (
+      item.runner !== undefined &&
+      (typeof item.runner !== 'string' || item.runner.length > MAX_VERIFICATION_ATTEMPT_RUNNER)
+    ) {
+      return 'invalid'
+    }
+    if (
+      item.script !== undefined &&
+      (typeof item.script !== 'string' || item.script.length > MAX_VERIFICATION_ATTEMPT_SCRIPT)
+    ) {
+      return 'invalid'
+    }
+    if (typeof item.shape !== 'string' || !shapes.has(item.shape)) return 'invalid'
+    if (
+      item.cwdHint !== undefined &&
+      (typeof item.cwdHint !== 'string' || item.cwdHint.length > MAX_VERIFICATION_ATTEMPT_CWD_HINT)
+    ) {
+      return 'invalid'
+    }
+    if (item.exitCode !== null && (typeof item.exitCode !== 'number' || !Number.isInteger(item.exitCode))) {
+      return 'invalid'
+    }
+    if (typeof item.matched !== 'boolean') return 'invalid'
+    attempts.push({
+      ...(typeof item.runner === 'string' ? { runner: item.runner } : {}),
+      ...(typeof item.script === 'string' ? { script: item.script } : {}),
+      shape: item.shape as EvalVerificationAttemptShape,
+      ...(typeof item.cwdHint === 'string' ? { cwdHint: item.cwdHint } : {}),
+      exitCode: item.exitCode as number | null,
+      matched: item.matched,
+    })
+  }
+  return attempts
+}
+
 /** Parse the latest summary, or explain why the file cannot be a summary. */
 export function parseLatest(value: unknown): EvalLatest | string {
   if (!isObject(value)) return 'latest summary is not an object'
@@ -846,6 +945,8 @@ export function parseLatest(value: unknown): EvalLatest | string {
     }
     const executionAttestation = parseExecutionAttestation(raw.executionAttestation)
     if (executionAttestation === 'invalid') return `${raw.scenario}: latest executionAttestation is invalid`
+    const verificationAttempts = parseVerificationAttempts(raw.verificationAttempts)
+    if (verificationAttempts === 'invalid') return `${raw.scenario}: latest verificationAttempts are invalid`
     const skillInstall = parseSkillState<EvalSkillInstall>(raw.skillInstall, SKILL_INSTALL_VALUES)
     if (skillInstall === 'invalid') return `${raw.scenario}: latest skillInstall is invalid`
     const skillAccess = parseSkillState<EvalSkillAccess>(raw.skillAccess, SKILL_ACCESS_VALUES)
@@ -871,6 +972,7 @@ export function parseLatest(value: unknown): EvalLatest | string {
       ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
       ...(typeof raw.taskFailureReason === 'string' ? { taskFailureReason: raw.taskFailureReason } : {}),
       ...(executionAttestation === undefined ? {} : { executionAttestation }),
+      ...(verificationAttempts === undefined ? {} : { verificationAttempts }),
       ...(skillInstall === undefined ? {} : { skillInstall }),
       ...(skillAccess === undefined ? {} : { skillAccess }),
       ...(skillAccessReason === undefined ? {} : { skillAccessReason }),
@@ -956,6 +1058,8 @@ export function parseRunRecordResult(
   }
   const executionAttestation = parseExecutionAttestation(value.executionAttestation)
   if (executionAttestation === 'invalid') return `run record result ${key} executionAttestation is invalid`
+  const verificationAttempts = parseVerificationAttempts(value.verificationAttempts)
+  if (verificationAttempts === 'invalid') return `run record result ${key} verificationAttempts are invalid`
   const skillInstall = parseSkillState<EvalSkillInstall>(value.skillInstall, SKILL_INSTALL_VALUES)
   if (skillInstall === 'invalid') return `run record result ${key} skillInstall is invalid`
   const skillAccess = parseSkillState<EvalSkillAccess>(value.skillAccess, SKILL_ACCESS_VALUES)
@@ -983,6 +1087,7 @@ export function parseRunRecordResult(
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
     ...(typeof value.taskFailureReason === 'string' ? { taskFailureReason: value.taskFailureReason } : {}),
     ...(executionAttestation === undefined ? {} : { executionAttestation }),
+    ...(verificationAttempts === undefined ? {} : { verificationAttempts }),
     ...(skillInstall === undefined ? {} : { skillInstall }),
     ...(skillAccess === undefined ? {} : { skillAccess }),
     ...(skillAccessReason === undefined ? {} : { skillAccessReason }),

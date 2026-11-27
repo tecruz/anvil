@@ -259,6 +259,292 @@ const AGENTS_COMMANDS: Rule = {
   },
 }
 
+interface InstructionSource {
+  /** Real repo-relative file path (never a bare directory). */
+  path: string
+  text: string
+  /** A 1-based line to cite, derived from the file's own content. */
+  line: number
+}
+
+/**
+ * Instruction text read for VERIFY_DOC_COVERAGE, from the real files.
+ *
+ * The engine builds `ctx.instructionsText` with `readFileSync(i.path)` for every
+ * instruction entry. A directory entry such as `.cursor/rules` throws EISDIR and
+ * contributes nothing, so commands actually documented in `.cursor/rules/verify.mdc`
+ * become invisible to a text comparison -- and the rule both warns about a gap that is
+ * not there and cites the bare directory as evidence. Here directory entries are expanded
+ * through `profile.files`, real file paths are kept, and a matching line is found in the
+ * file's content.
+ *
+ * `readSomething` distinguishes a file that was read but is blank (a real gap, once there
+ * are detected commands to document) from absent/unreadable instructions (nothing to
+ * compare, so `na`).
+ */
+function verifyInstructionSources(ctx: RuleContext): {
+  sources: InstructionSource[]
+  text: string
+  readSomething: boolean
+} {
+  const root = ctx.profile.root
+  const sources: InstructionSource[] = []
+  let readSomething = false
+
+  for (const instruction of ctx.profile.instructions) {
+    const path = instruction.path
+    const members = ctx.profile.files.filter((f) => f.startsWith(`${path}/`))
+    // A directory entry is expanded into the member files the walker recorded; a regular
+    // file has no such members and is read directly.
+    for (const member of members.length > 0 ? members : [path]) {
+      const text = readRepoText(root, member)
+      if (text === null) continue
+      readSomething = true
+      sources.push({ path: member, text, line: evidenceLine(text) })
+    }
+  }
+
+  return { sources, text: sources.map((s) => s.text).join('\n'), readSomething }
+}
+
+/** The line to cite for a file: its first command mention, else its first non-empty line. */
+function evidenceLine(text: string): number {
+  const rows = text.split('\n')
+  for (let i = 0; i < rows.length; i++) {
+    if (mentionsRunner(rows[i] ?? '')) return i + 1
+  }
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i] ?? '').trim() !== '') return i + 1
+  }
+  return 1
+}
+
+/** At most this many evidence entries go in a finding. */
+const EVIDENCE_CAP = 6
+
+/**
+ * Flags that turn a full-suite invocation into a narrower one.
+ *
+ * A `npm test -- --changed` or `npm test --watch` is a real command an agent can run, but it
+ * is documentation of a *subset* command, not coverage for the full suite anvil detected.
+ * Counting it as coverage is the false pass the review found: the agent follows the narrow
+ * command and leaves most of the suite unrun. The list mirrors the changed-files patterns
+ * used by the profile detectors, plus the watch forms a full-suite check can never use.
+ */
+const NARROWING_ARG =
+  /(?:^|\s)(?:--\s*)?(?:--?changed\b|--changedSince\b|--watch(?:All)?(?:=[^\s]*)?|-w\b|-k(?:\s|=)|--onlyChanged\b|--tests?\b|--testNamePattern\b|-t(?:\s|=)|--grep\b|-g(?:\s|=)|--filter\b|--include\b|--path\b|--file\b|--shard\b|nextest\b)/i
+
+/**
+ * The part of the text after an invocation that still belongs to that invocation. Prose
+ * punctuation (a backtick, a newline, a sentence-ending period) ends it; the rest is flags.
+ */
+function invocationArgs(rest: string): string {
+  const cut = /[`\n;]|\.(?=\s|$)/.exec(rest)
+  return cut === null ? rest : rest.slice(0, cut.index)
+}
+
+/**
+ * Whether the text right after a command ends an invocation rather than extending its name.
+ *
+ * `:` and `.` followed by a name character continue a script (`test:fast`, `test.unit`), so
+ * they cannot terminate it. A lone trailing `.` is prose punctuation and does terminate it.
+ */
+function endsInvocation(rest: string): boolean {
+  if (rest === '') return true
+  const first = rest[0] as string
+  if (first === ':') return false
+  if (first === '.') {
+    const second = rest[1]
+    return second === undefined || !/[a-z0-9:._-]/i.test(second)
+  }
+  return !/[a-z0-9_-]/i.test(first)
+}
+
+/**
+ * The 1-based line where `normalized` is written as a complete invocation, or null.
+ *
+ * Each line is checked on its own: a command split across two instruction files is not a
+ * command anyone can copy. A match needs a leading token boundary (so `npm test` is not found
+ * inside `pnpm test`), a terminator that is not script-name punctuation, and no narrowing
+ * flags in its arguments.
+ */
+function documentsOnLine(lines: readonly string[], normalized: string): number | null {
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?<![a-z0-9:._-])${escaped}`, 'gi')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    for (const match of line.matchAll(pattern)) {
+      const rest = line.slice((match.index ?? 0) + (match[0]?.length ?? 0))
+      if (!endsInvocation(rest)) continue
+      if (NARROWING_ARG.test(invocationArgs(rest))) continue
+      return i + 1
+    }
+  }
+  return null
+}
+
+/**
+ * Bound a finding's evidence without losing the sources it inspected.
+ *
+ * A flat `.slice(0, 6)` used to drop the last instruction file once four detected commands
+ * had contributed four `package.json` lines -- so a finding about three files cited two.
+ * Every inspected source keeps at least one entry; only the remaining citations are capped.
+ */
+function capEvidence(entries: readonly string[], sources: readonly string[]): string[] {
+  const unique = [...new Set(entries.filter((e) => e !== ''))]
+  if (unique.length <= EVIDENCE_CAP) return unique
+  const required = sources
+    .map((path) => unique.find((e) => e.startsWith(`${path}:`)) ?? path)
+    .filter((e, i, all) => all.indexOf(e) === i)
+  const rest = unique.filter((e) => !required.includes(e))
+  return [...required, ...rest].slice(0, Math.max(EVIDENCE_CAP, required.length))
+}
+
+/**
+ * A repository can name one generic command in its instructions and still leave the
+ * commands anvil actually detected undocumented.
+ *
+ * `AGENTS_COMMANDS` answers "does the text name any runnable command?" This rule answers
+ * the sharper question: "does it name the specific test/build/lint/typecheck commands this
+ * repository uses?" An agent that sees only `npm test` in prose but a detected
+ * `cargo test --workspace` will invent the wrong verify step. `anvil init` already stages
+ * those commands into AGENTS.md; this finding says when an existing file has not caught up.
+ *
+ * Deliberately narrow: only the primary detected command of each kind is required, declared
+ * commands are considered only when already present in the report, and a bare `npm test`
+ * in prose does not stand in for a specific detected runner. No command is invented.
+ */
+const VERIFY_DOC_COVERAGE: Rule = {
+  id: 'VERIFY_DOC_COVERAGE',
+  layer: 'context',
+  severity: 'medium',
+  title: 'Instructions document the detected verify commands',
+  order: 44,
+  evaluate(ctx) {
+    if (!ctx.hasCode) return na('No source files, so there are no verify commands to document')
+
+    const kinds = ['test', 'build', 'lint', 'typecheck'] as const
+    // Collect the detected commands before looking at the instructions: with no detected
+    // command there is nothing an instruction file could have failed to document, and the
+    // rule stays `na` (docs-only repos included).
+    const detected: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    for (const kind of kinds) {
+      const entries = ctx.profile.commands[kind]
+      if (entries === undefined || entries.length === 0) continue
+      // Only a command anvil found in this repository earns a coverage claim. An inferred
+      // convention is not a fact the instructions failed to document.
+      const entry = entries.find((candidate) => candidate.source === 'detected') ?? entries[0]
+      if (entry === undefined || entry.source !== 'detected') continue
+      const cmd = entry.cmd.trim()
+      if (cmd === '') continue
+      detected.push({ kind, cmd, evidence: entry.evidence ?? null })
+    }
+    if (detected.length === 0) return na('No detected verify command to document')
+
+    // Read the instruction files ourselves rather than trusting ctx.instructionsText:
+    // the engine's read of a directory entry throws EISDIR and contributes nothing.
+    const instructions = verifyInstructionSources(ctx)
+    const text = instructions.text
+    const sourcePaths = instructions.sources.map((s) => s.path)
+    const fallbackEvidence = (): string[] => instructions.sources.map((s) => `${s.path}:${s.line}`)
+    const target =
+      ctx.profile.instructions.find((i) => i.path === 'AGENTS.md')?.path ??
+      instructions.sources[0]?.path ??
+      ctx.profile.instructions[0]?.path ??
+      'AGENTS.md'
+    const commandEvidence = (): string[] =>
+      detected.map((d) => d.evidence).filter((e): e is string => e !== null && e !== '')
+
+    if (text.trim() === '') {
+      if (!instructions.readSomething) {
+        return na('No readable instruction text to compare against detected commands')
+      }
+      // A file was read successfully but is blank. With detected commands in the tree the
+      // gap is real, not unknown, so this is a warning rather than `na`.
+      const names = detected.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+      return warn(
+        `Instructions are blank, but the repository has detected verify commands: ${names}. An agent that cannot see the real command will invent or omit the verify step.`,
+        capEvidence([...commandEvidence(), ...fallbackEvidence()], sourcePaths),
+        {
+          ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+        },
+      )
+    }
+
+    const missing: Array<{ kind: string; cmd: string; evidence: string | null }> = []
+    const documented: Array<{ kind: string; path: string; line: number }> = []
+    // `npm run test` and `npm test` are the same command: npm has a built-in `test`
+    // shorthand. `npm lint`, `npm build` and `npm typecheck` are NOT valid npm commands --
+    // npm answers "Unknown command" and exits 1 -- so `run` is kept for every other
+    // script. Normalizing only the genuine alias avoids claiming coverage for an
+    // invocation that would fail.
+    const canonical = (value: string): string =>
+      value
+        .toLowerCase()
+        .replace(/\s+/g, ' ')
+        .replace(/\bnpm\s+run\s+test\b/g, 'npm test')
+        .trim()
+    // Canonicalize one line at a time: collapsing the whole file's whitespace would erase
+    // the line numbers the evidence has to cite. Each source is searched separately too, so
+    // a command split across two files cannot pass as documented.
+    const prepared = instructions.sources.map((source) => ({
+      ...source,
+      lines: source.text.split('\n').map((line) => canonical(line)),
+    }))
+    for (const entry of detected) {
+      const normalized = canonical(entry.cmd)
+      let found: { path: string; line: number } | null = null
+      for (const source of prepared) {
+        const line = documentsOnLine(source.lines, normalized)
+        if (line !== null) {
+          found = { path: source.path, line }
+          break
+        }
+      }
+      if (found !== null) {
+        documented.push({ kind: entry.kind, path: found.path, line: found.line })
+      } else {
+        missing.push(entry)
+      }
+    }
+
+    const documentedEvidence = documented.map((d) => `${d.path}:${d.line}`)
+    // A source that actually documents a command is already represented by that line; only
+    // sources with no match need the first-command fallback to stay in the provenance.
+    const documentedPaths = new Set(documented.map((d) => d.path))
+    const otherEvidence = instructions.sources
+      .filter((s) => !documentedPaths.has(s.path))
+      .map((s) => `${s.path}:${s.line}`)
+
+    if (missing.length === 0) {
+      return pass(
+        `${documented.length} detected verify command kind(s) appear in the instructions`,
+        capEvidence([...documentedEvidence, ...otherEvidence], sourcePaths),
+      )
+    }
+
+    const names = missing.map((entry) => `${entry.kind} (${entry.cmd})`).join(', ')
+    const prefix =
+      documented.length > 0
+        ? `Some verify commands are documented, but ${names} are not.`
+        : `Detected verify commands are not documented: ${names}.`
+    return warn(
+      `${prefix} An agent that cannot see the real command will invent or omit the verify step.`,
+      capEvidence(
+        [
+          ...missing.map((d) => d.evidence).filter((e): e is string => e !== null && e !== ''),
+          ...documentedEvidence,
+          ...otherEvidence,
+        ],
+        sourcePaths,
+      ),
+      {
+        ...derived(target, `Add ${names} to ${target}, using the commands anvil detected`, 0.8),
+      },
+    )
+  },
+}
+
 /**
  * The instruction file's size, and where its commands are.
  *
@@ -1010,10 +1296,10 @@ const STYLE_GUIDE: Rule = {
  * the command fails. That is the same class of bug as a stale `AGENTS.md` command, and it
  * belongs in the same report rather than in a quarterly cleanup.
  *
- * The scan reads `.opencode` directly because the profile walker deliberately skips hidden
- * config directories. It only reports references that can be resolved: a missing
- * `package.json` under a `cd` target proves nothing about the script, so that case is left
- * alone rather than turned into a guess.
+ * The scan reads `.opencode` and the other instruction sources directly because the profile
+ * walker deliberately skips hidden config directories and can be truncated. It only reports
+ * references that can be resolved: a missing `package.json` under a `cd` target proves
+ * nothing about the script, so that case is left alone rather than turned into a guess.
  */
 const AGENT_CONFIG: Rule = {
   id: 'AGENT_CONFIG',
@@ -1032,10 +1318,18 @@ const AGENT_CONFIG: Rule = {
         ...filesUnder(root, '.opencode/skills'),
       ]),
     ].filter((f) => f.endsWith('/SKILL.md'))
+    // Other instruction sources an agent actually loads. Read from disk, not from the
+    // profile walk: a truncated walk would otherwise make a stale CLAUDE.md invisible.
+    const instructionFiles = [
+      ...['CLAUDE.md', '.github/copilot-instructions.md', '.cursorrules'].filter((rel) =>
+        existsSync(join(root, ...rel.split('/'))),
+      ),
+      ...filesUnder(root, '.cursor/rules'),
+    ]
     const config = readInstructionsConfig(root)
 
-    if (commands.length === 0 && skills.length === 0 && config.patterns.length === 0) {
-      return na('No agent commands, skills or instruction globs to check')
+    if (commands.length === 0 && skills.length === 0 && instructionFiles.length === 0 && config.patterns.length === 0) {
+      return na('No agent commands, skills, instruction files or instruction globs to check')
     }
 
     const issues: string[] = []
@@ -1046,7 +1340,7 @@ const AGENT_CONFIG: Rule = {
       evidence.push(at)
     }
 
-    for (const file of [...commands, ...skills]) {
+    for (const file of [...commands, ...skills, ...instructionFiles]) {
       const text = readRepoText(root, file)
       // A file that was listed and then disappeared between walk and read is not evidence
       // of a stale reference; it is evidence that the tree moved while we looked at it.
@@ -1150,8 +1444,8 @@ const AGENT_CONFIG: Rule = {
       )
     }
 
-    const scanned = commands.length + skills.length + (config.path === '' ? 0 : 1)
-    const sources = [...commands, ...skills, ...(config.path === '' ? [] : [config.path])]
+    const scanned = commands.length + skills.length + instructionFiles.length + (config.path === '' ? 0 : 1)
+    const sources = [...commands, ...skills, ...instructionFiles, ...(config.path === '' ? [] : [config.path])]
     return pass(`${scanned} agent-config source(s) resolve`, sources.slice(0, 6))
   },
 }
@@ -1774,6 +2068,7 @@ const RISK_MAP: Rule = {
 export const RULES: readonly Rule[] = [
   AGENTS_FILE,
   AGENTS_COMMANDS,
+  VERIFY_DOC_COVERAGE,
   INSTRUCTION_BUDGET,
   ARCH_DOC,
   MODULE_MAP,

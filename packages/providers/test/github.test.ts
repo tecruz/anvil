@@ -29,6 +29,42 @@ describe('the forge push transport', () => {
     assert.equal(calls[0]?.env[SHIP_GUARD_ENV], '1')
   })
 
+  test('pushes the pinned commit to the branch ref instead of the local branch tip', async () => {
+    const calls: string[][] = []
+    const transport = new GhForgeTransport({
+      runGit: async (args): Promise<RunResult> => {
+        calls.push(args)
+        return { stdout: '', stderr: '', exitCode: 0 }
+      },
+    })
+
+    const result = await transport.pushBranch({
+      cwd: '/tmp/wt',
+      branch: 'feat/local-1',
+      commit: 'abcdef1234567890',
+    })
+
+    assert.equal(result.ok, true)
+    assert.deepEqual(calls[0], ['push', '-u', 'origin', 'abcdef1234567890:refs/heads/feat/local-1'])
+    assert.match(result.detail, /at abcdef1/)
+  })
+
+  test('refuses a non-commit value instead of building an arbitrary refspec', async () => {
+    let called = false
+    const transport = new GhForgeTransport({
+      runGit: async (): Promise<RunResult> => {
+        called = true
+        return { stdout: '', stderr: '', exitCode: 0 }
+      },
+    })
+
+    const result = await transport.pushBranch({ cwd: '/tmp/wt', branch: 'feat/local-1', commit: '--delete' })
+
+    assert.equal(result.ok, false)
+    assert.match(result.detail, /not a commit id/)
+    assert.equal(called, false)
+  })
+
   test('reports the git failure instead of claiming the push happened', async () => {
     const transport = new GhForgeTransport({
       runGit: async (): Promise<RunResult> => ({

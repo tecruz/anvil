@@ -6,6 +6,15 @@
  * widening the distribution's dependency surface.
  */
 
+export {
+  type ActionResult,
+  type ActionStage,
+  actionArgv,
+  actionResult,
+  DASHBOARD_ACTIONS,
+  type DashboardAction,
+  parseAction,
+} from './actions.ts'
 export { CSS, HTML, JS } from './assets.ts'
 export { createDashboardServer, type DashboardServerHandle, type DashboardServerOptions } from './server.ts'
 export {
@@ -18,3 +27,21 @@ export {
   type StagedFileView,
   type StagedView,
 } from './snapshot.ts'
+export {
+  buildTaskBrief,
+  buildTaskHandoff,
+  buildTaskMap,
+  MAX_TASK_TEXT,
+  type TaskBlocker,
+  type TaskBrief,
+  type TaskBriefInput,
+  type TaskCheck,
+  type TaskGate,
+  type TaskHandoff,
+  TaskInputError,
+  type TaskMap,
+  type TaskMapEdge,
+  type TaskMapNode,
+  type TaskStartItem,
+  type TaskWorkflowReference,
+} from './task.ts'

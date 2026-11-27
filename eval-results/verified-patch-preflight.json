@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "results": [
+    {
+      "id": "verified-patch",
+      "hiddenFailsOnBase": true,
+      "hiddenPassesWithFix": true,
+      "verifyScriptExecutable": true,
+      "ok": true
+    },
+    {
+      "id": "node-tiny-slugify",
+      "hiddenFailsOnBase": true,
+      "hiddenPassesWithFix": true,
+      "verifyScriptExecutable": true,
+      "ok": true
+    }
+  ]
+}

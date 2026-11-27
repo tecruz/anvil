@@ -6,7 +6,7 @@
       "size": "tiny",
       "kind": "code-change",
       "scenarioHash": "b19a54403397919b8eebf8b25fc17fabea64762d907a14957ce85b2480319d27",
-      "sourceHash": "681b148b6e228720bb9216a4eaf680a907d01c020a6aeab0d0733f15981f2ae0",
+      "sourceHash": "73074fbb73be1562f6698edc687691d1b6f273ae0f8d9fa37746a8a9c1035a92",
       "verify": ["npm test"],
       "hiddenVerify": ["node --test test/hidden-slugify.test.js"],
       "expect": {
@@ -19,7 +19,7 @@
       "size": "tiny",
       "kind": "verify-only",
       "scenarioHash": "90d10243bb03041e650d2f256f63c8f79def84ec715b440da19b302e54bb4c01",
-      "sourceHash": "5fa426f7d345cf5d2e3b2d18bbcb896103d986e2e28309420335fb0e8e09a265",
+      "sourceHash": "52fba84679b0c9acf11249fd1b6efcad034692e649a969e8500fba9a1191eb6b",
       "verify": ["npm test"],
       "hiddenVerify": [],
       "expect": {

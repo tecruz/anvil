@@ -22,7 +22,17 @@ Five stages, and the order is the design:
    have never seen and cannot modify. This is the only source of truth in the system;
    everything downstream is a function of it.
 2. **Audit** — run the readiness rules over the profile. Every finding carries
-   file:line evidence and a concrete fix.
+   file:line evidence and a concrete fix. `anvil doctor` also presents the profile's
+   repository-wide `Stack` list grouped by evidence directory ("Stack by location") when
+   more than one location is present. That grouping is presentation only: it never adds a
+   stack, changes playbook matching, or changes the JSON contract. The profile also reports
+   `diagnostics.unanalysedDeps`: a module with `deps: []` is either analysed (a manifest was
+   read and no internal edge was found) or unknown, and only the first is allowed to look
+   like a negative finding. Go workspace `require` edges, Node workspace dependencies,
+   Cargo path dependencies, uv workspace sources, Gradle `project(...)` calls and Maven reactor dependencies are currently
+   resolved; other ecosystems are declared unanalysed rather than silently empty. A uv
+   dependency becomes an edge only when `tool.uv.sources` declares it local, and a Gradle edge
+   only when the id is in the build's `include` set, and a Maven edge only when a declared dependency names another reactor coordinate. A matching name is not enough.
 3. **Plan / brief** — rank the gaps and emit the facts an LLM needs, so the model does
    the prose and anvil does the facts.
 4. **Init** — write the derived context into the repository, through a staging bundle
@@ -106,9 +116,11 @@ Two consequences worth knowing:
   tool said.
 - **The dashboard is a view, not a second implementation.** `anvil dashboard` binds to
   loopback, requires a one-time session token, and presents `doctor`, `ready`, `plan`,
-  `brief` and `crew status` JSON beside a read-only view of the staging bundle. A failed
-  source is reported beside the others, and verification is `unavailable` rather than
-  green by absence ([ADR-0025](adr/0025-local-dashboard.md)).
+  `profile`, `brief` and `crew status` JSON beside a read-only view of the staging bundle.
+  A task brief combines those sources for one entry point — a pasted ticket or a plan
+  suggestion — without running a command or writing to the repository. A failed source is
+  reported beside the others, and verification is `unavailable` rather than green by
+  absence ([ADR-0025](adr/0025-local-dashboard.md)).
 
 ## Tickets and providers
 
@@ -211,7 +223,7 @@ published — the profile, the report, the plan, the brief, the envelope — car
 
 | Contract | Defined in | What it carries |
 | --- | --- | --- |
-| `ProjectProfile` | `packages/profile/src/types.ts` | the repository as facts: languages, modules, stacks, commands, tooling, docs, risk paths, instruction files, and `diagnostics` for scan completeness |
+| `ProjectProfile` | `packages/profile/src/types.ts` | the repository as facts: languages, modules, stacks, commands, read-only workflow `file:line` citations (`workflowReferences`), tooling, docs, risk paths, instruction files, and `diagnostics` for scan completeness |
 | `Finding` | `packages/audit/src/types.ts` | one rule's verdict: `pass`, `warn`, `fail` or `na`, a severity, evidence, and a fix |
 | `Plan` | `packages/playbooks/src/plan.ts` | ranked suggestions in three tiers, with the satisfied ones counted and left out |
 | `Brief` | `packages/derive/src/brief.ts` | verified facts, the `gaps` that keep generated guidance honest, the evidence-use rules, and the context questions anvil did not answer |

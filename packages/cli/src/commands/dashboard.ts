@@ -1,17 +1,19 @@
 /**
- * `anvil dashboard` — an explicit, local-only, read-only overview of a repository.
+ * `anvil dashboard` — an explicit, local-only overview of a repository.
  *
  * The command is the only thing that knows how anvil stores state. The dashboard package
- * receives a read-only staging view and a CLI invoker; it never writes to the repository,
- * runs a verify command, or fetches guidance from the network.
+ * receives a read-only staging view and a CLI invoker. The page is read-only by default; the
+ * three confirm-gated Work-view actions call that same invoker with fixed CLI argv, so all
+ * approval checks stay in the CLI. It never fetches guidance from the network.
  */
 
 import { existsSync, statSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { AnvilError, ErrorCode, parseCliArgs } from '@anvil/core'
-import { createDashboardServer, type StagedFileView, type StagedView } from '@anvil/dashboard'
+import { createDashboardServer, type DashboardInvoke, type StagedFileView, type StagedView } from '@anvil/dashboard'
 import { diffFile, inspectStaging, readRepoFile, readStaged, renderUnifiedDiff, summarize } from '@anvil/derive'
-import { createCliInvoker } from '../mcp.ts'
+import { createCliInvoker, DASHBOARD_ACTION_TIMEOUT_MS } from '../mcp.ts'
+import { evidenceStore, headRevision, readVerificationEvidence } from './crew.ts'
 import type { Command } from './types.ts'
 
 function parsePort(value: unknown): number {
@@ -73,14 +75,50 @@ export function stagedView(repoRoot: string): StagedView {
   }
 }
 
+export interface DashboardInvokers {
+  /** Short runner for the read-only snapshot sources. */
+  invoke: DashboardInvoke
+  /** Long runner for the three gated actions, which may run multi-minute verification. */
+  invokeAction: DashboardInvoke
+}
+
+/**
+ * Two invokers, one transport. Snapshot reads stay fast; an action gets enough time for the
+ * CLI's ten-minute-per-check verification budget. The timeouts and entry are injectable so
+ * tests can prove a slow check survives on the action runner with a short wait.
+ */
+export function dashboardInvokers(
+  options: { entry?: string; snapshotTimeoutMs?: number; actionTimeoutMs?: number } = {},
+): DashboardInvokers {
+  const { entry, snapshotTimeoutMs, actionTimeoutMs = DASHBOARD_ACTION_TIMEOUT_MS } = options
+  // exactOptionalPropertyTypes: omit undefined keys rather than passing them through.
+  const invokeOptions = {
+    ...(entry === undefined ? {} : { entry }),
+    ...(snapshotTimeoutMs === undefined ? {} : { timeoutMs: snapshotTimeoutMs }),
+  }
+  return {
+    invoke: createCliInvoker(invokeOptions),
+    invokeAction: createCliInvoker({ ...invokeOptions, timeoutMs: actionTimeoutMs }),
+  }
+}
+
 export const dashboardCommand: Command = {
   name: 'dashboard',
-  summary: 'Start a local, read-only overview of readiness, context and parallel work.',
+  summary: 'Start a local overview with a task brief, readiness, context and work, with gated actions.',
   usage: 'anvil dashboard [--repo <dir>] [--port <n>]',
   details: [
-    'Serves a small read-only page over the same JSON contracts the CLI prints. It does not',
-    'replace any command, and it never builds, tests, sets up, claims, ships or fetches',
-    'guidance. Refresh re-reads the CLI output; the page is a snapshot, not a live agent view.',
+    'Serves a small page over the same JSON contracts the CLI prints. It does not replace any',
+    'command. Refresh re-reads the CLI output; the page is a snapshot, not a live agent view.',
+    '',
+    'The Task brief is the entry point: paste a ticket or task text, or pick a repository',
+    'suggestion. The brief names files to start from, checks, approval gates quoted from the',
+    'task, blockers and unknowns. It reads only the cached snapshot, stores nothing and never',
+    'starts a CLI process. Repository, Context and Work stay available as read-only views.',
+    '',
+    'The page is read-only by default. The Work view offers three explicit, confirm-gated',
+    'actions: Claim <ticket>, Verify crew, and Ship <claim key> --probe. Each runs the same',
+    'CLI command through the same approval checks; a refusal is shown beside the snapshot.',
+    'See ADR-0026.',
     '',
     'The server binds to 127.0.0.1 only. Open the one-time URL it prints; the session token',
     'is then kept in an HttpOnly cookie. Stop it with Ctrl+C.',
@@ -111,11 +149,27 @@ export const dashboardCommand: Command = {
       })
     }
 
+    // Resolve the bounded evidence store and sample the HEAD commit once with read-only Git
+    // flags. A page load or refresh never launches Git: a brief only reads the cached snapshot.
+    const store = evidenceStore(repoRoot)
+    // The revision is provenance, not a gate. A missing or broken Git (ToolMissing, a failed
+    // probe, a non-repository worktree) must not stop the read-only dashboard from listening:
+    // leave currentRevision null so the snapshot reports verification as explicitly unknown.
+    let currentRevision: string | null = null
+    try {
+      currentRevision = await headRevision(repoRoot)
+    } catch {
+      currentRevision = null
+    }
+    const { invoke, invokeAction } = dashboardInvokers()
     const server = await createDashboardServer({
       cwd: repoRoot,
       port,
-      invoke: createCliInvoker(),
+      invoke,
+      invokeAction,
       readStaged: () => stagedView(repoRoot),
+      currentRevision,
+      ...(store === null ? {} : { readVerification: () => readVerificationEvidence(store) }),
     })
 
     ctx.out(
@@ -123,14 +177,14 @@ export const dashboardCommand: Command = {
         schemaVersion: 1,
         url: server.url,
         repository: repoRoot,
-        note: 'Local, read-only. Open the URL once; stop with Ctrl+C.',
+        note: 'Local; read-only by default with three confirm-gated Work actions. Open the URL once; stop with Ctrl+C.',
       },
       () =>
         [
           `${ctx.style.green('dashboard')} ${server.url}`,
           `  repository  ${repoRoot}`,
           '',
-          '  Local and read-only. Open the URL once; stop with Ctrl+C.',
+          '  Local; read-only by default. Open the URL once; stop with Ctrl+C.',
         ].join('\n'),
     )
   },

@@ -17,7 +17,16 @@ const scenarios = (
   JSON.parse(readFileSync(join(source, 'eval/scenarios.json'), 'utf8')) as { scenarios: EvalScenario[] }
 ).scenarios
 const smoke = new Set(['tiny-code-change', 'tiny-verify-only', 'medium-code-change', 'medium-verify-only'])
-const extended = scenarios.filter((scenario) => !smoke.has(scenario.id))
+
+/**
+ * The pinned #91 source clones are local run inputs, not committed fixtures. They are validated by
+ * the real-agent run record, not by CI; a clean checkout must still have a passing test suite.
+ */
+function trackedFixture(repo: string): boolean {
+  const result = spawnSync('git', ['ls-files', '--error-unmatch', '--', repo], { cwd: source })
+  return result.status === 0
+}
+const extended = scenarios.filter((scenario) => !smoke.has(scenario.id) && trackedFixture(scenario.repo))
 const temps: string[] = []
 
 after(() => {

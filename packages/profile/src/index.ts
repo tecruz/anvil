@@ -49,6 +49,7 @@ export {
   detectDocumentedCommands,
   detectGenericTooling,
   detectInstructionFiles,
+  detectWorkflowReferences,
   globToRegExp,
   makefileTargets,
   matchesAny,
@@ -100,7 +101,14 @@ export {
   toPosix,
   type Vcs,
   type VcsHost,
+  type WorkflowReference,
 } from './types.ts'
+export {
+  type VerificationCommand,
+  type VerificationPlan,
+  type VerificationSource,
+  verificationPlan,
+} from './verify-plan.ts'
 export {
   DEFAULT_MAX_FILES,
   extensionOf,

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { delimiter, isAbsolute, join, relative } from 'node:path'
@@ -24,6 +24,25 @@ export interface CheckExecution {
   at: string
   /** Fixture-relative directory the broker ran the check in. Empty for the fixture root. */
   cwd: string
+  /**
+   * Optional snapshot of the in-scope files taken at execution time. A grader can compare it
+   * with the final patch so a check that went green before the last edit is not counted.
+   */
+  patchHash?: string
+}
+
+/**
+ * A command declared by the repository manifest, such as `npm run test`. The broker puts a
+ * PATH shim in front of that binary so an agent invocation of the declared command is captured
+ * with the same provenance as a standalone Node check.
+ */
+export interface DeclaredCommand {
+  /** Exact command string recorded in the attestation. */
+  command: string
+  /** Binary name to shim, e.g. `npm`. */
+  bin: string
+  /** Exact argv the shim must match, e.g. ['run', 'test']. */
+  argv: readonly string[]
 }
 
 export interface CheckBroker {
@@ -61,6 +80,19 @@ function hashSource(source: string): string {
   return createHash('sha256').update(source, 'utf8').digest('hex')
 }
 
+/** Resolve a declared binary on the original PATH, before any shim directory is prepended. */
+function resolveBinary(bin: string): string {
+  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
+  const names = process.platform === 'win32' ? [`${bin}.cmd`, `${bin}.exe`, bin] : [bin]
+  for (const dir of (process.env[pathKey] ?? '').split(delimiter)) {
+    for (const name of names) {
+      const candidate = join(dir, name)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return bin
+}
+
 /**
  * A broker fault must not carry a raw Node error: `error.message` includes the runtime path
  * and the `--eval` source, neither of which belongs in retained evidence. Return a small
@@ -84,6 +116,8 @@ export async function startCheckBroker(
   checks: readonly CapturedCheck[],
   workdir: string,
   captureDir = '',
+  fingerprint?: () => string,
+  declared?: DeclaredCommand,
 ): Promise<CheckBroker> {
   // macOS temporary paths (/var vs /private/var), Windows short names and shell
   // directory normalization can give the same directory different spellings.
@@ -161,6 +195,9 @@ export async function startCheckBroker(
         reply(response, 409, { error: integrityError })
         return
       }
+      // Snapshot the in-scope patch before the check starts. A fingerprint taken only after
+      // the process exits can attribute a green run to edits made while it was executing.
+      const patchHashBefore = fingerprint?.() ?? null
       // Never accept source, environment, argv or an exit status from the client.
       // The absolute runtime and captured source prevent executable/file swaps and
       // a race between the integrity check above and Node reading the main script.
@@ -187,6 +224,12 @@ export async function startCheckBroker(
         stdout = result.stdout ?? ''
         stderr = result.stderr ?? ''
       }
+      const patchHashAfter = fingerprint?.() ?? null
+      if (patchHashBefore !== null && patchHashAfter !== patchHashBefore) {
+        integrityError = 'the patch changed while the check was running; execution evidence is invalid'
+        reply(response, 409, { error: integrityError })
+        return
+      }
       const execution = {
         command: check.command,
         exitCode,
@@ -195,6 +238,7 @@ export async function startCheckBroker(
         stderr,
         at: new Date().toISOString(),
         cwd: recordedCwd,
+        ...(patchHashBefore === null ? {} : { patchHash: patchHashBefore }),
       }
       executions.push(execution)
       reply(response, 200, execution)
@@ -274,9 +318,51 @@ if (check === undefined) {
     const posixLauncher = join(launcher, 'node')
     writeFileSync(posixLauncher, `#!/bin/sh\nexec "${process.execPath}" "${client}" "$@"\n`, 'utf8')
     chmodSync(posixLauncher, 0o755)
+
+    if (declared !== undefined) {
+      const shimModule = join(launcher, `${declared.bin}-declared.mjs`)
+      const shim = `import { spawn } from 'node:child_process'
+import { realpathSync } from 'node:fs'
+const argv = ${JSON.stringify(declared.argv)}
+const command = ${JSON.stringify(declared.command)}
+const args = process.argv.slice(2)
+const cwd = realpathSync.native(process.cwd())
+const expected = ${JSON.stringify(directory)}
+if (cwd === expected && args.length === argv.length && args.every((a, i) => a === argv[i])) {
+  try {
+    const response = await fetch(${JSON.stringify(endpoint)}, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, cwd }), signal: AbortSignal.timeout(35000),
+    })
+    const result = await response.json()
+    if (!response.ok) throw new Error(result.error ?? 'the declared check was rejected')
+    process.stdout.write(result.stdout)
+    process.stderr.write(result.stderr)
+    process.exitCode = result.exitCode
+  } catch (error) { console.error(error.message); process.exitCode = 2 }
+} else {
+  const child = spawn(process.env.ANVIL_DECLARED_BIN, args, { stdio: 'inherit' })
+  child.on('error', (error) => { console.error(error.message); process.exit(2) })
+  child.on('exit', (code) => process.exit(code ?? 2))
+}
+`
+      writeFileSync(shimModule, shim, 'utf8')
+      writeFileSync(
+        join(launcher, `${declared.bin}.cmd`),
+        `@echo off\r\n"${process.execPath}" "${shimModule}" %*\r\n`,
+        'utf8',
+      )
+      const posixShim = join(launcher, declared.bin)
+      writeFileSync(posixShim, `#!/bin/sh\nexec "${process.execPath}" "${shimModule}" "$@"\n`, 'utf8')
+      chmodSync(posixShim, 0o755)
+    }
+
     const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH'
     return {
-      env: { [pathKey]: `${launcher}${delimiter}${process.env[pathKey] ?? ''}` },
+      env: {
+        [pathKey]: `${launcher}${delimiter}${process.env[pathKey] ?? ''}`,
+        ...(declared === undefined ? {} : { ANVIL_DECLARED_BIN: resolveBinary(declared.bin) }),
+      },
       executions,
       get integrityError() {
         return integrityError

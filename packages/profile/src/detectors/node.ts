@@ -20,6 +20,7 @@ import {
   type DetectorContext,
   filesUnder,
   hasFile,
+  markDepsAnalysed,
   type ProfileDraft,
   setMonorepo,
 } from '../detector.ts'
@@ -253,12 +254,16 @@ export const nodeDetector: Detector = {
     if (manifest.workspaces === null) {
       // A single-package project is still a module, and having it in the graph means the
       // module-map rule can describe the whole repo rather than saying "no modules".
+      const id = manifest.name ?? '.'
       addModule(draft, {
-        id: manifest.name ?? '.',
+        id,
         path: '.',
         kind: 'package',
         deps: [],
       })
+      // A single-package manifest was read: no workspace dependency is possible, so this
+      // empty list is a finding, not an unknown.
+      markDepsAnalysed(draft, id)
       return
     }
 
@@ -286,6 +291,7 @@ export const nodeDetector: Detector = {
         // are not assumed internal -- the name set is the only reliable test.
         deps: member.deps.filter((d) => ids.has(d) && d !== member.id),
       })
+      markDepsAnalysed(draft, member.id)
     }
     if (draft.monorepo !== null) {
       draft.monorepo.members = members.map((m) => m.id)

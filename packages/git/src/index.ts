@@ -16,7 +16,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, realpathSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { AnvilError, ErrorCode } from '@anvil/core'
@@ -193,6 +193,74 @@ export function normalizeGitPath(raw: string): string {
     return realpathSync.native(trimmed)
   } catch {
     return resolve(trimmed)
+  }
+}
+
+/** Bounded, non-blocking read of a small git metadata file; never follows a final link. */
+function readBoundedGitFile(path: string, maxBytes = 8 * 1024): string | null {
+  let fd: number | null = null
+  try {
+    const info = lstatSync(path)
+    if (info.isSymbolicLink() || !info.isFile()) return null
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+    const stat = fstatSync(fd)
+    if (!stat.isFile() || stat.size > maxBytes) return null
+    const size = stat.size
+    const buffer = Buffer.allocUnsafe(size + 1)
+    if (readSync(fd, buffer, 0, buffer.length, 0) !== size) return null
+    return buffer.subarray(0, size).toString('utf8')
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd)
+      } catch {
+        // A descriptor that cannot be closed cannot change the verdict.
+      }
+    }
+  }
+}
+
+/**
+ * Read the common Git metadata directory of a repository without starting a process.
+ *
+ * A linked worktree has a `.git` file naming its private gitdir, whose `commondir` points back to
+ * the main `.git`. Every resolved path goes through {@link normalizeGitPath}, so a gitdir written
+ * with a different drive-letter case or separator style still identifies the same physical
+ * directory. Consumers that must be process-free (the dashboard) use this rather than parsing the
+ * metadata themselves; callers that can afford a process should prefer `discoverRepo`.
+ */
+export function gitDirFromMetadata(repoRoot: string): string | null {
+  try {
+    const dotGit = join(repoRoot, '.git')
+    if (!existsSync(dotGit)) return null
+    const info = lstatSync(dotGit)
+    if (info.isSymbolicLink()) return null
+    let gitDir = normalizeGitPath(dotGit)
+    if (info.isFile()) {
+      const text = readBoundedGitFile(dotGit)
+      if (text === null) return null
+      const match = /^gitdir:\s*(.+)$/i.exec(text.trim())
+      if (match === null) return null
+      gitDir = normalizeGitPath(
+        isAbsolute((match[1] as string).trim())
+          ? (match[1] as string).trim()
+          : join(repoRoot, (match[1] as string).trim()),
+      )
+    } else if (!info.isDirectory()) {
+      return null
+    }
+    const commonFile = join(gitDir, 'commondir')
+    if (existsSync(commonFile)) {
+      const commonRaw = readBoundedGitFile(commonFile)
+      if (commonRaw === null || commonRaw.trim() === '') return null
+      const common = commonRaw.trim()
+      gitDir = normalizeGitPath(isAbsolute(common) ? common : join(gitDir, common))
+    }
+    return gitDir
+  } catch {
+    return null
   }
 }
 
@@ -479,23 +547,27 @@ export interface WorktreeStatus {
  * unpushed will happily release a worktree and lose them.
  */
 export async function worktreeStatus(cwd: string): Promise<WorktreeStatus> {
-  const statusRes = await git(['status', '--porcelain'], { cwd })
+  // The dashboard calls this on every load/refresh, so every probe must be read-only: no index
+  // refresh, no fsmonitor/filter helpers, no lazy fetch. On Git older than 2.45 the unknown
+  // --no-lazy-fetch option fails closed rather than silently fetching.
+  const options = { cwd, env: readOnlyGitEnv() }
+  const call = (args: string[]) =>
+    git(['--no-optional-locks', '--no-lazy-fetch', '-c', 'core.fsmonitor=false', ...args], options)
+  const statusRes = await call(['status', '--porcelain'])
   const changes = statusRes.exitCode === 0 ? statusRes.stdout.split('\n').filter((l) => l.trim() !== '') : []
 
-  const upstreamRes = await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], { cwd })
+  const upstreamRes = await call(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])
   const hasUpstream = upstreamRes.exitCode === 0
   let unpushed: number | null = null
   if (hasUpstream) {
-    const count = await git(['rev-list', '--count', '@{upstream}..HEAD'], {
-      cwd,
-    })
+    const count = await call(['rev-list', '--count', '@{upstream}..HEAD'])
     if (count.exitCode === 0) {
       const n = Number.parseInt(count.stdout.trim(), 10)
       unpushed = Number.isFinite(n) ? n : null
     }
   }
 
-  const log = await git(['log', '-1', '--format=%ct%x00%s'], { cwd })
+  const log = await call(['log', '-1', '--format=%ct%x00%s'])
   let lastCommitAgeSeconds: number | null = null
   let lastCommitSubject: string | null = null
   if (log.exitCode === 0) {

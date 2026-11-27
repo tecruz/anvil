@@ -75,6 +75,7 @@ describe('mergeConfig', () => {
     assert.doesNotThrow(() => mergeConfig(defaultConfig(), { provider: { default: 'github' } }, 'cfg'))
     assert.doesNotThrow(() => mergeConfig(defaultConfig(), { output: { color: 'never' } }, 'cfg'))
     assert.doesNotThrow(() => mergeConfig(defaultConfig(), { features: { probeCommands: true } }, 'cfg'))
+    assert.doesNotThrow(() => mergeConfig(defaultConfig(), { features: { requireCurrentVerification: true } }, 'cfg'))
     assert.doesNotThrow(() => mergeConfig(defaultConfig(), { git: { worktreeRoot: '/tmp/wt' } }, 'cfg'))
   })
 
@@ -145,6 +146,14 @@ describe('mergeConfig', () => {
       (err: unknown) => {
         assert.ok(err instanceof AnvilError)
         assert.match(err.message, /features\.probeCommands: expected a boolean/)
+        return true
+      },
+    )
+    assert.throws(
+      () => mergeConfig(defaultConfig(), { features: { requireCurrentVerification: 'yes' } }, 'cfg'),
+      (err: unknown) => {
+        assert.ok(err instanceof AnvilError)
+        assert.match(err.message, /features\.requireCurrentVerification: expected a boolean/)
         return true
       },
     )

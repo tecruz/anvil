@@ -6,8 +6,8 @@ Typescript project, with javascript. Default branch: `origin/main`.
 
 - **Install:** `npm ci` _(detected)_ `package-lock.json`
 - **Build:** `npm run build` `AGENTS.md:8`
-- **Test:** `npm run test` `CONTRIBUTING.md:70`
-- **Test (changed files only):** `npm run test:changed` `README.md:142`
+- **Test:** `npm run test` `CONTRIBUTING.md:74`
+- **Test (changed files only):** `npm run test:changed` `README.md:72`
 - **Lint:** `npm run lint` `AGENTS.md:11`
 - **Format:** `npm run format` `AGENTS.md:12`
 - **Typecheck:** `npm run typecheck` `AGENTS.md:13`
@@ -17,6 +17,7 @@ Typescript project, with javascript. Default branch: `origin/main`.
 - `packages/audit` -- @anvil/audit (depends on @anvil/profile)
 - `packages/cli` -- @anvil-workflows/cli
 - `packages/core` -- @anvil/core
+- `packages/dashboard` -- @anvil/dashboard
 - `packages/derive` -- @anvil/derive (depends on @anvil/audit, @anvil/playbooks, @anvil/profile)
 - `packages/discovery` -- @anvil/discovery (depends on @anvil/core, @anvil/playbooks)
 - `packages/git` -- @anvil/git (depends on @anvil/core)
@@ -57,6 +58,12 @@ See `docs/ARCHITECTURE.md`.
 - Formatting is handled by biome.
 - Pre-commit hooks (githooks) run on every commit.
 - CI runs on 3 workflow file(s).
+
+## Product expectations
+
+- Business expectations were not assessed here: what the product should do, and its acceptance criteria, are open questions, not facts.
+- Source code and tests are evidence of the current implementation, not by themselves the definition of correct product behavior.
+- Ask: What intended product behavior and acceptance criteria should guide changes?
 
 ## For agents
 

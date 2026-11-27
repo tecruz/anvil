@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { AnvilError, ErrorCode, probeCommandVersion } from '@anvil/core'
+import { AnvilError, type DeclaredCommand, ErrorCode, probeCommandVersion } from '@anvil/core'
 import {
   addWorktree,
   branchExists,
@@ -272,6 +272,8 @@ export interface ClaimOptions {
    * inside the callback.
    */
   recommend?: (worktreePath: string) => readonly RecommendedResource[]
+  /** Owner-declared commands, so the ticket bundle shows the same plan the runners use. */
+  declared?: readonly DeclaredCommand[]
 }
 
 export interface ClaimResult {
@@ -374,6 +376,7 @@ export async function claimTicket(options: ClaimOptions): Promise<ClaimResult> {
       profile,
       branch,
       ...(resources === undefined ? {} : { resources }),
+      ...(options.declared === undefined ? {} : { declared: options.declared }),
     })
     const overlay = renderAgentsOverlay({ ticket, profile })
     // Validate both outputs before the first write: a real parent does not make linked

@@ -80,18 +80,22 @@ It also refuses to run when `node_modules` is missing, and says so, rather than 
 
 ## What ships, and where from
 
-There is no npm release. The distribution is the repository itself
-(`npm install -g github:tecruz/anvil`), and that decides the manifest layout: **npm packs the
-repository root for a git dependency**, and there is no subdirectory install — the fragment
-after `#` is parsed as a git ref, not a path. So the root `package.json` is the package, with
-`bin` pointing down into `packages/cli/dist/cli.js`. [ADR-0007](docs/adr/0007-distribution-git-install.md)
-records the reasoning and supersedes the publish target in ADR-0006.
+Two channels ship: the prebuilt `@anvil-workflows/cli` package on npm, and the repository
+itself (`npm install -g github:tecruz/anvil`). The git channel decides the manifest layout:
+**npm packs the repository root for a git dependency**, and there is no subdirectory install —
+the fragment after `#` is parsed as a git ref, not a path. So the root `package.json` is the
+package, with `bin` pointing down into `packages/cli/dist/cli.js`.
+[ADR-0007](docs/adr/0007-distribution-git-install.md) records the reasoning and supersedes the
+publish target in ADR-0006; [ADR-0012](docs/adr/0012-versioned-prebuilt-distribution.md) covers
+the registry channel.
 
 Two consequences for you as a contributor:
 
 - **`npm ci` builds the bundle.** `prepare` runs `npm run build` on install, because
   `packages/*/dist/` is gitignored and a clone otherwise has no CLI. That is deliberate: the
-  thing you test is the thing a user installs.
+  thing you test is the thing a user installs. The build *checks* `generated.ts` against the
+  YAML sources; it never regenerates them, so an install cannot silently repair a stale
+  generated file and hide a missing `npm run gen:playbooks`.
 - **Two version fields exist and a test keeps them equal.** The root's version is the one that
   ships; `packages/cli` has one because npm expects it. If you bump a version, bump both —
   the test will tell you.

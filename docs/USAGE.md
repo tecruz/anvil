@@ -93,6 +93,21 @@ three files:
   verification commands.
 - `.opencode/commands/review-change.md` — a review command for the current diff.
 
+For a repository whose team reads another tool's instructions, add the opt-in mirrors:
+
+```bash
+anvil init --with-mirrors
+```
+
+This stages three thin files in addition to the default three: `CLAUDE.md`,
+`.cursor/rules/anvil.mdc`, and `.github/copilot-instructions.md`. They **point to**
+`AGENTS.md` as the source of truth instead of repeating command strings: each mirror names
+which verification kinds exist and sends the reader to `AGENTS.md` for the exact command,
+its working directory and its evidence, so there is no second copy to drift. They go
+through the same diff, validation and stale-bundle checks as `AGENTS.md`; nothing is
+written until `anvil init --apply`. The default stays the three-file bundle, and the
+option is never applied by `--only`.
+
 Then rank what is missing:
 
 ```bash
@@ -359,14 +374,27 @@ What each step does:
 - **`crew verify`** runs each worktree's verify commands. The concurrency is chosen from
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
-  run concurrently. The decision is always printed.
+  run concurrently. The decision is always printed. The command list is the shared
+  verification plan: an owner-declared command from `anvil.config.json` wins over the detected
+  one, runs in its declared directory, and any conflict with a detected command is printed
+  rather than hidden. `--record` writes bounded evidence
+  under `.anvil/` in the main worktree: each version 2 row names the claim, the commit, the
+  repo-relative directory and exact commands, a digest of that check plan, and the observed
+  exits. The commit is sampled before and after every command, so a check that spanned a tree
+  change records no current commit. Older rows stay readable as history, but they describe a
+  worktree rather than an immutable tree and are never presented as current.
 - **`ship`** runs the pipeline in a deliberate order: refuse, verify, diff, push, pull
   request, ticket. The stages that could lose work or leave debris on the remote run
   last, so a failed verification means nothing reached the remote at all. It refuses
   before pushing when the worktree has uncommitted changes or the branch has no commits
   beyond its base. `ship` needs `gh` and a GitHub remote for the pull request; the ticket
   update goes back to the provider the claim came from, so a local ticket is advanced
-  locally instead of being looked for on GitHub.
+  locally instead of being looked for on GitHub. When
+  `features.requireCurrentVerification` is enabled, `ship` also refuses before the push
+  unless a `crew verify --record` row is current for this claim, this commit and the current
+  check plan. `--skip-verify` does not waive that policy, and a stale or legacy row does not
+  satisfy it. The refusal happens before the transport is called, so nothing reaches the
+  remote.
 - **`release`** removes the worktree, and refuses to remove one holding uncommitted
   changes or unpushed commits unless `--force` is passed — and says which of the two it
   found.
@@ -671,7 +699,7 @@ accepts. This table is the summary; the help text is the contract.
 | Command | What it does |
 | --- | --- |
 | `anvil doctor` | Audit AI-readiness and score the repository. `--layer`, `--fail-on <severity>`, `--strict`, `--max-files <n>`. |
-| `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--apply` writes them. |
+| `anvil init` | Derive AGENTS.md, a verify skill and a review command. `--with-mirrors` also stages thin Claude/Cursor/Copilot instruction mirrors. `--apply` writes them. |
 | `anvil plan` | Rank fixes as derived / official / community. `--tier`, `--limit`, `--offline`, `--refresh`, `--include-satisfied`. |
 | `anvil profile` | Detect the stack and emit a ProjectProfile. Reads files, never runs a build. `--max-files <n>`. |
 | `anvil ready` | Report what an AI needs here and whether it is available: `verified`, `blocked` or `unknown`. `--check` probes the environment, `--fail-on-blocked` gates CI. |
@@ -687,7 +715,7 @@ accepts. This table is the summary; the help text is the contract.
 | `anvil config` | `show`, `path`, `init` — inspect or scaffold configuration. |
 | `anvil playbook` | `list`, `show`, `check`, `add`, `discover` — the guidance registry. |
 | `anvil mcp` | Serve `doctor`, `plan` and `crew status` to MCP clients over stdio. Read-only. |
-| `anvil dashboard` | Loopback-only read-only overview of readiness, context and work. `--repo <dir>`, `--port <n>`. |
+| `anvil dashboard` | Loopback-only overview of a task brief, readiness, context and work. `--repo <dir>`, `--port <n>`. |
 | `anvil version` | The anvil version and the JSON schema version. |
 
 ### The local dashboard
@@ -696,27 +724,105 @@ accepts. This table is the summary; the help text is the contract.
 one-time URL it prints; the session token is then held in an HttpOnly cookie. The server
 binds to `127.0.0.1`, never to a network interface, and is stopped with Ctrl+C.
 
-The page has three views: **Repository** (readiness findings, blockers and ranked next
-steps), **Context** (verified brief gaps and a read-only view of the staged diff), and
-**Work** (claims, worktrees, uncommitted and unpushed changes, and agent liveness). Each
-value names the CLI command behind it, and every refresh re-reads those commands in offline
-mode. A failed command appears as an error beside the other views; it never renders as an
-empty result.
+The page has four views. **Task brief** is the entry point: paste a ticket or task
+description, or choose one of the repository suggestions from `anvil plan`. Either way it
+shows the likely files to start from, the verification commands with the source and working
+directory that established them, the required needs `anvil ready` reports as blocked, and
+what the page cannot know.
 
-Verification is deliberately shown as *unavailable*: anvil does not persist verification
-results, and the dashboard does not run `crew verify` on page load. Run `anvil crew verify`
-for a current verdict. The dashboard does not stage, apply, set up, claim, ship, or update a
-tracker. See [ADR-0025](adr/0025-local-dashboard.md) for the boundary and threat model.
+**How to check** is deliberately local: the fast loop an agent can run now, from `anvil ready` or
+owner-declared configuration (`testFast`, `test`, `lint`, `typecheck`, `build`). Each row names the
+command, its source and `file:line` evidence, and the working directory that established it. None
+has been run by the page, and none carries a pass claim.
+
+**Workflow sources to review** lists `file:line` citations for `run:` and `script:` keys in the
+repository's workflows. These are read-only pointers, not commands to copy: the profile does not
+decide which step executes, in which directory, or whether it passed. Open the cited lines when
+you need to inspect the merge gates, including release, deploy and emulator steps. The list is not
+exhaustive, and its presence is never a pass.
+
+Device and accessibility validation remains outside the page. TalkBack, focus order, insets and
+200% font scaling need a device and manual checking; the brief says this explicitly.
+
+To inspect the merge gates yourself, open the cited workflow files — a short list, a source label or
+an evidence line is not a pass. The same brief includes a **task map**: a 2D subgraph of the
+matched files, the modules containing them, their declared one-hop dependencies and the
+verify commands. It opens filtered to the task, supports a text filter and a list view, and
+shows the CLI value behind a node when it is selected. An unanalysed dependency is drawn as
+a dashed *unknown* node, not as "no dependency". No edge is inferred from import statements,
+and the map adds no fact that the brief could not cite.
+
+When `anvil ready` reports a blocked capability, the brief also offers a **copyable blocker
+handoff**. It lists only measured blockers with their status and reason, carries a contact
+only when `anvil ready` explicitly declared one, says the owner is unknown rather than guessing
+one, and cites a CODEOWNERS path as review routing to open when the profile declares one. A
+failed or unprobed readiness source produces an explicit "not available yet" handoff, not a
+clean one. The commands are printed, never run.
+
+**Repository** covers readiness findings, blockers and ranked next steps; **Context** covers
+verified brief gaps and a read-only view of the staged diff; **Work** covers claims, worktrees,
+uncommitted and unpushed changes, and agent liveness. Each value names the CLI command behind
+it, and every refresh re-reads those commands in offline mode. A failed command appears as an
+error beside the other views; it never renders as an empty result.
+
+When the pasted text states an approval gate — "the audit and proposal are approved before
+implementation" — the brief quotes that sentence and separates *start now* from *wait for
+approval*. It never infers a gate from repository files (an issue body or PR template can say
+one). If the ticket states no gate, the brief says so instead of guessing, and a repository
+suggestion says that it carries no gate or owner at all. An explicit waiver such as "no
+approval required" is quoted as *approval is not required*, never applied as a gate; wording
+that merely mentions approval is quoted as *mentioned but not stated as a requirement*.
+
+The brief is honest about what it could not measure: a failed `anvil ready` is shown as
+*blockers unknown*, not as a clean report, and an unprobed environment is shown as *not
+checked* rather than *nothing missing*. An exact path in the task outranks a file that only
+shares its ending, and both are labelled for what they are. Paths follow the order the ticket
+names them.
+
+Pasted task text stays on the loopback page: it is limited to 4,000 characters, sent to the
+local server only, and not stored. The suggestions are engineering improvements derived from
+this repository's own findings, not a team's priorities. Building a brief does not create a
+tracker ticket, claim a worktree, or modify a file, and it never starts a CLI process: it
+reads the snapshot the page loads when it opens, so the first brief works without a reload. The
+request carries the server-issued generation of that snapshot; if another tab refreshes the
+shared cache first, the older tab is
+told to refresh rather than shown a brief built from a snapshot it is not displaying.
+
+Verification has no green-by-absence state. A page load or a brief never runs a verify command or
+a write action; a refresh re-reads the CLI's existing read-only JSON contracts (`doctor`, `ready`, `plan`,
+`brief`, `crew status`). With `anvil crew verify --record`, the CLI writes a bounded evidence file;
+the dashboard displays those records as historical facts, labelled with the commit sampled at
+startup and any incomplete or stale records. The dashboard cannot prove the records' origin and
+never presents them as a current verdict — run `anvil crew verify` for that. The page is read-only by
+default: it does not stage, apply, set up or update a tracker. The Work view does offer three
+**optional, confirm-gated** actions — Claim, Verify crew and Ship. Each posts only an action
+name (and one bounded ticket reference for Claim); the server maps it to the exact CLI argv
+and runs the same CLI command, so provider resolution, ship verification and approval checks
+are unchanged. A refusal is shown as an error beside the snapshot, never as a green result.
+See [ADR-0025](adr/0025-local-dashboard.md) for the read-only boundary and threat model, and
+[ADR-0026](adr/0026-dashboard-gated-actions.md) for this exception and its limits.
 
 `anvil profile` reports how complete the scan was in `diagnostics`: `truncated`, the
-`fileLimit` that was in force, and any `failedDetectors`. `anvil doctor` repeats those
-reasons under `degraded`, and `--strict` fails when the profile is incomplete. Raise
-`--max-files` when a real repository exceeds the default 20,000-file cap.
+`fileLimit` that was in force, any `failedDetectors`, and `unanalysedDeps` — modules whose
+internal dependency edges no detector could resolve from a manifest. `anvil doctor` repeats
+these reasons under `degraded` and prints `unknown (not analysed)` in the Modules table where
+it would otherwise print an empty dependency list. An empty `deps` array means "none found"
+only for analysed ecosystems (currently Node workspaces, Go workspaces, Cargo path
+dependencies, uv workspace sources, Gradle projects and Maven reactor modules); for every other
+module it means "not analysed". `anvil doctor --strict` fails while any of these diagnostics
+stand. Raise `--max-files` when a real repository exceeds the default 20,000-file cap.
 
 A repository can have more than one real runner for the same kind — `npm test` and
 `npx playwright test`, for example. `anvil profile` and `anvil doctor` label every runner
 `primary` or `candidate`, and the doctor's JSON carries the full list under `runners`, so
 the suite anvil did not choose is visible instead of silently dropped.
+
+On a polyglot monorepo the flat `Stack` table is hard to read: a Next.js app in `apps/web`
+and a FastAPI service in `services/api` become one list with no location. `anvil doctor`
+therefore also prints a **Stack by location** section when stacks come from more than one
+directory, grouping the same detected stacks by the directory of their evidence. It is a
+presentation of `ProjectProfile.stacks` — the array, playbook matching and `--json` output
+are unchanged. A stack with no evidence is shown as `unknown`, never dropped.
 
 `anvil mcp` is the same control surface for an MCP client. It speaks newline-delimited
 JSON-RPC 2.0 over stdio and exposes three read-only tools: `anvil_doctor`, `anvil_plan`
@@ -743,7 +849,7 @@ Two layers, repo-local wins:
     "jira": { "site": null, "project": null, "issueType": "Task" }
   },
   "output": { "color": "auto" },
-  "features": { "probeCommands": false },
+  "features": { "probeCommands": false, "requireCurrentVerification": false },
   "project": { "commands": [], "tools": [], "env": [], "services": [], "references": [] }
 }
 ```
@@ -769,6 +875,10 @@ Two layers, repo-local wins:
   `JIRA_API_TOKEN`, so they never end up in a committed file, a claim, an error or a log.
 - `output.color` — `auto`, `always` or `never`.
 - `features.probeCommands` — run the project's verify commands during `ship`.
+- `features.requireCurrentVerification` — refuse to push unless a current verification
+  record exists for the claim, the checked commit and the current check plan. Record one with
+  `anvil crew verify --record` in a clean worktree. Stale, legacy and unobserved evidence do
+  not satisfy it, and `--skip-verify` does not waive it. Off by default.
 - `project.commands` — commands the owner declares for a project anvil cannot detect on
   its own. Each entry is `{ "kind": "build" | "test" | ..., "cmd": "...", "dir": "..." }`;
   `dir` is the repo-relative working directory and defaults to the repository root. A
