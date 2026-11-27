@@ -206,23 +206,42 @@ export interface EvalExecutionAttestation {
   at?: string | null
 }
 
+/** Writer and reader share these caps, so a valid record can never fail its own parser. */
+export const MAX_VERIFICATION_ATTEMPT_RUNNER = 64
+export const MAX_VERIFICATION_ATTEMPT_SCRIPT = 128
+export const MAX_VERIFICATION_ATTEMPT_CWD_HINT = 256
+
 /**
- * A bounded shell command that looked like an attempt to run the scenario's check.
+ * How much of a reported shell command could be interpreted.
+ *
+ * `simple` is a runner and a script operand with nothing else. `extra-arguments` keeps only
+ * those two fields because anything after them may be a secret or a host path. `compound`
+ * names a shell chain, and `unparsed` names syntax the observer refused to interpret. No shape
+ * retains the raw command text.
+ */
+export type EvalVerificationAttemptShape = 'simple' | 'extra-arguments' | 'compound' | 'unparsed'
+
+/**
+ * A bounded observation of an invocation that looked like the scenario's check.
  *
  * An attestation only says whether the one required command was observed. When it was not,
  * the useful question is whether the agent tried a near miss — a wrong directory, a typo in
  * the script name, a command that reported no exit status — because that separates a context
- * problem from a detection problem without keeping a transcript. This is a *reported* command
- * from an OpenCode tool event; it is never treated as proof that the check ran.
+ * problem from a detection problem without keeping a transcript. This is a *reported* tool
+ * event; it is never treated as proof that the check ran.
  */
 export interface EvalVerificationAttempt {
-  /** The reported command, redacted and size-limited before persistence. */
-  command: string
-  /** A directory the command or tool event named, relative to the worktree when possible. */
+  /** The executable the agent invoked, when it could be read. */
+  runner?: string
+  /** The script operand, basename only, when it could be read. */
+  script?: string
+  /** How much of the invocation the observer understood. */
+  shape: EvalVerificationAttemptShape
+  /** The effective directory, relative to the worktree when possible. */
   cwdHint?: string
   /** The exit status the tool event reported; null when the event carried none. */
   exitCode: number | null
-  /** Whether this command matched the scenario's declared check. */
+  /** Whether this invocation matched the scenario's declared check. */
   matched: boolean
 }
 
@@ -830,11 +849,27 @@ function parseExecutionAttestation(value: unknown): EvalExecutionAttestation | '
 function parseVerificationAttempts(value: unknown): EvalVerificationAttempt[] | 'invalid' | undefined {
   if (value === undefined) return undefined
   if (!Array.isArray(value) || value.length > 20) return 'invalid'
+  const shapes: ReadonlySet<string> = new Set(['simple', 'extra-arguments', 'compound', 'unparsed'])
   const attempts: EvalVerificationAttempt[] = []
   for (const item of value) {
     if (!isObject(item)) return 'invalid'
-    if (typeof item.command !== 'string' || item.command.length > 1024) return 'invalid'
-    if (item.cwdHint !== undefined && (typeof item.cwdHint !== 'string' || item.cwdHint.length > 256)) {
+    if (
+      item.runner !== undefined &&
+      (typeof item.runner !== 'string' || item.runner.length > MAX_VERIFICATION_ATTEMPT_RUNNER)
+    ) {
+      return 'invalid'
+    }
+    if (
+      item.script !== undefined &&
+      (typeof item.script !== 'string' || item.script.length > MAX_VERIFICATION_ATTEMPT_SCRIPT)
+    ) {
+      return 'invalid'
+    }
+    if (typeof item.shape !== 'string' || !shapes.has(item.shape)) return 'invalid'
+    if (
+      item.cwdHint !== undefined &&
+      (typeof item.cwdHint !== 'string' || item.cwdHint.length > MAX_VERIFICATION_ATTEMPT_CWD_HINT)
+    ) {
       return 'invalid'
     }
     if (item.exitCode !== null && (typeof item.exitCode !== 'number' || !Number.isInteger(item.exitCode))) {
@@ -842,7 +877,9 @@ function parseVerificationAttempts(value: unknown): EvalVerificationAttempt[] | 
     }
     if (typeof item.matched !== 'boolean') return 'invalid'
     attempts.push({
-      command: item.command,
+      ...(typeof item.runner === 'string' ? { runner: item.runner } : {}),
+      ...(typeof item.script === 'string' ? { script: item.script } : {}),
+      shape: item.shape as EvalVerificationAttemptShape,
       ...(typeof item.cwdHint === 'string' ? { cwdHint: item.cwdHint } : {}),
       exitCode: item.exitCode as number | null,
       matched: item.matched,

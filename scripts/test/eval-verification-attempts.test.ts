@@ -3,8 +3,9 @@
  *
  * The grading attestation deliberately records only the one command that counts as evidence.
  * That is enough to decide a result and not enough to explain it. These tests pin the nearby
- * question: a near-miss command is retained with its reported exit status and a relative
- * directory, while unrelated shell activity is not retained at all.
+ * question: an invocation of the check is retained as a runner, a script name, an effective
+ * directory and an exit status — while a file read, an extra argument or a shell chain is
+ * classified rather than copied into a committed record.
  */
 
 import assert from 'node:assert/strict'
@@ -12,9 +13,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { type AgentExecution, observeVerificationAttempts } from '../eval.ts'
+import { MAX_VERIFICATION_ATTEMPT_CWD_HINT, parseRunRecordResult } from '../../packages/cli/src/eval-gate.ts'
+import { type AgentExecution, observeVerificationAttempts, type ScenarioResult, sanitizeResult } from '../eval.ts'
 
-test('near-miss verification commands are retained, with a relative directory', () => {
+test('a near-miss invocation is retained without its raw command or extra arguments', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-attempts-'))
   try {
     const executions: AgentExecution[] = [
@@ -24,24 +26,48 @@ test('near-miss verification commands are retained, with a relative directory', 
         exitCode: 127,
       },
       { command: 'node ./verify.js', exitCode: 1 },
+      { command: 'node verify.js --password hunter2', exitCode: 1 },
     ]
     const attempts = observeVerificationAttempts(['node verify.js'], executions, workdir)
 
-    assert.equal(attempts.length, 2, 'only commands naming the check script are retained')
+    assert.equal(attempts.length, 3, 'only invocations of the declared check are retained')
+    assert.equal(attempts[0]?.runner, 'node')
+    assert.equal(attempts[0]?.script, 'verfy.js')
+    assert.equal(attempts[0]?.shape, 'simple')
     assert.equal(attempts[0]?.matched, false, 'a typo is a near miss, not evidence')
-    assert.equal(attempts[0]?.exitCode, 127, 'the reported status is worth knowing')
-    assert.equal(attempts[0]?.cwdHint, 'packages/sub', 'the named directory is relative to the worktree')
-    assert.match(attempts[0]?.command ?? '', /node verfy\.js/)
-    assert.ok(!(attempts[0]?.command ?? '').includes(workdir), 'a host worktree path must not be published')
+    assert.equal(attempts[0]?.exitCode, 127)
+    assert.equal(attempts[0]?.cwdHint, 'packages/sub')
 
-    assert.equal(attempts[1]?.matched, true, 'the declared command is still recognised after ./ normalization')
-    assert.equal(attempts[1]?.cwdHint, undefined, 'no cwd was named, so none is claimed')
+    assert.equal(attempts[1]?.matched, true, 'the declared command survives ./ normalization')
+    assert.equal(attempts[1]?.cwdHint, '.', 'the worktree root is named, not called outside')
+
+    assert.equal(attempts[2]?.shape, 'extra-arguments')
+    assert.ok(!JSON.stringify(attempts).includes('hunter2'), 'an argument must never reach the record')
+    assert.ok(!JSON.stringify(attempts).includes(workdir), 'a host worktree path must not be published')
   } finally {
     rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 })
 
-test('a tool-reported cwd wins over a directory guessed from the command text', () => {
+test('reading a script is not an attempt to invoke it', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-read-'))
+  try {
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [
+        { command: 'cat verify.js', exitCode: 0 },
+        { command: 'node verfy.js', exitCode: 127 },
+      ],
+      workdir,
+    )
+    assert.equal(attempts.length, 1, 'a file read must not be mistaken for a check')
+    assert.equal(attempts[0]?.script, 'verfy.js')
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
+test('an explicit cd is resolved from the shell starting directory', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-cwd-'))
   try {
     const attempts = observeVerificationAttempts(
@@ -52,12 +78,79 @@ test('a tool-reported cwd wins over a directory guessed from the command text', 
           exitCode: 2,
           cwd: join(workdir, 'packages', 'elsewhere'),
         },
+        { command: 'node "verify.js', exitCode: 1 },
       ],
       workdir,
       'packages/sub',
     )
-    assert.equal(attempts[0]?.cwdHint, 'packages/elsewhere', 'the tool event is more direct than the command')
+    assert.equal(
+      attempts[0]?.cwdHint,
+      'packages/elsewhere/packages/sub',
+      'the command names a directory relative to the shell, not to the worktree root',
+    )
     assert.equal(attempts[0]?.matched, true, 'the directory-bound form still matches the declared check')
+    assert.equal(attempts[1]?.shape, 'unparsed')
+    assert.equal(attempts[1]?.cwdHint, undefined, 'an uninterpretable command claims no directory')
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
+test('a deep directory hint is bounded on write and accepted on read', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-deep-'))
+  try {
+    const deep = join(workdir, ...Array.from({ length: 40 }, (_, index) => `segment-${index}`))
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [{ command: 'node verify.js', exitCode: 1, cwd: deep }],
+      workdir,
+    )
+    assert.ok((attempts[0]?.cwdHint?.length ?? 0) > MAX_VERIFICATION_ATTEMPT_CWD_HINT)
+
+    const sanitized = sanitizeResult({ transcript: '', verificationAttempts: attempts } as ScenarioResult)
+    const hint = sanitized.verificationAttempts?.[0]?.cwdHint
+    assert.equal(hint?.length, MAX_VERIFICATION_ATTEMPT_CWD_HINT, 'writer and reader must share the cap')
+
+    const record = {
+      scenario: 'nested-stale-verification',
+      variant: 'bare',
+      model: null,
+      modelRole: null,
+      scenarioHash: 'scenario',
+      sourceHash: 'source',
+      verifyCount: 1,
+      hiddenVerifyCount: 0,
+      attempts: [],
+      verified: false,
+      hiddenVerified: null,
+      verifyExitCodes: [1],
+      repetition: 0,
+      costUsd: null,
+      tokens: null,
+      durationMs: null,
+      transcript: '',
+      verificationAttempts: [
+        {
+          runner: 'node',
+          script: 'verify.js',
+          shape: 'simple',
+          cwdHint: hint,
+          exitCode: 1,
+          matched: false,
+        },
+      ],
+    }
+    const parsed = parseRunRecordResult(record)
+    assert.equal(typeof parsed, 'object', `a bounded hint must round-trip: ${String(parsed)}`)
+    assert.equal(typeof parsed === 'object' ? parsed.verificationAttempts?.[0]?.cwdHint : undefined, hint)
+    assert.equal(
+      typeof parseRunRecordResult({
+        ...record,
+        verificationAttempts: [{ ...record.verificationAttempts[0], cwdHint: `${hint}x` }],
+      }),
+      'string',
+      'an overlong hint must still be rejected',
+    )
   } finally {
     rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }

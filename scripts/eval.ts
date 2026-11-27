@@ -79,12 +79,16 @@ import {
   type EvalSkillAccessReason,
   type EvalSkillSpec,
   type EvalVerificationAttempt,
+  type EvalVerificationAttemptShape,
   FAKE_AGENT_MODEL,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
   hermeticEvidenceProblems,
   latestAttemptState,
+  MAX_VERIFICATION_ATTEMPT_CWD_HINT,
+  MAX_VERIFICATION_ATTEMPT_RUNNER,
+  MAX_VERIFICATION_ATTEMPT_SCRIPT,
   parseBaseline,
   parseLatest,
   parseRunRecord,
@@ -201,11 +205,14 @@ function sanitizeAttestation(attestation: EvalExecutionAttestation): EvalExecuti
   }
 }
 
-/** Bound and redact verification attempts at the same persistence boundary as every other field. */
+/** Bound verification attempts at the same persistence boundary as every other field. */
 function sanitizeVerificationAttempts(attempts: readonly EvalVerificationAttempt[]): EvalVerificationAttempt[] {
+  const bounded = (value: string, max: number): string => redactTranscript(value).slice(0, max)
   return attempts.slice(0, 20).map((attempt) => ({
-    command: limitReason(redactTranscript(attempt.command)),
-    ...(attempt.cwdHint === undefined ? {} : { cwdHint: limitReason(redactTranscript(attempt.cwdHint)) }),
+    ...(attempt.runner === undefined ? {} : { runner: bounded(attempt.runner, MAX_VERIFICATION_ATTEMPT_RUNNER) }),
+    ...(attempt.script === undefined ? {} : { script: bounded(attempt.script, MAX_VERIFICATION_ATTEMPT_SCRIPT) }),
+    shape: attempt.shape,
+    ...(attempt.cwdHint === undefined ? {} : { cwdHint: bounded(attempt.cwdHint, MAX_VERIFICATION_ATTEMPT_CWD_HINT) }),
     exitCode: attempt.exitCode,
     matched: attempt.matched,
   }))
@@ -1419,12 +1426,11 @@ export function isCheckCommand(expected: string, actual: string, captureDir = ''
   return changeDir?.length === 2 && changeDir[0] === 'cd' && changeDir[1] === captureDir && sameCommand(command)
 }
 
-/** Keep a path useful to a reviewer without publishing an absolute host directory. */
-function relativeCwdHint(path: string, workdir: string): string {
-  if (path === '' || path === '.') return '.'
-  const resolved = isAbsolute(path) ? path : resolve(workdir, path)
-  const rel = relative(workdir, resolved).replace(/\\/g, '/')
-  if (rel === '' || rel === '..' || rel.startsWith('../')) return '<outside-worktree>'
+/** Map an absolute directory to a worktree-relative hint, never to a host path. */
+function worktreeRelativeDir(target: string, workdir: string): string {
+  const rel = relative(workdir, target).replace(/\\/g, '/')
+  if (rel === '') return '.'
+  if (rel === '..' || rel.startsWith('../')) return '<outside-worktree>'
   return rel
 }
 
@@ -1446,45 +1452,142 @@ function boundedEditDistance(a: string, b: string): number {
   return previous[b.length] as number
 }
 
-/** Script names a declared check points at, including the `cd ... && node verify.js` form. */
-function checkScriptNames(commands: readonly string[]): string[] {
-  const names = new Set<string>()
+/** Runner and script names the declared check points at, including its `cd ... &&` form. */
+function declaredInvocation(commands: readonly string[]): { runners: Set<string>; scripts: string[] } {
+  const runners = new Set<string>()
+  const scripts = new Set<string>()
   for (const command of commands) {
+    const runner = /^\s*([A-Za-z0-9_./-]+)/.exec(stripChangeDirectory(command).rest)?.[1]
+    if (runner !== undefined) runners.add(runner.split(/[/\\]/).at(-1) ?? runner)
     for (const match of command.matchAll(/[A-Za-z0-9_.-]+\.(?:c|m)?js\b/g)) {
-      names.add((match[0] ?? '').split(/[/\\]/).at(-1) ?? '')
+      scripts.add((match[0] ?? '').split(/[/\\]/).at(-1) ?? '')
     }
   }
-  return [...names].filter((name) => name !== '')
+  return { runners, scripts: [...scripts].filter((name) => name !== '') }
 }
 
-/** Whether a reported shell word names (or nearly names) one of those scripts. */
-function mentionsCheckScript(command: string, names: readonly string[]): boolean {
-  const words = command.split(/[^A-Za-z0-9_.-]+/).filter((word) => word !== '')
-  return words.some((word) => {
-    const candidate = word.split(/[/\\]/).at(-1) ?? word
-    if (candidate.length > 128) return false
-    return names.some((name) => {
-      const stem = name.replace(/\.(?:c|m)?js$/, '')
-      const candidateStem = candidate.replace(/\.(?:c|m)?js$/, '')
-      return candidate === name || candidate === stem || boundedEditDistance(candidateStem, stem) <= 2
-    })
+/** Whether a token names (or nearly names) the script operand of the declared check. */
+function nearDeclaredScript(token: string, names: readonly string[]): boolean {
+  const candidate = token.split(/[/\\]/).at(-1) ?? token
+  if (candidate.length > MAX_VERIFICATION_ATTEMPT_SCRIPT) return false
+  const candidateStem = candidate.replace(/\.(?:c|m)?js$/, '')
+  return names.some((name) => {
+    const stem = name.replace(/\.(?:c|m)?js$/, '')
+    return candidate === name || candidate === stem || boundedEditDistance(candidateStem, stem) <= 2
   })
 }
 
-/** Cap a reported command before it reaches a committed run record. */
-function boundedCommand(command: string, workdir: string): string {
-  const redacted = redactTranscript(command).replaceAll(workdir, '<worktree>').replaceAll(repoRoot, '<repo>')
-  return redacted.length <= 512 ? redacted : `${redacted.slice(0, 512)}…[command truncated]`
+/** Recognise the one supported `cd <dir> &&` prefix without treating it as a shell chain. */
+function stripChangeDirectory(command: string): { cd: string | undefined; rest: string } {
+  const match = /^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/.exec(command)
+  if (match === null) return { cd: undefined, rest: command }
+  const raw = match[1] ?? ''
+  const quoted = /^(["'])(.*)\1$/.exec(raw)
+  return { cd: quoted?.[2] ?? raw, rest: command.slice(match[0].length) }
+}
+
+/** Split a reported command for observation, never for grading. Raw text is not retained. */
+function tokenizeObservedCommand(source: string): { tokens: string[]; compound: boolean; unparsed: boolean } {
+  const tokens: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let compound = false
+  let unparsed = false
+  const push = (): void => {
+    if (current !== '') tokens.push(current)
+    current = ''
+  }
+  for (const char of source) {
+    if (quote !== null) {
+      if (char === quote) quote = null
+      else {
+        if (char === '\n' || char === '\r' || char === '`') unparsed = true
+        current += char
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === ' ' || char === '\t') {
+      push()
+      continue
+    }
+    if (char === '\n' || char === '\r' || char === ';' || char === '|' || char === '&' || char === '`') {
+      compound = true
+      push()
+      continue
+    }
+    if (char === '$' || (char < ' ' && char !== '\t')) {
+      unparsed = true
+      continue
+    }
+    current += char
+  }
+  if (quote !== null) unparsed = true
+  push()
+  return { tokens, compound, unparsed }
+}
+
+interface ObservedInvocation {
+  runner: string
+  script: string
+  shape: EvalVerificationAttemptShape
+  cd: string | undefined
+  interpreted: boolean
+}
+
+/** Only an invocation with the declared runner and script is an observation. */
+function parseObservedInvocation(
+  command: string,
+  runners: ReadonlySet<string>,
+  scripts: readonly string[],
+): ObservedInvocation | null {
+  const { cd, rest } = stripChangeDirectory(command)
+  const { tokens, compound, unparsed } = tokenizeObservedCommand(rest)
+  const first = tokens[0]
+  if (first === undefined) return null
+  const runner = first.split(/[/\\]/).at(-1) ?? first
+  if (!runners.has(runner)) return null
+  const scriptIndex = tokens.findIndex((token, index) => index > 0 && nearDeclaredScript(token, scripts))
+  if (scriptIndex === -1) return null
+  const scriptToken = tokens[scriptIndex] as string
+  const script = scriptToken.split(/[/\\]/).at(-1) ?? scriptToken
+
+  const shape: EvalVerificationAttemptShape = unparsed
+    ? 'unparsed'
+    : compound
+      ? 'compound'
+      : tokens.length === 2 && scriptIndex === 1
+        ? 'simple'
+        : 'extra-arguments'
+  return {
+    runner: runner.slice(0, MAX_VERIFICATION_ATTEMPT_RUNNER),
+    script: script.slice(0, MAX_VERIFICATION_ATTEMPT_SCRIPT),
+    shape,
+    cd,
+    interpreted: !unparsed,
+  }
+}
+
+/** Apply the starting directory and any supported `cd` to get the effective directory. */
+function effectiveCwdHint(execution: AgentExecution, cd: string | undefined, workdir: string): string {
+  const start =
+    execution.cwd === undefined ? workdir : isAbsolute(execution.cwd) ? execution.cwd : resolve(workdir, execution.cwd)
+  const target = cd === undefined ? start : isAbsolute(cd) ? cd : resolve(start, cd)
+  return worktreeRelativeDir(target, workdir)
 }
 
 /**
- * Near-miss commands that look like attempts to run the declared check.
+ * Near-miss invocations of the declared check.
  *
  * This is an observation, never evidence: a shell event can be forged by the agent and
  * matched only against its own words. Its job is to answer the question an attestation alone
  * leaves open — did the agent try the check in the wrong place, with a typo, or with no exit
- * status? — without keeping a transcript. Only commands naming a declared check script are
- * retained, so an unrelated `npm install` cannot fill the record.
+ * status? — without keeping a transcript. Reading a file is not invoking it, so the runner
+ * must match as well as the script operand. Extra arguments and shell chains are classified,
+ * not stored, because they may contain secrets or host paths.
  */
 export function observeVerificationAttempts(
   commands: readonly string[],
@@ -1492,26 +1595,20 @@ export function observeVerificationAttempts(
   workdir: string,
   captureDir = '',
 ): EvalVerificationAttempt[] {
-  const scriptNames = checkScriptNames(commands)
-  if (scriptNames.length === 0) return []
+  const declared = declaredInvocation(commands)
+  if (declared.scripts.length === 0 || declared.runners.size === 0) return []
 
   const attempts: EvalVerificationAttempt[] = []
   for (const execution of executions) {
     const matched = commands.some((command) => isCheckCommand(command, execution.command, captureDir))
-    if (!matched && !mentionsCheckScript(execution.command, scriptNames)) continue
-
-    const cdPrefix = /^\s*cd\s+("[^"]+"|\S+)\s*&&/.exec(execution.command)
-    const namedDir = cdPrefix?.[1]?.replace(/^"|"$/g, '')
-    const cwdHint =
-      execution.cwd !== undefined
-        ? relativeCwdHint(execution.cwd, workdir)
-        : namedDir !== undefined
-          ? relativeCwdHint(namedDir, workdir)
-          : undefined
+    const invocation = parseObservedInvocation(execution.command, declared.runners, declared.scripts)
+    if (invocation === null) continue
 
     attempts.push({
-      command: boundedCommand(execution.command, workdir),
-      ...(cwdHint === undefined ? {} : { cwdHint }),
+      runner: invocation.runner,
+      script: invocation.script,
+      shape: invocation.shape,
+      ...(invocation.interpreted ? { cwdHint: effectiveCwdHint(execution, invocation.cd, workdir) } : {}),
       exitCode: execution.exitCode,
       matched,
     })

@@ -200,7 +200,10 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           hiddenVerified: boolean | null
           error?: string
           verificationAttempts?: Array<{
-            command: string
+            runner?: string
+            script?: string
+            shape: string
+            cwdHint?: string
             exitCode: number | null
             matched: boolean
           }>
@@ -248,8 +251,12 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           continue
         }
         assert.ok(
-          attempts.some((attempt) => attempt.command.includes('run-check.js')),
-          `${mode}: ${result.variant} must retain the near-miss command`,
+          attempts.some((attempt) => attempt.script === 'run-check.js'),
+          `${mode}: ${result.variant} must retain the near-miss script operand`,
+        )
+        assert.ok(
+          attempts.every((attempt) => !JSON.stringify(attempt).includes('LASTEXITCODE')),
+          `${mode}: a shell chain must not be copied into the record`,
         )
         assert.ok(
           attempts.every((attempt) => typeof attempt.exitCode === 'number' || attempt.exitCode === null),
@@ -269,6 +276,18 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
           assert.ok(
             result.verificationAttempts?.every((attempt) => attempt.matched === false),
             `${mode}: a compound command must not be recorded as a match`,
+          )
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.shape === 'compound'),
+            `${mode}: the shell chain must be classified, not copied`,
+          )
+        }
+      }
+      if (mode.startsWith('honest')) {
+        for (const result of record.results) {
+          assert.ok(
+            result.verificationAttempts?.some((attempt) => attempt.shape === 'simple'),
+            `${mode}: a plain invocation must be classified as simple`,
           )
         }
       }

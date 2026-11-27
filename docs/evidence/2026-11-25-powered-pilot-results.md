@@ -68,9 +68,10 @@ reasons, so why a given arm failed cannot be attributed from this evidence alone
 ## Instrumentation added after this run
 
 The harness now retains `verificationAttempts` beside the execution attestation for
-execution-capture scenarios: each is a bounded, redacted shell command that named (or nearly
-named) the declared check, with the exit status the tool reported and a worktree-relative
-directory when the command or the tool event named one. A command that matched the check is
+execution-capture scenarios: each records the runner and script operand of an invocation that
+matched or nearly matched the declared check, its exit status, and the effective directory
+relative to the worktree. Extra arguments and shell chains are classified rather than copied,
+so a secret or a host path cannot enter a committed record. A command that matched the check is
 marked, but it is still an observation — the harness-controlled broker execution remains the
 only evidence that grades the result. This answers a question the attestation alone left open:
 was the check never attempted, or attempted in the wrong directory or under a mistyped name?
