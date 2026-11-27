@@ -69,8 +69,8 @@ repository, condensed from the full report:
 | From the real report | What it means |
 | --- | --- |
 | `TEST_FAST` | The rule passed, with both claims found. |
-| `npm run test:changed` | The command it reports, labelled `documented` and `detected`. |
-| `README.md:72` | The line in this document that names the command. |
+| `test:changed` | The npm script behind the command, labelled `documented` and `detected`. |
+| `README.md:172` | The line in this document that names the command. |
 | `package.json:51` | The line that defines the script. |
 
 Anvil reports both because a documented command that no longer runs is a defect and an

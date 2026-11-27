@@ -500,6 +500,52 @@ describe('buildTaskBrief', () => {
     assert.match(unknowns, /1 profile detector\(s\) failed/)
   })
 
+  test('a plan suggestion id may contain the slashes and dots of a real source id', () => {
+    const id = 'official:ci:https://docs.github.com/en/actions'
+    const snapshot = makeSnapshot({
+      suggestions: [
+        {
+          id,
+          tier: 'official',
+          title: 'CI / pipelines',
+          detail: 'Read the GitHub Actions documentation -- the workflow syntax reference.',
+          evidence: ['README.md:3'],
+        },
+      ],
+    })
+
+    const brief = buildTaskBrief(snapshot, { suggestionId: id })
+
+    assert.equal(brief.source.suggestionId, id)
+    assert.equal(brief.source.text, null)
+    assert.deepEqual(brief.startHere, [
+      { path: 'README.md', reason: 'evidence named by the suggestion', kind: 'evidence' },
+    ])
+  })
+
+  test('a plan suggestion id may end with a slash or contain a risk glob', () => {
+    const ids = ['official:python:https://docs.python.org/3/', 'risk:android:**/AndroidManifest.xml']
+    const snapshot = makeSnapshot({
+      suggestions: ids.map((id) => ({
+        id,
+        tier: 'official',
+        title: id,
+        detail: `${id} -- a real generated plan id.`,
+        evidence: ['README.md:3'],
+      })),
+    })
+
+    for (const id of ids) {
+      const brief = buildTaskBrief(snapshot, { suggestionId: id })
+
+      assert.equal(brief.source.suggestionId, id)
+      assert.equal(brief.source.text, null)
+      assert.deepEqual(brief.startHere, [
+        { path: 'README.md', reason: 'evidence named by the suggestion', kind: 'evidence' },
+      ])
+    }
+  })
+
   test('it refuses ambiguous, empty and unknown input', () => {
     assert.throws(() => buildTaskBrief(makeSnapshot(), {}), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: 'x', suggestionId: 'fix:TEST_FAST' }), TaskInputError)
@@ -509,6 +555,39 @@ describe('buildTaskBrief', () => {
     // down to a one-character task that slips past the documented 4,000-character limit.
     assert.throws(() => buildTaskBrief(makeSnapshot(), { text: `${' '.repeat(MAX_TASK_TEXT + 1)}x` }), TaskInputError)
     assert.throws(() => buildTaskBrief(makeSnapshot(), { suggestionId: '../etc' }), TaskInputError)
+  })
+
+  test('a suggestion id is not a path, a shell fragment or an invisible string', () => {
+    const invalid = [
+      '../etc',
+      'foo/../bar',
+      '/absolute',
+      '\\leading',
+      'trailing\\',
+      'foo\\bar',
+      'fix:TEST FAST',
+      'fix:TEST\u0000FAST',
+      'fix:TEST\u0007FAST',
+      'fix:TEST\nFAST',
+    ]
+    for (const suggestionId of invalid) {
+      assert.throws(
+        () => buildTaskBrief(makeSnapshot(), { suggestionId }),
+        (error: unknown) => error instanceof TaskInputError && error.message === 'That suggestion id is not valid.',
+        JSON.stringify(suggestionId),
+      )
+    }
+    // Only whitespace is still the empty-input error, not an invalid-id error.
+    assert.throws(
+      () => buildTaskBrief(makeSnapshot(), { suggestionId: '   ' }),
+      (error: unknown) =>
+        error instanceof TaskInputError && error.message === 'Pick a suggestion or paste a task first.',
+    )
+    // Whitespace around a real id is trimmed, as it was before the charset change.
+    assert.equal(
+      buildTaskBrief(makeSnapshot(), { suggestionId: '  fix:TEST_FAST  ' }).source.suggestionId,
+      'fix:TEST_FAST',
+    )
   })
 
   test('a named path outside the index is reported, not silently dropped', () => {

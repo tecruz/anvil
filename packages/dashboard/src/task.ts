@@ -166,6 +166,30 @@ export interface TaskBrief {
 /** A request the user can correct without retrying the whole page. */
 export class TaskInputError extends Error {}
 
+/** The characters a plan suggestion id may use. The 200-character cap bounds the lookup. */
+const SUGGESTION_ID_CHARS = /^[A-Za-z0-9:._/*-]{1,200}$/
+
+/**
+ * Whether a suggestion id is a plan id rather than a path or a shell fragment.
+ *
+ * Real plan ids name a source, not a file: `official:ci:https://docs.github.com/en/actions`
+ * contains `/` and `.`, and real official URLs may end with `/`, such as
+ * `official:python:https://docs.python.org/3/`. Risk globs use `*`, as in the android risk id
+ * that names every `AndroidManifest.xml`; two asterisks there are a glob, not a `..`. Path
+ * shapes still have to be refused explicitly: a `..` anywhere, a leading separator or a
+ * backslash is a path, and whitespace and control characters are never part of an id. The
+ * character class already excludes the latter two; they are listed here so the safety rules
+ * read as one list.
+ */
+function validSuggestionId(id: string): boolean {
+  if (!SUGGESTION_ID_CHARS.test(id)) return false
+  if (id.includes('..')) return false
+  if (id.includes('\\')) return false
+  if (id.startsWith('/')) return false
+  if (/[\s\p{Cc}]/u.test(id)) return false
+  return true
+}
+
 const STOPWORDS = new Set([
   'about',
   'after',
@@ -1073,7 +1097,7 @@ export function buildTaskBrief(snapshot: DashboardSnapshot, input: TaskBriefInpu
   if (text !== '' && suggestionId !== '') {
     throw new TaskInputError('Choose one entry point: a suggestion or pasted task text.')
   }
-  if (suggestionId !== '' && !/^[A-Za-z0-9:_-]{1,200}$/.test(suggestionId)) {
+  if (suggestionId !== '' && !validSuggestionId(suggestionId)) {
     throw new TaskInputError('That suggestion id is not valid.')
   }
 

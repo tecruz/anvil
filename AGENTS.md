@@ -7,7 +7,7 @@ Typescript project, with javascript. Default branch: `origin/main`.
 - **Install:** `npm ci` _(detected)_ `package-lock.json`
 - **Build:** `npm run build` `AGENTS.md:8`
 - **Test:** `npm run test` `CONTRIBUTING.md:74`
-- **Test (changed files only):** `npm run test:changed` `README.md:72`
+- **Test (changed files only):** `npm run test:changed` `README.md:172`
 - **Lint:** `npm run lint` `AGENTS.md:11`
 - **Format:** `npm run format` `AGENTS.md:12`
 - **Typecheck:** `npm run typecheck` `AGENTS.md:13`

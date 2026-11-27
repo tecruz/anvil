@@ -97,6 +97,28 @@ test('a mid-path tilde is a literal path character, not a shell expansion', () =
   }
 })
 
+test('a leading tilde is a shell expansion, so it yields no directory hint', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-home-'))
+  try {
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [
+        { command: 'cd ~ && node verify.js', exitCode: 1 },
+        { command: 'cd ~/packages && node verify.js', exitCode: 1 },
+        { command: 'cd ~root && node verify.js', exitCode: 1 },
+      ],
+      workdir,
+    )
+    assert.equal(attempts.length, 3, 'the invocation is still retained as an attempt')
+    assert.ok(
+      attempts.every((attempt) => attempt.cwdHint === undefined),
+      'a home-directory expansion can land anywhere, so it is not a directory name',
+    )
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
 test('reading a script is not an attempt to invoke it', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-read-'))
   try {
