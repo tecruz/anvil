@@ -404,6 +404,14 @@ describe('the dashboard server', () => {
           detail: 'Document a changed-files test command -- no changed-files subset is documented.',
           evidence: ['README.md:3'],
         },
+        {
+          // A real official-playbook id: the slashes and dots are part of the id, not a path.
+          id: 'official:ci:https://docs.github.com/en/actions',
+          tier: 'official',
+          title: 'CI / pipelines',
+          detail: 'Read the workflow syntax reference -- CI advice for this stack.',
+          evidence: ['README.md:3'],
+        },
       ],
     })
     await withServer(
@@ -422,6 +430,12 @@ describe('the dashboard server', () => {
         assert.equal(brief.source.text, null)
         assert.equal(brief.startHere[0]?.path, 'README.md')
         assert.match(brief.unknowns.join(' '), /engineering improvement/)
+
+        const officialId = 'official:ci:https://docs.github.com/en/actions'
+        const official = await authedPost(server, '/api/brief', { suggestionId: officialId })
+        assert.equal(official.status, 200, 'a real plan id with / and . must reach the plan lookup')
+        const officialBrief = (await official.json()) as { source: { suggestionId: string | null } }
+        assert.equal(officialBrief.source.suggestionId, officialId)
       },
       { plan },
     )
