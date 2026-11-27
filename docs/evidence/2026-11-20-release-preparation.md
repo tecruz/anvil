@@ -1,3 +1,8 @@
+> Historical record of the 2026-11-20 rehearsal of `@anvil-workflows/cli@0.1.0` from
+> `9d2fce8087d396ae2cb8abc6ea147fd76eee1531`. It is not the current candidate. The
+> refreshed no-publish rehearsal against `main` `32d1074` is
+> [2026-11-27-release-preparation.md](./2026-11-27-release-preparation.md).
+
 # 2026-11-20 — first publication preparation (no publish)
 
 Status: **prepared only**. The maintainer approved preparation of the first
