@@ -1430,7 +1430,18 @@ export function isCheckCommand(expected: string, actual: string, captureDir = ''
 function worktreeRelativeDir(target: string, workdir: string): string {
   const rel = relative(workdir, target).replace(/\\/g, '/')
   if (rel === '') return '.'
-  if (rel === '..' || rel.startsWith('../')) return '<outside-worktree>'
+  // On Windows, `relative()` returns an absolute path when the drives differ. On POSIX, a
+  // Windows drive or UNC prefix is still a host path. Neither may reach a committed record.
+  if (
+    isAbsolute(rel) ||
+    /^[A-Za-z]:[\\/]/.test(rel) ||
+    rel.startsWith('\\\\') ||
+    rel.startsWith('//') ||
+    rel === '..' ||
+    rel.startsWith('../')
+  ) {
+    return '<outside-worktree>'
+  }
   return rel
 }
 
@@ -1477,13 +1488,20 @@ function nearDeclaredScript(token: string, names: readonly string[]): boolean {
   })
 }
 
-/** Recognise the one supported `cd <dir> &&` prefix without treating it as a shell chain. */
-function stripChangeDirectory(command: string): { cd: string | undefined; rest: string } {
+/**
+ * Recognise the one supported `cd <dir> &&` prefix without treating it as a shell chain.
+ *
+ * Only a literal path can be resolved. A shell expansion such as `$HOME` is reported as an
+ * unknown directory rather than pretending the token was a worktree-relative path.
+ */
+function stripChangeDirectory(command: string): { cd: string | undefined; cwdUnknown: boolean; rest: string } {
   const match = /^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/.exec(command)
-  if (match === null) return { cd: undefined, rest: command }
+  if (match === null) return { cd: undefined, cwdUnknown: false, rest: command }
   const raw = match[1] ?? ''
   const quoted = /^(["'])(.*)\1$/.exec(raw)
-  return { cd: quoted?.[2] ?? raw, rest: command.slice(match[0].length) }
+  const dir = quoted?.[2] ?? raw
+  const literal = /^[A-Za-z0-9_./\\:-]+$/.test(dir)
+  return { cd: literal ? dir : undefined, cwdUnknown: !literal, rest: command.slice(match[0].length) }
 }
 
 /** Split a reported command for observation, never for grading. Raw text is not retained. */
@@ -1515,9 +1533,10 @@ function tokenizeObservedCommand(source: string): { tokens: string[]; compound: 
       continue
     }
     if (char === '\n' || char === '\r' || char === ';' || char === '|' || char === '&' || char === '`') {
+      // Only the first segment belongs to the invocation. Later segments may name a
+      // different program; merging their words would invent a check that never ran.
       compound = true
-      push()
-      continue
+      break
     }
     if (char === '$' || (char < ' ' && char !== '\t')) {
       unparsed = true
@@ -1535,6 +1554,8 @@ interface ObservedInvocation {
   script: string
   shape: EvalVerificationAttemptShape
   cd: string | undefined
+  /** A `cd` used shell expansion, so no effective directory can be claimed. */
+  cwdUnknown: boolean
   interpreted: boolean
 }
 
@@ -1544,14 +1565,16 @@ function parseObservedInvocation(
   runners: ReadonlySet<string>,
   scripts: readonly string[],
 ): ObservedInvocation | null {
-  const { cd, rest } = stripChangeDirectory(command)
+  const { cd, cwdUnknown, rest } = stripChangeDirectory(command)
   const { tokens, compound, unparsed } = tokenizeObservedCommand(rest)
   const first = tokens[0]
   if (first === undefined) return null
   const runner = first.split(/[/\\]/).at(-1) ?? first
   if (!runners.has(runner)) return null
-  const scriptIndex = tokens.findIndex((token, index) => index > 0 && nearDeclaredScript(token, scripts))
-  if (scriptIndex === -1) return null
+  // Only the first script-shaped token after the runner can be the operand. Scanning every
+  // token would turn `node helper.js verify.js` into an attempt to run `verify.js`.
+  const scriptIndex = tokens.findIndex((token, index) => index > 0 && /\.(?:c|m)?js$/.test(token))
+  if (scriptIndex === -1 || !nearDeclaredScript(tokens[scriptIndex] as string, scripts)) return null
   const scriptToken = tokens[scriptIndex] as string
   const script = scriptToken.split(/[/\\]/).at(-1) ?? scriptToken
 
@@ -1567,6 +1590,7 @@ function parseObservedInvocation(
     script: script.slice(0, MAX_VERIFICATION_ATTEMPT_SCRIPT),
     shape,
     cd,
+    cwdUnknown,
     interpreted: !unparsed,
   }
 }
@@ -1587,7 +1611,9 @@ function effectiveCwdHint(execution: AgentExecution, cd: string | undefined, wor
  * leaves open — did the agent try the check in the wrong place, with a typo, or with no exit
  * status? — without keeping a transcript. Reading a file is not invoking it, so the runner
  * must match as well as the script operand. Extra arguments and shell chains are classified,
- * not stored, because they may contain secrets or host paths.
+ * not stored, because they may contain secrets or host paths. `matched` means the command text
+ * matched the declaration; it says nothing about the effective directory, which the broker
+ * checks independently.
  */
 export function observeVerificationAttempts(
   commands: readonly string[],
@@ -1608,7 +1634,9 @@ export function observeVerificationAttempts(
       runner: invocation.runner,
       script: invocation.script,
       shape: invocation.shape,
-      ...(invocation.interpreted ? { cwdHint: effectiveCwdHint(execution, invocation.cd, workdir) } : {}),
+      ...(invocation.interpreted && !invocation.cwdUnknown
+        ? { cwdHint: effectiveCwdHint(execution, invocation.cd, workdir) }
+        : {}),
       exitCode: execution.exitCode,
       matched,
     })

@@ -246,8 +246,8 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
       // observation, not a second grading signal: the verdict above stays unchanged.
       for (const result of record.results) {
         const attempts = result.verificationAttempts ?? []
-        if (mode === 'report-only') {
-          assert.deepEqual(attempts, [], `${mode}: no shell event means no attempt to describe`)
+        if (mode === 'report-only' || mode === 'newline-command') {
+          assert.deepEqual(attempts, [], `${mode}: no parseable invocation means no attempt to describe`)
           continue
         }
         assert.ok(

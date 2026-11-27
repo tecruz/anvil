@@ -79,6 +79,7 @@ test('an explicit cd is resolved from the shell starting directory', () => {
           cwd: join(workdir, 'packages', 'elsewhere'),
         },
         { command: 'node "verify.js', exitCode: 1 },
+        { command: 'cd "$HOME" && node verify.js', exitCode: 1 },
       ],
       workdir,
       'packages/sub',
@@ -88,9 +89,54 @@ test('an explicit cd is resolved from the shell starting directory', () => {
       'packages/elsewhere/packages/sub',
       'the command names a directory relative to the shell, not to the worktree root',
     )
-    assert.equal(attempts[0]?.matched, true, 'the directory-bound form still matches the declared check')
+    assert.equal(
+      attempts[0]?.matched,
+      true,
+      'matched is a command-text match; the broker checks the effective directory separately',
+    )
     assert.equal(attempts[1]?.shape, 'unparsed')
     assert.equal(attempts[1]?.cwdHint, undefined, 'an uninterpretable command claims no directory')
+    assert.equal(attempts[2]?.cwdHint, undefined, 'a shell expansion cannot be resolved to a directory')
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
+test('a path on another drive is outside the worktree, not a retained hint', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-drive-'))
+  try {
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [
+        { command: 'node verify.js', exitCode: 1, cwd: 'Z:/private/example' },
+        { command: 'node verify.js', exitCode: 1, cwd: '\\\\server\\share\\private' },
+      ],
+      workdir,
+    )
+    assert.equal(attempts.length, 2)
+    assert.ok(
+      attempts.every((attempt) => attempt.cwdHint === '<outside-worktree>'),
+      'a foreign drive or UNC path must never be published as a relative hint',
+    )
+  } finally {
+    rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  }
+})
+
+test('only the first script-shaped operand in the runner command counts', () => {
+  const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-operand-'))
+  try {
+    const attempts = observeVerificationAttempts(
+      ['node verify.js'],
+      [
+        { command: 'node helper.js verify.js', exitCode: 0 },
+        { command: 'node --version; cat verify.js', exitCode: 0 },
+        { command: 'node verfy.js', exitCode: 127 },
+      ],
+      workdir,
+    )
+    assert.equal(attempts.length, 1, 'a later argument or a merged shell segment is not the check')
+    assert.equal(attempts[0]?.script, 'verfy.js', 'the runner’s own operand must be the near miss')
   } finally {
     rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }

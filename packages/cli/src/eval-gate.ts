@@ -237,11 +237,11 @@ export interface EvalVerificationAttempt {
   script?: string
   /** How much of the invocation the observer understood. */
   shape: EvalVerificationAttemptShape
-  /** The effective directory, relative to the worktree when possible. */
+  /** The effective directory, relative to the worktree when possible; absent when unknown. */
   cwdHint?: string
   /** The exit status the tool event reported; null when the event carried none. */
   exitCode: number | null
-  /** Whether this invocation matched the scenario's declared check. */
+  /** Whether the command text matched the declaration; never proof of the effective directory. */
   matched: boolean
 }
 
