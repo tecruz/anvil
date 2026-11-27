@@ -93,7 +93,9 @@ Two consequences for you as a contributor:
 
 - **`npm ci` builds the bundle.** `prepare` runs `npm run build` on install, because
   `packages/*/dist/` is gitignored and a clone otherwise has no CLI. That is deliberate: the
-  thing you test is the thing a user installs.
+  thing you test is the thing a user installs. The build *checks* `generated.ts` against the
+  YAML sources; it never regenerates them, so an install cannot silently repair a stale
+  generated file and hide a missing `npm run gen:playbooks`.
 - **Two version fields exist and a test keeps them equal.** The root's version is the one that
   ships; `packages/cli` has one because npm expects it. If you bump a version, bump both —
   the test will tell you.

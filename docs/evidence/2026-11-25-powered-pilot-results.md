@@ -65,6 +65,25 @@ The anvil-only and bare-only wins both occurred under the same scenario, model, 
 and configuration. The retained records do not contain agent reports or bounded failure
 reasons, so why a given arm failed cannot be attributed from this evidence alone.
 
+## Instrumentation added after this run
+
+The harness now retains `verificationAttempts` beside the execution attestation for
+execution-capture scenarios: each records the runner and script operand of an invocation that
+matched or nearly matched the declared check, its exit status, and the effective directory
+relative to the worktree. Extra arguments and shell chains are classified rather than copied,
+so a secret or a host path cannot enter a committed record. Only a direct invocation is
+attributed: a check in a later shell segment may be skipped, so an empty list means no direct
+invocation was recognized, and a chained command reports an unknown exit status because the
+shell's status belongs to its last command. A command that matched the check is marked, but it is
+still an observation —
+the harness-controlled broker execution remains the only evidence that grades the result. This
+answers a question the attestation alone left open: was the check never attempted, or attempted
+in the wrong directory or under a mistyped name?
+
+This record predates that instrumentation and has not been rerun. It is not a third run, not a
+reinterpretation of the ten pairs, and not permission to design one from these numbers — the
+stop rule below still applies.
+
 ## Stop
 
 The predeclared plan fixes the outcome rule: *"Claim a direction only if the predeclared

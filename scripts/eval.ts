@@ -78,12 +78,17 @@ import {
   type EvalSkillAccess,
   type EvalSkillAccessReason,
   type EvalSkillSpec,
+  type EvalVerificationAttempt,
+  type EvalVerificationAttemptShape,
   FAKE_AGENT_MODEL,
   hashImplementation,
   hashScenario,
   hashScenarioSource,
   hermeticEvidenceProblems,
   latestAttemptState,
+  MAX_VERIFICATION_ATTEMPT_CWD_HINT,
+  MAX_VERIFICATION_ATTEMPT_RUNNER,
+  MAX_VERIFICATION_ATTEMPT_SCRIPT,
   parseBaseline,
   parseLatest,
   parseRunRecord,
@@ -200,6 +205,19 @@ function sanitizeAttestation(attestation: EvalExecutionAttestation): EvalExecuti
   }
 }
 
+/** Bound verification attempts at the same persistence boundary as every other field. */
+function sanitizeVerificationAttempts(attempts: readonly EvalVerificationAttempt[]): EvalVerificationAttempt[] {
+  const bounded = (value: string, max: number): string => redactTranscript(value).slice(0, max)
+  return attempts.slice(0, 20).map((attempt) => ({
+    ...(attempt.runner === undefined ? {} : { runner: bounded(attempt.runner, MAX_VERIFICATION_ATTEMPT_RUNNER) }),
+    ...(attempt.script === undefined ? {} : { script: bounded(attempt.script, MAX_VERIFICATION_ATTEMPT_SCRIPT) }),
+    shape: attempt.shape,
+    ...(attempt.cwdHint === undefined ? {} : { cwdHint: bounded(attempt.cwdHint, MAX_VERIFICATION_ATTEMPT_CWD_HINT) }),
+    exitCode: attempt.exitCode,
+    matched: attempt.matched,
+  }))
+}
+
 /**
  * Fingerprint the paths a scenario says must not change.
  *
@@ -256,6 +274,9 @@ export function sanitizeResult(result: ScenarioResult): ScenarioResult {
     ...(result.executionAttestation === undefined
       ? {}
       : { executionAttestation: sanitizeAttestation(result.executionAttestation) }),
+    ...(result.verificationAttempts === undefined
+      ? {}
+      : { verificationAttempts: sanitizeVerificationAttempts(result.verificationAttempts) }),
   }
 }
 
@@ -332,6 +353,13 @@ export interface AgentExecution {
    * evidence.
    */
   exitCode: number | null
+  /**
+   * A working directory the tool event itself reported, when it reports one.
+   *
+   * OpenCode 2 does not always include it. Absence is not an empty directory: a reader must
+   * be able to tell "the agent named no cwd" from "the agent named the worktree root".
+   */
+  cwd?: string
 }
 
 interface RunResult {
@@ -354,6 +382,8 @@ export interface ScenarioResult extends EvalResultSummary {
   transcript: string
   /** What the verifier said, so a failure can be read rather than guessed at. */
   verifyOutput?: string
+  /** Bounded near-miss verification commands from an execution-capture scenario. */
+  verificationAttempts?: EvalVerificationAttempt[]
   error?: string
 }
 
@@ -1150,6 +1180,9 @@ async function runScenario(
       const observedRuns = checkCommands.map((expected) =>
         agentExecutions.filter((execution) => isCheckCommand(expected, execution.command, captureDir)),
       )
+      // Retain near misses even when the attestation is `not-observed`: a typo or a wrong
+      // directory is a different product question from an agent that never tried at all.
+      result.verificationAttempts = observeVerificationAttempts(checkCommands, agentExecutions, workdir, captureDir)
       const commandLabel = checkCommands.join(', ')
       let attestation: EvalExecutionAttestation = {
         status: 'not-observed',
@@ -1263,7 +1296,9 @@ function numberAtPath(source: unknown, path: readonly string[]): number | null {
     if (current === null || typeof current !== 'object') return null
     current = (current as Record<string, unknown>)[key]
   }
-  return typeof current === 'number' && Number.isFinite(current) ? current : null
+  // Process exit statuses are integers. A fractional status cannot be one, and accepting it
+  // here would produce a check record the eval-gate parser correctly refuses on resume.
+  return typeof current === 'number' && Number.isInteger(current) ? current : null
 }
 
 /** The exit status a completed shell tool reported, whichever OpenCode version wrote it. */
@@ -1326,9 +1361,15 @@ export function parseOpenCodeRunEvents(output: string): {
     const input = record.part.state.input
     if (input === null || typeof input !== 'object') continue
     if (SHELL_TOOL_NAMES.has(tool)) {
-      const command = (input as { command?: unknown }).command
+      const fields = input as { command?: unknown; cwd?: unknown; workdir?: unknown }
+      const command = fields.command
       if (typeof command === 'string') {
-        executions.push({ command, exitCode: readExitStatus(record.part.state.metadata) })
+        const reportedCwd = typeof fields.cwd === 'string' ? fields.cwd : fields.workdir
+        executions.push({
+          command,
+          exitCode: readExitStatus(record.part.state.metadata),
+          ...(typeof reportedCwd === 'string' && reportedCwd !== '' ? { cwd: reportedCwd } : {}),
+        })
       }
       continue
     }
@@ -1385,6 +1426,259 @@ export function isCheckCommand(expected: string, actual: string, captureDir = ''
   const changeDir = parseEvidenceCommand(parts[0] ?? '')
   const command = parseEvidenceCommand(parts[1] ?? '')
   return changeDir?.length === 2 && changeDir[0] === 'cd' && changeDir[1] === captureDir && sameCommand(command)
+}
+
+/** Map an absolute directory to a worktree-relative hint, never to a host path. */
+function worktreeRelativeDir(target: string, workdir: string): string {
+  const rel = relative(workdir, target).replace(/\\/g, '/')
+  if (rel === '') return '.'
+  // On Windows, `relative()` returns an absolute path when the drives differ. On POSIX, a
+  // Windows drive or UNC prefix is still a host path. Neither may reach a committed record.
+  if (
+    isAbsolute(rel) ||
+    /^[A-Za-z]:[\\/]/.test(rel) ||
+    rel.startsWith('\\\\') ||
+    rel.startsWith('//') ||
+    rel === '..' ||
+    rel.startsWith('../')
+  ) {
+    return '<outside-worktree>'
+  }
+  return rel
+}
+
+/** Levenshtein distance, capped so a long shell word cannot make this expensive. */
+function boundedEditDistance(a: string, b: string): number {
+  if (a.length > 128 || b.length > 128) return Number.MAX_SAFE_INTEGER
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index)
+  for (let i = 1; i <= a.length; i += 1) {
+    const current = [i]
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = Math.min(
+        (current[j - 1] as number) + 1,
+        (previous[j] as number) + 1,
+        (previous[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1),
+      )
+    }
+    previous = current
+  }
+  return previous[b.length] as number
+}
+
+/** Runner and script names the declared check points at, including its `cd ... &&` form. */
+function declaredInvocation(commands: readonly string[]): { runners: Set<string>; scripts: string[] } {
+  const runners = new Set<string>()
+  const scripts = new Set<string>()
+  for (const command of commands) {
+    const runner = /^\s*([A-Za-z0-9_./-]+)/.exec(stripChangeDirectory(command).rest)?.[1]
+    if (runner !== undefined) runners.add(runner.split(/[/\\]/).at(-1) ?? runner)
+    for (const match of command.matchAll(/[A-Za-z0-9_.-]+\.(?:c|m)?js\b/g)) {
+      scripts.add((match[0] ?? '').split(/[/\\]/).at(-1) ?? '')
+    }
+  }
+  return { runners, scripts: [...scripts].filter((name) => name !== '') }
+}
+
+/** Whether a token names (or nearly names) the script operand of the declared check. */
+function nearDeclaredScript(token: string, names: readonly string[]): boolean {
+  const candidate = token.split(/[/\\]/).at(-1) ?? token
+  if (candidate.length > MAX_VERIFICATION_ATTEMPT_SCRIPT) return false
+  const candidateStem = candidate.replace(/\.(?:c|m)?js$/, '')
+  return names.some((name) => {
+    const stem = name.replace(/\.(?:c|m)?js$/, '')
+    return candidate === name || candidate === stem || boundedEditDistance(candidateStem, stem) <= 2
+  })
+}
+
+/**
+ * Recognise the one supported `cd <dir> &&` prefix without treating it as a shell chain.
+ *
+ * Only a literal path can be resolved. A shell expansion such as `$HOME` is reported as an
+ * unknown directory rather than pretending the token was a worktree-relative path.
+ */
+function stripChangeDirectory(command: string): { cd: string | undefined; cwdUnknown: boolean; rest: string } {
+  const match = /^\s*cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/.exec(command)
+  if (match === null) return { cd: undefined, cwdUnknown: false, rest: command }
+  const raw = match[1] ?? ''
+  const quoted = /^(["'])(.*)\1$/.exec(raw)
+  const dir = quoted?.[2] ?? raw
+  // Quotes make a space literal; unquoted spaces already ended the cd argument. `cd -` and
+  // `cd ~` are shell-dependent destinations, not directory names we can resolve. A `~` in the
+  // middle of a token is a literal path character (Windows 8.3 short names like RUNNER~1),
+  // not an expansion; expansions only start with `~`.
+  const chars = quoted === null ? /^[A-Za-z0-9_./\\:~-]+$/ : /^[A-Za-z0-9_./\\: ~-]+$/
+  const literal = dir !== '' && dir !== '-' && !dir.startsWith('~') && chars.test(dir)
+  return { cd: literal ? dir : undefined, cwdUnknown: !literal, rest: command.slice(match[0].length) }
+}
+
+/** Split one reported command segment for observation, never for grading. */
+function tokenizeObservedCommand(source: string): { tokens: string[]; compound: boolean; unparsed: boolean } {
+  const tokens: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let compound = false
+  let unparsed = false
+  const push = (): void => {
+    if (current !== '') tokens.push(current)
+    current = ''
+  }
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] as string
+    if (quote !== null) {
+      if (char === quote) quote = null
+      else {
+        if (char === '\n' || char === '\r' || char === '`') unparsed = true
+        current += char
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === ' ' || char === '\t') {
+      push()
+      continue
+    }
+    if (char === '\n' || char === '\r' || char === ';' || char === '|' || char === '&' || char === '`') {
+      // Only the first segment can be attributed. Later segments may be skipped by a shell
+      // condition, and this observer is not a shell interpreter.
+      compound = true
+      break
+    }
+    if (char === '$' || (char < ' ' && char !== '\t')) {
+      unparsed = true
+      continue
+    }
+    current += char
+  }
+  if (quote !== null) unparsed = true
+  push()
+  return { tokens, compound, unparsed }
+}
+
+interface ObservedInvocation {
+  runner: string
+  script: string
+  shape: EvalVerificationAttemptShape
+  cd: string | undefined
+  /** A `cd` used shell expansion, or the invocation came from an unparsed later segment. */
+  cwdUnknown: boolean
+  interpreted: boolean
+}
+
+/**
+ * A direct `<runner> <script>` invocation.
+ *
+ * The script is the first argument, not any `.js` word later in the command: `node --require
+ * verify.js helper.js` passes the script as an option value and `node helper.ts verify.js`
+ * runs a different program. Node option forms are left unclassified rather than guessed.
+ */
+function parseInvocationTokens(
+  tokens: readonly string[],
+  runners: ReadonlySet<string>,
+  scripts: readonly string[],
+): { runner: string; script: string; extraArguments: boolean } | null {
+  const first = tokens[0]
+  const scriptToken = tokens[1]
+  if (first === undefined || scriptToken === undefined || scriptToken.startsWith('-')) return null
+  const runner = first.split(/[/\\]/).at(-1) ?? first
+  if (!runners.has(runner) || !nearDeclaredScript(scriptToken, scripts)) return null
+  return {
+    runner,
+    script: scriptToken.split(/[/\\]/).at(-1) ?? scriptToken,
+    extraArguments: tokens.length > 2,
+  }
+}
+
+/** Only an invocation with the declared runner and script is an observation. */
+function parseObservedInvocation(
+  command: string,
+  runners: ReadonlySet<string>,
+  scripts: readonly string[],
+): ObservedInvocation | null {
+  const { cd, cwdUnknown, rest } = stripChangeDirectory(command)
+  const first = tokenizeObservedCommand(rest)
+  const direct = parseInvocationTokens(first.tokens, runners, scripts)
+  if (direct !== null) {
+    const shape: EvalVerificationAttemptShape = first.unparsed
+      ? 'unparsed'
+      : first.compound
+        ? 'compound'
+        : direct.extraArguments
+          ? 'extra-arguments'
+          : 'simple'
+    return {
+      runner: direct.runner.slice(0, MAX_VERIFICATION_ATTEMPT_RUNNER),
+      script: direct.script.slice(0, MAX_VERIFICATION_ATTEMPT_SCRIPT),
+      shape,
+      cd,
+      cwdUnknown,
+      interpreted: !first.unparsed,
+    }
+  }
+
+  // A chain can still contain a check after an unrelated first command (`pwd && node
+  // verify.js`). Attribute it as a compound observation with no directory claim, not as a
+  // match; the broker still decides what actually ran.
+  // A check in a later shell segment is deliberately not attributed: `false && node
+  // verify.js` never runs it, and this observer is not a shell interpreter. An empty list
+  // means no direct invocation was recognized, not that the agent did nothing.
+  return null
+}
+
+/** Apply the starting directory and any supported `cd` to get the effective directory. */
+function effectiveCwdHint(execution: AgentExecution, cd: string | undefined, workdir: string): string {
+  const start =
+    execution.cwd === undefined ? workdir : isAbsolute(execution.cwd) ? execution.cwd : resolve(workdir, execution.cwd)
+  const target = cd === undefined ? start : isAbsolute(cd) ? cd : resolve(start, cd)
+  return worktreeRelativeDir(target, workdir)
+}
+
+/**
+ * Near-miss invocations of the declared check.
+ *
+ * This is an observation, never evidence: a shell event can be forged by the agent and
+ * matched only against its own words. Its job is to answer the question an attestation alone
+ * leaves open — did the agent try the check in the wrong place, with a typo, or with no exit
+ * status? — without keeping a transcript. Reading a file is not invoking it, so the runner
+ * must match as well as the script operand. Extra arguments and shell chains are classified,
+ * not stored, because they may contain secrets or host paths. `matched` means the command text
+ * matched the declaration; it says nothing about the effective directory, which the broker
+ * checks independently. Only a direct invocation is recorded: a check in a later shell segment
+ * may be skipped, so an empty list means no direct invocation was recognized. A chained status
+ * belongs to the chain, not the check, and is reported as unknown.
+ */
+export function observeVerificationAttempts(
+  commands: readonly string[],
+  executions: readonly AgentExecution[],
+  workdir: string,
+  captureDir = '',
+): EvalVerificationAttempt[] {
+  const declared = declaredInvocation(commands)
+  if (declared.scripts.length === 0 || declared.runners.size === 0) return []
+
+  const attempts: EvalVerificationAttempt[] = []
+  for (const execution of executions) {
+    const matched = commands.some((command) => isCheckCommand(command, execution.command, captureDir))
+    const invocation = parseObservedInvocation(execution.command, declared.runners, declared.scripts)
+    if (invocation === null) continue
+
+    attempts.push({
+      runner: invocation.runner,
+      script: invocation.script,
+      shape: invocation.shape,
+      ...(invocation.interpreted && !invocation.cwdUnknown
+        ? { cwdHint: effectiveCwdHint(execution, invocation.cd, workdir) }
+        : {}),
+      // A shell chain's status belongs to its last command, not to the check named in the
+      // first segment. Only an attributed, interpretable invocation carries a status.
+      exitCode: invocation.shape === 'simple' || invocation.shape === 'extra-arguments' ? execution.exitCode : null,
+      matched,
+    })
+    if (attempts.length >= 20) break
+  }
+  return attempts
 }
 
 /**
@@ -2150,6 +2444,7 @@ function summaryOf(result: ScenarioResult): EvalResultSummary {
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
+    ...(result.verificationAttempts === undefined ? {} : { verificationAttempts: result.verificationAttempts }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
@@ -2301,6 +2596,7 @@ export function scoredResultsFromRecord(
         ...(error === undefined ? {} : { error }),
         ...(prior.taskFailureReason === undefined ? {} : { taskFailureReason: prior.taskFailureReason }),
         ...(prior.executionAttestation === undefined ? {} : { executionAttestation: prior.executionAttestation }),
+        ...(prior.verificationAttempts === undefined ? {} : { verificationAttempts: prior.verificationAttempts }),
         ...(prior.skillInstall === undefined ? {} : { skillInstall: prior.skillInstall }),
         ...(prior.skillAccess === undefined ? {} : { skillAccess: prior.skillAccess }),
         ...(prior.skillAccessReason === undefined ? {} : { skillAccessReason: prior.skillAccessReason }),
@@ -2338,6 +2634,7 @@ function recordResultFrom(
     ...(result.error === undefined ? {} : { error: result.error }),
     ...(result.taskFailureReason === undefined ? {} : { taskFailureReason: result.taskFailureReason }),
     ...(result.executionAttestation === undefined ? {} : { executionAttestation: result.executionAttestation }),
+    ...(result.verificationAttempts === undefined ? {} : { verificationAttempts: result.verificationAttempts }),
     ...(result.skillInstall === undefined ? {} : { skillInstall: result.skillInstall }),
     ...(result.skillAccess === undefined ? {} : { skillAccess: result.skillAccess }),
     ...(result.skillAccessReason === undefined ? {} : { skillAccessReason: result.skillAccessReason }),
