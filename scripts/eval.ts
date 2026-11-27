@@ -1296,7 +1296,9 @@ function numberAtPath(source: unknown, path: readonly string[]): number | null {
     if (current === null || typeof current !== 'object') return null
     current = (current as Record<string, unknown>)[key]
   }
-  return typeof current === 'number' && Number.isFinite(current) ? current : null
+  // Process exit statuses are integers. A fractional status cannot be one, and accepting it
+  // here would produce a check record the eval-gate parser correctly refuses on resume.
+  return typeof current === 'number' && Number.isInteger(current) ? current : null
 }
 
 /** The exit status a completed shell tool reported, whichever OpenCode version wrote it. */
@@ -1500,11 +1502,14 @@ function stripChangeDirectory(command: string): { cd: string | undefined; cwdUnk
   const raw = match[1] ?? ''
   const quoted = /^(["'])(.*)\1$/.exec(raw)
   const dir = quoted?.[2] ?? raw
-  const literal = /^[A-Za-z0-9_./\\:-]+$/.test(dir)
+  // Quotes make a space literal; unquoted spaces already ended the cd argument. `cd -` and
+  // `cd ~` are shell-dependent destinations, not directory names we can resolve.
+  const chars = quoted === null ? /^[A-Za-z0-9_./\\:-]+$/ : /^[A-Za-z0-9_./\\: -]+$/
+  const literal = dir !== '' && dir !== '-' && !dir.startsWith('~') && chars.test(dir)
   return { cd: literal ? dir : undefined, cwdUnknown: !literal, rest: command.slice(match[0].length) }
 }
 
-/** Split a reported command for observation, never for grading. Raw text is not retained. */
+/** Split one reported command segment for observation, never for grading. */
 function tokenizeObservedCommand(source: string): { tokens: string[]; compound: boolean; unparsed: boolean } {
   const tokens: string[] = []
   let current = ''
@@ -1515,7 +1520,8 @@ function tokenizeObservedCommand(source: string): { tokens: string[]; compound: 
     if (current !== '') tokens.push(current)
     current = ''
   }
-  for (const char of source) {
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index] as string
     if (quote !== null) {
       if (char === quote) quote = null
       else {
@@ -1533,8 +1539,8 @@ function tokenizeObservedCommand(source: string): { tokens: string[]; compound: 
       continue
     }
     if (char === '\n' || char === '\r' || char === ';' || char === '|' || char === '&' || char === '`') {
-      // Only the first segment belongs to the invocation. Later segments may name a
-      // different program; merging their words would invent a check that never ran.
+      // Only the first segment can be attributed. Later segments may be skipped by a shell
+      // condition, and this observer is not a shell interpreter.
       compound = true
       break
     }
@@ -1554,9 +1560,33 @@ interface ObservedInvocation {
   script: string
   shape: EvalVerificationAttemptShape
   cd: string | undefined
-  /** A `cd` used shell expansion, so no effective directory can be claimed. */
+  /** A `cd` used shell expansion, or the invocation came from an unparsed later segment. */
   cwdUnknown: boolean
   interpreted: boolean
+}
+
+/**
+ * A direct `<runner> <script>` invocation.
+ *
+ * The script is the first argument, not any `.js` word later in the command: `node --require
+ * verify.js helper.js` passes the script as an option value and `node helper.ts verify.js`
+ * runs a different program. Node option forms are left unclassified rather than guessed.
+ */
+function parseInvocationTokens(
+  tokens: readonly string[],
+  runners: ReadonlySet<string>,
+  scripts: readonly string[],
+): { runner: string; script: string; extraArguments: boolean } | null {
+  const first = tokens[0]
+  const scriptToken = tokens[1]
+  if (first === undefined || scriptToken === undefined || scriptToken.startsWith('-')) return null
+  const runner = first.split(/[/\\]/).at(-1) ?? first
+  if (!runners.has(runner) || !nearDeclaredScript(scriptToken, scripts)) return null
+  return {
+    runner,
+    script: scriptToken.split(/[/\\]/).at(-1) ?? scriptToken,
+    extraArguments: tokens.length > 2,
+  }
 }
 
 /** Only an invocation with the declared runner and script is an observation. */
@@ -1566,33 +1596,33 @@ function parseObservedInvocation(
   scripts: readonly string[],
 ): ObservedInvocation | null {
   const { cd, cwdUnknown, rest } = stripChangeDirectory(command)
-  const { tokens, compound, unparsed } = tokenizeObservedCommand(rest)
-  const first = tokens[0]
-  if (first === undefined) return null
-  const runner = first.split(/[/\\]/).at(-1) ?? first
-  if (!runners.has(runner)) return null
-  // Only the first script-shaped token after the runner can be the operand. Scanning every
-  // token would turn `node helper.js verify.js` into an attempt to run `verify.js`.
-  const scriptIndex = tokens.findIndex((token, index) => index > 0 && /\.(?:c|m)?js$/.test(token))
-  if (scriptIndex === -1 || !nearDeclaredScript(tokens[scriptIndex] as string, scripts)) return null
-  const scriptToken = tokens[scriptIndex] as string
-  const script = scriptToken.split(/[/\\]/).at(-1) ?? scriptToken
-
-  const shape: EvalVerificationAttemptShape = unparsed
-    ? 'unparsed'
-    : compound
-      ? 'compound'
-      : tokens.length === 2 && scriptIndex === 1
-        ? 'simple'
-        : 'extra-arguments'
-  return {
-    runner: runner.slice(0, MAX_VERIFICATION_ATTEMPT_RUNNER),
-    script: script.slice(0, MAX_VERIFICATION_ATTEMPT_SCRIPT),
-    shape,
-    cd,
-    cwdUnknown,
-    interpreted: !unparsed,
+  const first = tokenizeObservedCommand(rest)
+  const direct = parseInvocationTokens(first.tokens, runners, scripts)
+  if (direct !== null) {
+    const shape: EvalVerificationAttemptShape = first.unparsed
+      ? 'unparsed'
+      : first.compound
+        ? 'compound'
+        : direct.extraArguments
+          ? 'extra-arguments'
+          : 'simple'
+    return {
+      runner: direct.runner.slice(0, MAX_VERIFICATION_ATTEMPT_RUNNER),
+      script: direct.script.slice(0, MAX_VERIFICATION_ATTEMPT_SCRIPT),
+      shape,
+      cd,
+      cwdUnknown,
+      interpreted: !first.unparsed,
+    }
   }
+
+  // A chain can still contain a check after an unrelated first command (`pwd && node
+  // verify.js`). Attribute it as a compound observation with no directory claim, not as a
+  // match; the broker still decides what actually ran.
+  // A check in a later shell segment is deliberately not attributed: `false && node
+  // verify.js` never runs it, and this observer is not a shell interpreter. An empty list
+  // means no direct invocation was recognized, not that the agent did nothing.
+  return null
 }
 
 /** Apply the starting directory and any supported `cd` to get the effective directory. */
@@ -1613,7 +1643,9 @@ function effectiveCwdHint(execution: AgentExecution, cd: string | undefined, wor
  * must match as well as the script operand. Extra arguments and shell chains are classified,
  * not stored, because they may contain secrets or host paths. `matched` means the command text
  * matched the declaration; it says nothing about the effective directory, which the broker
- * checks independently.
+ * checks independently. Only a direct invocation is recorded: a check in a later shell segment
+ * may be skipped, so an empty list means no direct invocation was recognized. A chained status
+ * belongs to the chain, not the check, and is reported as unknown.
  */
 export function observeVerificationAttempts(
   commands: readonly string[],
@@ -1637,7 +1669,9 @@ export function observeVerificationAttempts(
       ...(invocation.interpreted && !invocation.cwdUnknown
         ? { cwdHint: effectiveCwdHint(execution, invocation.cd, workdir) }
         : {}),
-      exitCode: execution.exitCode,
+      // A shell chain's status belongs to its last command, not to the check named in the
+      // first segment. Only an attributed, interpretable invocation carries a status.
+      exitCode: invocation.shape === 'simple' || invocation.shape === 'extra-arguments' ? execution.exitCode : null,
       matched,
     })
     if (attempts.length >= 20) break

@@ -281,6 +281,10 @@ writeFileSync('.anvil-eval-report.json', JSON.stringify({
             result.verificationAttempts?.some((attempt) => attempt.shape === 'compound'),
             `${mode}: the shell chain must be classified, not copied`,
           )
+          assert.ok(
+            result.verificationAttempts?.every((attempt) => attempt.exitCode === null),
+            `${mode}: the chain status must not be attributed to the check`,
+          )
         }
       }
       if (mode.startsWith('honest')) {

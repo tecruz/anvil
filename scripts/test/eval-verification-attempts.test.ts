@@ -14,7 +14,37 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { MAX_VERIFICATION_ATTEMPT_CWD_HINT, parseRunRecordResult } from '../../packages/cli/src/eval-gate.ts'
-import { type AgentExecution, observeVerificationAttempts, type ScenarioResult, sanitizeResult } from '../eval.ts'
+import {
+  type AgentExecution,
+  observeVerificationAttempts,
+  parseOpenCodeRunEvents,
+  type ScenarioResult,
+  sanitizeResult,
+} from '../eval.ts'
+
+/** A minimal run-record result so a retained observation can be parsed as it will be on resume. */
+function recordWith(verificationAttempts: unknown): Record<string, unknown> {
+  return {
+    scenario: 'nested-stale-verification',
+    variant: 'bare',
+    model: null,
+    modelRole: null,
+    scenarioHash: 'scenario',
+    sourceHash: 'source',
+    verifyCount: 1,
+    hiddenVerifyCount: 0,
+    attempts: [],
+    verified: false,
+    hiddenVerified: null,
+    verifyExitCodes: [1],
+    repetition: 0,
+    costUsd: null,
+    tokens: null,
+    durationMs: null,
+    transcript: '',
+    verificationAttempts,
+  }
+}
 
 test('a near-miss invocation is retained without its raw command or extra arguments', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-attempts-'))
@@ -22,7 +52,7 @@ test('a near-miss invocation is retained without its raw command or extra argume
     const executions: AgentExecution[] = [
       { command: 'npm install', exitCode: 0 },
       {
-        command: `cd ${join(workdir, 'packages', 'sub')} && node verfy.js`,
+        command: `cd "${join(workdir, 'packages', 'sub')}" && node verfy.js`,
         exitCode: 127,
       },
       { command: 'node ./verify.js', exitCode: 1 },
@@ -80,6 +110,8 @@ test('an explicit cd is resolved from the shell starting directory', () => {
         },
         { command: 'node "verify.js', exitCode: 1 },
         { command: 'cd "$HOME" && node verify.js', exitCode: 1 },
+        { command: 'cd "packages/sub project" && node verify.js', exitCode: 1 },
+        { command: 'cd - && node verify.js', exitCode: 1 },
       ],
       workdir,
       'packages/sub',
@@ -97,6 +129,8 @@ test('an explicit cd is resolved from the shell starting directory', () => {
     assert.equal(attempts[1]?.shape, 'unparsed')
     assert.equal(attempts[1]?.cwdHint, undefined, 'an uninterpretable command claims no directory')
     assert.equal(attempts[2]?.cwdHint, undefined, 'a shell expansion cannot be resolved to a directory')
+    assert.equal(attempts[3]?.cwdHint, 'packages/sub project', 'a quoted literal path may contain spaces')
+    assert.equal(attempts[4]?.cwdHint, undefined, 'cd - is shell state, not a directory name')
   } finally {
     rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
@@ -123,23 +157,61 @@ test('a path on another drive is outside the worktree, not a retained hint', () 
   }
 })
 
-test('only the first script-shaped operand in the runner command counts', () => {
+test('only a direct runner-script invocation counts', () => {
   const workdir = mkdtempSync(join(tmpdir(), 'anvil-verification-operand-'))
   try {
     const attempts = observeVerificationAttempts(
       ['node verify.js'],
       [
         { command: 'node helper.js verify.js', exitCode: 0 },
+        { command: 'node helper.ts verify.js', exitCode: 0 },
+        { command: 'node --require verify.js helper.js', exitCode: 0 },
         { command: 'node --version; cat verify.js', exitCode: 0 },
+        { command: 'pwd && node verify.js', exitCode: 0 },
         { command: 'node verfy.js', exitCode: 127 },
       ],
       workdir,
     )
-    assert.equal(attempts.length, 1, 'a later argument or a merged shell segment is not the check')
+    assert.equal(attempts.length, 1, 'a later argument, option value or chained command is not attributed')
     assert.equal(attempts[0]?.script, 'verfy.js', 'the runner’s own operand must be the near miss')
   } finally {
     rmSync(workdir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
+})
+
+test('a non-integral tool exit status is unknown and round-trips', () => {
+  const events = parseOpenCodeRunEvents(
+    `${JSON.stringify({
+      type: 'tool_use',
+      part: {
+        type: 'tool',
+        tool: 'shell',
+        state: {
+          status: 'completed',
+          input: { command: 'node verify.js' },
+          metadata: { metadata: { exit: 0.5 } },
+        },
+      },
+    })}\n`,
+  )
+  const attempts = observeVerificationAttempts(['node verify.js'], events.executions, process.cwd())
+  assert.equal(attempts.length, 1)
+  assert.equal(attempts[0]?.exitCode, null, 'a fractional status is not a process exit code')
+
+  const parsed = parseRunRecordResult(recordWith(attempts), 3)
+  assert.equal(typeof parsed, 'object', `the harness must be able to parse its own record: ${String(parsed)}`)
+  assert.equal(typeof parsed === 'object' ? parsed.verificationAttempts?.[0]?.exitCode : undefined, null)
+})
+
+test('a chained invocation carries no check exit status', () => {
+  const attempts = observeVerificationAttempts(
+    ['node verify.js'],
+    [{ command: 'node verify.js; false', exitCode: 1 }],
+    process.cwd(),
+  )
+  assert.equal(attempts.length, 1)
+  assert.equal(attempts[0]?.shape, 'compound')
+  assert.equal(attempts[0]?.exitCode, null, 'the chain status belongs to its last command')
 })
 
 test('a deep directory hint is bounded on write and accepted on read', () => {
@@ -157,43 +229,20 @@ test('a deep directory hint is bounded on write and accepted on read', () => {
     const hint = sanitized.verificationAttempts?.[0]?.cwdHint
     assert.equal(hint?.length, MAX_VERIFICATION_ATTEMPT_CWD_HINT, 'writer and reader must share the cap')
 
-    const record = {
-      scenario: 'nested-stale-verification',
-      variant: 'bare',
-      model: null,
-      modelRole: null,
-      scenarioHash: 'scenario',
-      sourceHash: 'source',
-      verifyCount: 1,
-      hiddenVerifyCount: 0,
-      attempts: [],
-      verified: false,
-      hiddenVerified: null,
-      verifyExitCodes: [1],
-      repetition: 0,
-      costUsd: null,
-      tokens: null,
-      durationMs: null,
-      transcript: '',
-      verificationAttempts: [
-        {
-          runner: 'node',
-          script: 'verify.js',
-          shape: 'simple',
-          cwdHint: hint,
-          exitCode: 1,
-          matched: false,
-        },
-      ],
+    const attempt = {
+      runner: 'node',
+      script: 'verify.js',
+      shape: 'simple',
+      cwdHint: hint,
+      exitCode: 1,
+      matched: false,
     }
+    const record = recordWith([attempt])
     const parsed = parseRunRecordResult(record)
     assert.equal(typeof parsed, 'object', `a bounded hint must round-trip: ${String(parsed)}`)
     assert.equal(typeof parsed === 'object' ? parsed.verificationAttempts?.[0]?.cwdHint : undefined, hint)
     assert.equal(
-      typeof parseRunRecordResult({
-        ...record,
-        verificationAttempts: [{ ...record.verificationAttempts[0], cwdHint: `${hint}x` }],
-      }),
+      typeof parseRunRecordResult(recordWith([{ ...attempt, cwdHint: `${hint}x` }])),
       'string',
       'an overlong hint must still be rejected',
     )
