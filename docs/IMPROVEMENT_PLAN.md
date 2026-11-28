@@ -3,11 +3,10 @@
 Status: **Phases 0, 1, 2A/B and 3 implemented, with acceptance evidence reconciled
 2026-11-14.** The bounded Phase 2 real-agent pilot is complete, with an exploratory tie,
 unknown cost, and skill-access evidence that was diagnosed from local, uncommitted session
-observations rather than rerun. Phase 4's installed-CLI matrix now passes on
-all six CI legs; publication is the remaining Phase 4 criterion. The Phase 0 merge-gate
-demonstration was recorded on 2026-11-14, and the Phase 1 artifact-retention demonstration
-was recorded on 2026-11-17. Open: publication (needs publishing approval and control of the
-scoped npm name).
+observations rather than rerun. Phase 4's installed-CLI matrix passes on all six CI legs,
+and `@anvil-workflows/cli` `0.2.0` and `0.2.1` were published on 2026-11-26. The Phase 0
+merge-gate demonstration was recorded on 2026-11-14, and the Phase 1 artifact-retention
+demonstration was recorded on 2026-11-17. No Phase 4 criterion remains open.
 Prepared: 2026-10-27, after the corrective hardening in PR #4.
 
 This is the next implementation cycle, not a rewrite of the completed
@@ -474,14 +473,13 @@ and relevant process/Git helpers in `packages/core` and `packages/git`.
 
 **Outcome:** users install a tested artifact without fetching the source build toolchain.
 
-**Status:** in progress. Expanded installed-CLI smoke coverage passes on all three OSes and
-both Node lanes; publication is the remaining criterion. Publishing separately requires
-approval and confirmed scope access, and the maintainer has explicitly put it on hold. The
+**Status:** complete. Expanded installed-CLI smoke coverage passes on all three OSes and
+both Node lanes, and `@anvil-workflows/cli` has been published: `0.2.0` at
+`2026-11-26T17:08:45.888Z` and `0.2.1` at `2026-11-26T18:13:24.599Z` (npm `time`, UTC). The
 registry name changed from `@anvil/cli` to `@anvil-workflows/cli` on 2026-11-17 after the
 `@anvil` scope was found to already contain an unrelated package
 ([ADR-0023](adr/0023-npm-package-name-is-anvil-workflows.md)). The maintainer created the
-`anvil-workflows` org and is its owner, so name control is confirmed; the package remains
-unpublished.
+`anvil-workflows` org and is its owner, so name control is confirmed.
 
 Implemented: the release workflow (`.github/workflows/release.yml`), the tarball allowlist,
 the identity check that the tag, the workspace manifest and the packed tarball agree, an
@@ -494,21 +492,50 @@ of existing consumer files through the installed binary. That expanded test pass
 six `check` legs (3 OS x floor/LTS) in run 43625583728 at `93c6f12`, so matrix acceptance
 is recorded below.
 
-The release workflow now writes `SHA256SUMS` and draft release notes containing the
+The release workflow writes `SHA256SUMS` and draft release notes containing the
 source SHA, verifies the checksum after smoke testing, and retains those sidecars with
 the tested tarball for 90 days. Upload failure blocks publication. Actionlint passes,
 and a local rehearsal of the exact provenance/checksum commands accepts unchanged bytes
-and rejects tampering. The GitHub artifact upload can now be exercised by the no-publish
-dispatch rehearsal described below; publication remains unexercised.
+and rejects tampering. The GitHub artifact upload can also be exercised by the no-publish
+`workflow_dispatch` rehearsal described below. The publish path has since run: the `v0.2.1`
+release run [45873069026](https://github.com/tecruz/anvil/actions/runs/45873069026)
+completed both the `Release v0.2.1` and `Publish v0.2.1` jobs successfully.
 
-Still not done: approving and publishing a first release, and recording a published checksum
-and source SHA in the release notes. Name control is confirmed by the authenticated owner
-check recorded below; that confirmation does not authorize publication. The workflow now has
-a no-publish `workflow_dispatch` rehearsal that runs the same build, allowlist, smoke test,
+Published `0.2.1` details: npm shasum
+`243ee594f23f331e129cb724e0db5fc8adb81463`, integrity
+`sha512-p1OHNBevkeT5IHZ/Vu7SBa7uBSr51cF9X0jbhSd4R6Kgf+OFSKqwHquzSoXWgE4UDKLHTX3KE7eH+vrLVcM+Tw==`,
+and tarball SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`. The
+source is `33e24ee36256b429ce72ea919cd2ba0cb7730c11`, tagged `v0.2.1`; the peeled tag commit
+equals the SLSA source SHA. The [SLSA provenance
+attestation](https://registry.npmjs.org/-/npm/v1/attestations/@anvil-workflows%2fcli@0.2.1)
+has predicate type `https://slsa.dev/provenance/v1`, build type
+`https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1`, and workflow path
+`.github/workflows/release.yml`; it was produced by [run
+45873069026](https://github.com/tecruz/anvil/actions/runs/45873069026/attempts/1). The
+registry tarball was downloaded independently (302191 bytes); its SHA-1 and SHA-512 match the
+registry metadata and its SHA-256 matches the tested artifact. `npm audit signatures` reported
+a verified registry signature and a verified attestation.
+
+Approval: the [publication evidence
+note](evidence/2026-11-26-release-publication.md) records the maintainer's approval in the
+2026-11-26 session after the `NPM_TOKEN` secret was added. That is a maintainer-authored
+evidence note, not an independently posted issue or PR comment; issue #38 has no comments, and
+no issue or PR comment recording the approval was found. The publish job had no GitHub
+environment, so no environment approval review is available. `0.2.0` was the first publication; its shasum was
+`df4404b9853ce65b7b2a394ccf1ca87e91654812` and integrity
+`sha512-O0APtqE/kbF3DuV7YDt3t9IQZSCmBUn6dpGjuiEcQS459jihToGJzdnDtHDtyGY3ZCPAT5mrNswx+vUQHhaPmw==`.
+No GitHub Release object exists for `v0.2.0` or `v0.2.1`.
+
+The no-publish `workflow_dispatch` rehearsal runs the same build, allowlist, smoke test,
 checksum guard and artifact upload but stops before `npm publish`; it is documented in
-[CONTRIBUTING.md](../CONTRIBUTING.md#rehearsing-a-release-without-publishing). The rehearsal
-has not been dispatched yet, and no release workflow has published anything, so the publish
-step itself remains unproven end to end.
+[CONTRIBUTING.md](../CONTRIBUTING.md#rehearsing-a-release-without-publishing). A later
+local rehearsal on 2026-11-27 ([preparation note](evidence/2026-11-27-release-preparation.md)),
+not a `workflow_dispatch` of the release workflow, built from a different, later source and
+produced tarball SHA-256
+`ee884d3f6630ab135e33ede3c4c977cbc881a2bb742ea5531862becb10b4cf20`; those are not the
+published `0.2.1` bytes (SHA-256
+`9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`) and must not be
+republished as `0.2.1`.
 
 ### Decisions before implementation
 
@@ -553,8 +580,9 @@ step itself remains unproven end to end.
   The original `@anvil` scope already contained `@anvil/common-asc`; the public checks did
   not establish maintainer control. For the agreed replacement, `@anvil-workflows/cli`,
   `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned
-  `{"tecruz":"owner"}` on 2026-11-17. The package lookup still returned 404, and no publication
-  was attempted. See [the scope evidence](evidence/2026-11-17-npm-scope.md).
+  `{"tecruz":"owner"}` on 2026-11-17. The package lookup returned 404 on that date, before
+  publication; `@anvil-workflows/cli` `0.2.1` was published on 2026-11-26. See
+  [the scope evidence](evidence/2026-11-17-npm-scope.md).
 - [x] A clean tarball install works without a source build or runtime dependencies.
   `the staged artifact installs without scripts and exercises the installed CLI` in
   `packages/cli/test/package.test.ts`: `npm pack` of the staged workspace, then
@@ -564,16 +592,25 @@ step itself remains unproven end to end.
   the Node floor and current LTS. The expanded registry test covers version/JSON, help,
   doctor, staged generation/apply, preservation of existing files and MCP. The six `check`
   legs (3 OS x floor/LTS) have existed since PR #30.
-- [ ] Published bytes match the tested checksum; version and provenance identify the source.
-  **Open, blocked on publication.** No comparison of the tested artifact with a published
-  `@anvil-workflows/cli` release has been recorded.
-- [ ] First publication is explicitly approved; GitHub installation remains tested if supported.
-  **Half satisfied**: the git channel is tested (`npm pack -> npm install -> the installed
-  binary does real work`), but no publication has been approved or attempted.
+- [x] Published bytes match the tested checksum; version and provenance identify the source.
+  The registry tarball for `0.2.1` was downloaded independently (302191 bytes); its SHA-1
+  `243ee594f23f331e129cb724e0db5fc8adb81463` matches the npm shasum, its SHA-512 matches the
+  published integrity, and its SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`
+  matches the tested artifact recorded in
+  [the publication evidence](evidence/2026-11-26-release-publication.md). The SLSA
+  provenance subject digest matches the npm integrity, and its source is
+  `33e24ee36256b429ce72ea919cd2ba0cb7730c11` at `refs/tags/v0.2.1`.
+- [x] First publication is explicitly approved; GitHub installation remains tested if supported.
+  The [publication evidence](evidence/2026-11-26-release-publication.md) records the
+  maintainer's approval in the 2026-11-26 session after the `NPM_TOKEN` secret was added.
+  That is a maintainer-authored note; issue #38 has no comments, no issue or PR comment
+  recording the approval was found, and the publish job had no GitHub environment, so no
+  environment approval review exists. The git channel remains tested (`npm pack -> npm install -> the
+  installed binary does real work`).
 
 ## Acceptance evidence (2026-11-14)
 
-Initially reconciled on 2026-11-14; dated additions through 2026-11-17 are included below.
+Initially reconciled on 2026-11-14; dated additions through 2026-11-26 are included below.
 
 "Complete" in this document means a command was run and its output was read, not that code
 for it exists. These are the commands behind the reconciled checklists.
@@ -590,14 +627,17 @@ for it exists. These are the commands behind the reconciled checklists.
 | Expanded installed-registry smoke coverage | `node --test --test-name-pattern="registry tarball" packages/cli/test/package.test.ts`: 2 passed locally. CI run 43625583728 (`93c6f12`) passed `npm run check` on Windows, Ubuntu and macOS at both the Node floor and LTS. |
 | Approved real-agent pilot | [Report and retained run record](evidence/2026-11-14-skill-guidance.md): 6 unique completed keys, 3 counterbalanced pairs, all visible/hidden checks passed; source, fixture and bundle hashes verified; retained record byte-identical to generated evidence. |
 | Artifact retention after an intentional failure | [Retained artifact record](evidence/2026-11-17-artifact-retention.md): run 44056529412 failed on purpose; artifact `eval-failure-rehearsal-44056529412-attempt1` retained 12 allowlisted files and expires 2026-12-17; the downloaded copy re-validated as `Validated 3 files, the run archive and 8 checkpoints.` |
-| Name control (2026-11-17) | [Scope check](evidence/2026-11-17-npm-scope.md): `@anvil` already contained `@anvil/common-asc`, and maintainer control was not established. After the maintainer created `anvil-workflows`, `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. The `@anvil-workflows/cli` lookup still returned 404; no publication was attempted. |
-| Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. No publication was attempted. |
+| Name control (2026-11-17) | [Scope check](evidence/2026-11-17-npm-scope.md): `@anvil` already contained `@anvil/common-asc`, and maintainer control was not established. After the maintainer created `anvil-workflows`, `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. The `@anvil-workflows/cli` lookup returned 404 on that date, before publication; `0.2.1` was published on 2026-11-26 (see the publication row below). |
+| Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. The workflow later published `0.2.1`; see the publication row below. |
+| Publication of `@anvil-workflows/cli` (2026-11-26) | [Publication evidence](evidence/2026-11-26-release-publication.md): `0.2.0` at `2026-11-26T17:08:45.888Z` and `0.2.1` at `2026-11-26T18:13:24.599Z` (npm `time`, UTC). `0.2.1` shasum `243ee594f23f331e129cb724e0db5fc8adb81463`, integrity `sha512-p1OHNBevkeT5IHZ/Vu7SBa7uBSr51cF9X0jbhSd4R6Kgf+OFSKqwHquzSoXWgE4UDKLHTX3KE7eH+vrLVcM+Tw==`, SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`; source `33e24ee36256b429ce72ea919cd2ba0cb7730c11` at tag `v0.2.1` (peeled tag commit equals the SLSA source SHA). SLSA provenance from run 45873069026 (predicate `https://slsa.dev/provenance/v1`, build type `https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1`, workflow `.github/workflows/release.yml`). No GitHub Release object exists for `v0.2.0` or `v0.2.1`. |
 | Historical lookup of the superseded package name (2026-11-14) | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404. This records no publicly accessible `latest` release at that endpoint then, not publication history or ownership. The agreed name's check is recorded in the scope evidence above. |
 
-The Phase 1 artifact-retention criterion is closed by the rehearsal record above; the open
-Phase 4 items each name what would close them.
+The Phase 1 artifact-retention criterion is closed by the rehearsal record above; the Phase 4
+items are closed by the publication record.
 The bounded pilot is recorded as complete, not as proof of product effectiveness.
-Publication remains on hold. Approval and successful execution are separate facts.
+Publication occurred on 2026-11-26. Approval and successful execution are separate facts; the
+publication evidence note records the session approval, not an issue/PR comment or environment
+review.
 
 ### Maintainer authorizations (2026-11-14)
 
@@ -616,6 +656,12 @@ on 2026-11-14. Name control was subsequently confirmed: authenticated `npm whoam
 `tecruz`, and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. See
 [the scope evidence](evidence/2026-11-17-npm-scope.md). The publication hold is unchanged;
 name control does not authorize a release, and final artifact verification is still required.
+
+**2026-11-26 follow-up:** the hold above records the state on 2026-11-14 and 2026-11-17.
+`@anvil-workflows/cli` `0.2.0` and `0.2.1` were subsequently published (see
+[the publication evidence](evidence/2026-11-26-release-publication.md) and the Phase 4
+record). The evidence note records a session approval on 2026-11-26 after the `NPM_TOKEN`
+secret was added; no issue/PR comment or environment approval review was found.
 
 ## PR breakdown and release gates
 
