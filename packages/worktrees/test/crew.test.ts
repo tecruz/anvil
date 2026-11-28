@@ -50,6 +50,25 @@ function stubRunnerDir(name: string): string {
   return dir
 }
 
+/**
+ * A PATH containing a native-shaped runner: `opencode` on POSIX, `opencode.exe` on Windows.
+ *
+ * The Windows shim path rewrites argv into a cmd.exe command string, so a test that needs to
+ * inspect the real argv array must use an executable rather than a `.cmd` shim.
+ */
+function nativeStubRunnerDir(name: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'anvil-native-stub-path-'))
+  temps.push(dir)
+  if (process.platform === 'win32') {
+    writeFileSync(join(dir, `${name}.exe`), '', 'utf8')
+  } else {
+    const stub = join(dir, name)
+    writeFileSync(stub, '#!/bin/sh\nexit 0\n', 'utf8')
+    chmodSync(stub, 0o755)
+  }
+  return dir
+}
+
 function makeRepo(opts: { npm?: boolean; gradle?: boolean; go?: boolean } = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'anvil-m5-'))
   temps.push(dir)
@@ -426,31 +445,37 @@ describe('launchOpencodeAgent', () => {
     assert.equal(calls[0]?.opts.windowsVerbatimArguments, true, 'quoting only survives with verbatim args')
   })
 
-  test('passes run, --dir, the worktree and a read-the-prompt instruction as argv', async () => {
+  test('passes run, --print-logs and a read-the-prompt instruction as argv, with the worktree as cwd', async () => {
     // The prompt itself is a multi-line document, so it is written to a file and argv
     // carries a single-line instruction to read it. argv must therefore stay free of
-    // anything an argv-entry safety check would refuse.
-    if (process.platform !== 'win32') return
+    // anything an argv-entry safety check would refuse -- and free of a directory flag,
+    // because the worktree is already the child's cwd.
     const dir = mkdtempSync(join(tmpdir(), 'anvil-launch-args-'))
     const { fn, calls } = fakeSpawn()
+    const prompt = 'do the thing\nand also the other thing'
     await launchOpencodeAgent({
       worktree: dir,
       key: 'k',
-      prompt: 'do the thing\nand also the other thing',
+      prompt,
       logPath: join(dir, 'k.log'),
       runner: 'opencode',
-      env: { PATH: stubRunnerDir('opencode') },
+      env: { PATH: nativeStubRunnerDir('opencode') },
       spawnFn: fn,
     })
-    const line = calls[0]?.args.join(' ') ?? ''
-    assert.match(line, /\brun\b/)
-    assert.match(line, /--dir/)
-    assert.match(line, /--print-logs/)
-    assert.match(line, new RegExp(PROMPT_FILE.replace(/\./g, '\\.')))
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0]?.args, [
+      'run',
+      '--print-logs',
+      `Read ${PROMPT_FILE} and follow every instruction in it exactly.`,
+    ])
+    assert.equal(calls[0]?.opts.cwd, dir, 'the worktree is the child cwd, not an argv entry')
+    for (const flag of ['--dir', '--worktree', '--auto']) {
+      assert.ok(!(calls[0]?.args ?? []).includes(flag), `${flag} must not be part of the launch argv`)
+    }
 
     // The full prompt, newlines and all, is in the file the instruction points at.
     const written = readFileSync(join(dir, PROMPT_FILE), 'utf8')
-    assert.equal(written, 'do the thing\nand also the other thing')
+    assert.equal(written, prompt)
   })
 
   test('the real multi-line agent prompt launches on Windows', async () => {

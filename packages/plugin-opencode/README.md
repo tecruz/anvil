@@ -13,7 +13,11 @@ copy of a rule.
 
 - The `anvil` CLI on your `PATH` — the plugin runs it, it does not embed it:
   `npm install -g github:tecruz/anvil`.
-- opencode, with the plugin loaded.
+- OpenCode **1.18.x**, with the plugin loaded. This plugin uses the V1 plugin API; do not
+  enable it on OpenCode v2. Its tools (`anvil_doctor`, `anvil_plan`, `anvil_ticket`,
+  `anvil_status`) and session-recording hook do not load there until a later port.
+  `anvil crew up --launch` itself is verified against OpenCode **v2.3.0** — the tested
+  version, not every v2 release — and launches without this plugin.
 
 ## Install
 

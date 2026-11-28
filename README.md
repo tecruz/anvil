@@ -110,6 +110,13 @@ Inside opencode, the [plugin](packages/plugin-opencode/README.md) registers the 
 tools for the agent, and keeps the ticket context alive when the conversation is
 compacted.
 
+`anvil crew up --launch` is verified against OpenCode **v2.3.0**. That names the tested
+version, not a claim about every v2 release. The plugin is a separate integration for
+OpenCode **1.18.x** (the V1 plugin API). Do not enable `opencode-anvil` on OpenCode v2:
+its tools (`anvil_doctor`, `anvil_plan`, `anvil_ticket`, `anvil_status`) and its
+session-recording hook are unavailable there until a later port. Launching without the
+plugin is supported.
+
 ## Local detection, online enrichment
 
 Anvil detects the project from local files first, without running its build or calling a

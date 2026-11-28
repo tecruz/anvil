@@ -26,6 +26,13 @@ explaining is a tool people route around.
 | `opencode` | `anvil crew up --launch` (the default agent runner) | everything else; pass `--runner <name>` to launch a different agent |
 | `ccusage` | `anvil crew status --cost` | the cost report says so instead of failing |
 
+`anvil crew up --launch` is verified against OpenCode **v2.3.0**. That names the tested
+version, not a claim about every v2 release. The `opencode-anvil` plugin is a separate
+integration for OpenCode **1.18.x** (the V1 plugin API); do not enable it on OpenCode v2.
+Its tools (`anvil_doctor`, `anvil_plan`, `anvil_ticket`, `anvil_status`) and its
+session-recording hook are unavailable there until a later port. The launcher works
+without the plugin.
+
 `anvil` never runs a build to find out what a repository is, so it is safe to point at a
 repository you have never seen and cannot modify.
 
@@ -370,7 +377,10 @@ What each step does:
   each. Claims are created one at a time (`git worktree add` mutates shared
   administrative state) and agents then start in parallel, because each one only touches
   its own worktree. Agents launched this way cannot push: each claim's `pre-push` hook
-  permits only the push `anvil ship` performs, because shipping is a human decision.
+  permits only the push `anvil ship` performs, because shipping is a human decision. The
+  launcher and the plugin are separate: on an OpenCode v2 runner `--launch` warns once on
+  stderr that the V1 `opencode-anvil` plugin should stay disabled, then starts the agent
+  anyway.
 - **`crew verify`** runs each worktree's verify commands. The concurrency is chosen from
   the toolchain — Gradle, Maven, npm, pnpm, Yarn and Bazel keep mutable state in a
   shared home-directory cache, so those serialize to one at a time, while Go and Cargo
