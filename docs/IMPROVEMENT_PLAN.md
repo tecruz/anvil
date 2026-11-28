@@ -519,9 +519,9 @@ a verified registry signature and a verified attestation.
 Approval: the [publication evidence
 note](evidence/2026-11-26-release-publication.md) records the maintainer's approval in the
 2026-11-26 session after the `NPM_TOKEN` secret was added. That is a maintainer-authored
-evidence note, not an independently posted issue or PR comment; issue #38 has no comments and
-no issue or PR comment records the approval. The publish job had no GitHub environment, so no
-environment approval review is available. `0.2.0` was the first publication; its shasum was
+evidence note, not an independently posted issue or PR comment; issue #38 has no comments, and
+no issue or PR comment recording the approval was found. The publish job had no GitHub
+environment, so no environment approval review is available. `0.2.0` was the first publication; its shasum was
 `df4404b9853ce65b7b2a394ccf1ca87e91654812` and integrity
 `sha512-O0APtqE/kbF3DuV7YDt3t9IQZSCmBUn6dpGjuiEcQS459jihToGJzdnDtHDtyGY3ZCPAT5mrNswx+vUQHhaPmw==`.
 No GitHub Release object exists for `v0.2.0` or `v0.2.1`.
@@ -529,10 +529,13 @@ No GitHub Release object exists for `v0.2.0` or `v0.2.1`.
 The no-publish `workflow_dispatch` rehearsal runs the same build, allowlist, smoke test,
 checksum guard and artifact upload but stops before `npm publish`; it is documented in
 [CONTRIBUTING.md](../CONTRIBUTING.md#rehearsing-a-release-without-publishing). A later
-rehearsal on 2026-11-27 ([preparation note](evidence/2026-11-27-release-preparation.md)) built
-from a different, later source and produced tarball SHA-256
+local rehearsal on 2026-11-27 ([preparation note](evidence/2026-11-27-release-preparation.md)),
+not a `workflow_dispatch` of the release workflow, built from a different, later source and
+produced tarball SHA-256
 `ee884d3f6630ab135e33ede3c4c977cbc881a2bb742ea5531862becb10b4cf20`; those are not the
-published `0.2.1` bytes (SHA-256 `9dbdb1c2…4162e9`) and must not be republished as `0.2.1`.
+published `0.2.1` bytes (SHA-256
+`9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`) and must not be
+republished as `0.2.1`.
 
 ### Decisions before implementation
 
@@ -591,8 +594,9 @@ published `0.2.1` bytes (SHA-256 `9dbdb1c2…4162e9`) and must not be republishe
   legs (3 OS x floor/LTS) have existed since PR #30.
 - [x] Published bytes match the tested checksum; version and provenance identify the source.
   The registry tarball for `0.2.1` was downloaded independently (302191 bytes); its SHA-1
-  `243ee594…c81463` matches the npm shasum, its SHA-512 matches the published integrity, and
-  its SHA-256 `9dbdb1c2…4162e9` matches the tested artifact recorded in
+  `243ee594f23f331e129cb724e0db5fc8adb81463` matches the npm shasum, its SHA-512 matches the
+  published integrity, and its SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`
+  matches the tested artifact recorded in
   [the publication evidence](evidence/2026-11-26-release-publication.md). The SLSA
   provenance subject digest matches the npm integrity, and its source is
   `33e24ee36256b429ce72ea919cd2ba0cb7730c11` at `refs/tags/v0.2.1`.
@@ -600,8 +604,8 @@ published `0.2.1` bytes (SHA-256 `9dbdb1c2…4162e9`) and must not be republishe
   The [publication evidence](evidence/2026-11-26-release-publication.md) records the
   maintainer's approval in the 2026-11-26 session after the `NPM_TOKEN` secret was added.
   That is a maintainer-authored note; issue #38 has no comments, no issue or PR comment
-  records the approval, and the publish job had no GitHub environment, so no environment
-  approval review exists. The git channel remains tested (`npm pack -> npm install -> the
+  recording the approval was found, and the publish job had no GitHub environment, so no
+  environment approval review exists. The git channel remains tested (`npm pack -> npm install -> the
   installed binary does real work`).
 
 ## Acceptance evidence (2026-11-14)
@@ -625,7 +629,7 @@ for it exists. These are the commands behind the reconciled checklists.
 | Artifact retention after an intentional failure | [Retained artifact record](evidence/2026-11-17-artifact-retention.md): run 44056529412 failed on purpose; artifact `eval-failure-rehearsal-44056529412-attempt1` retained 12 allowlisted files and expires 2026-12-17; the downloaded copy re-validated as `Validated 3 files, the run archive and 8 checkpoints.` |
 | Name control (2026-11-17) | [Scope check](evidence/2026-11-17-npm-scope.md): `@anvil` already contained `@anvil/common-asc`, and maintainer control was not established. After the maintainer created `anvil-workflows`, `npm whoami` returned `tecruz` and `npm org ls anvil-workflows --json` returned `{"tecruz":"owner"}`. The `@anvil-workflows/cli` lookup returned 404 on that date, before publication; `0.2.1` was published on 2026-11-26 (see the publication row below). |
 | Release workflow syntax and checksum commands | Actionlint 1.7.12 passes all three workflows. A local rehearsal of the exact provenance step preserves artifact bytes and writes matching notes/checksum; the checksum guard passes unchanged bytes and fails tampered bytes. The workflow later published `0.2.1`; see the publication row below. |
-| Publication of `@anvil-workflows/cli` (2026-11-26) | [Publication evidence](evidence/2026-11-26-release-publication.md): `0.2.0` at `2026-11-26T17:08:45.888Z` and `0.2.1` at `2026-11-26T18:13:24.599Z` (npm `time`, UTC). `0.2.1` shasum `243ee594f23f331e129cb724e0db5fc8adb81463`, integrity `sha512-p1OHNBevkeT5IHZ/Vu7SBa7uBSr51cF9X0jbhSd4R6Kgf+OFSKqwHquzSoXWgE4UDKLHTX3KE7eH+vrLVcM+Tw==`, SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`; source `33e24ee36256b429ce72ea919cd2ba0cb7730c11` at tag `v0.2.1` (peeled tag commit equals the SLSA source SHA). SLSA provenance from run 45873069026 (predicate `https://slsa.dev/provenance/v1`, build type `https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1`, workflow `.github/workflows/release.yml`). No GitHub Release was created. |
+| Publication of `@anvil-workflows/cli` (2026-11-26) | [Publication evidence](evidence/2026-11-26-release-publication.md): `0.2.0` at `2026-11-26T17:08:45.888Z` and `0.2.1` at `2026-11-26T18:13:24.599Z` (npm `time`, UTC). `0.2.1` shasum `243ee594f23f331e129cb724e0db5fc8adb81463`, integrity `sha512-p1OHNBevkeT5IHZ/Vu7SBa7uBSr51cF9X0jbhSd4R6Kgf+OFSKqwHquzSoXWgE4UDKLHTX3KE7eH+vrLVcM+Tw==`, SHA-256 `9dbdb1c2a16f39fbada7d528beac2faab7fc4609e23c8051d8b5e2b5ff4162e9`; source `33e24ee36256b429ce72ea919cd2ba0cb7730c11` at tag `v0.2.1` (peeled tag commit equals the SLSA source SHA). SLSA provenance from run 45873069026 (predicate `https://slsa.dev/provenance/v1`, build type `https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1`, workflow `.github/workflows/release.yml`). No GitHub Release object exists for `v0.2.0` or `v0.2.1`. |
 | Historical lookup of the superseded package name (2026-11-14) | `GET https://registry.npmjs.org/@anvil%2fcli/latest` returned 404. This records no publicly accessible `latest` release at that endpoint then, not publication history or ownership. The agreed name's check is recorded in the scope evidence above. |
 
 The Phase 1 artifact-retention criterion is closed by the rehearsal record above; the Phase 4
