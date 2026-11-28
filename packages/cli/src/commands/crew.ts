@@ -25,6 +25,7 @@ import {
   ExitCode,
   loadConfig,
   parseCliArgs,
+  parseVersion,
   renderTable,
   runProcess,
   tokenizeCommand,
@@ -76,6 +77,8 @@ export const crewCommand: Command = {
     'concurrently. The decision is always printed.',
     '',
     '--launch          start an agent in each new worktree',
+    '                  (the OpenCode launcher only; the opencode-anvil plugin is separate)',
+    '                  On OpenCode v2, keep that V1 plugin disabled until it is ported.',
     '--runner <r>      agent binary, default `opencode`',
     '--provider <p>    ticket provider for the whole crew: local (default), github or jira',
     '--jobs <n>        concurrent verify runs (overrides the cache policy only with --force-parallel)',
@@ -121,6 +124,17 @@ export const crewCommand: Command = {
 // ---------------------------------------------------------------------------
 // crew up
 // ---------------------------------------------------------------------------
+
+/**
+ * OpenCode v2 does not load V1 plugins. The launcher itself still works, so this is a
+ * warning attached to the recorded claim version -- never a second probe and never a
+ * refusal. Unknown versions stay silent rather than guessing.
+ */
+function isOpencodeV2(version: string | undefined): boolean {
+  if (version === undefined) return false
+  const parsed = parseVersion(version)
+  return parsed !== null && parsed.major >= 2
+}
 
 async function crewUpFlow(
   ctx: CommandContext,
@@ -236,6 +250,20 @@ async function crewUpFlow(
     out.push(s.dim('Watch with `anvil crew status`; verify with `anvil crew verify`.'))
     return out.join('\n')
   })
+
+  // The launcher and the plugin are separate: OpenCode v2 can run the agent, but it does
+  // not load the V1 `opencode-anvil` plugin. Reuse the version `claimTicket` already
+  // recorded; do not probe again, and do not fail a launch that works without the plugin.
+  if (args.values.launch === true && runner === 'opencode') {
+    const v2Claim = result.claims.find((claim) => isOpencodeV2(claim.agent?.version))
+    if (v2Claim !== undefined) {
+      ctx.writeError(
+        `${ctx.style.yellow('warning')} OpenCode ${v2Claim.agent?.version ?? 'v2'} does not load the V1 ` +
+          '`opencode-anvil` plugin; keep it disabled for this runner. ' +
+          'Launching without the plugin is supported on OpenCode v2.3.0.\n',
+      )
+    }
+  }
 
   return undefined
 }

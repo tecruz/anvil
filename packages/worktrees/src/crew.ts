@@ -386,9 +386,10 @@ export function agentPrompt(claim: Claim, repoRoot: string): string {
 /**
  * Start an opencode agent in a worktree, detached.
  *
- * `--dir` rather than a working-directory change, so the parent's cwd is untouched. The
- * process is detached and its stdio ignored so it survives anvil exiting -- a crew is
- * meant to keep working after you close the terminal.
+ * The worktree is the child's cwd rather than an argv entry: OpenCode v2 accepts a cwd-only
+ * launch, and keeping the directory out of argv avoids a flag that differs between
+ * versions. The process is detached and its stdio redirected to the log so it survives
+ * anvil exiting -- a crew is meant to keep working after you close the terminal.
  */
 export async function launchOpencodeAgent(options: {
   worktree: string
@@ -418,7 +419,7 @@ export async function launchOpencodeAgent(options: {
   writeFileSync(promptPath, options.prompt, 'utf8')
   const launchArg = `Read ${promptFile} and follow every instruction in it exactly.`
 
-  const args = ['run', '--dir', options.worktree, '--print-logs', launchArg]
+  const args = ['run', '--print-logs', launchArg]
 
   // `spawnArgv` rather than `spawn(binary, ...)`: the npm-installed `opencode` is a `.CMD`
   // shim on Windows, and Node's spawn does not resolve PATHEXT, so the bare form fails
