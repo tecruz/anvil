@@ -21,7 +21,7 @@ followed when the last Phase 3 change (the shared verification plan) landed.
 | npm shasum | `243ee594f23f331e129cb724e0db5fc8adb81463` |
 
 The registry tarball was downloaded independently after publication: 302191 bytes, SHA-256
-`9dbdb1c2…4162e9` and SHA-1 `243ee594…c81463`, both matching the tested artifact. `npx
+`9dbdb1c2…4162e9` and SHA-1 `243ee594f23f331e129cb724e0db5fc8adb81463`, both matching the tested artifact. `npx
 @anvil-workflows/cli@0.2.1 version` reports `anvil 0.2.1 (schema v1, node 24.13.0)`.
 
 The registry tarball is downloaded and its SHA-256 compared with the tested artifact after
